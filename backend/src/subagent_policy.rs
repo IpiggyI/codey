@@ -44,6 +44,7 @@ pub(crate) fn reconcile_for_current_provider(
         .unwrap_or_default();
     let state = model_catalog::selection_state_with_manual_models(
         codex_home,
+        &crate::codex_config::codey_model_catalog_dir(),
         official_provider,
         upstream_models,
         &selected_models,

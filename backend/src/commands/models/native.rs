@@ -115,6 +115,7 @@ pub(crate) fn native_model_state_for_provider(
     let requested_default = native_upstream_model(config, &config.subagent_model);
     model_catalog::selection_state_with_manual_models(
         home,
+        &crate::codex_config::codey_model_catalog_dir(),
         provider.official,
         upstream_models,
         &selected_models,

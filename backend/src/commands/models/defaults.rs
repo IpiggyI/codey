@@ -237,6 +237,7 @@ pub(crate) fn current_model_state(
         .unwrap_or_default();
     model_catalog::selection_state_with_manual_models(
         codex_home(),
+        &crate::codex_config::codey_model_catalog_dir(),
         official,
         config.upstream_models_snapshot(),
         &selected_models,
@@ -268,6 +269,7 @@ pub(crate) fn model_state_for_profile(
         .unwrap_or_default();
     model_catalog::selection_state_with_manual_models(
         codex_home(),
+        &crate::codex_config::codey_model_catalog_dir(),
         official,
         upstream_models,
         &selected_models,

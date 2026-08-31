@@ -20,6 +20,7 @@ mod local_router;
 mod maintenance_lock;
 mod message_delete;
 mod model_catalog;
+mod model_catalog_store;
 mod model_id;
 mod model_list;
 mod model_ownership;
@@ -46,6 +47,7 @@ mod subagent_policy;
 mod trace_log_guard;
 mod trace_log_stats;
 
+use std::path::Path;
 use std::sync::Arc;
 
 #[cfg(unix)]
@@ -166,6 +168,21 @@ async fn run() -> Result<()> {
         );
         eprintln!("Codey 启动前写入 codey_router 恢复兼容桩失败：{error:#}");
     }
+    match repair_legacy_model_catalog(codex_home).await {
+        Ok(true) => eprintln!("已修复旧版 Codey 模型目录缺失的 description 字段"),
+        Ok(false) => {}
+        Err(error) => {
+            error_log::record_failure(
+                "repair_failed",
+                "repair_legacy_model_catalog",
+                format!("{error:#}"),
+                serde_json::json!({
+                    "codexHome": codex_home,
+                }),
+            );
+            eprintln!("Codey 启动前修复旧版模型目录失败：{error:#}");
+        }
+    }
     let mut shutdown = Box::pin(shutdown_signal());
     let shutdown_reason = match commands::launch_codey_runtime(&state).await {
         Ok(_) => tokio::select! {
@@ -222,6 +239,16 @@ async fn run() -> Result<()> {
         }
     }
     cleanup.map_err(anyhow::Error::msg)
+}
+
+async fn repair_legacy_model_catalog(home: &Path) -> Result<bool> {
+    let home = home.to_path_buf();
+    let catalog_dir = crate::codex_config::codey_model_catalog_dir();
+    tokio::task::spawn_blocking(move || {
+        model_catalog::repair_missing_descriptions(&home, &catalog_dir)
+    })
+    .await
+    .map_err(anyhow::Error::from)?
 }
 
 async fn stop_runtime_with_retry(state: &Arc<AppState>) -> Result<(), String> {

@@ -250,6 +250,8 @@ release 应用通过 `plutil -lint`、`codesign --verify --deep --strict` 和可
 
 ## 配置与数据
 
+生成的模型目录写在 Codey 数据目录，不写入 CODEX_HOME。
+
 - Codey 配置由 directories crate 放在系统配置目录的 config.json，并保留三份有效滚动备份。Unix 下配置、备份、日志和本地请求日志应限制为当前用户可读写。
 - CODEX_HOME 非空时始终优先；否则使用 Codex 默认目录。
 - auth.json 只读，Codey 不修改官方登录凭据。

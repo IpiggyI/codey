@@ -73,6 +73,7 @@ const CODEY_RUNTIME_CONFIG_LOCK_FILE: &str = "codex-runtime-config.lock";
 const RUNTIME_CONFIG_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const RUNTIME_CONFIG_LOCK_RETRY: Duration = Duration::from_millis(10);
 const RUNTIME_AGENT_SCHEMA_VERSION: u32 = 1;
+const CODEY_WSL_ONLY_OVERRIDE_PREFIX: &str = "__CODEY_WSL_ONLY__:";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -118,8 +119,6 @@ fn read_codex_config(path: &Path) -> Result<Option<Vec<u8>>> {
     Ok(snapshot.exists().then(|| snapshot.raw().to_vec()))
 }
 
-/// Parsed view of `config.toml` for read-only probes. Reuses the document that
-/// `ConfigManager` already parsed instead of re-parsing the raw bytes.
 fn read_codex_config_document(path: &Path) -> Result<DocumentMut> {
     let snapshot = ConfigManager::new(path).load()?;
     Ok(if snapshot.exists() {
@@ -150,6 +149,56 @@ fn codex_config_matches(path: &Path, expected: Option<&[u8]>) -> Result<bool> {
 
 fn lease_marker_path() -> PathBuf {
     default_config_path().with_file_name("codex-lease.json")
+}
+
+pub(crate) fn codey_model_catalog_dir() -> PathBuf {
+    lease_marker_path().with_file_name("model-catalogs")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ConfiguredModelCatalog {
+    Unset,
+    User(PathBuf),
+    CodeyOwned,
+}
+
+pub(crate) fn configured_model_catalog(
+    home: &Path,
+    catalog_dir: &Path,
+) -> Result<ConfiguredModelCatalog> {
+    let config_path = home.join("config.toml");
+    let Some(bytes) = read_codex_config(&config_path)? else {
+        return Ok(ConfiguredModelCatalog::Unset);
+    };
+    let existing = str::from_utf8(&bytes).context("Codex config.toml 不是 UTF-8")?;
+    let document = parse_document(existing)?;
+    let Some(raw) = document
+        .get("model_catalog_json")
+        .and_then(Item::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return Ok(ConfiguredModelCatalog::Unset);
+    };
+    if crate::model_catalog::is_codey_owned_model_catalog_path(raw, home, catalog_dir) {
+        return Ok(ConfiguredModelCatalog::CodeyOwned);
+    }
+    let path = Path::new(raw);
+    Ok(ConfiguredModelCatalog::User(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        home.join(path)
+    }))
+}
+
+pub(crate) fn configured_user_model_catalog_path(
+    home: &Path,
+    catalog_dir: &Path,
+) -> Result<Option<PathBuf>> {
+    Ok(match configured_model_catalog(home, catalog_dir)? {
+        ConfiguredModelCatalog::User(path) => Some(path),
+        ConfiguredModelCatalog::Unset | ConfiguredModelCatalog::CodeyOwned => None,
+    })
 }
 
 struct RuntimeConfigLock {
@@ -212,7 +261,7 @@ impl Drop for RuntimeConfigLock {
 
 pub(crate) struct RuntimeRouterConfigOptions<'a> {
     pub local_router: Option<&'a RuntimeRouterEndpoint>,
-    pub use_official_catalog: bool,
+    pub model_catalog_path: Option<&'a Path>,
     pub default_model: Option<&'a str>,
     pub fast_context_tools: bool,
     pub subagent_optimization: bool,
@@ -238,7 +287,7 @@ pub(crate) struct FastContextToolsStatus {
 
 struct RouterApplyOptions<'a> {
     local_router: Option<&'a RuntimeRouterEndpoint>,
-    use_official_catalog: bool,
+    model_catalog_path: Option<&'a Path>,
     default_model: Option<&'a str>,
     fastctx_command: Option<&'a Path>,
     subagent_optimization: bool,
@@ -271,13 +320,8 @@ pub(crate) fn apply_runtime_router_config(
     let _runtime_config_lock = RuntimeConfigLock::acquire(&marker)?;
     let backup_root = marker.with_file_name("codex-backups");
     let fastctx_command = resolve_fastctx_command(options.fast_context_tools);
-    let use_official_catalog = options.use_official_catalog;
+    let model_catalog_path = options.model_catalog_path;
     let default_model = options.default_model;
-    // The startup patch supplies the runtime gate that makes these generated
-    // roles safe. Never install the coupled role/prompt/hook configuration on
-    // a platform where that patch is not available.
-    let subagent_optimization =
-        options.subagent_optimization && cfg!(any(windows, target_os = "macos"));
     if !cfg!(any(windows, target_os = "macos")) {
         bail!(
             "当前平台尚不能把 Codey Provider 配置限定到单次 Codex 进程；为避免修改用户 config.toml，已取消启动"
@@ -290,10 +334,10 @@ pub(crate) fn apply_runtime_router_config(
         home,
         RouterApplyOptions {
             local_router: options.local_router,
-            use_official_catalog,
+            model_catalog_path,
             default_model,
             fastctx_command: fastctx_command.as_deref(),
-            subagent_optimization,
+            subagent_optimization: options.subagent_optimization,
             subagent_model: options.subagent_model,
             subagent_reasoning_effort: options.subagent_reasoning_effort,
             subagent_roles: options.subagent_roles,
@@ -369,7 +413,7 @@ fn apply_isolated_runtime_router_config(
 ) -> Result<AppliedRuntimeRouterConfig> {
     let RouterApplyOptions {
         local_router,
-        use_official_catalog,
+        model_catalog_path,
         default_model,
         fastctx_command,
         subagent_optimization,
@@ -382,15 +426,11 @@ fn apply_isolated_runtime_router_config(
     fs::create_dir_all(home)?;
     let config_path = home.join("config.toml");
     let hooks_path = home.join("hooks.json");
-    let original_config = if local_router.is_some() {
-        Some(read_or_create_codex_config(&config_path)?)
-    } else {
-        read_codex_config(&config_path)?
-    };
+    let original_config = read_codex_config(&config_path)?;
     let existing = str::from_utf8(original_config.as_deref().unwrap_or_default())
         .context("Codex config.toml 不是 UTF-8")?;
     let persistent = parse_document(existing).context("解析 Codex config.toml 失败")?;
-    if local_router.is_some() && user_owned_router_provider_occupies_id(&persistent) {
+    if user_owned_router_provider_occupies_id(&persistent) {
         anyhow::bail!(
             "Codex config.toml 已占用 Codey 内部 Provider ID「{}」；请先重命名该自定义 Provider",
             local_router::ROUTER_PROVIDER_ID
@@ -398,13 +438,13 @@ fn apply_isolated_runtime_router_config(
     }
     // Codex resolves this path from the app-server working directory, which is
     // `/` for the packaged macOS app, rather than from CODEX_HOME.
-    let model_catalog_path =
-        use_official_catalog.then(|| home.join(crate::model_catalog::relative_path()));
+    let catalog_dir = marker.with_file_name("model-catalogs");
     let effective = patch_config_with_fastctx_mode(
         existing,
         RouterPatchOptions {
             config_path: &config_path,
-            model_catalog_path: model_catalog_path.as_deref(),
+            catalog_dir: &catalog_dir,
+            model_catalog_path,
             default_model,
             fastctx_command,
             subagent_optimization,
@@ -414,13 +454,12 @@ fn apply_isolated_runtime_router_config(
         },
     )?;
     let mut effective_document = parse_document(&effective).context("解析 Codey 运行时约束失败")?;
-    if use_official_catalog {
-        update_model_catalog_reference(
-            &mut effective_document,
-            &config_path,
-            model_catalog_path.as_deref(),
-        );
-    }
+    update_model_catalog_reference(
+        &mut effective_document,
+        home,
+        &catalog_dir,
+        model_catalog_path,
+    );
     let fastctx_namespace = effective_document
         .get("mcp_servers")
         .and_then(Item::as_table)
@@ -506,9 +545,9 @@ fn apply_isolated_runtime_router_config(
         &effective_document,
         root_instructions.as_deref(),
         &runtime_agents,
-        model_catalog_path.as_deref(),
+        model_catalog_path,
         fastctx_namespace,
-        local_router.map(|_| local_router::ROUTER_PROVIDER_ID),
+        local_router::ROUTER_PROVIDER_ID,
         &hook_trust_entries,
     )?;
 
@@ -615,11 +654,14 @@ fn apply_isolated_test_runtime_config(
     marker: &Path,
     backup_root: &Path,
 ) -> Result<AppliedRuntimeRouterConfig> {
+    let catalog_path = marker
+        .with_file_name("model-catalogs")
+        .join(crate::model_catalog_store::DERIVED_CATALOG_FILE_NAME);
     apply_isolated_runtime_router_config(
         home,
         RouterApplyOptions {
             local_router: Some(test_runtime_router_endpoint()),
-            use_official_catalog,
+            model_catalog_path: use_official_catalog.then_some(catalog_path.as_path()),
             default_model: None,
             fastctx_command,
             subagent_optimization,
@@ -641,6 +683,19 @@ fn read_or_create_constraint_file(path: &Path, default_contents: &str) -> Result
     Ok(default_contents.to_string())
 }
 
+fn runtime_root_instructions_for_roles(
+    root_instructions: &str,
+    roles: &BTreeMap<String, SubagentRoleConfig>,
+) -> String {
+    let has_writable_role =
+        roles.contains_key(SUBAGENT_ROLE_WORKER) || roles.contains_key(SUBAGENT_ROLE_VISUAL_WORKER);
+    if has_writable_role {
+        root_instructions.to_string()
+    } else {
+        append_constraint_text(root_instructions, NO_WRITABLE_SUBAGENT_GUIDANCE)
+    }
+}
+
 fn runtime_subagent_roles(
     configured: Option<&BTreeMap<String, SubagentRoleConfig>>,
     legacy_model: &str,
@@ -660,19 +715,6 @@ fn runtime_subagent_roles(
             selection.enabled.then(|| (role.to_string(), selection))
         })
         .collect()
-}
-
-fn runtime_root_instructions_for_roles(
-    root_instructions: &str,
-    roles: &BTreeMap<String, SubagentRoleConfig>,
-) -> String {
-    let has_writable_role =
-        roles.contains_key(SUBAGENT_ROLE_WORKER) || roles.contains_key(SUBAGENT_ROLE_VISUAL_WORKER);
-    if has_writable_role {
-        root_instructions.to_string()
-    } else {
-        append_constraint_text(root_instructions, NO_WRITABLE_SUBAGENT_GUIDANCE)
-    }
 }
 
 fn prepare_runtime_agent_files(
@@ -803,14 +845,6 @@ fn render_runtime_agent(
             document.as_table_mut(),
             "developer_instructions",
             instructions,
-            "developer_instructions",
-        )?;
-    }
-    if !matches!(role, SUBAGENT_ROLE_WORKER | SUBAGENT_ROLE_VISUAL_WORKER) {
-        append_table_constraint_text(
-            document.as_table_mut(),
-            "developer_instructions",
-            READ_ONLY_AGENT_WRITE_GUARD,
             "developer_instructions",
         )?;
     }
@@ -1164,6 +1198,10 @@ pub(crate) fn restore_runtime_config_for_router_mode(
     restore_runtime_config_at(home, &marker, repair_router_config)
 }
 
+pub fn restore_runtime_config(home: &Path) -> Result<bool> {
+    restore_runtime_config_for_router_mode(home, true)
+}
+
 fn restore_runtime_config_at(
     home: &Path,
     marker: &Path,
@@ -1262,10 +1300,9 @@ pub(crate) fn prepare_persistent_router_resume_shim_at(home: &Path) -> Result<bo
 }
 
 /// Persist the live loopback `codey_router` table while the local router is
-/// running. Official authentication stays enabled when available, while the
-/// provider name advertises OpenAI-only capabilities only when every runtime
-/// route supports them. Desktop and config reload resolve that id from disk,
-/// so it must match the process `-c` overlay.
+/// running. Official routing uses CC Switch's OpenAI-authenticated provider
+/// shape; third-party-only routing uses the API-key shape. Desktop and config
+/// reload resolve that id from disk, so it must match the process `-c` overlay.
 pub(crate) fn prepare_runtime_router_disk_provider_at(
     home: &Path,
     endpoint: &RuntimeRouterEndpoint,
@@ -1564,14 +1601,8 @@ fn remove_codey_model_catalog_reference(doc: &mut DocumentMut, home: &Path) {
     let Some(catalog_path) = doc.get("model_catalog_json").and_then(Item::as_str) else {
         return;
     };
-    let catalog_path = catalog_path.trim();
-    let relative = crate::model_catalog::relative_path();
-    let absolute = home.join(relative).to_string_lossy().replace('\\', "/");
-    let normalized = catalog_path.replace('\\', "/");
-    if normalized == relative
-        || normalized == absolute
-        || normalized.ends_with(&format!("/{relative}"))
-    {
+    let catalog_dir = codey_model_catalog_dir();
+    if crate::model_catalog::is_codey_owned_model_catalog_path(catalog_path, home, &catalog_dir) {
         doc.as_table_mut().remove("model_catalog_json");
     }
 }
@@ -1777,8 +1808,8 @@ pub(crate) fn fast_context_tools_status(home: &Path) -> Result<FastContextToolsS
 
 #[cfg(test)]
 pub fn patch_config(existing: &str, use_official_catalog: bool) -> Result<String> {
-    let model_catalog_path =
-        use_official_catalog.then(|| Path::new(crate::model_catalog::relative_path()));
+    let model_catalog_path = use_official_catalog
+        .then(|| Path::new(crate::model_catalog_store::DERIVED_CATALOG_FILE_NAME));
     patch_config_with_fastctx(existing, model_catalog_path, None, None, false)
 }
 
@@ -1794,6 +1825,7 @@ fn patch_config_with_fastctx(
         existing,
         RouterPatchOptions {
             config_path: Path::new("config.toml"),
+            catalog_dir: Path::new("model-catalogs"),
             model_catalog_path,
             default_model,
             fastctx_command,
@@ -1819,6 +1851,7 @@ fn test_runtime_router_endpoint() -> &'static RuntimeRouterEndpoint {
 
 struct RouterPatchOptions<'a> {
     config_path: &'a Path,
+    catalog_dir: &'a Path,
     model_catalog_path: Option<&'a Path>,
     default_model: Option<&'a str>,
     fastctx_command: Option<&'a Path>,
@@ -1834,6 +1867,7 @@ fn patch_config_with_fastctx_mode(
 ) -> Result<String> {
     let RouterPatchOptions {
         config_path,
+        catalog_dir,
         model_catalog_path,
         default_model,
         fastctx_command,
@@ -1843,16 +1877,17 @@ fn patch_config_with_fastctx_mode(
         local_router,
     } = options;
     let mut doc = parse_document(existing)?;
+    ensure_provider_table(&mut doc)?;
     if let Some(local_router) = local_router {
-        ensure_provider_table(&mut doc)?;
         doc["model_providers"]
             .as_table_mut()
             .expect("model_providers was initialized")[local_router::ROUTER_PROVIDER_ID] =
             Item::Table(local_router_provider_table(local_router));
         doc["model_provider"] = value(local_router::ROUTER_PROVIDER_ID);
-        update_model_catalog_reference(&mut doc, config_path, model_catalog_path);
-        set_model_selection(&mut doc, default_model);
     }
+    let home = config_path.parent().unwrap_or_else(|| Path::new("."));
+    update_model_catalog_reference(&mut doc, home, catalog_dir, model_catalog_path);
+    set_model_selection(&mut doc, default_model);
     enable_desktop_reasoning_efforts(&mut doc)?;
     ensure_default_service_tier(&mut doc);
     let fastctx_namespace = if let Some(command) = fastctx_command {
@@ -1924,7 +1959,7 @@ fn enable_subagent_optimization(
     multi_agent["tool_namespace"] = value("agents");
     multi_agent["min_wait_timeout_ms"] = value(10_000);
     multi_agent["default_wait_timeout_ms"] = value(30_000);
-    multi_agent["max_wait_timeout_ms"] = value(30_000);
+    multi_agent["max_wait_timeout_ms"] = value(120_000);
     let existing_root_usage_hint = multi_agent
         .get("root_agent_usage_hint_text")
         .map(|item| {
@@ -1965,6 +2000,7 @@ struct CodeyHookSpec {
 struct RuntimeHookTrustEntry {
     state_key: String,
     trusted_hash: String,
+    wsl_trusted_hash: Option<String>,
 }
 
 struct RuntimeHooksFile {
@@ -2116,6 +2152,14 @@ fn build_runtime_hooks_file(
             trust_entries.push(RuntimeHookTrustEntry {
                 state_key,
                 trusted_hash,
+                wsl_trusted_hash: cfg!(windows).then(|| {
+                    crate::subagent_gate::hook_trust_hash(
+                        spec.event_key,
+                        spec.matcher,
+                        &commands.command,
+                        spec.timeout_seconds,
+                    )
+                }),
             });
         }
     }
@@ -2148,7 +2192,7 @@ fn build_isolated_runtime_overrides(
     runtime_agents: &[RuntimeAgentRegistration],
     model_catalog_path: Option<&Path>,
     fastctx_namespace: Option<&str>,
-    provider_id: Option<&str>,
+    provider_id: &str,
     hook_trust_entries: &[RuntimeHookTrustEntry],
 ) -> Result<Vec<String>> {
     let mut overrides = Vec::new();
@@ -2160,14 +2204,12 @@ fn build_isolated_runtime_overrides(
     )?;
     push_required_document_override(&mut overrides, effective, &["service_tier"], "service_tier")?;
 
-    if provider_id.is_some() {
-        push_required_document_override(
-            &mut overrides,
-            effective,
-            &["model_provider"],
-            "model_provider",
-        )?;
-    }
+    push_required_document_override(
+        &mut overrides,
+        effective,
+        &["model_provider"],
+        "model_provider",
+    )?;
     push_document_override(&mut overrides, effective, &["model"], "model")?;
 
     if model_catalog_path.is_some() {
@@ -2181,31 +2223,28 @@ fn build_isolated_runtime_overrides(
 
     // The only runtime provider is Codey's process-local loopback gateway.
     // Upstream route tables and credentials never enter Codex's configuration.
-    if let Some(provider_id) = provider_id {
-        let provider_segment =
-            codex_config_override_bare_segment(provider_id, "Codex Provider ID")?;
-        for field in [
-            "name",
-            "base_url",
-            "wire_api",
-            "requires_openai_auth",
-            "supports_websockets",
-            "http_headers",
-        ] {
-            push_required_document_override(
-                &mut overrides,
-                effective,
-                &["model_providers", provider_id, field],
-                &format!("model_providers.{provider_segment}.{field}"),
-            )?;
-        }
-        push_document_override(
+    let provider_segment = codex_config_override_bare_segment(provider_id, "Codex Provider ID")?;
+    for field in [
+        "name",
+        "base_url",
+        "wire_api",
+        "requires_openai_auth",
+        "supports_websockets",
+        "http_headers",
+    ] {
+        push_required_document_override(
             &mut overrides,
             effective,
-            &["model_providers", provider_id, "experimental_bearer_token"],
-            &format!("model_providers.{provider_segment}.experimental_bearer_token"),
+            &["model_providers", provider_id, field],
+            &format!("model_providers.{provider_segment}.{field}"),
         )?;
     }
+    push_document_override(
+        &mut overrides,
+        effective,
+        &["model_providers", provider_id, "experimental_bearer_token"],
+        &format!("model_providers.{provider_segment}.experimental_bearer_token"),
+    )?;
 
     if fastctx_namespace.is_some() {
         for (path, key) in [
@@ -2396,11 +2435,23 @@ fn build_isolated_runtime_overrides(
                 &key,
                 &Value::from(trust_entry.trusted_hash.as_str()),
             );
+            if let Some(wsl_trusted_hash) = trust_entry.wsl_trusted_hash.as_deref() {
+                let mut wsl_override = Vec::with_capacity(1);
+                push_runtime_override_value(
+                    &mut wsl_override,
+                    &key,
+                    &Value::from(wsl_trusted_hash),
+                );
+                overrides.push(format!(
+                    "{CODEY_WSL_ONLY_OVERRIDE_PREFIX}{}",
+                    wsl_override
+                        .pop()
+                        .expect("WSL Hook trust override was rendered")
+                ));
+            }
         }
     }
-    if let Some(provider_id) = provider_id {
-        validate_runtime_router_overrides(&overrides, provider_id)?;
-    }
+    validate_runtime_router_overrides(&overrides, provider_id)?;
     Ok(overrides)
 }
 
@@ -2545,15 +2596,16 @@ fn hook_command_is_codey_owned(command: &str) -> bool {
 
 fn local_router_provider_table(endpoint: &RuntimeRouterEndpoint) -> Table {
     let mut provider = Table::new();
-    provider["name"] = value(if endpoint.supports_remote_compaction {
-        // Codex derives remote compaction from this exact name. Authentication
-        // remains an independent provider field so mixed Chat/Responses
-        // runtimes can keep official login without advertising compaction to
-        // routes that cannot carry its Responses V2 trigger.
-        OPENAI_PROVIDER_NAME
-    } else {
-        LOCAL_ROUTER_PROVIDER_NAME
-    });
+    provider["name"] = value(
+        if endpoint.requires_openai_auth || endpoint.supports_remote_compaction {
+            // Match CC Switch's official proxy route: Codex derives the OpenAI
+            // capability set (including remote compaction) from this exact name,
+            // while base_url still points every request at the loopback gateway.
+            OPENAI_PROVIDER_NAME
+        } else {
+            LOCAL_ROUTER_PROVIDER_NAME
+        },
+    );
     provider["base_url"] = value(endpoint.base_url.trim_end_matches('/'));
     provider["wire_api"] = value("responses");
     provider["requires_openai_auth"] = value(endpoint.requires_openai_auth);
@@ -2572,39 +2624,27 @@ fn local_router_provider_table(endpoint: &RuntimeRouterEndpoint) -> Table {
 
 fn update_model_catalog_reference(
     document: &mut DocumentMut,
-    config_path: &Path,
+    home: &Path,
+    catalog_dir: &Path,
     desired_codey_catalog: Option<&Path>,
 ) {
-    let existing = document
-        .get("model_catalog_json")
-        .and_then(Item::as_str)
-        .map(str::trim)
-        .filter(|path| !path.is_empty());
-    let existing_is_codey_owned =
-        existing.is_some_and(|path| is_codey_owned_model_catalog_path(path, config_path));
-    match (desired_codey_catalog, existing) {
-        (Some(path), None) => {
+    match desired_codey_catalog {
+        Some(path) => {
             document["model_catalog_json"] = value(path.to_string_lossy().into_owned());
         }
-        (Some(path), Some(_)) if existing_is_codey_owned => {
-            document["model_catalog_json"] = value(path.to_string_lossy().into_owned());
+        None => {
+            let existing = document
+                .get("model_catalog_json")
+                .and_then(Item::as_str)
+                .map(str::trim)
+                .filter(|path| !path.is_empty());
+            if existing.is_some_and(|path| {
+                crate::model_catalog::is_codey_owned_model_catalog_path(path, home, catalog_dir)
+            }) {
+                document.as_table_mut().remove("model_catalog_json");
+            }
         }
-        (None, Some(_)) if existing_is_codey_owned => {
-            document.as_table_mut().remove("model_catalog_json");
-        }
-        _ => {}
     }
-}
-
-fn is_codey_owned_model_catalog_path(path: &str, config_path: &Path) -> bool {
-    let candidate = Path::new(path);
-    let relative = Path::new(crate::model_catalog::relative_path());
-    if candidate == relative {
-        return true;
-    }
-    config_path
-        .parent()
-        .is_some_and(|parent| candidate == parent.join(relative))
 }
 
 fn parse_document(existing: &str) -> Result<DocumentMut> {

@@ -14,13 +14,13 @@ pub(crate) struct ModelCatalogRefresh {
 pub(crate) fn refresh_model_catalog_or_fallback(
     config: &CodeyConfig,
 ) -> Result<ModelCatalogRefresh, String> {
-    let home = codex_home();
-    let snapshot = model_catalog::snapshot(home).map_err(|error| error.to_string())?;
+    let catalog_dir = crate::codex_config::codey_model_catalog_dir();
+    let snapshot = model_catalog::snapshot(&catalog_dir).map_err(|error| error.to_string())?;
     let native_web_search_models = config.runtime_native_web_search_model_aliases();
     let context_1m_models = config.runtime_1m_context_model_aliases();
     let result = model_catalog_fallback(
         try_refresh_model_catalog(config),
-        home,
+        &catalog_dir,
         &native_web_search_models,
         &context_1m_models,
     );
@@ -149,17 +149,16 @@ pub(crate) fn rollback_model_catalog_snapshot(
 
 pub(crate) fn model_catalog_fallback(
     result: anyhow::Result<()>,
-    home: &std::path::Path,
+    catalog_dir: &std::path::Path,
     native_web_search_models: &[String],
-    context_1m_models: &[String],
+    _context_1m_models: &[String],
 ) -> Result<bool, String> {
     match result {
         Ok(()) => Ok(false),
         Err(error) if model_catalog::is_runtime_model_cache_unavailable(&error) => {
-            model_catalog::prepare_cached_catalog_for_current_capabilities(
-                home,
+            model_catalog::prepare_cached_catalog_for_native_web_search(
+                catalog_dir,
                 native_web_search_models,
-                context_1m_models,
             )
             .map(|available| !available)
             .map_err(|fallback_error| fallback_error.to_string())
@@ -169,21 +168,22 @@ pub(crate) fn model_catalog_fallback(
 }
 
 pub(crate) fn try_refresh_model_catalog(config: &CodeyConfig) -> anyhow::Result<()> {
-    let use_builtin_official_catalog = config.uses_builtin_official_model_catalog();
+    let home = codex_home();
+    let catalog_dir = crate::codex_config::codey_model_catalog_dir();
+    let user_catalog = crate::codex_config::configured_user_model_catalog_path(home, &catalog_dir)?;
+    let has_third_party_route = config.has_third_party_route();
     let (upstream_models, selected_models) = config.runtime_catalog_models();
     let websocket_models = config.runtime_websocket_model_aliases();
     let native_web_search_models = config.runtime_native_web_search_model_aliases();
-    let context_1m_models = config.runtime_1m_context_model_aliases();
-    model_catalog::refresh_for_provider_with_capabilities(
-        codex_home(),
-        config.official_account_available_this_launch && use_builtin_official_catalog,
-        (!use_builtin_official_catalog)
-            .then_some(upstream_models)
-            .as_deref(),
-        &selected_models,
-        &websocket_models,
-        &native_web_search_models,
-        &context_1m_models,
-    )
+    model_catalog::refresh_catalog(model_catalog::CatalogRefreshArgs {
+        codex_home: home,
+        catalog_dir: &catalog_dir,
+        official_provider: config.official_account_available_this_launch && !has_third_party_route,
+        upstream_models: has_third_party_route.then_some(upstream_models).as_deref(),
+        selected_models: &selected_models,
+        websocket_models: Some(&websocket_models),
+        native_web_search_models: Some(&native_web_search_models),
+        user_catalog: user_catalog.as_deref(),
+    })
     .map(|_| ())
 }

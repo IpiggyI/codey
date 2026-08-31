@@ -8,13 +8,15 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::fs_util::atomic_write_private_with_parent as atomic_write;
+use crate::model_catalog_store::{
+    derived_catalog_path, load_user_catalog, materialize_derived_catalog,
+    migrate_legacy_catalog_if_needed, read_derived_catalog, write_derived_catalog,
+};
 use crate::model_id;
 
-const MODEL_CATALOG_RELATIVE_PATH: &str = "model-catalogs/codey-official.json";
-const CONTEXT_1M_WINDOW: u64 = 1_000_000;
-const DEFAULT_CONTEXT_WINDOW: u64 = 272_000;
-const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT: u64 = 95;
+pub(crate) use crate::model_catalog_store::{
+    CatalogSnapshot, is_codey_owned_model_catalog_path, restore_snapshot, snapshot,
+};
 pub(crate) const THIRD_PARTY_REASONING_EFFORTS: [&str; 4] = ["low", "medium", "high", "xhigh"];
 const THIRD_PARTY_REASONING_EFFORT_ALLOWLIST: [&str; 6] =
     ["low", "medium", "high", "xhigh", "max", "ultra"];
@@ -33,8 +35,7 @@ const REASONING_LEVEL_DESCRIPTIONS: [(&str, &str); 6] = [
 const FAST_SERVICE_TIER_ID: &str = "priority";
 const FAST_SPEED_TIER_ID: &str = "fast";
 const PERSONALITY_PLACEHOLDER: &str = "{{ personality }}";
-const OFFICIAL_MODELS: [(&str, &str); 8] = [
-    ("gpt-6-astra", "GPT-6-Astra"),
+const OFFICIAL_MODELS: [(&str, &str); 7] = [
     ("gpt-5.6-sol", "GPT-5.6-Sol"),
     ("gpt-5.6-terra", "GPT-5.6-Terra"),
     ("gpt-5.6-luna", "GPT-5.6-Luna"),
@@ -121,40 +122,15 @@ impl ModelSelectionState {
     }
 }
 
-pub fn relative_path() -> &'static str {
-    MODEL_CATALOG_RELATIVE_PATH
-}
-
-#[derive(Debug)]
-pub(crate) struct CatalogSnapshot {
-    path: PathBuf,
-    contents: Option<Vec<u8>>,
-}
-
-pub(crate) fn snapshot(home: &Path) -> Result<CatalogSnapshot> {
-    let path = home.join(relative_path());
-    let contents = match fs::read(&path) {
-        Ok(contents) => Some(contents),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => {
-            return Err(error)
-                .with_context(|| format!("读取现有 Codey 模型目录失败：{}", path.display()));
-        }
-    };
-    Ok(CatalogSnapshot { path, contents })
-}
-
-pub(crate) fn restore_snapshot(snapshot: CatalogSnapshot) -> Result<()> {
-    match snapshot.contents {
-        Some(contents) => atomic_write(&snapshot.path, &contents),
-        None => match fs::remove_file(&snapshot.path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error).with_context(|| {
-                format!("移除新建的 Codey 模型目录失败：{}", snapshot.path.display())
-            }),
-        },
-    }
+pub(crate) struct CatalogRefreshArgs<'a> {
+    pub codex_home: &'a Path,
+    pub catalog_dir: &'a Path,
+    pub official_provider: bool,
+    pub upstream_models: Option<&'a [String]>,
+    pub selected_models: &'a [String],
+    pub websocket_models: Option<&'a [String]>,
+    pub native_web_search_models: Option<&'a [String]>,
+    pub user_catalog: Option<&'a Path>,
 }
 
 pub fn default_official_model_slugs() -> Vec<String> {
@@ -171,169 +147,52 @@ pub fn refresh_for_provider(
     upstream_models: Option<&[String]>,
     selected_models: &[String],
 ) -> Result<usize> {
-    refresh_for_provider_with_transport_preferences(
-        home,
+    refresh_catalog(CatalogRefreshArgs {
+        codex_home: home,
+        catalog_dir: home,
         official_provider,
         upstream_models,
         selected_models,
-        None,
-        None,
-        None,
-    )
+        websocket_models: None,
+        native_web_search_models: None,
+        user_catalog: None,
+    })
 }
 
-#[cfg(test)]
-pub(crate) fn refresh_for_provider_with_websocket_models(
-    home: &Path,
-    official_provider: bool,
-    upstream_models: Option<&[String]>,
-    selected_models: &[String],
-    websocket_models: &[String],
-) -> Result<usize> {
-    refresh_for_provider_with_transport_preferences(
-        home,
-        official_provider,
-        upstream_models,
-        selected_models,
-        Some(websocket_models),
-        None,
-        None,
-    )
+pub(crate) fn refresh_catalog(args: CatalogRefreshArgs<'_>) -> Result<usize> {
+    refresh_for_provider_with_transport_preferences(args)
 }
 
-pub(crate) fn refresh_for_provider_with_capabilities(
-    home: &Path,
-    official_provider: bool,
-    upstream_models: Option<&[String]>,
-    selected_models: &[String],
-    websocket_models: &[String],
-    native_web_search_models: &[String],
-    context_1m_models: &[String],
-) -> Result<usize> {
-    refresh_for_provider_with_transport_preferences(
-        home,
-        official_provider,
-        upstream_models,
-        selected_models,
-        Some(websocket_models),
-        Some(native_web_search_models),
-        Some(context_1m_models),
-    )
-}
-
-// Extends the existing capability entry point without changing its callers' API.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn refresh_for_provider_with_contexts(
-    home: &Path,
-    official_provider: bool,
-    upstream_models: Option<&[String]>,
-    selected_models: &[String],
-    websocket_models: &[String],
-    native_web_search_models: &[String],
-    context_1m_models: &[String],
-    contexts: &std::collections::BTreeMap<String, crate::config::ModelContextConfig>,
-) -> Result<usize> {
-    let count = refresh_for_provider_with_capabilities(
-        home,
+fn refresh_for_provider_with_transport_preferences(args: CatalogRefreshArgs<'_>) -> Result<usize> {
+    let CatalogRefreshArgs {
+        codex_home,
+        catalog_dir,
         official_provider,
         upstream_models,
         selected_models,
         websocket_models,
         native_web_search_models,
-        context_1m_models,
-    )?;
-    apply_catalog_contexts(home, contexts)?;
-    Ok(count)
-}
-
-pub(crate) fn apply_catalog_contexts(
-    home: &Path,
-    contexts: &std::collections::BTreeMap<String, crate::config::ModelContextConfig>,
-) -> Result<()> {
-    let mut models = read_runtime_catalog_models(home)?;
-    for model in &mut models {
-        let policy = model.get("slug").and_then(Value::as_str).and_then(|slug| {
-            contexts
-                .iter()
-                .find(|(key, _)| model_id::equal(key, slug))
-                .map(|(_, policy)| policy)
-        });
-        apply_model_context(model, policy)?;
+        user_catalog,
+    } = args;
+    migrate_legacy_catalog_if_needed(codex_home, catalog_dir)?;
+    if let Some(user_path) = user_catalog {
+        load_user_catalog(user_path)?;
     }
-    write_verified_catalog(home, &models)?;
-    Ok(())
-}
-
-pub(crate) fn runtime_context_metadata(
-    home: &Path,
-) -> std::collections::BTreeMap<String, serde_json::Map<String, Value>> {
-    read_runtime_catalog_models(home)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|model| {
-            let slug = model["slug"].as_str()?.to_string();
-            let fields = [
-                "context_window",
-                "max_context_window",
-                "effective_context_window_percent",
-                "auto_compact_token_limit",
-                "codey_context_source",
-            ];
-            Some((
-                slug,
-                fields
-                    .into_iter()
-                    .map(|field| (field.to_string(), model[field].clone()))
-                    .collect(),
-            ))
-        })
-        .collect()
-}
-
-pub(crate) fn apply_model_context(
-    model: &mut Value,
-    policy: Option<&crate::config::ModelContextConfig>,
-) -> Result<()> {
-    let Some(policy) = policy else {
-        return Ok(());
+    let official_models = match read_official_entries(codex_home, catalog_dir) {
+        Ok(models) => models,
+        Err(_error) if user_catalog.is_some() => {
+            return materialize_user_catalog_without_generated(
+                catalog_dir,
+                codex_home,
+                user_catalog,
+            );
+        }
+        Err(error) => return Err(error),
     };
-    policy.validate().map_err(anyhow::Error::msg)?;
-    let window = policy.context_window_tokens;
-    let percent = (window - policy.reserve_output_tokens.unwrap_or(0)) * 100 / window;
-    model["context_window"] = json!(window);
-    model["max_context_window"] = json!(window);
-    model["effective_context_window_percent"] = json!(percent);
-    model["auto_compact_token_limit"] = json!(
-        policy
-            .auto_compact_token_limit
-            .unwrap_or((window * 9 / 10).min(window * percent / 100))
-    );
-    model["codey_context_source"] = json!("user_declared");
-    Ok(())
-}
-
-fn refresh_for_provider_with_transport_preferences(
-    home: &Path,
-    official_provider: bool,
-    upstream_models: Option<&[String]>,
-    selected_models: &[String],
-    websocket_models: Option<&[String]>,
-    native_web_search_models: Option<&[String]>,
-    context_1m_models: Option<&[String]>,
-) -> Result<usize> {
-    if !official_provider
-        && upstream_models.is_some_and(|models| models.is_empty())
-        && selected_models.is_empty()
-    {
-        return write_verified_catalog(home, &[]);
+    if user_catalog.is_some() && ensure_runtime_compatible_models(&official_models).is_err() {
+        return materialize_user_catalog_without_generated(catalog_dir, codex_home, user_catalog);
     }
-    let official_models = read_official_entries(home)?;
-    if official_models
-        .iter()
-        .all(|model| model_instruction_source(model).is_none())
-    {
-        return Err(RuntimeModelCacheUnavailable.into());
-    }
+    ensure_runtime_compatible_models(&official_models)?;
     let official_slugs = official_models
         .iter()
         .filter_map(|model| model.get("slug").and_then(Value::as_str))
@@ -377,10 +236,7 @@ fn refresh_for_provider_with_transport_preferences(
     if !official_provider {
         let template = official_models
             .iter()
-            .find(|model| {
-                model.get("visibility").and_then(Value::as_str) == Some("list")
-                    && model_instruction_source(model).is_some()
-            })
+            .find(|model| model.get("visibility").and_then(Value::as_str) == Some("list"))
             .or_else(|| official_models.first())
             .cloned()
             .ok_or_else(|| {
@@ -431,20 +287,50 @@ fn refresh_for_provider_with_transport_preferences(
     for model in &mut catalog_models {
         gate_synthetic_native_web_search(model, &native_web_search_model_keys);
     }
-    let context_1m_model_keys = context_1m_models
-        .unwrap_or_default()
-        .iter()
-        .map(|model| model_id::key(model))
-        .collect::<HashSet<_>>();
-    for model in &mut catalog_models {
-        configure_1m_context_window(model, &context_1m_model_keys);
-    }
     // Validate the selected models so a newly bundled model without a local
     // runtime template cannot block routes that still use older models.
     if !catalog_models.is_empty() {
         ensure_runtime_compatible_models(&catalog_models)?;
     }
-    write_verified_catalog(home, &catalog_models)
+    materialize_derived_catalog(catalog_dir, codex_home, &catalog_models, user_catalog)?;
+    let written_models = read_runtime_catalog_models(catalog_dir)?;
+    let expected_model_keys = catalog_models
+        .iter()
+        .filter_map(|model| model.get("slug").and_then(Value::as_str))
+        .map(model_id::key)
+        .collect::<Vec<_>>();
+    let written_model_keys = written_models
+        .iter()
+        .filter_map(|model| model.get("slug").and_then(Value::as_str))
+        .map(model_id::key)
+        .collect::<Vec<_>>();
+    if user_catalog.is_none() && written_model_keys != expected_model_keys {
+        bail!("写入后的 Codey 模型目录与本次生成结果不一致");
+    }
+    if let Some(user_path) = user_catalog {
+        let user_models = load_user_catalog(user_path)?;
+        let expected_user_keys = user_models
+            .get("models")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|model| model.get("slug").and_then(Value::as_str))
+            .map(model_id::key)
+            .collect::<Vec<_>>();
+        if written_model_keys != expected_user_keys {
+            bail!("写入后的 Codey 模型目录与用户模型目录不一致");
+        }
+    }
+    Ok(catalog_models.len())
+}
+
+fn materialize_user_catalog_without_generated(
+    catalog_dir: &Path,
+    codex_home: &Path,
+    user_catalog: Option<&Path>,
+) -> Result<usize> {
+    materialize_derived_catalog(catalog_dir, codex_home, &[], user_catalog)?;
+    Ok(read_runtime_catalog_models(catalog_dir)?.len())
 }
 
 #[cfg(test)]
@@ -457,6 +343,7 @@ pub fn selection_state(
 ) -> Result<ModelSelectionState> {
     selection_state_with_manual_models(
         home,
+        home,
         official_provider,
         upstream_models,
         selected_models,
@@ -467,6 +354,7 @@ pub fn selection_state(
 
 pub fn selection_state_with_manual_models(
     home: &Path,
+    catalog_dir: &Path,
     official_provider: bool,
     upstream_models: Option<&[String]>,
     selected_models: &[String],
@@ -477,7 +365,7 @@ pub fn selection_state_with_manual_models(
     // provider may legitimately expose a model whose id also appears in the
     // official catalog; it must remain a route-scoped model and go through the
     // local router instead of acquiring official-account semantics.
-    let official_entries = match read_official_entries(home) {
+    let official_entries = match read_official_entries(home, catalog_dir) {
         Ok(entries) => entries,
         Err(error) if official_provider => return Err(error),
         Err(_) => Arc::new(Vec::new()),
@@ -607,31 +495,94 @@ fn effective_default_model(
         .unwrap_or_default()
 }
 
-pub fn is_available(home: &Path) -> bool {
-    read_catalog_value(&home.join(relative_path())).is_some_and(|value| {
+pub fn is_available(catalog_dir: &Path) -> bool {
+    read_derived_catalog(catalog_dir).is_some_and(|value| {
         let models = catalog_models_from_value(&value);
         runtime_compatible_models(&models)
     })
 }
 
+/// Repairs catalogs written by older Codey versions that copied model-cache
+/// entries without Codex's now-required `description` fields on models and
+/// their reasoning levels.
+pub(crate) fn repair_missing_descriptions(codex_home: &Path, catalog_dir: &Path) -> Result<bool> {
+    migrate_legacy_catalog_if_needed(codex_home, catalog_dir)?;
+    let path = derived_catalog_path(catalog_dir);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("读取待修复的 Codey 模型目录失败：{}", path.display()));
+        }
+    };
+    let mut catalog: Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("解析待修复的 Codey 模型目录失败：{}", path.display()))?;
+    let models = catalog
+        .get_mut("models")
+        .and_then(Value::as_array_mut)
+        .ok_or_else(|| anyhow::anyhow!("待修复的 Codey 模型目录缺少 models 数组"))?;
+    if !models.iter().any(model_needs_description_repair) {
+        return Ok(false);
+    }
+    let mut repaired = false;
+    for model in models.iter_mut() {
+        if !model_has_runtime_description(model) {
+            let description = model
+                .get("display_name")
+                .and_then(Value::as_str)
+                .or_else(|| model.get("slug").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|description| !description.is_empty())
+                .map(ToString::to_string);
+            if let Some(description) = description {
+                model["description"] = json!(description);
+                repaired = true;
+            }
+        }
+        if let Some(levels) = model
+            .get_mut("supported_reasoning_levels")
+            .and_then(Value::as_array_mut)
+        {
+            for level in levels {
+                if level_has_runtime_description(level) {
+                    continue;
+                }
+                let effort = level.get("effort").and_then(Value::as_str);
+                if let Some(effort) = effort {
+                    level["description"] = json!(reasoning_level_description(effort));
+                    repaired = true;
+                }
+            }
+        }
+    }
+    if models.iter().any(model_needs_description_repair) {
+        bail!("旧版 Codey 模型目录存在无法自动补全 description 的条目");
+    }
+    debug_assert!(repaired);
+
+    let mut contents =
+        serde_json::to_vec_pretty(&catalog).context("序列化已修复的 Codey 模型目录失败")?;
+    contents.push(b'\n');
+    crate::fs_util::atomic_write_private_with_parent(&path, &contents)?;
+    Ok(true)
+}
+
 /// Makes a previously generated catalog safe to reuse when the upstream model
-/// cache cannot be refreshed. Older catalogs may still advertise capabilities
-/// whose route settings have since changed.
-pub(crate) fn prepare_cached_catalog_for_current_capabilities(
-    home: &Path,
+/// cache cannot be refreshed. Older catalogs may still advertise native Web
+/// Search for a route whose protocol or capability setting has since changed.
+/// This fallback is intentionally subtractive: it can remove stale capability
+/// metadata, but never invent support that was absent from the cached source.
+pub(crate) fn prepare_cached_catalog_for_native_web_search(
+    catalog_dir: &Path,
     native_web_search_models: &[String],
-    context_1m_models: &[String],
 ) -> Result<bool> {
-    if !is_available(home) {
+    if !is_available(catalog_dir) {
         return Ok(false);
     }
 
-    let mut models = read_runtime_catalog_models(home)?;
+    let mut models = read_runtime_catalog_models(catalog_dir)?;
     let allowed_model_keys = native_web_search_models
-        .iter()
-        .map(|model| model_id::key(model))
-        .collect::<HashSet<_>>();
-    let context_1m_model_keys = context_1m_models
         .iter()
         .map(|model| model_id::key(model))
         .collect::<HashSet<_>>();
@@ -639,28 +590,23 @@ pub(crate) fn prepare_cached_catalog_for_current_capabilities(
     for model in &mut models {
         let previous = model.clone();
         gate_cached_native_web_search(model, &allowed_model_keys);
-        configure_1m_context_window(model, &context_1m_model_keys);
         changed |= *model != previous;
     }
     if changed {
-        write_catalog(home, &models)?;
+        write_derived_catalog(catalog_dir, &json!({ "models": models }))?;
     }
 
-    let written_models = read_runtime_catalog_models(home)?;
+    let written_models = read_runtime_catalog_models(catalog_dir)?;
     let mut safely_gated_models = written_models.clone();
     for model in &mut safely_gated_models {
         gate_cached_native_web_search(model, &allowed_model_keys);
-        configure_1m_context_window(model, &context_1m_model_keys);
     }
     if safely_gated_models != written_models {
-        bail!("复用的 Codey 模型目录仍包含与当前线路不匹配的模型能力");
+        bail!("复用的 Codey 模型目录仍包含与当前线路不匹配的原生网页搜索能力");
     }
     Ok(true)
 }
 
-/// Repairs catalogs written by older Codey versions that copied model-cache
-/// entries without Codex's now-required `description` fields on models and
-/// their reasoning levels.
 pub fn is_runtime_model_cache_unavailable(error: &anyhow::Error) -> bool {
     error.is::<RuntimeModelCacheUnavailable>()
 }
@@ -686,8 +632,14 @@ fn catalog_signature(paths: &[PathBuf]) -> CatalogSignature {
         .collect()
 }
 
-fn read_official_entries(home: &Path) -> Result<std::sync::Arc<Vec<Value>>> {
-    let paths = vec![home.join("models_cache.json"), home.join(relative_path())];
+fn read_official_entries(
+    codex_home: &Path,
+    catalog_dir: &Path,
+) -> Result<std::sync::Arc<Vec<Value>>> {
+    let paths = vec![
+        codex_home.join("models_cache.json"),
+        derived_catalog_path(catalog_dir),
+    ];
     let signature = catalog_signature(&paths);
     let cache = OFFICIAL_ENTRIES_CACHE.get_or_init(|| std::sync::Mutex::new(None));
     if let Ok(guard) = cache.lock()
@@ -764,10 +716,9 @@ fn read_official_entries_uncached(paths: &[PathBuf]) -> Result<Vec<Value>> {
             let fallbacks = matching_models.collect::<Vec<_>>();
             complete_reasoning_metadata(&mut model, &fallbacks);
             normalize_official_model(&mut model, slug, display_name, priority);
+            remove_fast_speed_controls(&mut model);
             if bundled_fast_model_slugs.contains(*slug) {
                 add_fast_speed_controls(&mut model);
-            } else {
-                remove_fast_speed_controls(&mut model);
             }
             Ok(model)
         })
@@ -846,7 +797,7 @@ fn normalize_official_model(model: &mut Value, slug: &str, display_name: &str, p
         .is_none()
     {
         match slug {
-            "gpt-6-astra" | "gpt-5.6-sol" | "gpt-5.6-terra" => {
+            "gpt-5.6-sol" | "gpt-5.6-terra" => {
                 model["multi_agent_version"] = json!("v2");
             }
             "gpt-5.6-luna" => {
@@ -902,7 +853,7 @@ fn reasoning_efforts_from_value(model: &Value) -> Vec<String> {
 
 fn third_party_reasoning_efforts_from_value(model: &Value) -> Vec<String> {
     let mut efforts = fallback_third_party_reasoning_efforts();
-    let allow_ultra = third_party_template_supports_ultra(model);
+    let allow_ultra = third_party_gpt_5_6_template_supports_ultra(model);
     for effort in reasoning_efforts_from_value(model) {
         let allowed = effort == "max" || (effort == "ultra" && allow_ultra);
         if allowed && !efforts.iter().any(|existing| existing == &effort) {
@@ -912,28 +863,23 @@ fn third_party_reasoning_efforts_from_value(model: &Value) -> Vec<String> {
     efforts
 }
 
-fn third_party_template_supports_ultra(model: &Value) -> bool {
-    let is_supported_gpt = model
+fn third_party_gpt_5_6_template_supports_ultra(model: &Value) -> bool {
+    let is_gpt_5_6 = model
         .get("slug")
         .and_then(Value::as_str)
         .is_some_and(|slug| {
-            [
-                "gpt-6-astra",
-                "gpt-5.6-sol",
-                "gpt-5.6-terra",
-                "gpt-5.6-luna",
-            ]
-            .iter()
-            .any(|candidate| model_id::equal(slug, candidate))
+            ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+                .iter()
+                .any(|candidate| model_id::equal(slug, candidate))
         });
-    is_supported_gpt
+    is_gpt_5_6
         && reasoning_efforts_from_value(model)
             .iter()
             .any(|effort| effort == "ultra")
 }
 
-fn third_party_template_supports_coordination(model: &Value) -> bool {
-    third_party_template_supports_ultra(model)
+fn third_party_gpt_5_6_template_supports_coordination(model: &Value) -> bool {
+    third_party_gpt_5_6_template_supports_ultra(model)
         && model
             .get("multi_agent_version")
             .and_then(Value::as_str)
@@ -1122,6 +1068,26 @@ fn reasoning_level_description(effort: &str) -> String {
         .unwrap_or_else(|| format!("{effort} reasoning"))
 }
 
+fn level_has_runtime_description(level: &Value) -> bool {
+    level
+        .get("description")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|description| !description.is_empty())
+}
+
+fn model_needs_description_repair(model: &Value) -> bool {
+    !model_has_runtime_description(model)
+        || model
+            .get("supported_reasoning_levels")
+            .and_then(Value::as_array)
+            .is_some_and(|levels| {
+                levels
+                    .iter()
+                    .any(|level| !level_has_runtime_description(level))
+            })
+}
+
 fn clamp_reasoning_efforts(model: &mut Value) {
     if let Some(levels) = model
         .get_mut("supported_reasoning_levels")
@@ -1278,30 +1244,11 @@ fn synthetic_model(
     index: usize,
     preserve_source_runtime_metadata: bool,
 ) -> Value {
-    let preserve_multi_agent_version =
-        preserve_source_runtime_metadata && third_party_template_supports_coordination(template);
+    let preserve_multi_agent_version = preserve_source_runtime_metadata
+        && third_party_gpt_5_6_template_supports_coordination(template);
     let mut model = template.clone();
     if !preserve_source_runtime_metadata {
         codey_runtime_core::model_suffix::sanitize_generic_model_metadata(&mut model);
-    }
-    if !preserve_source_runtime_metadata
-        || model
-            .get("context_window")
-            .and_then(Value::as_u64)
-            .is_none_or(|window| window == 0)
-    {
-        // ponytail: unknown providers use a conservative operating budget; an
-        // explicit provider/model setting replaces it when capacity is known.
-        model["context_window"] = json!(32_768);
-        model["max_context_window"] = json!(32_768);
-        model["effective_context_window_percent"] = json!(95);
-        model["auto_compact_token_limit"] = Value::Null;
-        model["codey_context_source"] = json!("conservative_fallback");
-        if let Some(object) = model.as_object_mut() {
-            object.remove("codey_context_base");
-        }
-    } else {
-        model["codey_context_source"] = json!("official_catalog");
     }
     model["slug"] = json!(model_id);
     model["display_name"] = json!(model_id);
@@ -1316,12 +1263,11 @@ fn synthetic_model(
     if let Some(object) = model.as_object_mut() {
         object.remove("availability_nux");
         object.remove("upgrade");
-        // Only route aliases that exactly reuse a supported GPT template with native
+        // Only route aliases that exactly reuse a GPT-5.6 template with native
         // Ultra support may coordinate delegated work. Generic provider models
         // remain leaf candidates and must not inherit that capability.
         if !preserve_multi_agent_version {
             object.remove("multi_agent_version");
-            object.remove("multi_agent_reasoning_effort");
         }
     }
     model["service_tiers"] = json!([]);
@@ -1359,165 +1305,8 @@ fn gate_cached_native_web_search(model: &mut Value, allowed_model_keys: &HashSet
     }
 }
 
-fn configure_1m_context_window(model: &mut Value, allowed_model_keys: &HashSet<String>) {
-    if model.get("codey_source").and_then(Value::as_str) == Some("third_party")
-        && model.get("codey_context_source").is_none()
-        && !model
-            .get("slug")
-            .and_then(Value::as_str)
-            .is_some_and(|slug| {
-                let upstream = slug.split_once('/').map_or(slug, |(_, model)| model);
-                default_official_model_slugs()
-                    .iter()
-                    .any(|official| model_id::equal(official, upstream))
-            })
-    {
-        model["context_window"] = json!(32_768);
-        model["max_context_window"] = json!(32_768);
-        model["effective_context_window_percent"] = json!(95);
-        model["auto_compact_token_limit"] = Value::Null;
-        model["codey_context_source"] = json!("conservative_fallback");
-    }
-    // Preserve the unmodified declaration so cached catalogs can remove an
-    // override without inheriting stale window/threshold values.
-    const FIELDS: [&str; 5] = [
-        "context_window",
-        "max_context_window",
-        "effective_context_window_percent",
-        "auto_compact_token_limit",
-        "codey_context_source",
-    ];
-    if model.get("codey_context_base").is_none()
-        && matches!(
-            model.get("codey_context_source").and_then(Value::as_str),
-            None | Some("legacy_1m")
-        )
-        && model.get("context_window").and_then(Value::as_u64) == Some(CONTEXT_1M_WINDOW)
-    {
-        // Migrate a pre-baseline Codey override once. A source explicitly
-        // identified as official metadata must retain its declared window.
-        model["context_window"] = json!(DEFAULT_CONTEXT_WINDOW);
-        model["max_context_window"] = json!(DEFAULT_CONTEXT_WINDOW);
-        model["effective_context_window_percent"] = json!(DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT);
-        model["auto_compact_token_limit"] = Value::Null;
-    }
-    if let Some(base) = model.get("codey_context_base").cloned() {
-        for field in FIELDS {
-            if let Some(value) = base.get(field) {
-                model[field] = value.clone();
-            } else if let Some(object) = model.as_object_mut() {
-                object.remove(field);
-            }
-        }
-    } else {
-        let mut base = serde_json::Map::new();
-        for field in FIELDS {
-            if let Some(value) = model.get(field) {
-                base.insert(field.to_string(), value.clone());
-            }
-        }
-        model["codey_context_base"] = Value::Object(base);
-    }
-    let allowed = model
-        .get("slug")
-        .and_then(Value::as_str)
-        .is_some_and(|slug| allowed_model_keys.contains(&model_id::key(slug)));
-    if allowed {
-        model["codey_context_source"] = json!("legacy_1m");
-        model["context_window"] = json!(CONTEXT_1M_WINDOW);
-        model["max_context_window"] = json!(CONTEXT_1M_WINDOW);
-        model["effective_context_window_percent"] = json!(100);
-        model["auto_compact_token_limit"] = Value::Null;
-    }
-}
-
-#[cfg(test)]
-#[test]
-fn cached_context_projection_preserves_missing_fields_and_is_idempotent() {
-    for mut model in [
-        json!({"slug": "route/gpt-5.6-sol", "codey_source": "third_party"}),
-        json!({"slug": "gpt-5.6-sol", "context_window": 272000, "auto_compact_token_limit": null}),
-    ] {
-        let original = model.clone();
-        configure_1m_context_window(&mut model, &HashSet::new());
-        let projected = model.clone();
-        configure_1m_context_window(&mut model, &HashSet::new());
-        assert_eq!(model, projected);
-        model.as_object_mut().unwrap().remove("codey_context_base");
-        assert_eq!(model, original);
-    }
-}
-
-#[cfg(test)]
-#[test]
-fn model_context_projection_restores_cache_and_explicit_overrides_legacy() {
-    use crate::config::ModelContextConfig;
-    let mut model = json!({ "slug": "route/custom", "codey_source": "third_party", "context_window": 272000, "max_context_window": 872000 });
-    configure_1m_context_window(&mut model, &HashSet::new());
-    assert_eq!(model["context_window"], 32768);
-    assert_eq!(model["codey_context_source"], "conservative_fallback");
-    configure_1m_context_window(&mut model, &HashSet::from(["route/custom".into()]));
-    assert_eq!(model["context_window"], 1_000_000);
-    let policy = ModelContextConfig {
-        context_window_tokens: 100_000,
-        auto_compact_token_limit: Some(80_000),
-        reserve_output_tokens: Some(12_345),
-    };
-    apply_model_context(&mut model, Some(&policy)).unwrap();
-    assert_eq!(model["context_window"], 100_000);
-    assert_eq!(model["max_context_window"], 100_000);
-    assert_eq!(model["effective_context_window_percent"], 87);
-    assert_eq!(model["auto_compact_token_limit"], 80_000);
-    assert_eq!(model["codey_context_source"], "user_declared");
-    configure_1m_context_window(&mut model, &HashSet::new());
-    assert_eq!(model["context_window"], 32768);
-    assert_eq!(model["max_context_window"], 32768);
-    assert_eq!(model["effective_context_window_percent"], 95);
-    assert!(model["auto_compact_token_limit"].is_null());
-    let mut trusted = json!({ "slug": "gpt-5.5", "context_window": 272000, "max_context_window": 872000, "effective_context_window_percent": 95 });
-    configure_1m_context_window(&mut trusted, &HashSet::new());
-    assert_eq!(trusted["max_context_window"], 872000);
-    let mut native_large = json!({"slug":"official", "context_window":1000000, "max_context_window":1000000, "effective_context_window_percent":95, "codey_context_source":"official_catalog"});
-    configure_1m_context_window(&mut native_large, &HashSet::new());
-    assert_eq!(native_large["context_window"], 1000000);
-    assert_eq!(native_large["effective_context_window_percent"], 95);
-}
-
-/// Writes the catalog and returns the exact bytes that now live on disk.
-fn write_catalog(home: &Path, models: &[Value]) -> Result<Vec<u8>> {
-    let mut catalog = serde_json::to_vec_pretty(&json!({ "models": models }))
-        .context("序列化 Codey 模型目录失败")?;
-    catalog.push(b'\n');
-    let path = home.join(relative_path());
-    if fs::read(&path).is_ok_and(|current| current == catalog) {
-        protect_catalog_file(&path)?;
-        return Ok(catalog);
-    }
-    atomic_write(&path, &catalog)?;
-    Ok(catalog)
-}
-
-fn write_verified_catalog(home: &Path, models: &[Value]) -> Result<usize> {
-    let written = write_catalog(home, models)?;
-    // Verify the bytes on disk instead of re-parsing the whole catalog; the
-    // serialized form already carries every slug in order.
-    let path = home.join(relative_path());
-    let on_disk = fs::read(&path)
-        .with_context(|| format!("读取 Codey 运行时模型目录失败：{}", path.display()))?;
-    if on_disk != written {
-        bail!("写入后的 Codey 模型目录与本次生成结果不一致");
-    }
-    Ok(models.len())
-}
-
-fn read_catalog_value(path: &Path) -> Option<Value> {
-    fs::read(path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-}
-
-fn read_runtime_catalog_models(home: &Path) -> Result<Vec<Value>> {
-    let path = home.join(relative_path());
+fn read_runtime_catalog_models(catalog_dir: &Path) -> Result<Vec<Value>> {
+    let path = derived_catalog_path(catalog_dir);
     let bytes = fs::read(&path)
         .with_context(|| format!("读取 Codey 运行时模型目录失败：{}", path.display()))?;
     let value: Value = serde_json::from_slice(&bytes)
@@ -1532,30 +1321,10 @@ fn read_runtime_catalog_models(home: &Path) -> Result<Vec<Value>> {
     Ok(models)
 }
 
-fn protect_catalog_file(path: &Path) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("保护本地模型目录失败：{}", path.display()))?;
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-    Ok(())
-}
-
-#[cfg(test)]
-fn level_has_runtime_description(level: &Value) -> bool {
-    level
-        .get("description")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .is_some_and(|description| !description.is_empty())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model_catalog_store::DERIVED_CATALOG_FILE_NAME;
 
     fn official_cache() -> Value {
         let mut cache = json!({
@@ -1655,7 +1424,7 @@ mod tests {
         for model in cache["models"].as_array_mut().unwrap() {
             let slug = model["slug"].as_str().unwrap_or("test-model").to_string();
             match slug.as_str() {
-                "gpt-6-astra" | "gpt-5.6-sol" | "gpt-5.6-terra" => {
+                "gpt-5.6-sol" | "gpt-5.6-terra" => {
                     model["multi_agent_version"] = json!("v2");
                 }
                 "gpt-5.6-luna" => {
@@ -1821,10 +1590,9 @@ mod tests {
             refresh_for_provider(home.path(), true, None, &[]).unwrap(),
             OFFICIAL_MODELS.len()
         );
-        let catalog: Value = serde_json::from_slice(
-            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
-        )
-        .unwrap();
+        let catalog: Value =
+            serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
+                .unwrap();
         let models = catalog["models"].as_array().unwrap();
         assert_eq!(
             models
@@ -1886,7 +1654,6 @@ mod tests {
                 .map(|model| model["slug"].as_str().unwrap())
                 .collect::<Vec<_>>(),
             [
-                "gpt-6-astra",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
@@ -1903,10 +1670,9 @@ mod tests {
 
         refresh_for_provider(home.path(), true, None, &[]).unwrap();
 
-        let catalog: Value = serde_json::from_slice(
-            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
-        )
-        .unwrap();
+        let catalog: Value =
+            serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
+                .unwrap();
         let models = catalog["models"].as_array().unwrap();
         let marker = |slug: &str| {
             models
@@ -1916,7 +1682,6 @@ mod tests {
                 .and_then(Value::as_str)
         };
 
-        assert_eq!(marker("gpt-6-astra"), Some("v2"));
         assert_eq!(marker("gpt-5.6-sol"), Some("v2"));
         assert_eq!(marker("gpt-5.6-terra"), Some("v2"));
         assert_eq!(marker("gpt-5.6-luna"), Some("v1"));
@@ -1936,10 +1701,9 @@ mod tests {
 
         refresh_for_provider(home.path(), false, Some(&upstream), &upstream).unwrap();
 
-        let catalog: Value = serde_json::from_slice(
-            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
-        )
-        .unwrap();
+        let catalog: Value =
+            serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
+                .unwrap();
         let models = catalog["models"].as_array().unwrap();
         let luna = models
             .iter()
@@ -1965,16 +1729,10 @@ mod tests {
 
         refresh_for_provider(home.path(), true, None, &[]).unwrap();
 
-        let catalog: Value = serde_json::from_slice(
-            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
-        )
-        .unwrap();
-        let model = catalog["models"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|model| model["slug"] == "gpt-5.6-sol")
-            .unwrap();
+        let catalog: Value =
+            serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
+                .unwrap();
+        let model = &catalog["models"][0];
         assert_eq!(
             model["base_instructions"],
             "runtime-cache-only base instructions"
@@ -1997,10 +1755,9 @@ mod tests {
 
         refresh_for_provider(home.path(), true, None, &[]).unwrap();
 
-        let catalog: Value = serde_json::from_slice(
-            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
-        )
-        .unwrap();
+        let catalog: Value =
+            serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
+                .unwrap();
         let models = catalog["models"].as_array().unwrap();
         assert!(models.iter().all(|model| {
             let template = model["model_messages"]["instructions_template"]
@@ -2043,10 +1800,9 @@ mod tests {
 
         refresh_for_provider(home.path(), true, None, &[]).unwrap();
 
-        let catalog: Value = serde_json::from_slice(
-            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
-        )
-        .unwrap();
+        let catalog: Value =
+            serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
+                .unwrap();
         let models = catalog["models"].as_array().unwrap();
         assert!(models.iter().all(|model| {
             model
@@ -2100,7 +1856,7 @@ mod tests {
 
             refresh_for_provider(home.path(), true, None, &[]).unwrap();
             let catalog: Value = serde_json::from_slice(
-                &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
+                &fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap(),
             )
             .unwrap();
             let sol = catalog["models"]
@@ -2157,7 +1913,7 @@ mod tests {
 
         refresh_for_provider(home.path(), true, None, &[]).unwrap();
 
-        let mode = fs::metadata(home.path().join(MODEL_CATALOG_RELATIVE_PATH))
+        let mode = fs::metadata(home.path().join(DERIVED_CATALOG_FILE_NAME))
             .unwrap()
             .permissions()
             .mode()
@@ -2172,10 +1928,9 @@ mod tests {
 
         refresh_for_provider(home.path(), true, None, &[]).unwrap();
 
-        let catalog: Value = serde_json::from_slice(
-            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
-        )
-        .unwrap();
+        let catalog: Value =
+            serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
+                .unwrap();
         let models = catalog["models"].as_array().unwrap();
         assert_eq!(
             models
@@ -2184,7 +1939,6 @@ mod tests {
                 .map(|model| model["slug"].as_str().unwrap())
                 .collect::<Vec<_>>(),
             [
-                "gpt-6-astra",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
@@ -2214,10 +1968,9 @@ mod tests {
             refresh_for_provider(home.path(), false, Some(&upstream), &selected,).unwrap(),
             4
         );
-        let catalog: Value = serde_json::from_slice(
-            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
-        )
-        .unwrap();
+        let catalog: Value =
+            serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
+                .unwrap();
         let models = catalog["models"].as_array().unwrap();
         assert_eq!(
             models
@@ -2297,7 +2050,6 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
         let selected = vec![
-            "openai/gpt-6-astra".into(),
             "openai/gpt-5.6-sol".into(),
             "openai/gpt-5.5".into(),
             "provider/custom-model".into(),
@@ -2305,35 +2057,12 @@ mod tests {
 
         assert_eq!(
             refresh_for_provider(home.path(), false, Some(&selected), &selected).unwrap(),
-            4
+            3
         );
-        let catalog: Value = serde_json::from_slice(
-            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
-        )
-        .unwrap();
+        let catalog: Value =
+            serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
+                .unwrap();
         let models = catalog["models"].as_array().unwrap();
-
-        let astra = models
-            .iter()
-            .find(|model| model["slug"] == "openai/gpt-6-astra")
-            .unwrap();
-        assert_eq!(astra["use_responses_lite"], true);
-        assert_eq!(astra["tool_mode"], "code_mode_only");
-        assert_eq!(astra["multi_agent_version"], "v2");
-        assert_eq!(astra["multi_agent_reasoning_effort"], "xhigh");
-        assert_eq!(astra["node_repl_auto_review_required"], true);
-        assert_eq!(
-            astra["experimental_supported_tools"],
-            json!(["send_user_message_async", "clock"])
-        );
-        assert_eq!(
-            reasoning_efforts_from_value(astra),
-            ["low", "medium", "high", "xhigh", "max", "ultra"]
-        );
-        assert_eq!(
-            astra["base_instructions"],
-            "test-only instructions for gpt-6-astra"
-        );
 
         let gpt_56 = models
             .iter()
@@ -2386,7 +2115,6 @@ mod tests {
         for field in [
             "tool_mode",
             "multi_agent_version",
-            "multi_agent_reasoning_effort",
             "comp_hash",
             "default_service_tier",
             "prefer_websockets",
@@ -2394,8 +2122,6 @@ mod tests {
             "auto_review_model_override",
             "node_repl_auto_review_required",
             "node_repl_disabled",
-            "supports_search_tool",
-            "web_search_tool_type",
         ] {
             assert!(
                 custom.get(field).is_none(),
@@ -2414,60 +2140,6 @@ mod tests {
     }
 
     #[test]
-    fn configured_models_receive_and_clear_the_1m_context_window() {
-        let home = tempfile::tempdir().unwrap();
-        write_cache(home.path());
-        let selected = vec!["route/gpt-5.6-sol".to_string(), "route/gpt-5.5".to_string()];
-
-        refresh_for_provider_with_capabilities(
-            home.path(),
-            false,
-            Some(&selected),
-            &selected,
-            &[],
-            &[],
-            &["route/gpt-5.6-sol".to_string()],
-        )
-        .unwrap();
-        let catalog: Value = serde_json::from_slice(
-            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
-        )
-        .unwrap();
-        let models = catalog["models"].as_array().unwrap();
-        let supported = models
-            .iter()
-            .find(|model| model["slug"] == "route/gpt-5.6-sol")
-            .unwrap();
-        assert_eq!(supported["context_window"], 1_000_000);
-        assert_eq!(supported["max_context_window"], 1_000_000);
-        assert_eq!(supported["effective_context_window_percent"], 100);
-        assert!(supported["auto_compact_token_limit"].is_null());
-
-        refresh_for_provider_with_capabilities(
-            home.path(),
-            false,
-            Some(&selected),
-            &selected,
-            &[],
-            &[],
-            &[],
-        )
-        .unwrap();
-        let catalog: Value = serde_json::from_slice(
-            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
-        )
-        .unwrap();
-        let cleared = catalog["models"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|model| model["slug"] == "route/gpt-5.6-sol")
-            .unwrap();
-        assert_ne!(cleared["context_window"], 1_000_000);
-        assert_ne!(cleared["max_context_window"], 1_000_000);
-    }
-
-    #[test]
     fn websocket_preference_is_isolated_per_route_model_alias() {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
@@ -2477,18 +2149,20 @@ mod tests {
         ];
         let websocket_models = vec!["route-ws/gpt-5.6-sol".to_string()];
 
-        refresh_for_provider_with_websocket_models(
-            home.path(),
-            false,
-            Some(&selected),
-            &selected,
-            &websocket_models,
-        )
+        refresh_catalog(CatalogRefreshArgs {
+            codex_home: home.path(),
+            catalog_dir: home.path(),
+            official_provider: false,
+            upstream_models: Some(&selected),
+            selected_models: &selected,
+            websocket_models: Some(&websocket_models),
+            native_web_search_models: None,
+            user_catalog: None,
+        })
         .unwrap();
-        let catalog: Value = serde_json::from_slice(
-            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
-        )
-        .unwrap();
+        let catalog: Value =
+            serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
+                .unwrap();
         let models = catalog["models"].as_array().unwrap();
         let websocket = models
             .iter()
@@ -2517,18 +2191,19 @@ mod tests {
             "route-search/claude-opus-5".to_string(),
         ];
 
-        refresh_for_provider_with_capabilities(
-            home.path(),
-            false,
-            Some(&selected),
-            &selected,
-            &[],
-            &native_web_search_models,
-            &[],
-        )
+        refresh_catalog(CatalogRefreshArgs {
+            codex_home: home.path(),
+            catalog_dir: home.path(),
+            official_provider: false,
+            upstream_models: Some(&selected),
+            selected_models: &selected,
+            websocket_models: None,
+            native_web_search_models: Some(&native_web_search_models),
+            user_catalog: None,
+        })
         .unwrap();
         let catalog: Value = serde_json::from_slice(
-            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
+            &fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap(),
         )
         .unwrap();
         let models = catalog["models"].as_array().unwrap();
@@ -2554,26 +2229,26 @@ mod tests {
     }
 
     #[test]
-    fn cached_catalog_fallback_removes_stale_capability_metadata() {
+    fn cached_catalog_fallback_removes_stale_native_web_search_metadata() {
         let home = tempfile::tempdir().unwrap();
         write_cache_with_native_web_search(home.path());
         let selected = vec!["route-search/gpt-5.6-sol".to_string()];
 
-        refresh_for_provider_with_capabilities(
-            home.path(),
-            false,
-            Some(&selected),
-            &selected,
-            &[],
-            &selected,
-            &selected,
-        )
+        refresh_catalog(CatalogRefreshArgs {
+            codex_home: home.path(),
+            catalog_dir: home.path(),
+            official_provider: false,
+            upstream_models: Some(&selected),
+            selected_models: &selected,
+            websocket_models: None,
+            native_web_search_models: Some(&selected),
+            user_catalog: None,
+        })
         .unwrap();
-        let path = home.path().join(MODEL_CATALOG_RELATIVE_PATH);
+        let path = home.path().join(DERIVED_CATALOG_FILE_NAME);
         let mut stale: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(stale["models"][0]["supports_search_tool"], true);
         assert!(stale["models"][0]["web_search_tool_type"].is_string());
-        assert_eq!(stale["models"][0]["context_window"], CONTEXT_1M_WINDOW);
         stale["models"][0]
             .as_object_mut()
             .unwrap()
@@ -2581,16 +2256,15 @@ mod tests {
         fs::write(&path, serde_json::to_vec_pretty(&stale).unwrap()).unwrap();
 
         assert!(
-            prepare_cached_catalog_for_current_capabilities(home.path(), &[], &[]).unwrap(),
+            prepare_cached_catalog_for_native_web_search(home.path(), &[]).unwrap(),
             "a valid cached catalog should remain usable after stale capabilities are removed"
         );
         let sanitized: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         assert!(sanitized["models"][0].get("supports_search_tool").is_none());
         assert!(sanitized["models"][0].get("web_search_tool_type").is_none());
-        assert_eq!(sanitized["models"][0]["context_window"], 32_768);
         let sanitized_bytes = fs::read(&path).unwrap();
 
-        assert!(prepare_cached_catalog_for_current_capabilities(home.path(), &[], &[]).unwrap());
+        assert!(prepare_cached_catalog_for_native_web_search(home.path(), &[]).unwrap());
         assert_eq!(fs::read(&path).unwrap(), sanitized_bytes);
     }
 
@@ -2608,10 +2282,9 @@ mod tests {
             refresh_for_provider(home.path(), false, Some(&selected), &selected,).unwrap(),
             1
         );
-        let catalog: Value = serde_json::from_slice(
-            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
-        )
-        .unwrap();
+        let catalog: Value =
+            serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
+                .unwrap();
         let model = &catalog["models"][0];
         assert_eq!(model["slug"], "provider-fast-coder");
         assert_eq!(
@@ -2641,10 +2314,9 @@ mod tests {
             refresh_for_provider(home.path(), false, None, &selected,).unwrap(),
             OFFICIAL_MODELS.len() + 1
         );
-        let catalog: Value = serde_json::from_slice(
-            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
-        )
-        .unwrap();
+        let catalog: Value =
+            serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
+                .unwrap();
         let models = catalog["models"].as_array().unwrap();
         let model = models.last().unwrap();
         assert_eq!(model["slug"], "provider-fast-coder");
@@ -2668,113 +2340,16 @@ mod tests {
 
         assert!(error.to_string().contains("模型缓存缺少运行时必需字段"));
         assert!(is_runtime_model_cache_unavailable(&error));
-        assert!(!home.path().join(MODEL_CATALOG_RELATIVE_PATH).exists());
+        assert!(!home.path().join(DERIVED_CATALOG_FILE_NAME).exists());
         assert!(!is_available(home.path()));
         let state = selection_state(home.path(), true, None, &[], None).unwrap();
         assert_eq!(state.official_models.len(), OFFICIAL_MODELS.len());
-        assert_eq!(state.available_model("gpt-6-astra"), Some("gpt-6-astra"));
-    }
-
-    #[test]
-    fn astra_selection_and_route_metadata_follow_the_native_reasoning_levels() {
-        let home = tempfile::tempdir().unwrap();
-        write_cache(home.path());
-        let selected = vec!["gpt-6-astra".into()];
-        let expected_efforts = ["low", "medium", "high", "xhigh", "max", "ultra"];
-
-        let state =
-            selection_state(home.path(), true, None, &selected, Some("GPT-6-ASTRA")).unwrap();
-        assert_eq!(state.default_model, "gpt-6-astra");
-        assert_eq!(
-            state.official_models[0].supported_reasoning_efforts,
-            expected_efforts
-        );
-        assert_eq!(state.official_models[0].default_reasoning_effort, "medium");
-        refresh_for_provider(home.path(), true, None, &selected).unwrap();
-        let catalog = read_catalog_value(&home.path().join(relative_path())).unwrap();
-        assert_eq!(
-            catalog["models"][0]["service_tiers"][0]["description"],
-            "2x speed, increased usage"
-        );
-
-        let route = vec!["relay/GPT-6-ASTRA".into()];
-        let state = selection_state(home.path(), false, Some(&route), &route, None).unwrap();
-        let metadata = state
-            .third_party_model_metadata
-            .iter()
-            .find(|model| model.slug == route[0])
-            .unwrap();
-        assert_eq!(metadata.supported_reasoning_efforts, expected_efforts);
-
-        let mut cache = official_cache();
-        let astra = cache["models"]
-            .as_array_mut()
-            .unwrap()
-            .iter_mut()
-            .find(|model| model["slug"] == "gpt-6-astra")
-            .unwrap();
-        astra["supported_reasoning_levels"]
-            .as_array_mut()
-            .unwrap()
-            .retain(|level| level["effort"] != "ultra");
-        fs::write(
-            home.path().join("models_cache.json"),
-            serde_json::to_vec(&cache).unwrap(),
-        )
-        .unwrap();
-
-        refresh_for_provider(home.path(), false, Some(&route), &route).unwrap();
-        let catalog = read_catalog_value(&home.path().join(relative_path())).unwrap();
-        let astra = &catalog["models"][0];
-        assert_eq!(
-            reasoning_efforts_from_value(astra),
-            ["low", "medium", "high", "xhigh", "max"]
-        );
-        assert!(astra.get("multi_agent_version").is_none());
-        assert!(astra.get("multi_agent_reasoning_effort").is_none());
-    }
-
-    #[test]
-    fn cache_without_astra_keeps_existing_routes_and_requires_its_own_runtime_template() {
-        let home = tempfile::tempdir().unwrap();
-        let mut cache = official_cache();
-        cache["models"]
-            .as_array_mut()
-            .unwrap()
-            .retain(|model| model["slug"] != "gpt-6-astra");
-        fs::write(
-            home.path().join("models_cache.json"),
-            serde_json::to_vec(&cache).unwrap(),
-        )
-        .unwrap();
-
-        for (official, model) in [
-            (true, "gpt-5.6-sol"),
-            (false, "relay/gpt-5.6-sol"),
-            (false, "provider/custom-model"),
-        ] {
-            let selected = vec![model.into()];
-            assert_eq!(
-                refresh_for_provider(home.path(), official, Some(&selected), &selected).unwrap(),
-                1
-            );
-        }
-
-        let path = home.path().join(relative_path());
-        let previous = fs::read(&path).unwrap();
-        for (official, model) in [(true, "gpt-6-astra"), (false, "relay/gpt-6-astra")] {
-            let selected = vec![model.into()];
-            let error = refresh_for_provider(home.path(), official, Some(&selected), &selected)
-                .unwrap_err();
-            assert!(is_runtime_model_cache_unavailable(&error));
-            assert_eq!(fs::read(&path).unwrap(), previous);
-        }
     }
 
     #[test]
     fn prompt_free_existing_catalog_is_not_reused_as_a_runtime_fallback() {
         let home = tempfile::tempdir().unwrap();
-        let path = home.path().join(MODEL_CATALOG_RELATIVE_PATH);
+        let path = home.path().join(DERIVED_CATALOG_FILE_NAME);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(
             &path,
@@ -2797,11 +2372,86 @@ mod tests {
             .as_object_mut()
             .unwrap()
             .remove("description");
-        let path = home.path().join(MODEL_CATALOG_RELATIVE_PATH);
+        let path = home.path().join(DERIVED_CATALOG_FILE_NAME);
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
 
         assert!(!is_available(home.path()));
+    }
+
+    #[test]
+    fn startup_repair_fills_legacy_catalog_descriptions_once() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(DERIVED_CATALOG_FILE_NAME);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "models": [
+                    {
+                        "slug": "model-a",
+                        "display_name": "Model A",
+                        "base_instructions": "instructions",
+                        "supported_reasoning_levels": [
+                            { "effort": "low" },
+                            { "effort": "high", "description": "Existing level" }
+                        ]
+                    },
+                    {
+                        "slug": "model-b",
+                        "description": "   ",
+                        "base_instructions": "instructions"
+                    },
+                    {
+                        "slug": "model-c",
+                        "display_name": "Model C",
+                        "description": "Existing description",
+                        "base_instructions": "instructions"
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert!(repair_missing_descriptions(home.path(), home.path()).unwrap());
+
+        let repaired: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(repaired["models"][0]["description"], "Model A");
+        assert_eq!(
+            repaired["models"][0]["supported_reasoning_levels"][0]["description"],
+            "Fast responses with lighter reasoning"
+        );
+        assert_eq!(
+            repaired["models"][0]["supported_reasoning_levels"][1]["description"],
+            "Existing level"
+        );
+        assert_eq!(repaired["models"][1]["description"], "model-b");
+        assert_eq!(repaired["models"][2]["description"], "Existing description");
+        assert!(is_available(home.path()));
+        let repaired_contents = fs::read(&path).unwrap();
+
+        assert!(!repair_missing_descriptions(home.path(), home.path()).unwrap());
+        assert_eq!(fs::read(&path).unwrap(), repaired_contents);
+    }
+
+    #[test]
+    fn startup_repair_leaves_unrepairable_catalog_untouched() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(DERIVED_CATALOG_FILE_NAME);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let original = serde_json::to_vec(&json!({
+            "models": [{
+                "base_instructions": "instructions"
+            }]
+        }))
+        .unwrap();
+        fs::write(&path, &original).unwrap();
+
+        let error = repair_missing_descriptions(home.path(), home.path()).unwrap_err();
+
+        assert!(error.to_string().contains("无法自动补全 description"));
+        assert_eq!(fs::read(&path).unwrap(), original);
     }
 
     #[test]
@@ -2811,7 +2461,7 @@ mod tests {
         for model in stale_catalog["models"].as_array_mut().unwrap() {
             add_fast_speed_controls(model);
         }
-        let catalog_path = home.path().join(MODEL_CATALOG_RELATIVE_PATH);
+        let catalog_path = home.path().join(DERIVED_CATALOG_FILE_NAME);
         fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
         fs::write(&catalog_path, serde_json::to_vec(&stale_catalog).unwrap()).unwrap();
 
@@ -2838,10 +2488,9 @@ mod tests {
             refresh_for_provider(home.path(), false, Some(&upstream), &[],).unwrap(),
             0
         );
-        let catalog: Value = serde_json::from_slice(
-            &fs::read(home.path().join(MODEL_CATALOG_RELATIVE_PATH)).unwrap(),
-        )
-        .unwrap();
+        let catalog: Value =
+            serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
+                .unwrap();
         assert_eq!(catalog["models"].as_array().unwrap().len(), 0);
     }
 
@@ -2863,6 +2512,7 @@ mod tests {
         write_cache(home.path());
         let upstream = vec!["gpt-5.6-sol".into(), "third-model".into()];
         let state = selection_state_with_manual_models(
+            home.path(),
             home.path(),
             false,
             Some(&upstream),
@@ -3006,6 +2656,7 @@ mod tests {
         let upstream = vec!["live-model".to_string()];
         let state = selection_state_with_manual_models(
             home.path(),
+            home.path(),
             false,
             Some(&upstream),
             &["live-model".into()],
@@ -3119,7 +2770,7 @@ mod tests {
 
         let state = selection_state(home.path(), true, None, &[], None).unwrap();
 
-        assert!(!home.path().join(relative_path()).exists());
+        assert!(!home.path().join(DERIVED_CATALOG_FILE_NAME).exists());
         for model in &state.official_models {
             assert_eq!(
                 state.available_model(&model.slug),
@@ -3130,9 +2781,73 @@ mod tests {
     }
 
     #[test]
+    fn selection_reads_the_derived_catalog_outside_codex_home() {
+        let root = tempfile::tempdir().unwrap();
+        let codex_home = root.path().join("codex");
+        let catalog_dir = root.path().join("codey/model-catalogs");
+        fs::create_dir_all(&codex_home).unwrap();
+        fs::create_dir_all(&catalog_dir).unwrap();
+        fs::write(
+            derived_catalog_path(&catalog_dir),
+            serde_json::to_vec(&json!({
+                "models": [{
+                    "slug": "gpt-5.6-sol",
+                    "display_name": "GPT-5.6-Sol",
+                    "description": "Split-dir sol",
+                    "supported_reasoning_levels": [
+                        {"effort": "low", "description": "local low"},
+                        {"effort": "xhigh", "description": "local xhigh"}
+                    ],
+                    "default_reasoning_level": "xhigh"
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let missed = selection_state_with_manual_models(
+            &codex_home,
+            &codex_home,
+            true,
+            None,
+            &[],
+            &[],
+            None,
+        )
+        .unwrap();
+        let missed_sol = missed
+            .official_models
+            .iter()
+            .find(|model| model.slug == "gpt-5.6-sol")
+            .unwrap();
+        assert_ne!(
+            missed_sol.supported_reasoning_efforts.as_slice(),
+            ["low", "xhigh"]
+        );
+
+        let state = selection_state_with_manual_models(
+            &codex_home,
+            &catalog_dir,
+            true,
+            None,
+            &[],
+            &[],
+            None,
+        )
+        .unwrap();
+        let sol = state
+            .official_models
+            .iter()
+            .find(|model| model.slug == "gpt-5.6-sol")
+            .unwrap();
+        assert_eq!(sol.supported_reasoning_efforts, ["low", "xhigh"]);
+        assert_eq!(sol.default_reasoning_effort, "xhigh");
+    }
+
+    #[test]
     fn catalog_snapshot_restores_existing_content_and_removes_new_content() {
         let existing_home = tempfile::tempdir().unwrap();
-        let existing_path = existing_home.path().join(relative_path());
+        let existing_path = existing_home.path().join(DERIVED_CATALOG_FILE_NAME);
         fs::create_dir_all(existing_path.parent().unwrap()).unwrap();
         fs::write(&existing_path, b"original catalog\n").unwrap();
         let existing_snapshot = snapshot(existing_home.path()).unwrap();
@@ -3143,7 +2858,7 @@ mod tests {
         assert_eq!(fs::read(&existing_path).unwrap(), b"original catalog\n");
 
         let new_home = tempfile::tempdir().unwrap();
-        let new_path = new_home.path().join(relative_path());
+        let new_path = new_home.path().join(DERIVED_CATALOG_FILE_NAME);
         let new_snapshot = snapshot(new_home.path()).unwrap();
         fs::create_dir_all(new_path.parent().unwrap()).unwrap();
         fs::write(&new_path, b"new catalog\n").unwrap();
@@ -3151,5 +2866,67 @@ mod tests {
         restore_snapshot(new_snapshot).unwrap();
 
         assert!(!new_path.exists());
+    }
+
+    #[test]
+    fn refresh_writes_the_derived_catalog_outside_codex_home() {
+        let root = tempfile::tempdir().unwrap();
+        let codex_home = root.path().join("codex");
+        let catalog_dir = root.path().join("codey/model-catalogs");
+        fs::create_dir_all(&codex_home).unwrap();
+        write_cache(&codex_home);
+
+        refresh_catalog(CatalogRefreshArgs {
+            codex_home: &codex_home,
+            catalog_dir: &catalog_dir,
+            official_provider: true,
+            upstream_models: None,
+            selected_models: &[],
+            websocket_models: None,
+            native_web_search_models: None,
+            user_catalog: None,
+        })
+        .unwrap();
+
+        assert!(derived_catalog_path(&catalog_dir).exists());
+        assert!(!codex_home.join("model-catalogs").exists());
+    }
+
+    #[test]
+    fn refresh_merges_a_user_catalog_without_changing_its_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let codex_home = root.path().join("codex");
+        let catalog_dir = root.path().join("codey/model-catalogs");
+        fs::create_dir_all(&codex_home).unwrap();
+        write_cache(&codex_home);
+        let user_path = root.path().join("user-catalog.json");
+        let user_bytes = serde_json::to_vec_pretty(&json!({
+            "models": [{
+                "slug": "gpt-5.6-sol",
+                "display_name": "Custom Sol"
+            }]
+        }))
+        .unwrap();
+        fs::write(&user_path, &user_bytes).unwrap();
+
+        refresh_catalog(CatalogRefreshArgs {
+            codex_home: &codex_home,
+            catalog_dir: &catalog_dir,
+            official_provider: true,
+            upstream_models: None,
+            selected_models: &[],
+            websocket_models: None,
+            native_web_search_models: None,
+            user_catalog: Some(&user_path),
+        })
+        .unwrap();
+
+        assert_eq!(fs::read(&user_path).unwrap(), user_bytes);
+        let derived: Value =
+            serde_json::from_slice(&fs::read(derived_catalog_path(&catalog_dir)).unwrap()).unwrap();
+        assert_eq!(derived["models"][0]["display_name"], "Custom Sol");
+        assert!(derived["models"][0].get("description").is_some());
+        assert_eq!(derived["models"].as_array().unwrap().len(), 1);
+        assert!(!codex_home.join("config.toml").exists());
     }
 }

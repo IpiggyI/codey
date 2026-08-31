@@ -356,6 +356,7 @@ pub(crate) fn renderer_route_model_catalog(
         } else {
             model_catalog::selection_state_with_manual_models(
                 codex_home(),
+                &crate::codex_config::codey_model_catalog_dir(),
                 profile.official_account,
                 upstream_models,
                 &selected_models,

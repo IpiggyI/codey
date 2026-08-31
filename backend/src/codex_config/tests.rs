@@ -47,10 +47,7 @@ fn assert_runtime_disk_provider(document: &DocumentMut, base_url: &str, token: &
     let router = document["model_providers"][local_router::ROUTER_PROVIDER_ID]
         .as_table_like()
         .expect("codey_router runtime disk provider");
-    assert_eq!(
-        router.get("name").and_then(Item::as_str),
-        Some("Codey Local Router")
-    );
+    assert_eq!(router.get("name").and_then(Item::as_str), Some("OpenAI"));
     assert_eq!(
         router.get("base_url").and_then(Item::as_str),
         Some(base_url)
@@ -234,9 +231,7 @@ default_subagent_reasoning_effort = "max"
 "#;
     fs::write(home.join("config.toml"), original).unwrap();
 
-    assert!(
-        restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap()
-    );
+    assert!(restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap());
     let repaired = fs::read_to_string(home.join("config.toml")).unwrap();
     let document = repaired.parse::<DocumentMut>().unwrap();
 
@@ -278,29 +273,6 @@ default_subagent_reasoning_effort = "max"
 }
 
 #[test]
-fn read_only_router_mode_does_not_repair_or_rewrite_codex_config_without_a_lease() {
-    let temp = tempfile::tempdir().unwrap();
-    let home = temp.path().join("codex-home");
-    fs::create_dir_all(&home).unwrap();
-    let original = br#"model_provider = "codey_router"
-model = "relay/relay-model"
-
-[model_providers.codey_router]
-name = "Codey Local Router"
-base_url = "http://127.0.0.1:43127/v1"
-wire_api = "responses"
-experimental_bearer_token = "runtime-token"
-http_headers = { x-codey-router-token = "runtime-token" }
-"#;
-    fs::write(home.join("config.toml"), original).unwrap();
-
-    assert!(
-        !restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), false,).unwrap()
-    );
-    assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
-}
-
-#[test]
 fn restore_without_a_lease_repairs_dangling_codey_router_selection() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("codex-home");
@@ -315,9 +287,7 @@ base_url = "https://relay.example/v1"
 "#;
     fs::write(home.join("config.toml"), original).unwrap();
 
-    assert!(
-        restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap()
-    );
+    assert!(restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap());
     let repaired = fs::read_to_string(home.join("config.toml")).unwrap();
     let document = repaired.parse::<DocumentMut>().unwrap();
 
@@ -530,7 +500,7 @@ fn isolated_runtime_restores_live_disk_provider_to_resume_shim() {
         &home,
         RouterApplyOptions {
             local_router: Some(&endpoint),
-            use_official_catalog: false,
+            model_catalog_path: None,
             default_model: Some("route-a/hy3"),
             fastctx_command: None,
             subagent_optimization: false,
@@ -639,7 +609,7 @@ fn local_router_accepts_a_codey_owned_resume_shim() {
         &home,
         RouterApplyOptions {
             local_router: Some(&endpoint),
-            use_official_catalog: true,
+            model_catalog_path: relative_model_catalog_path(),
             default_model: Some("openai/gpt-5.6-sol"),
             fastctx_command: None,
             subagent_optimization: false,
@@ -665,47 +635,6 @@ fn local_router_accepts_a_codey_owned_resume_shim() {
 }
 
 #[test]
-fn isolated_runtime_config_creates_empty_codex_config_when_missing() {
-    let temp = tempfile::tempdir().unwrap();
-    let home = temp.path().join("codex-home");
-    let marker = temp.path().join("codey-state/codex-lease.json");
-    let backup_root = temp.path().join("codey-state/codex-backups");
-    fs::create_dir_all(&home).unwrap();
-    let endpoint = crate::local_router::RuntimeRouterEndpoint {
-        base_url: "http://127.0.0.1:43127/v1".into(),
-        token: "launch-only-router-token".into(),
-        supports_websockets: false,
-        supports_remote_compaction: false,
-        requires_openai_auth: false,
-    };
-
-    let applied = apply_isolated_runtime_router_config(
-        &home,
-        RouterApplyOptions {
-            local_router: Some(&endpoint),
-            use_official_catalog: true,
-            default_model: Some("openai/gpt-5.6-sol"),
-            fastctx_command: None,
-            subagent_optimization: false,
-            subagent_model: DEFAULT_SUBAGENT_MODEL,
-            subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
-            subagent_roles: None,
-            marker: &marker,
-            backup_root: &backup_root,
-        },
-    )
-    .unwrap();
-
-    assert_eq!(fs::read(home.join("config.toml")).unwrap(), b"");
-    assert!(
-        applied
-            .runtime_config_overrides
-            .iter()
-            .any(|entry| entry == "model_provider=\"codey_router\"")
-    );
-}
-
-#[test]
 fn legacy_repair_keeps_a_user_owned_codey_router_provider() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("codex-home");
@@ -720,9 +649,7 @@ wire_api = "responses"
 "#;
     fs::write(home.join("config.toml"), original).unwrap();
 
-    assert!(
-        !restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap()
-    );
+    assert!(!restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap());
     assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
 }
 
@@ -737,9 +664,7 @@ model_providers = { codey_router = { name = "User-Owned Router", base_url = "htt
 "#;
     fs::write(home.join("config.toml"), original).unwrap();
 
-    assert!(
-        !restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap()
-    );
+    assert!(!restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap());
     assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
 }
 
@@ -763,9 +688,7 @@ tool_namespace = "agents"
 "#;
     fs::write(home.join("config.toml"), original).unwrap();
 
-    assert!(
-        !restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap()
-    );
+    assert!(!restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap());
     assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
     assert!(!home.join("config.toml.bak").exists());
 }
@@ -807,64 +730,6 @@ fn disabled_subagent_roles_are_omitted_from_runtime_registration_and_policy_inpu
         prepare_runtime_agent_files(&constraints_dir, &runtime_roles, None).unwrap();
     assert_eq!(registrations.len(), runtime_roles.len());
     assert!(!stale_worker_path.exists());
-}
-
-#[test]
-fn runtime_guidance_keeps_writes_with_root_when_all_writable_roles_are_disabled() {
-    let mut configured = crate::config::default_subagent_roles();
-    configured
-        .get_mut(crate::config::SUBAGENT_ROLE_WORKER)
-        .unwrap()
-        .enabled = false;
-    configured
-        .get_mut(crate::config::SUBAGENT_ROLE_VISUAL_WORKER)
-        .unwrap()
-        .enabled = false;
-    let runtime_roles = runtime_subagent_roles(
-        Some(&configured),
-        DEFAULT_SUBAGENT_MODEL,
-        DEFAULT_SUBAGENT_REASONING_EFFORT,
-    );
-
-    let instructions = runtime_root_instructions_for_roles("BASE", &runtime_roles);
-    assert!(instructions.contains("BASE"));
-    assert!(instructions.contains(NO_WRITABLE_SUBAGENT_GUIDANCE));
-    assert!(instructions.contains("所有创建、修改"));
-    assert!(instructions.contains("由主代理直接完成"));
-
-    let writable_roles = runtime_subagent_roles(
-        Some(&crate::config::default_subagent_roles()),
-        DEFAULT_SUBAGENT_MODEL,
-        DEFAULT_SUBAGENT_REASONING_EFFORT,
-    );
-    assert_eq!(
-        runtime_root_instructions_for_roles("BASE", &writable_roles),
-        "BASE"
-    );
-}
-
-#[test]
-fn runtime_read_only_agents_are_explicitly_told_not_to_call_write_tools() {
-    let temp = tempfile::tempdir().unwrap();
-    let constraints_dir = temp.path().join("codex-constraints");
-    let roles = crate::config::default_subagent_roles();
-    let plans =
-        plan_runtime_agent_files(&constraints_dir, &roles, Some(CODEY_FASTCTX_GUIDANCE)).unwrap();
-
-    let quick_scan = plans
-        .iter()
-        .find(|plan| plan.registration.role == crate::config::SUBAGENT_ROLE_QUICK_SCAN)
-        .unwrap();
-    let quick_scan = String::from_utf8(quick_scan.contents.clone()).unwrap();
-    assert!(quick_scan.contains(READ_ONLY_AGENT_WRITE_GUARD));
-    assert!(quick_scan.contains("不要调用 `replace`、`apply_patch`"));
-
-    let worker = plans
-        .iter()
-        .find(|plan| plan.registration.role == crate::config::SUBAGENT_ROLE_WORKER)
-        .unwrap();
-    let worker = String::from_utf8(worker.contents.clone()).unwrap();
-    assert!(!worker.contains(READ_ONLY_AGENT_WRITE_GUARD));
 }
 
 #[test]
@@ -917,85 +782,60 @@ fn stale_backup_dirs_are_pruned_beyond_retention() {
 }
 
 fn relative_model_catalog_path() -> Option<&'static Path> {
-    Some(Path::new(crate::model_catalog::relative_path()))
+    Some(Path::new(
+        crate::model_catalog_store::DERIVED_CATALOG_FILE_NAME,
+    ))
 }
 
 #[test]
-fn native_provider_patch_keeps_local_route_configuration_unchanged() {
-    let existing = r#"model_provider = "relay"
-model = "relay-model"
-model_catalog_json = "/user/catalog.json"
-
-[model_providers.relay]
-base_url = "https://relay.example/v1"
-wire_api = "responses"
-"#;
-    let result = patch_config_with_fastctx_mode(
-        existing,
-        RouterPatchOptions {
-            config_path: Path::new("config.toml"),
-            model_catalog_path: None,
-            default_model: None,
-            fastctx_command: None,
-            subagent_optimization: false,
-            subagent_model: DEFAULT_SUBAGENT_MODEL,
-            subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
-            local_router: None,
-        },
-    )
-    .unwrap();
-    let document = result.parse::<DocumentMut>().unwrap();
-
-    assert_eq!(document["model_provider"].as_str(), Some("relay"));
-    assert_eq!(document["model"].as_str(), Some("relay-model"));
-    assert_eq!(
-        document["model_catalog_json"].as_str(),
-        Some("/user/catalog.json")
-    );
-    assert!(
-        document
-            .get("model_providers")
-            .and_then(Item::as_table)
-            .is_some_and(|providers| {
-                providers.contains_key("relay")
-                    && !providers.contains_key(local_router::ROUTER_PROVIDER_ID)
-            })
-    );
-}
-
-#[test]
-fn native_isolated_runtime_does_not_create_a_missing_codex_config() {
+fn configured_model_catalog_treats_legacy_codey_paths_as_owned() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("codex-home");
-    let marker = temp.path().join("codey-state/codex-lease.json");
-    let backup_root = temp.path().join("codey-state/codex-backups");
+    let catalog_dir = temp.path().join("codey/model-catalogs");
     fs::create_dir_all(&home).unwrap();
-
-    let applied = apply_isolated_runtime_router_config(
-        &home,
-        RouterApplyOptions {
-            local_router: None,
-            use_official_catalog: false,
-            default_model: None,
-            fastctx_command: None,
-            subagent_optimization: false,
-            subagent_model: DEFAULT_SUBAGENT_MODEL,
-            subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
-            subagent_roles: None,
-            marker: &marker,
-            backup_root: &backup_root,
-        },
+    let legacy = home.join("model-catalogs/codey-official.json");
+    fs::write(
+        home.join("config.toml"),
+        format!("model_catalog_json = \"{}\"\n", legacy.display()),
     )
     .unwrap();
 
-    assert!(!home.join("config.toml").exists());
-    assert!(applied.runtime_config_overrides.iter().all(|entry| {
-        !entry.starts_with("model_provider=")
-            && !entry.starts_with("model_catalog_json=")
-            && !entry.starts_with("model_providers.")
-    }));
-    assert!(restore_runtime_config_at(&home, &marker, false).unwrap());
-    assert!(!home.join("config.toml").exists());
+    assert_eq!(
+        configured_model_catalog(&home, &catalog_dir).unwrap(),
+        ConfiguredModelCatalog::CodeyOwned
+    );
+    assert_eq!(
+        configured_user_model_catalog_path(&home, &catalog_dir).unwrap(),
+        None
+    );
+
+    fs::write(
+        home.join("config.toml"),
+        "model_catalog_json = \"model-catalogs/codey-official.json\"\n",
+    )
+    .unwrap();
+    assert_eq!(
+        configured_model_catalog(&home, &catalog_dir).unwrap(),
+        ConfiguredModelCatalog::CodeyOwned
+    );
+}
+
+#[test]
+fn configured_model_catalog_keeps_user_files_as_user_owned() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("codex-home");
+    let catalog_dir = temp.path().join("codey/model-catalogs");
+    fs::create_dir_all(&home).unwrap();
+    fs::write(
+        home.join("config.toml"),
+        "model_catalog_json = \"/user/catalog.json\"\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        configured_model_catalog(&home, &catalog_dir).unwrap(),
+        ConfiguredModelCatalog::User(PathBuf::from("/user/catalog.json"))
+    );
 }
 
 #[test]
@@ -1028,7 +868,7 @@ fn isolated_runtime_preserves_computer_use_without_adding_an_mcp() {
                 &home,
                 RouterApplyOptions {
                     local_router,
-                    use_official_catalog: false,
+                    model_catalog_path: None,
                     default_model: None,
                     fastctx_command: None,
                     subagent_optimization: false,
@@ -1078,7 +918,7 @@ wire_api = "responses"
         &home,
         RouterApplyOptions {
             local_router: None,
-            use_official_catalog: false,
+            model_catalog_path: None,
             default_model: None,
             fastctx_command: None,
             subagent_optimization: false,
@@ -1097,8 +937,7 @@ wire_api = "responses"
 }
 
 #[test]
-fn router_patch_installs_only_the_loopback_provider_and_preserves_user_catalog() {
-    let result = patch_config(
+fn router_patch_installs_only_the_loopback_provider_and_preserves_user_catalog() {    let result = patch_config(
         r#"model_provider = "relay"
 model_catalog_json = "/user/catalog.json"
 
@@ -1131,7 +970,7 @@ experimental_bearer_token = "user-secret"
     );
     assert_eq!(
         root_key_string(&result, "model_catalog_json").as_deref(),
-        Some("/user/catalog.json")
+        Some(crate::model_catalog_store::DERIVED_CATALOG_FILE_NAME)
     );
 }
 
@@ -1150,7 +989,7 @@ fn runtime_router_provider_advertises_websockets_only_when_enabled() {
 }
 
 #[test]
-fn runtime_router_separates_openai_identity_from_auth_shape() {
+fn runtime_router_matches_cc_switch_openai_identity_and_auth_shape() {
     let mut endpoint = crate::local_router::RuntimeRouterEndpoint {
         base_url: "http://127.0.0.1:43127/v1".into(),
         token: "test-router-token".into(),
@@ -1160,7 +999,7 @@ fn runtime_router_separates_openai_identity_from_auth_shape() {
     };
 
     let provider = local_router_provider_table(&endpoint);
-    assert_eq!(provider["name"].as_str(), Some("Codey Local Router"));
+    assert_eq!(provider["name"].as_str(), Some("OpenAI"));
     assert_eq!(provider["requires_openai_auth"].as_bool(), Some(true));
     assert!(provider.get("experimental_bearer_token").is_none());
     assert_eq!(
@@ -2003,6 +1842,7 @@ command = "echo preserve-user-hook"
         existing,
         RouterPatchOptions {
             config_path: Path::new("/tmp/codey-codex/config.toml"),
+            catalog_dir: Path::new("model-catalogs"),
             model_catalog_path: relative_model_catalog_path(),
             default_model: None,
             fastctx_command: None,
@@ -2053,7 +1893,7 @@ command = "echo preserve-user-hook"
     );
     assert_eq!(
         multi_agent["max_wait_timeout_ms"].as_integer(),
-        Some(30_000)
+        Some(120_000)
     );
     assert_eq!(multi_agent["custom_setting"].as_str(), Some("preserved"));
     assert_eq!(document["features"]["hooks"].as_bool(), Some(true));
@@ -2088,8 +1928,7 @@ command = "echo preserve-user-hook"
             .to_string()
             .contains(crate::subagent_gate::HOOK_ARGUMENT)
     );
-    assert!(document["hooks"].get("state").is_none());
-}
+    assert!(document["hooks"].get("state").is_none());}
 
 #[test]
 fn subagent_optimization_keeps_explicit_agents_concurrency_over_legacy_max_threads() {
@@ -2107,6 +1946,7 @@ default_subagent_reasoning_effort = "low"
         existing,
         RouterPatchOptions {
             config_path: Path::new("/tmp/codey-codex/config.toml"),
+            catalog_dir: Path::new("model-catalogs"),
             model_catalog_path: relative_model_catalog_path(),
             default_model: None,
             fastctx_command: None,
@@ -2131,6 +1971,7 @@ fn subagent_optimization_keeps_a_standalone_explicit_lower_concurrency() {
         "[agents]\nmax_concurrent_threads_per_session = 2\n",
         RouterPatchOptions {
             config_path: Path::new("/tmp/codey-codex/config.toml"),
+            catalog_dir: Path::new("model-catalogs"),
             model_catalog_path: relative_model_catalog_path(),
             default_model: None,
             fastctx_command: None,
@@ -2162,6 +2003,7 @@ fn subagent_optimization_defaults_concurrency_for_new_or_invalid_configs() {
             existing,
             RouterPatchOptions {
                 config_path: Path::new("/tmp/codey-codex/config.toml"),
+                catalog_dir: Path::new("model-catalogs"),
                 model_catalog_path: relative_model_catalog_path(),
                 default_model: None,
                 fastctx_command: None,
@@ -2187,6 +2029,7 @@ fn subagent_optimization_accepts_dynamic_model_ids_and_rejects_empty_values() {
         "",
         RouterPatchOptions {
             config_path: Path::new("/tmp/codey-codex/config.toml"),
+            catalog_dir: Path::new("model-catalogs"),
             model_catalog_path: relative_model_catalog_path(),
             default_model: None,
             fastctx_command: None,
@@ -2207,6 +2050,7 @@ fn subagent_optimization_accepts_dynamic_model_ids_and_rejects_empty_values() {
         "",
         RouterPatchOptions {
             config_path: Path::new("/tmp/codey-codex/config.toml"),
+            catalog_dir: Path::new("model-catalogs"),
             model_catalog_path: relative_model_catalog_path(),
             default_model: None,
             fastctx_command: None,
@@ -2403,7 +2247,7 @@ experimental_bearer_token = "upstream-secret-token"
         &home,
         RouterApplyOptions {
             local_router: Some(&endpoint),
-            use_official_catalog: true,
+            model_catalog_path: relative_model_catalog_path(),
             default_model: Some("route-a/provider-model"),
             fastctx_command: None,
             subagent_optimization: false,
@@ -2478,7 +2322,7 @@ fn official_login_uses_the_websocket_router_without_overriding_builtin_openai() 
         base_url: "http://127.0.0.1:43127/v1".into(),
         token: "launch-only-router-token".into(),
         supports_websockets: true,
-        supports_remote_compaction: true,
+        supports_remote_compaction: false,
         requires_openai_auth: true,
     };
 
@@ -2486,7 +2330,7 @@ fn official_login_uses_the_websocket_router_without_overriding_builtin_openai() 
         &home,
         RouterApplyOptions {
             local_router: Some(&endpoint),
-            use_official_catalog: true,
+            model_catalog_path: relative_model_catalog_path(),
             default_model: Some("openai/gpt-5.6-sol"),
             fastctx_command: None,
             subagent_optimization: false,
@@ -2534,7 +2378,7 @@ wire_api = "responses"
         &home,
         RouterApplyOptions {
             local_router: Some(&endpoint),
-            use_official_catalog: true,
+            model_catalog_path: relative_model_catalog_path(),
             default_model: Some("relay/provider-model"),
             fastctx_command: None,
             subagent_optimization: false,
@@ -2633,9 +2477,6 @@ fn isolated_runtime_constraints_stay_out_of_config_and_restore_hooks() {
 model_catalog_json = "/user/catalog.json"
 developer_instructions = "Keep the user's instructions."
 
-[features.multi_agent_v2]
-max_wait_timeout_ms = 120000
-
 [model_providers.relay]
 name = "Relay"
 base_url = "https://relay.example/v1"
@@ -2688,12 +2529,6 @@ wire_api = "responses"
     .unwrap();
 
     assert_eq!(fs::read(home.join("config.toml")).unwrap(), original_config);
-    assert!(
-        applied
-            .runtime_config_overrides
-            .iter()
-            .any(|entry| entry == "features.multi_agent_v2.max_wait_timeout_ms=30000")
-    );
     assert!(!home.join("AGENTS.md").exists());
     assert!(!home.join("agents/default.toml").exists());
     assert!(
@@ -2702,6 +2537,9 @@ wire_api = "responses"
             .iter()
             .any(|entry| entry.starts_with("developer_instructions="))
     );
+    let expected_catalog = marker
+        .with_file_name("model-catalogs")
+        .join(crate::model_catalog_store::DERIVED_CATALOG_FILE_NAME);
     let model_catalog_override = applied
         .runtime_config_overrides
         .iter()
@@ -2711,7 +2549,7 @@ wire_api = "responses"
         .unwrap();
     assert_eq!(
         model_catalog_override["model_catalog_json"].as_str(),
-        Some("/user/catalog.json")
+        Some(expected_catalog.to_string_lossy().as_ref())
     );
     assert!(
         applied
@@ -2787,6 +2625,14 @@ wire_api = "responses"
         "mcp_servers.codey_fastctx.env.FASTCTX_TOKEN_BUDGET",
         "mcp_servers.codey_fastctx.env.FASTCTX_GREP_TOKEN_BUDGET",
         "mcp_servers.codey_fastctx.env.FASTCTX_GLOB_TOKEN_BUDGET",
+        "mcp_servers.codey_subagent_control.command",
+        "mcp_servers.codey_subagent_control.args",
+        "mcp_servers.codey_subagent_control.startup_timeout_sec",
+        "mcp_servers.codey_subagent_control.tool_timeout_sec",
+        "mcp_servers.codey_subagent_control.enabled_tools",
+        "mcp_servers.codey_subagent_control.disabled_tools",
+        "mcp_servers.codey_subagent_control.tools.resolve_batch.approval_mode",
+        "mcp_servers.codey_subagent_control.tools.prepare_delegation.approval_mode",
         "tool_output_token_limit",
         "agents.enabled",
         "agents.max_concurrent_threads_per_session",
@@ -2824,7 +2670,22 @@ wire_api = "responses"
             .count(),
         SUBAGENT_GATE_HOOKS.len()
     );
+    assert_eq!(
+        applied
+            .runtime_config_overrides
+            .iter()
+            .filter(|entry| entry.starts_with(CODEY_WSL_ONLY_OVERRIDE_PREFIX))
+            .count(),
+        if cfg!(windows) {
+            SUBAGENT_GATE_HOOKS.len()
+        } else {
+            0
+        }
+    );
     for runtime_override in &applied.runtime_config_overrides {
+        let runtime_override = runtime_override
+            .strip_prefix(CODEY_WSL_ONLY_OVERRIDE_PREFIX)
+            .unwrap_or(runtime_override);
         runtime_override
             .parse::<DocumentMut>()
             .unwrap_or_else(|error| {

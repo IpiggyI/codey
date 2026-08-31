@@ -164,7 +164,7 @@ async fn disabled_official_route_installs_an_empty_model_catalog() {
 #[tokio::test]
 async fn startup_fallback_removes_search_from_a_stale_chat_route_catalog() {
     let home = tempfile::tempdir().unwrap();
-    let path = home.path().join(model_catalog::relative_path());
+    let path = home.path().join(crate::model_catalog_store::DERIVED_CATALOG_FILE_NAME);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(
         &path,
@@ -208,7 +208,7 @@ async fn startup_fallback_removes_search_from_a_stale_chat_route_catalog() {
         .await
         .unwrap();
 
-    assert!(startup.use_official_catalog);
+    assert!(startup.model_catalog_path.is_some());
     let catalog: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert!(catalog["models"][0].get("supports_search_tool").is_none());
