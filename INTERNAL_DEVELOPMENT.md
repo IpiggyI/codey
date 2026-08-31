@@ -16,10 +16,10 @@
 
 - src/：Codey 控制台、请求日志页和前端状态逻辑。
 - public/：注入 Codex 页面的轻量脚本。
-- backend/src/：启动器、配置、CDP、本地路由、会话、通知、诊断和更新实现。
+- backend/src/：启动器、配置、CDP、本地路由、会话、通知和诊断实现。
 - backend/resources/：随二进制分发的运行时规则数据。
 - vendor/CodeyRuntime/：backend 实际消费的跨平台能力子集：应用位置发现、CDP 桥接、Codex config.toml 事务读写、Codex SQLite 会话发现与删除、插件市场快照、诊断日志、端口守卫、Windows 进程工具和启动命令构造。2026-09-06 起未被 backend 引用的旧模块（独立启动器、relay/settings 存储、Zed 远程、worktree、stepwise、更新器、旧注入脚本等）及其测试已删除，历史实现从 Git 获取。 2026-09-07 又按 `cargo check --all-targets` 的 dead_code 结果删除了 backend 未引用的零散函数（回环端口守卫锁、CDP 周期求值与新文档脚本注入、旧会话库路径探测、config_manager 备份恢复与 wire_api 写入、运行时版本缓存等）；Windows 专属的 `windows_open_url`、`windows_activate_process_window`、`windows_apply_codey_icon_to_process_window`、`windows_process_control_strategy` 在 backend 中同样无引用，但本机无法交叉编译核实，暂保留。
-- scripts/：开发、构建、前端打包、更新清单和发布脚本。
+- scripts/：开发、构建、前端打包和发布脚本。
 - tests/ 与 backend 各模块测试：JavaScript 集成测试和 Rust 测试。
 - .github/workflows/：质量检查与桌面安装包构建。
 
@@ -155,26 +155,19 @@ macOS 本地调试未签名安装包时，确认来源后可用 `xattr -dr com.a
 
 默认要求工作区干净。确实要把现有改动纳入发布时使用 --include-existing-changes；只在本地创建标签时使用 --no-push。
 
-v* 标签会触发 macOS arm64、macOS x64 和 Windows x64 构建，并附加到 GitHub Release。配置以下 GitHub 变量和密钥后，工作流也会上传安装包与 latest.json 到 Cloudflare R2：
-
-- CLOUDFLARE_R2_BUCKET
-- CLOUDFLARE_R2_PUBLIC_BASE_URL
-- CLOUDFLARE_ACCOUNT_ID
-- CLOUDFLARE_API_TOKEN
-
-CODEY_UPDATE_BASE_URL 可在编译时覆盖客户端更新源。发布标签版本必须与项目版本一致。
+v* 标签会触发 macOS arm64、macOS x64 和 Windows x64 构建，并附加到 GitHub Release。本分叉不向客户端分发在线更新：安装包只通过 GitHub Release 和 Actions 产物提供，客户端启动和控制台都不会检查、下载或安装更新。发布标签版本必须与项目版本一致。
 
 ## 运行流程
 
 宠物精简设置是可选启动步骤：读取 `.codex-global-state.json` 时使用 `serde_json::value::RawValue` 保留非目标字段的原始 JSON 值，兼容 Codex 保存的未配对 UTF-16 代理项，只修改 `electron-avatar-overlay-open`。主文件无法读取时沿用 `.bak` 回退；两者都无法读取时不覆盖文件。顶层字段名包含未配对代理项仍无法解析。解析、写入或后台任务失败均记录 `startup.pet_slim`、`recoverable: true` 和 `fallback: continue_startup`，继续启动，不触发运行配置恢复。回归测试覆盖特殊字符原样保留、备份恢复及宠物开关两种状态下读取失败仍可完成启动准备。
 
-1. 恢复上次异常退出留下的 Codey 自有临时状态，并执行启动更新检查。
+1. 恢复上次异常退出留下的 Codey 自有临时状态。
 2. 加载 Codey 配置，只读检查 Codex 配置、登录状态和应用位置；首次空配置可导入当前第三方线路。
 3. 在 Codex 未运行时完成会话索引维护、旧版 Codey 状态清理和诊断保护准备。
 4. 按设置启动本地路由、生成本次进程覆盖、Hook、子代理角色和注入脚本。
 5. 启动 Codex，通过启动补丁或 CLI 包装入口传递本次 app-server 配置，再通过 CDP 安装桥接与页面增强。macOS 的 `CODEX_CLI_PATH` 指向私有可执行包装脚本，由脚本恢复可能被 Codex 子进程过滤的兼容环境后再进入 Codey CLI 包装分支，禁止把完整 Codey 桌面入口直接暴露为 CLI。包装器使用官方 CLI 的 `-c` 参数，执行目标程序后才完成握手；握手证明目标已执行，不代表 app-server 已完成初始化或接受了所有配置。Inspector 不可用时，以已确认的 CLI 包装入口正常运行；两条入口都失败且存在必须的运行时约束时停止 Codex。
 6. 启动健康检查、退出监听、通知和平台保护任务。设置保存后，支持热更新的项目立即替换；影响启动参数、角色集合或能力目录的项目标记为需要重启。
-7. Codex 退出、系统信号或安装更新时，先确认受控 Codex 已停止，再关闭 watcher、回收 Child、恢复临时配置，最后停止路由。停止进程失败时保留 watcher、桥接、配置和路由；配置恢复失败时保留路由，使同一运行时可以重试。只有清理完成后才释放 Hook、租约及其他 Codey 自有运行状态。
+7. Codex 退出或系统信号时，先确认受控 Codex 已停止，再关闭 watcher、回收 Child、恢复临时配置，最后停止路由。停止进程失败时保留 watcher、桥接、配置和路由；配置恢复失败时保留路由，使同一运行时可以重试。只有清理完成后才释放 Hook、租约及其他 Codey 自有运行状态。
 
 启动必需步骤失败都应走同一清理路径。会话数据的安全修复不会在退出时回滚；临时路由、Hook 和运行文件必须可恢复。初始 Trace/Crashpad 任务在 profile 与路由 Provider 校验通过后创建；应用定位、旧进程停止或维护失败时，仍等待已启动任务结束并更新状态，再返回原始错误。Trace 失败也会等待 Crashpad，避免丢弃 JoinHandle 后后台清理继续运行。旧 Codex 停止后，模型目录准备与会话维护并行；两者及存储保护全部结束后，才启动路由并写入最终运行配置。并行减少串行步骤，尚未测量问题设备上的冷启动耗时收益。
 

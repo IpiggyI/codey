@@ -22,9 +22,6 @@ export const CODEY_API_COMMANDS = [
   "optimize_prompt",
   "test_prompt_optimization",
   "fetch_prompt_optimization_models",
-  "check_for_updates",
-  "download_update",
-  "install_downloaded_update",
   "plugin_marketplace_status",
   "repair_plugin_marketplace",
 ] as const;

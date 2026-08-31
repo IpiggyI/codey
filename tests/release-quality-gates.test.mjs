@@ -14,10 +14,6 @@ const macBuildScript = fs.readFileSync(
   new URL("../scripts/build.mjs", import.meta.url),
   "utf8",
 );
-const updateSource = fs.readFileSync(
-  new URL("../backend/src/commands/updates.rs", import.meta.url),
-  "utf8",
-);
 const windowsInstallerScript = fs.readFileSync(
   new URL("../scripts/installer/windows/Codey.nsi", import.meta.url),
   "utf8",
@@ -83,18 +79,13 @@ test("desktop builds generate embedded overlay assets before Cargo compiles", ()
   );
 });
 
-test("macOS updates retain a rollback bundle until the replacement launches", () => {
-  const backup = updateSource.indexOf('/bin/mv "$app_bundle" "$backup_bundle"');
-  const install = updateSource.indexOf('/bin/mv "$tmp_dir/$app_name" "$app_bundle"');
-  const launch = updateSource.indexOf('/usr/bin/open "$app_bundle"');
-  const commit = updateSource.indexOf("replacement_committed=1");
-  assert.ok(backup >= 0 && backup < install);
-  assert.ok(install < launch && launch < commit);
-  assert.match(
-    updateSource,
-    /if \[ "\$replacement_committed" -ne 1 \][\s\S]*?\/bin\/mv "\$backup_bundle" "\$app_bundle" \|\| true/,
+test("desktop release does not ship a client updater or update feed", () => {
+  assert.equal(
+    fs.existsSync(new URL("../backend/src/commands/updates.rs", import.meta.url)),
+    false,
   );
-  assert.doesNotMatch(updateSource, /rm -rf "\$app_bundle"\s*\nmv "\$tmp_dir/);
+  assert.doesNotMatch(workflow, /CODEY_UPDATE_BASE_URL|latest\.json/);
+  assert.match(workflow, /name: Attach packages to GitHub Release/);
 });
 
 test("desktop packages include FastCtx license and notice files", () => {

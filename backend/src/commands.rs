@@ -16,7 +16,6 @@ mod models;
 mod plugins;
 mod prompt_optimization;
 mod runtime;
-mod updates;
 mod webhooks;
 mod wechat_claw;
 
@@ -62,16 +61,6 @@ use runtime::{begin_shutdown, launch_codey_inner};
 pub use runtime::{
     launch_codey_runtime, runtime_status, schedule_restart_codey_runtime, stop_codey_runtime,
 };
-use updates::current_update_platform;
-#[cfg(test)]
-pub(crate) use updates::{UpdateAssetInfo, UpdateCheck};
-pub(crate) use updates::{
-    UpdateCandidate, UpdateDownload, check_for_update_candidate, download_update_candidate,
-    start_downloaded_update,
-};
-#[cfg(test)]
-use updates::{UpdateManifest, assess_update_manifest, current_update_arch};
-pub use updates::{check_for_updates, download_update, install_downloaded_update};
 use webhooks::{
     WaitingLedgerState, WebhookNotificationState, initial_waiting_notifications,
     sync_waiting_webhook_watcher, test_notification_channel,
@@ -136,8 +125,6 @@ pub struct AppState {
     trace_log_write_protection_active: AtomicBool,
     pub crashpad_pending_stats: CrashpadPendingStatsHandle,
     pub startup_error: RwLock<Option<String>>,
-    available_update: RwLock<Option<updates::UpdateCheck>>,
-    update_candidate_cache: Mutex<Option<updates::CachedUpdateCandidate>>,
     codex_app_version_cache: Mutex<Option<runtime::CodexAppVersionCache>>,
     restart_in_progress: AtomicBool,
     shutting_down: AtomicBool,
@@ -185,7 +172,6 @@ impl Drop for RestartInProgressGuard {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppShutdownReason {
     CodexExited,
-    InstallUpdate,
 }
 
 impl Default for AppState {
@@ -224,8 +210,6 @@ impl Default for AppState {
             trace_log_write_protection_active: AtomicBool::new(false),
             crashpad_pending_stats: CrashpadPendingStatsHandle::idle(protect_crashpad_pending),
             startup_error: RwLock::new(config_load_error),
-            available_update: RwLock::new(None),
-            update_candidate_cache: Mutex::new(None),
             codex_app_version_cache: Mutex::new(None),
             restart_in_progress: AtomicBool::new(false),
             shutting_down: AtomicBool::new(false),
@@ -289,10 +273,6 @@ fn bridge_string_array(payload: &Value, name: &str, limit: usize) -> Vec<String>
 impl AppState {
     pub fn request_shutdown(&self) {
         self.request_shutdown_with_reason(AppShutdownReason::CodexExited);
-    }
-
-    pub fn request_update_shutdown(&self) {
-        self.request_shutdown_with_reason(AppShutdownReason::InstallUpdate);
     }
 
     fn request_shutdown_with_reason(&self, reason: AppShutdownReason) {
@@ -1038,12 +1018,6 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
                 Err(error) => Err(error),
             }
         }
-        "check_for_updates" => check_for_updates(state).await,
-        "download_update" => download_update(state).await,
-        "install_downloaded_update" => match string_argument(&args, "filePath") {
-            Ok(file_path) => install_downloaded_update(state, file_path).await,
-            Err(error) => Err(error),
-        },
         "plugin_marketplace_status" => plugin_marketplace_status().await,
         "repair_plugin_marketplace" => repair_plugin_marketplace().await,
         _ => Err(format!("未知 Codey API 命令：{command}")),

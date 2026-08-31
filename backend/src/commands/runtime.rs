@@ -13,7 +13,7 @@ use super::webhooks::{
 };
 use super::{
     AppState, RestartInProgressGuard, ScheduledRestart, config_requires_restart_with_route_status,
-    current_update_platform, make_bridge_handler, prepare_routes_for_current_launch,
+    make_bridge_handler, prepare_routes_for_current_launch,
     provider_route_restart_required_for_runtime, sync_provider_models_for_launch,
 };
 use crate::codex_config::codex_home;
@@ -21,6 +21,16 @@ use crate::error_log;
 use crate::launcher::{CodeyRuntime, restore_previous_runtime_state};
 
 const CODEX_APP_VERSION_CACHE_TTL: Duration = Duration::from_secs(30);
+
+pub(super) fn current_update_platform() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        std::env::consts::OS
+    }
+}
 
 pub(super) struct CodexAppVersionCache {
     runtime_app_path: Option<PathBuf>,
@@ -159,14 +169,6 @@ pub(super) async fn runtime_status_with_options(
         && let Some(object) = status.as_object_mut()
     {
         object.insert("startupError".into(), Value::String(error));
-    };
-    if let Some(update) = state.available_update.read().await.clone()
-        && let Some(object) = status.as_object_mut()
-    {
-        object.insert(
-            "availableUpdate".into(),
-            serde_json::to_value(update).expect("update metadata must be JSON-serializable"),
-        );
     }
     if let Some(runtime) = runtime.as_ref()
         && let Some(object) = status.as_object_mut()

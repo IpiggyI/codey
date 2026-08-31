@@ -782,23 +782,6 @@ async fn runtime_status_does_not_wait_for_a_lifecycle_operation() {
     assert_eq!(status["running"], false);
 }
 
-#[tokio::test]
-async fn runtime_status_exposes_cached_available_update() {
-    let state = Arc::new(AppState::default());
-    *state.available_update.write().await = Some(UpdateCheck {
-        current_version: "1.0.0".to_string(),
-        latest_version: "2.0.0".to_string(),
-        update_available: true,
-        selected_asset: None,
-    });
-
-    let status = runtime_status(&state).await.unwrap();
-
-    assert_eq!(status["availableUpdate"]["currentVersion"], "1.0.0");
-    assert_eq!(status["availableUpdate"]["latestVersion"], "2.0.0");
-    assert_eq!(status["availableUpdate"]["updateAvailable"], true);
-}
-
 #[test]
 fn successful_startup_model_sync_keeps_only_enabled_route_models() {
     let mut config = CodeyConfig::default();

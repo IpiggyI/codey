@@ -21,8 +21,7 @@ test("Windows source contract: Codey uses the GUI subsystem", async () => {
     /^#!\[cfg_attr\(target_os = "windows", windows_subsystem = "windows"\)\]/,
   );
   assert.doesNotMatch(library, /hide_exclusive_windows_console|ShowWindow|GetConsoleWindow/);
-  assert.doesNotMatch(manifest, /Win32_System_Console/);
-  assert.match(manifest, /Win32_UI_WindowsAndMessaging/);
+  assert.doesNotMatch(manifest, /Win32_System_Console|Win32_UI_WindowsAndMessaging/);
 });
 
 test("Windows source contract: fatal startup failures remain visible", async () => {
@@ -127,39 +126,14 @@ test("Windows source contract: packaged Codex exit uses an OS process wait", asy
   assert.match(coreLauncher, /WaitForSingleObject\(handle, INFINITE\)/);
 });
 
-test("Windows source contract: updates use the detached native helper", async () => {
-  const [main, updates, updateHelper] = await Promise.all([
-    readFile(new URL("../backend/src/main.rs", import.meta.url), "utf8").then(
-      normalizeLineEndings,
-    ),
-    readFile(
-      new URL("../backend/src/commands/updates.rs", import.meta.url),
-      "utf8",
-    ).then(normalizeLineEndings),
-    readFile(
-      new URL("../backend/src/update_helper.rs", import.meta.url),
-      "utf8",
-    ).then(normalizeLineEndings),
-  ]);
+test("Windows source contract: Codey does not ship an update helper", async () => {
+  const main = await readFile(
+    new URL("../backend/src/main.rs", import.meta.url),
+    "utf8",
+  ).then(normalizeLineEndings);
 
-  assert.match(
-    main,
-    /run_update_helper_if_requested\(\)\?[\s\S]*run_desktop_application\(\)/,
-  );
-  assert.match(
-    updates,
-    /crate::update_helper::spawn_update_installer\(update_path, asset\.size, &asset\.sha256\)/,
-  );
-  assert.doesNotMatch(updates, /powershell\.exe|install-codey-update\.ps1/i);
-  assert.match(
-    updateHelper,
-    /std::fs::copy\(&executable, &helper_path\)[\s\S]*Command::new\(&helper_path\)/,
-  );
-  assert.match(
-    updateHelper,
-    /let install_result = install_windows_update[\s\S]*let restart_result = restart_codey/,
-  );
-  assert.match(updateHelper, /raw_arg\(nsis_install_directory_argument/);
+  assert.doesNotMatch(main, /run_update_helper_if_requested/);
+  assert.match(main, /run_desktop_application\(\)/);
 });
 
 test("Windows source contract: missing Codex paths recover before startup", async () => {

@@ -572,7 +572,7 @@ const createStartupUpdateFixture = (bridge) => {
   };
 };
 
-test("hydrates the passive update badge from startup backend state", async () => {
+test("legacy update payloads do not show a red-dot or schedule update checks", async () => {
   const bridgeCalls = [];
   const fixture = createStartupUpdateFixture(async (path, payload) => {
     bridgeCalls.push({ path, payload });
@@ -588,6 +588,9 @@ test("hydrates the passive update badge from startup backend state", async () =>
       };
     }
     if (path === "/backend/health") return { status: "ok" };
+    if (path === "/api/check_for_updates") {
+      throw new Error("update check must stay unreachable");
+    }
     throw new Error(`unexpected bridge path: ${path}`);
   });
 
@@ -595,59 +598,53 @@ test("hydrates the passive update badge from startup backend state", async () =>
 
   const button = fixture.document.getElementById("codey-settings-button");
   assert.ok(button);
-  assert.equal(button.getAttribute("data-codey-update-available"), "true");
-  assert.equal(button.getAttribute("aria-label"), "打开 Codey 配置，有可用更新");
-  assert.equal(fixture.window.__codeyUpdateAvailability.latestVersion, "0.4.0");
-  const updateEvents = fixture.events.filter(
-    (event) => event.type === "codey-update-availability-changed",
+  assert.equal(button.getAttribute("data-codey-update-available"), null);
+  assert.equal(button.getAttribute("aria-label"), "打开 Codey 配置");
+  assert.equal(fixture.window.__codeyUpdateAvailability, undefined);
+  assert.equal(
+    fixture.events.some((event) => event.type === "codey-update-availability-changed"),
+    false,
   );
-  assert.equal(updateEvents.length, 1);
   assert.equal(fixture.document.getElementById("codey-update-check-status"), null);
   assert.equal(fixture.document.getElementById("codey-update-dialog"), null);
   assert.equal(
     fixture.activeTimers().some((timer) => timer.delay === 30 * 60 * 1000),
     false,
   );
-  assert.deepEqual(
-    bridgeCalls.map(({ path }) => path),
-    ["/backend/status", "/backend/health"],
+  assert.equal(
+    fixture.activeTimers().some((timer) => timer.delay === 10_000),
+    false,
   );
+  assert.equal(
+    bridgeCalls.some(({ path }) => path === "/api/check_for_updates"),
+    false,
+  );
+  const actionLabels = [button.getAttribute("aria-label"), button.title].filter(Boolean);
+  assert.equal(actionLabels.some((label) => /检查更新|下载更新|安装更新|可用更新/.test(label)), false);
   assert.equal(
     fixture.activeTimers().some((timer) => timer.delay === 30_000),
     true,
   );
-
-  let unchangedAttributeWrites = 0;
-  const originalSetAttribute = button.setAttribute.bind(button);
-  button.setAttribute = (...args) => {
-    unchangedAttributeWrites += 1;
-    originalSetAttribute(...args);
-  };
-  await fixture.window.__codeyRefreshRuntimeHealth();
-  assert.equal(unchangedAttributeWrites, 0);
 });
 
-test("falls back to a passive periodic check when backend update state hangs", async () => {
+test("a hung backend does not fall back to a periodic update check", async () => {
   const fixture = createStartupUpdateFixture(
     async () => new Promise(() => {}),
   );
 
-  const timeoutTimer = fixture.activeTimers().find(
-    (timer) => timer.delay === 10_000,
+  assert.equal(
+    fixture.activeTimers().some((timer) => timer.delay === 10_000),
+    false,
   );
-  assert.ok(timeoutTimer);
-  timeoutTimer.cleared = true;
-  timeoutTimer.callback();
-  await new Promise((resolve) => setImmediate(resolve));
-
   assert.equal(fixture.document.getElementById("codey-update-check-status"), null);
   assert.equal(fixture.document.getElementById("codey-update-dialog"), null);
-  assert.equal(fixture.window.__codeyUpdateAvailability, null);
+  assert.equal(fixture.window.__codeyUpdateAvailability, undefined);
   assert.equal(
     fixture.activeTimers().some((timer) => timer.delay === 30 * 60 * 1000),
-    true,
+    false,
   );
 });
+
 
 test("marks the Codey icon unavailable after consecutive hung health checks and recovers", async () => {
   let healthMode = "hang";

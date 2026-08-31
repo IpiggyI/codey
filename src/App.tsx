@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   IconCheck,
-  IconCircleArrowUp,
   IconDeviceFloppy as Save,
   IconGitBranch as GitBranch,
   IconLoader2 as LoaderCircle,
@@ -29,7 +28,6 @@ import { CodeyBrandMark, SettingsModalShell } from "./SettingsModalShell";
 import { useModelSelection } from "./useModelSelection";
 import type { CrashpadPendingStats, TraceLogStats } from "./traceLogTypes";
 import { useRuntimeStatus } from "./useRuntimeStatus";
-import { useAppUpdates } from "./useAppUpdates";
 import {
   NoticeLoadingText,
   NoticeToast,
@@ -51,7 +49,7 @@ import type {
   Profile,
   TraceLogCleanup,
 } from "./App.types";
-import { Badge, Button, Tooltip } from "./components/mantine";
+import { Badge, Button } from "./components/mantine";
 
 const Check = IconCheck;
 const X = IconX;
@@ -135,10 +133,6 @@ export function App({
     null,
   );
   const popupContainer = modalContainer ?? null;
-  const getTooltipContainer = useCallback(
-    () => popupContainer ?? portalContainer ?? document.body,
-    [popupContainer, portalContainer],
-  );
   const noticeController = useAppNoticeController();
   const confirmationController = useConfirmationController();
   const setNotice = noticeController.setNotice;
@@ -149,7 +143,6 @@ export function App({
 
   const provider = providerStatus?.provider;
   const isBusy = busy !== null;
-  const configLoaded = config !== null;
   const pendingNativeRouterToggle = Boolean(
     config &&
       persistedConfigRef.current &&
@@ -248,24 +241,6 @@ export function App({
     setPersistedConfig,
     setStatus,
     setNotice,
-  });
-  const {
-    updateResult,
-    updateCheck,
-    downloadedUpdate,
-    checkForUpdates,
-    downloadUpdate,
-    askInstallDownloadedUpdate,
-  } = useAppUpdates({
-    embedded,
-    configLoaded,
-    isBusy,
-    setBusy,
-    setNotice,
-    setConfirmation,
-    beforeInstall: async () => {
-      if (config && dirty) await persist(config);
-    },
   });
 
   useEffect(() => {
@@ -978,11 +953,6 @@ export function App({
     () => void repairPluginMarketplace(),
   );
   const handleRestartCodex = useStableEvent(askRestartCodex);
-  const handleCheckForUpdates = useStableEvent(() => void checkForUpdates());
-  const handleDownloadUpdate = useStableEvent(() => void downloadUpdate());
-  const handleInstallDownloadedUpdate = useStableEvent(
-    askInstallDownloadedUpdate,
-  );
   const handleConfigChange = useStableEvent(editConfig);
   const handleAddNotificationChannel = useStableEvent(addNotificationChannel);
   const handleNotificationChannelChange = useStableEvent(
@@ -1086,22 +1056,6 @@ export function App({
     );
   }
 
-  const hasUpdate =
-    updateCheck?.updateAvailable === true &&
-    Boolean(updateCheck.selectedAsset);
-  const isCheckingUpdate = busy === "check-update";
-  const isDownloadingUpdate = busy === "download-update";
-  const isInstallingUpdate = busy === "install-update";
-  const updateTooltipText = downloadedUpdate
-    ? `新版本 v${downloadedUpdate.latestVersion} 已下载，点击安装并重启`
-    : hasUpdate
-      ? `发现新版本 v${updateCheck?.latestVersion}，点击下载更新`
-      : isCheckingUpdate
-        ? "正在检查更新…"
-        : updateResult?.text
-          ? `${updateResult.text}（点击再次检查）`
-          : "检查 Codey 在线更新";
-
   const configHeaderContent = (
     <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-5 max-[760px]:grid-cols-[minmax(0,1fr)_auto_auto] max-[760px]:gap-2.5">
       <div className="flex min-w-0 items-center gap-3 justify-self-start max-[760px]:gap-2">
@@ -1112,53 +1066,6 @@ export function App({
             <span className="whitespace-nowrap text-[11px] font-medium tracking-[0.01em] text-[#8e8e93]">
               v{status.appVersion || "0.2.0"}
             </span>
-
-            <Tooltip
-              content={updateTooltipText}
-              getPopupContainer={getTooltipContainer}
-              position="bottom"
-            >
-              <span className="header-update-btn-wrap">
-                <button
-                  type="button"
-                  className={`header-update-pill ${
-                    hasUpdate
-                      ? "has-update"
-                      : downloadedUpdate
-                        ? "has-downloaded"
-                        : ""
-                  }`}
-                  disabled={isBusy}
-                  aria-label={updateTooltipText}
-                  onClick={() => {
-                    if (downloadedUpdate) {
-                      handleInstallDownloadedUpdate();
-                    } else if (hasUpdate) {
-                      handleDownloadUpdate();
-                    } else {
-                      handleCheckForUpdates();
-                    }
-                  }}
-                >
-                  {isCheckingUpdate || isDownloadingUpdate || isInstallingUpdate ? (
-                    <LoaderCircle className="animate-spin" size={12} aria-hidden="true" />
-                  ) : downloadedUpdate ? (
-                    <IconCheck size={12} aria-hidden="true" />
-                  ) : (
-                    <IconCircleArrowUp size={13} aria-hidden="true" />
-                  )}
-                  {downloadedUpdate ? (
-                    <span className="header-update-pill-label">
-                      v{downloadedUpdate.latestVersion} 已下载
-                    </span>
-                  ) : hasUpdate ? (
-                    <span className="header-update-pill-label">
-                      v{updateCheck?.latestVersion} 可更新
-                    </span>
-                  ) : null}
-                </button>
-              </span>
-            </Tooltip>
 
             {dirty && (
               <Badge variant="warning">

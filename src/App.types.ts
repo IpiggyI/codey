@@ -157,7 +157,6 @@ export type InjectionScriptStatus = {
 export type RuntimeStatus = {
   running: boolean;
   appVersion?: string;
-  availableUpdate?: UpdateCheck;
   codexAppVersion?: string;
   clientPlatform?: string;
   restartRequired?: boolean;
@@ -215,7 +214,6 @@ export type Confirmation = {
   action:
     | "clear"
     | "restart"
-    | "install-update"
     | "delete-notification-channel"
     | "delete-route";
   title: string;
@@ -248,32 +246,6 @@ export type CrashpadCleanup = {
   limitApplied: boolean;
   stillOverLimit: boolean;
   errors: string[];
-};
-
-export type UpdateCheck = {
-  currentVersion: string;
-  latestVersion: string;
-  updateAvailable: boolean;
-  selectedAsset?: UpdateAsset;
-};
-
-export type UpdateAsset = {
-  platform: string;
-  arch: string;
-  packageType: string;
-  fileName: string;
-  url: string;
-  sha256: string;
-  size: number;
-};
-
-export type UpdateDownload = {
-  latestVersion: string;
-  filePath: string;
-  fileName: string;
-  size: number;
-  sha256: string;
-  asset: UpdateAsset;
 };
 
 export type AppProps = {

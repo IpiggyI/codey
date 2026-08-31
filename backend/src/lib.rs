@@ -22,6 +22,7 @@ mod message_delete;
 mod model_catalog;
 mod model_id;
 mod model_list;
+#[cfg(target_os = "macos")]
 mod native_update_ui;
 mod notifications;
 mod pending_approval;
@@ -37,14 +38,12 @@ mod session_index_cleanup;
 mod session_metadata;
 mod session_transfer;
 mod sqlite_util;
-mod startup_update;
 mod subagent;
 mod subagent_gate;
 mod subagent_orchestrator;
 mod subagent_policy;
 mod trace_log_guard;
 mod trace_log_stats;
-mod update_helper;
 
 use std::sync::Arc;
 
@@ -53,17 +52,11 @@ use anyhow::Context;
 use anyhow::Result;
 
 use commands::{AppShutdownReason, AppState};
-use native_update_ui::NativeUpdateUi;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ShutdownReason {
     CodexExited,
-    InstallUpdate,
     Signal,
-}
-
-pub fn run_update_helper_if_requested() -> Result<bool> {
-    update_helper::run_if_requested().map_err(anyhow::Error::msg)
 }
 
 pub fn run_error_log_helper_if_requested() -> Result<bool> {
@@ -114,15 +107,12 @@ pub fn run_fastctx_route_hook_if_requested() -> Result<bool> {
 pub fn run_desktop_application() -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        native_update_ui::run_macos_application(|ui| build_async_runtime()?.block_on(run(ui)))
+        native_update_ui::run_macos_application(|| build_async_runtime()?.block_on(run()))
     }
 
     #[cfg(not(target_os = "macos"))]
     {
-        let ui = NativeUpdateUi::start();
-        let result = build_async_runtime()?.block_on(run(ui.clone()));
-        ui.shutdown();
-        result
+        build_async_runtime()?.block_on(run())
     }
 }
 
@@ -135,7 +125,7 @@ fn build_async_runtime() -> Result<tokio::runtime::Runtime> {
     builder.enable_all().build().map_err(anyhow::Error::from)
 }
 
-async fn run(ui: NativeUpdateUi) -> Result<()> {
+async fn run() -> Result<()> {
     error_log::initialize();
     let state = Arc::new(AppState::default());
     let configured_codex_app_path = state.config.read().await.codex_app_path.clone();
@@ -176,20 +166,10 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
         eprintln!("Codey 启动前写入 codey_router 恢复兼容桩失败：{error:#}");
     }
     let mut shutdown = Box::pin(shutdown_signal());
-    let startup_update = startup_update::run(&state, &ui);
-    tokio::pin!(startup_update);
-    let startup_update_outcome = tokio::select! {
-        outcome = &mut startup_update => outcome,
-        _ = &mut shutdown => return Ok(()),
-    };
-    if startup_update_outcome == startup_update::StartupUpdateOutcome::InstallScheduled {
-        return Ok(());
-    }
     let shutdown_reason = match commands::launch_codey_runtime(&state).await {
         Ok(_) => tokio::select! {
             reason = state.wait_for_shutdown() => match reason {
                 AppShutdownReason::CodexExited => ShutdownReason::CodexExited,
-                AppShutdownReason::InstallUpdate => ShutdownReason::InstallUpdate,
             },
             _ = &mut shutdown => ShutdownReason::Signal,
         },
@@ -223,7 +203,6 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
     }
     let shutdown_context = match shutdown_reason {
         ShutdownReason::CodexExited => "Codex 已退出",
-        ShutdownReason::InstallUpdate => "Codey 正在安装更新",
         ShutdownReason::Signal => "Codey 收到退出信号",
     };
     match process_cleanup::terminate_other_codey_processes().await {

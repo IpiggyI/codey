@@ -9,14 +9,12 @@ const root = new URL("../", import.meta.url);
 test("settings panels keep stable handlers and skip unrelated parent renders", async () => {
   const [
     app,
-    appUpdates,
     notice,
     confirmation,
     sections,
     modelSelection,
   ] = await Promise.all([
     readFile(new URL("src/App.tsx", root), "utf8"),
-    readFile(new URL("src/useAppUpdates.ts", root), "utf8"),
     readFile(new URL("src/useAppNotice.tsx", root), "utf8"),
     readFile(new URL("src/useConfirmationDialog.tsx", root), "utf8"),
     Promise.all(
@@ -36,20 +34,7 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
   assert.match(confirmation, /useSyncExternalStore\(/);
   assert.match(confirmation, /export const ConfirmationDialogHost = memo\(/);
   assert.doesNotMatch(app, /CodexAppPathDialog/);
-  assert.doesNotMatch(app, /async function checkForUpdates\(/);
-  assert.match(appUpdates, /export function useAppUpdates/);
-  assert.match(appUpdates, /invoke<UpdateCheck>\("check_for_updates"\)/);
-  assert.equal(
-    appUpdates.match(/invoke<UpdateCheck>\("check_for_updates"\)/g)?.length,
-    1,
-  );
-  assert.match(
-    appUpdates,
-    /updateCheckInFlightRef = useRef<Promise<UpdateCheck> \| null>/,
-  );
-  assert.match(appUpdates, /const result = await requestUpdateCheck\(\)/);
-  assert.match(appUpdates, /invoke<UpdateDownload>\("download_update"\)/);
-  assert.match(appUpdates, /invoke\("install_downloaded_update"/);
+  assert.doesNotMatch(app, /useAppUpdates|checkForUpdates|downloadUpdate/);
   assert.match(app, /onRepairPluginMarketplace=\{handleRepairPluginMarketplace\}/);
   assert.match(app, /onRefresh=\{handleRefreshTraceLogStats\}/);
   assert.match(app, /onToggleDraftModel=\{toggleDraftModel\}/);
