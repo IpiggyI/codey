@@ -257,6 +257,7 @@ release 应用通过 `plutil -lint`、`codesign --verify --deep --strict` 和可
 - codex-lease.json、hooks.json 中的 Codey 组、角色运行副本和证明状态均属于临时运行资产，异常退出后由下次启动恢复。
 - 第三方 API Key、通知地址和机器人令牌目前仍以明文保存在 Codey 私有配置及备份中；后端不会把已保存值返回前端。后续若迁移系统凭据库，应同时处理备份格式和升级兼容。
 - codey-errors.log 只记录脱敏后的失败信息。不要把提示词、响应正文、认证值或完整敏感地址写入日志。
+- 账户区额度只认 auth.json 里的 ChatGPT 登录和 showAccountUsageInHeader，不读取 CodeyConfig.profiles。
 
 ## 主要子系统
 

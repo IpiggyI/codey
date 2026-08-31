@@ -629,7 +629,7 @@ pub struct CodeyConfig {
     #[serde(default)]
     pub hide_full_access_warning: bool,
     /// Shows the current ChatGPT account rate-limit windows in the Codex
-    /// header. The renderer only activates this for an official login route.
+    /// header when auth.json has a usable ChatGPT login.
     #[serde(default = "default_true")]
     pub show_account_usage_in_header: bool,
     /// Launch-scoped authentication capability captured from Codex before

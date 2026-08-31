@@ -2252,49 +2252,39 @@ fn redacted_config(config: &CodeyConfig) -> CodeyConfig {
 }
 
 async fn account_usage_snapshot(state: &Arc<AppState>) -> Value {
-    {
+    let show_account_usage_in_header = {
         let config = state.config.read().await;
-        if !config.show_account_usage_in_header {
-            return json!({"status": "disabled"});
-        }
-        if !account_usage_enabled_for_config(&config) {
-            return json!({
-                "status": "unavailable",
-                "reason": "official_account_missing",
-                "message": "当前线路列表中没有可用的官方账号线路",
-            });
-        }
-    }
-
+        config.show_account_usage_in_header
+    };
     let home = codex_home();
-    let mut cache = state.account_usage_cache.lock().await;
-    match cache.fetch(home).await {
-        Ok(snapshot) => {
-            let mut value = serde_json::to_value(snapshot)
-                .expect("account usage snapshots must be JSON-serializable");
-            if let Some(object) = value.as_object_mut() {
-                object.insert("status".into(), Value::String("ok".into()));
-            }
-            value
-        }
-        Err(error) => json!({
-            "status": "error",
-            "message": error.to_string(),
+    match account_usage::account_usage_preflight(
+        show_account_usage_in_header,
+        &home.join("auth.json"),
+    ) {
+        account_usage::AccountUsagePreflight::Disabled => json!({"status": "disabled"}),
+        account_usage::AccountUsagePreflight::Unavailable { reason, message } => json!({
+            "status": "unavailable",
+            "reason": reason,
+            "message": message,
         }),
+        account_usage::AccountUsagePreflight::Ready => {
+            let mut cache = state.account_usage_cache.lock().await;
+            match cache.fetch(home).await {
+                Ok(snapshot) => {
+                    let mut value = serde_json::to_value(snapshot)
+                        .expect("account usage snapshots must be JSON-serializable");
+                    if let Some(object) = value.as_object_mut() {
+                        object.insert("status".into(), Value::String("ok".into()));
+                    }
+                    value
+                }
+                Err(error) => json!({
+                    "status": "error",
+                    "message": error.to_string(),
+                }),
+            }
+        }
     }
-}
-
-fn account_usage_enabled_for_config(config: &CodeyConfig) -> bool {
-    if !config.show_account_usage_in_header {
-        return false;
-    }
-    if !config.local_router_enabled {
-        return config.official_account_available_this_launch;
-    }
-    config
-        .profiles
-        .iter()
-        .any(|profile| profile.enabled && profile.official_account)
 }
 
 #[cfg(test)]

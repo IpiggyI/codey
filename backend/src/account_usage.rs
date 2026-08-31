@@ -219,6 +219,7 @@ fn account_usage_failure_backoff(consecutive_failures: u32) -> Duration {
     Duration::from_secs(seconds)
 }
 
+// shortcut: 账号额度始终按本机 auth.json 的 ChatGPT 登录读取 ChatGPT backend 用量; ceiling: 当前 provider 为账号池型中转时数字不代表实际消耗; replace when: 能从当前 provider 取得该登录账号自己的用量
 pub async fn fetch_official_account_usage(
     client: &Client,
     codex_home: &Path,
@@ -274,6 +275,32 @@ pub async fn fetch_official_account_usage(
         "{}",
         last_error.unwrap_or_else(|| "未找到可用的官方额度接口".to_string())
     )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AccountUsagePreflight {
+    Disabled,
+    Unavailable {
+        reason: &'static str,
+        message: &'static str,
+    },
+    Ready,
+}
+
+pub(crate) fn account_usage_preflight(
+    show_in_header: bool,
+    auth_path: &Path,
+) -> AccountUsagePreflight {
+    if !show_in_header {
+        return AccountUsagePreflight::Disabled;
+    }
+    match read_official_auth(auth_path) {
+        Ok(_) => AccountUsagePreflight::Ready,
+        Err(_) => AccountUsagePreflight::Unavailable {
+            reason: "chatgpt_login_missing",
+            message: "当前没有可用的 ChatGPT 登录",
+        },
+    }
 }
 
 pub(crate) fn read_official_auth(path: &Path) -> Result<OfficialAuth> {
@@ -516,6 +543,83 @@ mod tests {
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
         let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
         format!("{header}.{payload}.signature")
+    }
+
+    fn write_chatgpt_auth(path: &Path) {
+        fs::write(
+            path,
+            r#"{"auth_mode":"chatgpt","tokens":{"access_token":"token-value","account_id":"account-value"}}"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn account_usage_preflight_allows_fetch_when_chatgpt_login_exists() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("auth.json");
+        write_chatgpt_auth(&path);
+
+        assert_eq!(
+            account_usage_preflight(true, &path),
+            AccountUsagePreflight::Ready
+        );
+    }
+
+    #[test]
+    fn account_usage_preflight_is_unavailable_without_chatgpt_login() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("auth.json");
+        assert_eq!(
+            account_usage_preflight(true, &missing),
+            AccountUsagePreflight::Unavailable {
+                reason: "chatgpt_login_missing",
+                message: "当前没有可用的 ChatGPT 登录",
+            }
+        );
+
+        let api_key = directory.path().join("api-key-auth.json");
+        fs::write(
+            &api_key,
+            r#"{"auth_mode":"apikey","tokens":{"access_token":"sk-not-chatgpt"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            account_usage_preflight(true, &api_key),
+            AccountUsagePreflight::Unavailable {
+                reason: "chatgpt_login_missing",
+                message: "当前没有可用的 ChatGPT 登录",
+            }
+        );
+
+        let refresh_only = directory.path().join("refresh-only-auth.json");
+        fs::write(
+            &refresh_only,
+            r#"{"auth_mode":"chatgpt","tokens":{"refresh_token":"refresh-only"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            account_usage_preflight(true, &refresh_only),
+            AccountUsagePreflight::Unavailable {
+                reason: "chatgpt_login_missing",
+                message: "当前没有可用的 ChatGPT 登录",
+            }
+        );
+    }
+
+    #[test]
+    fn account_usage_preflight_is_disabled_when_header_toggle_is_off() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("auth.json");
+        write_chatgpt_auth(&path);
+
+        assert_eq!(
+            account_usage_preflight(false, &path),
+            AccountUsagePreflight::Disabled
+        );
+        assert_eq!(
+            account_usage_preflight(false, &directory.path().join("missing.json")),
+            AccountUsagePreflight::Disabled
+        );
     }
 
     fn sample_snapshot() -> AccountUsageSnapshot {
