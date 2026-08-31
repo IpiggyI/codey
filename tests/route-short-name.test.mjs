@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
@@ -46,18 +45,4 @@ test("model labels use the fixed official prefix or a route short name", () => {
   assert.equal(shortNames.prefixedRouteModelName(official, "gpt-5.6-sol"), "[官] gpt-5.6-sol");
   assert.equal(shortNames.prefixedRouteModelName(relay, "claude-opus"), "[备] claude-opus");
   assert.equal(shortNames.fallbackRouteShortName(" 备用中转 "), "备用");
-});
-
-test("the third-party route editor exposes the short-name field and validation hint", async () => {
-  const source = await readFile(
-    new URL("../src/ModelSection.tsx", import.meta.url),
-    "utf8",
-  );
-
-  assert.match(source, /id="route-short-name-input"/);
-  assert.match(source, /最多 2 个字符且不可重复，模型名称前会显示为 \[短名称\]/);
-  assert.match(
-    source,
-    /validateThirdPartyRouteShortName\(route\.shortName, profiles, route\.id\)/,
-  );
 });

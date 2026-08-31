@@ -222,8 +222,7 @@ export type Confirmation = {
   action:
     | "clear"
     | "restart"
-    | "delete-notification-channel"
-    | "delete-route";
+    | "delete-notification-channel";
   title: string;
   description: string;
   confirmLabel: string;

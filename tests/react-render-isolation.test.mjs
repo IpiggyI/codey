@@ -38,14 +38,12 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
   assert.match(app, /onRepairPluginMarketplace=\{handleRepairPluginMarketplace\}/);
   assert.match(app, /onRefresh=\{handleRefreshTraceLogStats\}/);
   assert.match(app, /onToggleDraftModel=\{toggleDraftModel\}/);
-  assert.match(app, /onSaveRoute=\{handleSaveRoute\}/);
+  assert.doesNotMatch(app, /onSaveRoute|handleSaveRoute/);
   assert.doesNotMatch(app, /onActivateRoute|handleActivateRoute/);
   assert.doesNotMatch(app, /activeProfileId:\s*route\.id/);
-  assert.match(app, /onDeleteRoute=\{handleDeleteRoute\}/);
+  assert.doesNotMatch(app, /onDeleteRoute|handleDeleteRoute/);
   assert.match(app, /onFetchRouteModels=\{handleFetchRouteModels\}/);
   assert.match(app, /onSetDefaultModel=\{handleSetRouteDefaultModel\}/);
-  assert.match(app, /onToggleLocalRouter=\{handleToggleLocalRouter\}/);
-  assert.match(app, /onToggleRouteRequestLog=\{handleToggleRouteRequestLog\}/);
   assert.match(
     app,
     /onToggleAccountUsage=\{handleToggleAccountUsage\}/,
@@ -60,51 +58,29 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
     app,
     /onRepairPluginMarketplace=\{\(\) => void repairPluginMarketplace\(\)\}/,
   );
-  assert.match(sections, /aria-labelledby="route-protocol-label"/);
-  assert.match(sections, /OpenAI Responses/);
-  assert.match(sections, /OpenAI Chat Completions/);
-  assert.match(sections, /Anthropic Messages/);
+  assert.doesNotMatch(sections, /aria-labelledby="route-protocol-label"/);
   assert.doesNotMatch(sections, /第三方 Responses 兼容/);
   assert.doesNotMatch(sections, /route-auth-mode-label/);
-  assert.equal(sections.match(/<Select\s/g)?.length, 2);
+  assert.equal(sections.match(/<Select\s/g)?.length, 1);
   assert.equal(sections.match(/<ModelCombobox\s/g)?.length, 1);
   assert.doesNotMatch(sections, /<select|route-native-select/);
-  assert.match(sections, /route-manager route-manager-balanced/);
-  assert.match(sections, /route-manager-current/);
+  assert.match(sections, /className="route-manager route-manager-single"/);
   assert.match(sections, /className="provider-model-groups"/);
   assert.match(sections, /modelState\.officialModelIds/);
   assert.match(sections, /checked=\{showAccountUsageInHeader\}/);
-  assert.match(sections, /checked=\{config\.localRouterEnabled\}/);
-  assert.match(sections, /const routeConfigReadOnly = !config\.localRouterEnabled/);
   assert.match(sections, /checked=\{checked\}/);
   assert.match(sections, /额度显示/);
-  assert.match(
-    sections,
-    /routeConfigReadOnly && group\.official && \([\s\S]*provider-model-usage-toggle[\s\S]*checked=\{showAccountUsageInHeader\}/,
-  );
   assert.match(sections, /<DialogTitle>/);
-  assert.match(sections, /config\.localRouterEnabled && \(/);
-  assert.match(sections, /checked=\{config\.routeRequestLog\.enabled\}/);
-  assert.match(sections, /onCheckedChange=\{onToggleRouteRequestLog\}/);
-  assert.match(sections, /查看请求日志/);
-  assert.match(sections, /当前线路模型/);
-  assert.match(sections, /仅展示 Codex 当前线路，可同步模型/);
-  assert.match(sections, /if \(routeConfigReadOnly\) return nativeProfile \? \[nativeProfile\] : \[\]/);
-  assert.match(sections, /disabled=\{!canSyncCurrentProvider \|\| isBusy\}/);
-  assert.match(app, /const canSyncCurrentProvider = !dirty \|\| pendingNativeRouterToggle/);
-  assert.match(app, /canSyncCurrentProvider=\{canSyncCurrentProvider\}/);
-  assert.match(app, /if \(shouldPersistNativeToggle\) \{\s*await persist\(config\)/);
-  assert.match(app, /if \(nativeMode\) \{\s*openModelPicker\(/);
-  assert.match(app, /result\.providerStatus\.provider\.official \? null : result\.providerStatus\.provider\.id/);
-  assert.match(app, /if \(nativeMode \|\| route\.authMode === "officialAccount"\) \{\s*await syncCurrentProvider\(\);\s*return/);
-  assert.match(
+  assert.match(sections, /重新读取 Codex 配置/);
+  assert.doesNotMatch(
     sections,
-    /disabled=\{\s*routeConfigReadOnly \|\|\s*isBusy \|\|\s*dirty \|\|\s*config\.profiles\.length <= 1\s*\}/,
+    /disabled=\{isBusy \|\| dirty \|\| config\.profiles\.length <= 1\}/,
   );
   assert.match(sections, /统一模型目录/);
   assert.doesNotMatch(sections, /catalog-search|searchQuery|搜索模型\.\.\./);
-  assert.match(sections, /第三方线路同时接入统一路由/);
-  assert.match(sections, /已接入路由/);
+  assert.doesNotMatch(sections, /第三方线路同时接入统一路由/);
+  assert.doesNotMatch(sections, /已接入路由/);
+  assert.doesNotMatch(sections, /供应商线路/);
   assert.match(sections, /aria-label="当前 Codex provider"/);
   assert.match(sections, /当前 Codex provider/);
   assert.match(sections, /官方账号鉴权/);

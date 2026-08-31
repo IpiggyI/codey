@@ -95,19 +95,19 @@ test("settings overlay stays inside body so Mantine can detect outside clicks", 
   );
 });
 
-test("route selectors render their dropdowns inside the settings overlay", async () => {
+test("official model editor dialog stays inside the settings overlay", async () => {
   const source = await readFile(
     new URL("src/ModelSection.tsx", root),
     "utf8",
   );
 
-  assert.equal(
-    source.match(/getPopupContainer=\{\(\) => popupContainer \?\? document\.body\}/g)?.length,
-    1,
+  assert.doesNotMatch(
+    source,
+    /getPopupContainer=\{\(\) => popupContainer \?\? document\.body\}/,
   );
   assert.equal(
     source.match(/zIndex=\{SETTINGS_OVERLAY_Z_INDEX\}/g)?.length,
-    2,
+    1,
   );
   assert.match(source, /<DialogContent[\s\S]{0,180}zIndex=\{SETTINGS_OVERLAY_Z_INDEX\}/);
 });

@@ -12,14 +12,7 @@ test("all configuration API keys use PasswordInput with local values", async () 
     readFile(new URL("backend/src/commands.rs", root), "utf8"),
   ]);
 
-  assert.match(
-    routes,
-    /<PasswordInput[\s\S]*?id="route-key-input"[\s\S]*?onVisibilityChange=/,
-  );
-  assert.doesNotMatch(
-    routes,
-    /<Input[\s\S]*?id="route-key-input"[\s\S]*?type="password"/,
-  );
+  assert.doesNotMatch(routes, /id="route-key-input"/);
   assert.doesNotMatch(routes, /reveal_route_api_key/);
   assert.match(
     promptOptimization,
