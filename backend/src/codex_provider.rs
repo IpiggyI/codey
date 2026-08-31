@@ -17,6 +17,7 @@ use toml_edit::{DocumentMut, Item, TableLike};
 
 use crate::codex_config::BUILTIN_OPENAI_PROVIDER_ID;
 use crate::config::{CodeyConfig, DERIVED_OFFICIAL_PROFILE_ID, ProviderProfile};
+use crate::model_ownership::CurrentProviderSnapshot;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -156,6 +157,37 @@ fn official_profile_from_snapshot(snapshot: &LocalProviderSnapshot) -> ProviderP
 
 pub fn current_provider(codex_home: &Path) -> Result<CurrentProvider> {
     Ok(local_provider(codex_home)?.provider)
+}
+
+/// Read-only snapshot of the user-owned `config.toml` current provider.
+/// Never writes `config.toml`. Parse or schema failures are returned as errors
+/// so the caller can refuse to start instead of auto-correcting.
+pub fn current_provider_snapshot(codex_home: &Path) -> Result<CurrentProviderSnapshot> {
+    let config_path = codex_home.join("config.toml");
+    let config = ConfigManager::new(&config_path)
+        .load()
+        .context("解析 Codex 用户配置失败")?;
+    let document = config.document();
+    let provider_id = active_provider_id(document).to_string();
+    let table = provider_table(document, &provider_id);
+    let base_url = table
+        .and_then(|provider| provider.get("base_url"))
+        .and_then(Item::as_str)
+        .unwrap_or_default();
+    let wire_api = table
+        .and_then(|provider| provider.get("wire_api"))
+        .and_then(Item::as_str)
+        .unwrap_or("responses");
+    let has_provider_scoped_api_key = provider_config_api_key(document, table).is_some();
+    let normalized = crate::model_ownership::normalize_base_url(base_url);
+    let official_endpoint = normalized.is_empty() || is_official_base_url(&normalized);
+    let uses_official_account_auth = official_endpoint && !has_provider_scoped_api_key;
+    Ok(CurrentProviderSnapshot::from_parts(
+        provider_id,
+        normalized,
+        wire_api,
+        uses_official_account_auth,
+    ))
 }
 
 pub fn provider_model_fetch_profile(
@@ -949,6 +981,49 @@ experimental_bearer_token = "sk-relay"
         write_config(home.path(), "");
         fs::write(home.path().join("auth.json"), b"{").unwrap();
         assert!(current_provider(home.path()).is_err());
+    }
+
+    #[test]
+    fn current_provider_snapshot_reads_user_config_without_writing() {
+        let home = TempDir::new().unwrap();
+        let original = third_party_config("chat_completions");
+        write_config(home.path(), &original);
+        let before = fs::read(home.path().join("config.toml")).unwrap();
+
+        let snapshot = current_provider_snapshot(home.path()).unwrap();
+
+        assert_eq!(snapshot.id, "relay");
+        assert_eq!(snapshot.base_url, "https://relay.example/v1");
+        assert_eq!(snapshot.wire_api, "chat_completions");
+        assert!(!snapshot.uses_official_account_auth);
+        assert_eq!(snapshot.ownership_key, "relay#889271d70d18");
+        assert_eq!(fs::read(home.path().join("config.toml")).unwrap(), before);
+    }
+
+    #[test]
+    fn current_provider_snapshot_rejects_malformed_user_config() {
+        let home = TempDir::new().unwrap();
+        write_config(home.path(), "not = [valid");
+        let before = fs::read(home.path().join("config.toml")).unwrap();
+
+        let error = current_provider_snapshot(home.path()).unwrap_err();
+
+        assert!(
+            format!("{error:#}").contains("解析 Codex 用户配置失败")
+                || format!("{error:#}").contains("解析")
+        );
+        assert_eq!(fs::read(home.path().join("config.toml")).unwrap(), before);
+    }
+
+    #[test]
+    fn empty_user_config_snapshot_uses_builtin_openai_defaults() {
+        let home = TempDir::new().unwrap();
+        write_config(home.path(), "");
+        let snapshot = current_provider_snapshot(home.path()).unwrap();
+        assert_eq!(snapshot.id, BUILTIN_OPENAI_PROVIDER_ID);
+        assert!(snapshot.base_url.is_empty());
+        assert_eq!(snapshot.wire_api, "responses");
+        assert!(snapshot.uses_official_account_auth);
     }
 
     #[test]

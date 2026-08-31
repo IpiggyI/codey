@@ -642,6 +642,11 @@ pub struct CodeyConfig {
     /// preserves whether the preflight was authoritative or inconclusive.
     #[serde(skip)]
     pub official_account_status_this_launch: LaunchOfficialAccountStatus,
+    /// Launch-scoped current provider identity from the user-owned Codex
+    /// config. Once attached, current-provider model-list reads use the
+    /// fingerprint key only and never fall back to a bare provider id.
+    #[serde(skip)]
+    pub current_provider_snapshot: Option<crate::model_ownership::CurrentProviderSnapshot>,
 }
 
 /// User-declared operating budget, never proof of upstream model capacity.
@@ -716,6 +721,7 @@ impl Default for CodeyConfig {
             show_account_usage_in_header: true,
             official_account_available_this_launch: false,
             official_account_status_this_launch: LaunchOfficialAccountStatus::Unauthenticated,
+            current_provider_snapshot: None,
         }
     }
 }
@@ -935,8 +941,59 @@ impl CodeyConfig {
             .map(ProviderProfile::provider_id)
     }
 
+    pub fn attach_current_provider_snapshot(
+        &mut self,
+        snapshot: crate::model_ownership::CurrentProviderSnapshot,
+    ) {
+        self.current_provider_snapshot = Some(snapshot);
+    }
+
+    pub fn current_model_list_key(&self) -> Option<&str> {
+        if let Some(snapshot) = &self.current_provider_snapshot {
+            Some(snapshot.ownership_key.as_str())
+        } else {
+            self.current_provider_id()
+        }
+    }
+
+    pub fn model_list_key_for_profile(&self, profile: &ProviderProfile) -> String {
+        if let Some(snapshot) = &self.current_provider_snapshot
+            && profile.provider_id() == snapshot.id
+            && profile.normalized_base_url() == snapshot.base_url
+        {
+            return snapshot.ownership_key.clone();
+        }
+        profile.provider_id().to_string()
+    }
+
+    pub fn migrate_current_provider_model_lists(
+        &mut self,
+        snapshot: &crate::model_ownership::CurrentProviderSnapshot,
+    ) -> crate::model_ownership::MigrationOutcome {
+        let legacy = self
+            .profiles
+            .iter()
+            .map(|profile| {
+                (
+                    profile.provider_id().to_string(),
+                    profile.normalized_base_url(),
+                )
+            })
+            .collect::<Vec<_>>();
+        crate::model_ownership::migrate_model_maps(
+            [
+                &mut self.selected_models_by_provider,
+                &mut self.manual_third_party_models_by_provider,
+                &mut self.declared_official_models_by_provider,
+                &mut self.upstream_models_by_provider,
+            ],
+            legacy,
+            snapshot,
+        )
+    }
+
     pub fn selected_models(&self) -> &[String] {
-        self.current_provider_id()
+        self.current_model_list_key()
             .and_then(|provider_id| self.selected_models_by_provider.get(provider_id))
             .map(Vec::as_slice)
             .unwrap_or_default()
@@ -1109,10 +1166,11 @@ impl CodeyConfig {
             .filter(|profile| self.route_supports_websockets_this_launch(profile))
             .flat_map(|profile| {
                 let provider_id = profile.provider_id();
+                let list_key = self.model_list_key_for_profile(profile);
                 let models = if profile.official_account {
-                    self.enabled_official_route_models(provider_id)
+                    self.enabled_official_route_models(&list_key)
                 } else {
-                    self.enabled_route_models(provider_id)
+                    self.enabled_route_models(&list_key)
                 };
                 models
                     .into_iter()
@@ -1213,21 +1271,21 @@ impl CodeyConfig {
     }
 
     pub fn manual_third_party_models(&self) -> &[String] {
-        self.current_provider_id()
+        self.current_model_list_key()
             .and_then(|provider_id| self.manual_third_party_models_by_provider.get(provider_id))
             .map(Vec::as_slice)
             .unwrap_or_default()
     }
 
     pub fn declared_official_models(&self) -> &[String] {
-        self.current_provider_id()
+        self.current_model_list_key()
             .and_then(|provider_id| self.declared_official_models_by_provider.get(provider_id))
             .map(Vec::as_slice)
             .unwrap_or_default()
     }
 
     pub fn upstream_models_snapshot(&self) -> Option<&[String]> {
-        self.current_provider_id()
+        self.current_model_list_key()
             .and_then(|provider_id| self.upstream_models_by_provider.get(provider_id))
             .map(Vec::as_slice)
     }
@@ -1341,10 +1399,11 @@ impl CodeyConfig {
             if provider_id.is_empty() {
                 continue;
             }
+            let list_key = self.model_list_key_for_profile(profile);
             let models = if profile.official_account {
-                self.enabled_official_route_models(provider_id)
+                self.enabled_official_route_models(&list_key)
             } else {
-                self.enabled_route_models(provider_id)
+                self.enabled_route_models(&list_key)
             };
             for upstream_model in models {
                 let alias = local_router::model_alias(provider_id, &upstream_model);
@@ -1419,7 +1478,8 @@ impl CodeyConfig {
             if profile.official_account {
                 if include_all_official {
                     let provider_id = profile.provider_id();
-                    let enabled = self.enabled_official_route_models(provider_id);
+                    let list_key = self.model_list_key_for_profile(profile);
+                    let enabled = self.enabled_official_route_models(&list_key);
                     let aliases = enabled
                         .iter()
                         .map(|model| runtime_catalog_model_id(profile, model))
@@ -1430,14 +1490,15 @@ impl CodeyConfig {
                 continue;
             }
             let provider_id = profile.provider_id();
-            if let Some(models) = self.upstream_models_by_provider.get(profile.provider_id()) {
+            let list_key = self.model_list_key_for_profile(profile);
+            if let Some(models) = self.upstream_models_by_provider.get(&list_key) {
                 upstream.extend(
                     models
                         .iter()
                         .map(|model| local_router::model_alias(provider_id, model)),
                 );
             }
-            let enabled_models = self.enabled_route_models(provider_id);
+            let enabled_models = self.enabled_route_models(&list_key);
             if !enabled_models.is_empty() {
                 let aliases = enabled_models
                     .iter()
@@ -1457,7 +1518,7 @@ impl CodeyConfig {
         &mut self,
         models: impl IntoIterator<Item = String>,
     ) {
-        let Some(provider_id) = self.current_provider_id().map(ToString::to_string) else {
+        let Some(provider_id) = self.current_model_list_key().map(ToString::to_string) else {
             return;
         };
         self.remember_provider_official_model_support(&provider_id, models);
@@ -3007,6 +3068,62 @@ mod tests {
         let normalized = config.normalize();
 
         assert_eq!(normalized.upstream_models_snapshot(), Some([].as_slice()));
+    }
+
+    #[test]
+    fn current_provider_reads_only_the_fingerprint_key_after_migrate() {
+        let mut config = CodeyConfig::default();
+        config.profiles[0].id = "relay".into();
+        config.profiles[0].source_provider_id = Some("relay".into());
+        config.profiles[0].base_url = "https://relay.example/v1".into();
+        config.active_profile_id = "relay".into();
+        config
+            .selected_models_by_provider
+            .insert("relay".into(), vec!["gpt-relay".into()]);
+        config = config.normalize();
+        let snapshot = crate::model_ownership::CurrentProviderSnapshot::from_parts(
+            "relay",
+            "https://relay.example/v1",
+            "responses",
+            false,
+        );
+        assert!(config.migrate_current_provider_model_lists(&snapshot).changed());
+        config.attach_current_provider_snapshot(snapshot);
+        assert_eq!(config.selected_models(), ["gpt-relay"]);
+        assert_eq!(
+            config.model_list_key_for_profile(&config.profiles[0]),
+            config.current_provider_snapshot.as_ref().unwrap().ownership_key
+        );
+        config
+            .selected_models_by_provider
+            .insert("relay".into(), vec!["stale".into()]);
+        assert_eq!(config.selected_models(), ["gpt-relay"]);
+    }
+
+    #[test]
+    fn current_provider_reads_empty_when_legacy_ownership_is_unproven() {
+        let mut config = CodeyConfig::default();
+        config.profiles[0].id = "relay".into();
+        config.profiles[0].source_provider_id = Some("relay".into());
+        config.profiles[0].base_url = "https://relay.example/v1".into();
+        config.active_profile_id = "relay".into();
+        config
+            .selected_models_by_provider
+            .insert("relay".into(), vec!["old-url-model".into()]);
+        config = config.normalize();
+        let snapshot = crate::model_ownership::CurrentProviderSnapshot::from_parts(
+            "relay",
+            "https://other.example/v1",
+            "responses",
+            false,
+        );
+        assert!(!config.migrate_current_provider_model_lists(&snapshot).changed());
+        config.attach_current_provider_snapshot(snapshot);
+        assert!(config.selected_models().is_empty());
+        assert_eq!(
+            config.model_list_key_for_profile(&config.profiles[0]),
+            "relay"
+        );
     }
 
     #[test]

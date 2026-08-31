@@ -606,8 +606,18 @@ pub(super) fn validate_official_account_config_change(
     Ok(())
 }
 
+pub(super) const USER_CONFIG_PARSE_ERROR_PREFIX: &str = "用户 Codex 配置无法解析，已拒绝启动";
+
 pub(super) async fn prepare_routes_for_current_launch(state: &Arc<AppState>) -> Result<(), String> {
     let home = codex_home().to_path_buf();
+    let snapshot_home = home.clone();
+    let snapshot = tokio::task::spawn_blocking(move || {
+        crate::codex_provider::current_provider_snapshot(&snapshot_home)
+    })
+    .await
+    .map_err(|error| format!("读取当前 Codex provider 快照的任务异常退出：{error}"))?
+    .map_err(|error| format!("{USER_CONFIG_PARSE_ERROR_PREFIX}：{error:#}"))?;
+
     let configured_codex_app_path = state.config.read().await.codex_app_path.clone();
     let official_status = tokio::task::spawn_blocking(move || {
         crate::codex_provider::current_official_account_profile_status_for_launch(
@@ -627,15 +637,21 @@ pub(super) async fn prepare_routes_for_current_launch(state: &Arc<AppState>) -> 
         return Ok(());
     }
     let mut next = route_config_for_official_probe(&previous, official_status)?;
+    let migration = next.migrate_current_provider_model_lists(&snapshot);
 
     if persisted_config_changed(&previous, &next) {
         if next.settings_revision == previous.settings_revision {
             next.settings_revision = previous.settings_revision.saturating_add(1);
         }
-        save_config_to_store(state, &next)
-            .await
-            .map_err(|error| format!("保存启动线路准备结果失败：{error}"))?;
+        save_config_to_store(state, &next).await.map_err(|error| {
+            if migration.changed() {
+                format!("迁移模型清单失败，已保持原数据：{error}")
+            } else {
+                format!("保存启动线路准备结果失败：{error}")
+            }
+        })?;
     }
+    next.attach_current_provider_snapshot(snapshot);
     *state.config.write().await = next;
     Ok(())
 }
@@ -836,6 +852,8 @@ fn persisted_config_changed(previous: &CodeyConfig, next: &CodeyConfig) -> bool 
     next.official_account_available_this_launch = false;
     previous.official_account_status_this_launch = LaunchOfficialAccountStatus::Unauthenticated;
     next.official_account_status_this_launch = LaunchOfficialAccountStatus::Unauthenticated;
+    previous.current_provider_snapshot = None;
+    next.current_provider_snapshot = None;
     previous != next
 }
 
@@ -1132,6 +1150,9 @@ pub async fn clear_route_request_logs(state: &Arc<AppState>) -> Result<Value, St
 pub async fn load_codey_config(state: &Arc<AppState>) -> Result<Value, String> {
     let runtime_running = state.runtime.lock().await.is_some();
     if !runtime_running && let Err(error) = prepare_routes_for_current_launch(state).await {
+        if error.starts_with(USER_CONFIG_PARSE_ERROR_PREFIX) {
+            return Err(error);
+        }
         error_log::record_failure(
             "route_prepare_failed",
             "load_codey_config",
@@ -1140,11 +1161,33 @@ pub async fn load_codey_config(state: &Arc<AppState>) -> Result<Value, String> {
         );
     }
     let imported = ensure_default_route_imported(state).await;
-    let config = if imported {
+    let mut config = if imported {
         sync_provider_models_for_launch(state, true).await
     } else {
         state.config.read().await.clone()
     };
+    if config.current_provider_snapshot.is_none() {
+        let home = codex_home().to_path_buf();
+        let snapshot = tokio::task::spawn_blocking(move || {
+            crate::codex_provider::current_provider_snapshot(&home)
+        })
+        .await
+        .map_err(|error| format!("读取当前 Codex provider 快照的任务异常退出：{error}"))?
+        .map_err(|error| format!("{USER_CONFIG_PARSE_ERROR_PREFIX}：{error:#}"))?;
+        let _config_write_guard = state.config_write_lock.lock().await;
+        let latest = state.config.read().await.clone();
+        let mut next = latest.clone();
+        let migration = next.migrate_current_provider_model_lists(&snapshot);
+        if migration.changed() {
+            next.settings_revision = latest.settings_revision.saturating_add(1);
+            save_config_to_store(state, &next)
+                .await
+                .map_err(|error| format!("迁移模型清单失败，已保持原数据：{error}"))?;
+        }
+        next.attach_current_provider_snapshot(snapshot);
+        *state.config.write().await = next.clone();
+        config = next;
+    }
     let startup_error = state.startup_error.read().await.clone();
     let provider_status = current_provider_status_async(&config).await?;
     let model_state = current_model_state_async(&config).await?;
@@ -1161,6 +1204,7 @@ pub async fn load_codey_config(state: &Arc<AppState>) -> Result<Value, String> {
         "officialAccountAvailable": config.official_account_available_this_launch,
         "officialAccountStatus": config.official_account_status_this_launch,
         "providerStatus": provider_status,
+        "currentProviderSnapshot": json_current_provider_snapshot(&config),
         "modelState": model_state,
         "fastContextToolsStatus": fast_context_tools_status,
     }))
@@ -1724,24 +1768,28 @@ fn retain_route_scoped_config(config: &mut CodeyConfig) {
                 .to_string()
         })
         .collect::<std::collections::HashSet<_>>();
+    let keep_key = |provider_id: &String| {
+        provider_ids.contains(provider_id)
+            || crate::model_ownership::is_ownership_key(provider_id)
+    };
     config
         .model_context_by_provider
-        .retain(|provider_id, _| provider_ids.contains(provider_id));
+        .retain(|provider_id, _| keep_key(provider_id));
     config
         .supports_1m_context_by_provider
-        .retain(|provider_id, _| provider_ids.contains(provider_id));
+        .retain(|provider_id, _| keep_key(provider_id));
     config
         .selected_models_by_provider
-        .retain(|provider_id, _| provider_ids.contains(provider_id));
+        .retain(|provider_id, _| keep_key(provider_id));
     config
         .manual_third_party_models_by_provider
-        .retain(|provider_id, _| provider_ids.contains(provider_id));
+        .retain(|provider_id, _| keep_key(provider_id));
     config
         .declared_official_models_by_provider
-        .retain(|provider_id, _| provider_ids.contains(provider_id));
+        .retain(|provider_id, _| keep_key(provider_id));
     config
         .upstream_models_by_provider
-        .retain(|provider_id, _| provider_ids.contains(provider_id));
+        .retain(|provider_id, _| keep_key(provider_id));
 }
 
 fn current_fast_context_tools_status() -> FastContextToolsStatus {
@@ -1825,6 +1873,7 @@ async fn finish_codey_config_save(
         "status":"ok",
         "config":public_config,
         "providerStatus":provider_status,
+        "currentProviderSnapshot": json_current_provider_snapshot(&saved.config),
         "modelState":model_state,
         "fastContextToolsStatus":saved.fast_context_tools_status,
         "restartRequired":restart_required,
@@ -2230,6 +2279,14 @@ pub(super) async fn hot_reload_runtime_subagent_config(
 
 #[cfg(test)]
 mod subagent_hot_reload_commit_tests;
+
+pub(super) fn json_current_provider_snapshot(config: &CodeyConfig) -> Value {
+    config
+        .current_provider_snapshot
+        .as_ref()
+        .and_then(|snapshot| serde_json::to_value(snapshot).ok())
+        .unwrap_or(Value::Null)
+}
 
 fn redacted_config(config: &CodeyConfig) -> CodeyConfig {
     let mut public = config.clone();

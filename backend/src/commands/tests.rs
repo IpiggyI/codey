@@ -1038,3 +1038,39 @@ async fn shutdown_signal_wakes_every_waiter_without_losing_the_reason() {
         );
     }
 }
+
+#[test]
+fn retain_route_scoped_config_keeps_fingerprint_keys() {
+    let mut profile = ProviderProfile::new("中转");
+    profile.id = "relay".into();
+    profile.source_provider_id = Some("relay".into());
+    let mut config = CodeyConfig {
+        active_profile_id: profile.id.clone(),
+        profiles: vec![profile],
+        ..CodeyConfig::default()
+    };
+    config
+        .selected_models_by_provider
+        .insert("relay".into(), vec!["legacy".into()]);
+    config
+        .selected_models_by_provider
+        .insert("relay#889271d70d18".into(), vec!["fingerprinted".into()]);
+    config
+        .selected_models_by_provider
+        .insert("gone".into(), vec!["stale".into()]);
+
+    retain_route_scoped_config(&mut config);
+
+    assert_eq!(
+        config.selected_models_by_provider.get("relay").unwrap(),
+        &vec!["legacy".to_string()]
+    );
+    assert_eq!(
+        config
+            .selected_models_by_provider
+            .get("relay#889271d70d18")
+            .unwrap(),
+        &vec!["fingerprinted".to_string()]
+    );
+    assert!(!config.selected_models_by_provider.contains_key("gone"));
+}

@@ -81,10 +81,11 @@ fn codey_route_model_uses_official_account(
             continue;
         }
         let provider_id = profile.provider_id();
+        let list_key = config.model_list_key_for_profile(profile);
         let models = if profile.official_account {
-            config.enabled_official_route_models(provider_id)
+            config.enabled_official_route_models(&list_key)
         } else {
-            config.enabled_route_models(provider_id)
+            config.enabled_route_models(&list_key)
         };
         for model in models {
             if requested_model == local_router::model_alias(provider_id, &model) {

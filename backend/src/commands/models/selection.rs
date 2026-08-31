@@ -60,14 +60,15 @@ pub async fn save_selected_models(
         return Err("官方线路不支持添加第三方模型".to_string());
     }
     let provider_id = profile.provider_id().to_string();
+    let list_key = config.model_list_key_for_profile(&profile);
     let upstream_models = config
         .upstream_models_by_provider
-        .get(&provider_id)
+        .get(&list_key)
         .cloned()
         .unwrap_or_default();
     let existing_manual_models = config
         .manual_third_party_models_by_provider
-        .get(&provider_id)
+        .get(&list_key)
         .cloned()
         .unwrap_or_default();
     if !requested_official_models.is_empty() {
@@ -123,33 +124,33 @@ pub async fn save_selected_models(
     )?;
     config
         .upstream_models_by_provider
-        .insert(provider_id.clone(), supported_models);
+        .insert(list_key.clone(), supported_models);
     if declared_official_models.is_empty() {
         config
             .declared_official_models_by_provider
-            .remove(&provider_id);
+            .remove(&list_key);
     } else {
         config
             .declared_official_models_by_provider
-            .insert(provider_id.clone(), declared_official_models);
+            .insert(list_key.clone(), declared_official_models);
     }
     if selected.is_empty() {
-        config.selected_models_by_provider.remove(&provider_id);
+        config.selected_models_by_provider.remove(&list_key);
         config
             .manual_third_party_models_by_provider
-            .remove(&provider_id);
+            .remove(&list_key);
     } else {
         config
             .selected_models_by_provider
-            .insert(provider_id.clone(), selected);
+            .insert(list_key.clone(), selected);
         if manual_third_party_models.is_empty() {
             config
                 .manual_third_party_models_by_provider
-                .remove(&provider_id);
+                .remove(&list_key);
         } else {
             config
                 .manual_third_party_models_by_provider
-                .insert(provider_id, manual_third_party_models);
+                .insert(list_key, manual_third_party_models);
         }
     }
     config = config.normalize();

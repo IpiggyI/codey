@@ -105,6 +105,9 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
   assert.doesNotMatch(sections, /catalog-search|searchQuery|搜索模型\.\.\./);
   assert.match(sections, /第三方线路同时接入统一路由/);
   assert.match(sections, /已接入路由/);
+  assert.match(sections, /aria-label="当前 Codex provider"/);
+  assert.match(sections, /当前 Codex provider/);
+  assert.match(sections, /官方账号鉴权/);
   assert.doesNotMatch(sections, /aria-pressed|route-list-select/);
   assert.doesNotMatch(sections, /role="radiogroup"/);
   assert.doesNotMatch(sections, /activeRouteLocked/);

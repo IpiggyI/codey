@@ -212,6 +212,17 @@ if (import.meta.env.DEV) {
         },
       };
     };
+    const previewCurrentProviderSnapshot = () => {
+      const profile = activePreviewProfile();
+      const id = profile ? routeProviderId(profile) : "openai";
+      return {
+        id,
+        baseUrl: (profile?.baseUrl || "").replace(/\/+$/, ""),
+        wireApi: "responses",
+        usesOfficialAccountAuth: profile?.authMode === "officialAccount",
+        ownershipKey: id,
+      };
+    };
     const previewModelStateForProfile = (profile: Profile): ModelState => {
       const providerId = routeProviderId(profile);
       const official = profile.authMode === "officialAccount";
@@ -327,6 +338,7 @@ if (import.meta.env.DEV) {
           modelState: previewModelState,
           startupError: undefined,
           providerStatus: previewProviderStatus(),
+          currentProviderSnapshot: previewCurrentProviderSnapshot(),
           fastContextToolsStatus: {
             userConfigured: false,
             detectionFailed: false,
@@ -591,6 +603,7 @@ if (import.meta.env.DEV) {
           config: previewConfig,
           modelState: previewModelState,
           providerStatus: previewProviderStatus(),
+          currentProviderSnapshot: previewCurrentProviderSnapshot(),
           fastContextToolsStatus: {
             userConfigured: false,
             detectionFailed: false,
@@ -603,6 +616,7 @@ if (import.meta.env.DEV) {
           config: previewConfig,
           modelState: previewModelState,
           providerStatus: previewProviderStatus(),
+          currentProviderSnapshot: previewCurrentProviderSnapshot(),
           restartRequired: false,
         };
       }
@@ -645,6 +659,7 @@ if (import.meta.env.DEV) {
           config: previewConfig,
           modelState: previewModelState,
           providerStatus: previewProviderStatus(),
+          currentProviderSnapshot: previewCurrentProviderSnapshot(),
           restartRequired: false,
           modelHotReloaded: true,
         };
@@ -690,6 +705,7 @@ if (import.meta.env.DEV) {
           modelState: previewModelState,
           routeModelState: previewModelStateForProfile(route),
           providerStatus: previewProviderStatus(),
+          currentProviderSnapshot: previewCurrentProviderSnapshot(),
           models,
           restartRequired: false,
           modelHotReloaded: true,

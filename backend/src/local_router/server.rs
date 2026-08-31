@@ -567,8 +567,7 @@ impl RouterSnapshot {
             };
             target.context_config = target.context_config_fingerprint();
             target.websocket_config = target.websocket_config_fingerprint();
-            for model in route_models(config, profile, provider_id) {
-                let alias_target = AliasTarget {
+            for model in route_models(config, profile) {                let alias_target = AliasTarget {
                     provider_id: provider_id.to_string(),
                     model: model.clone(),
                 };
@@ -880,12 +879,12 @@ impl<'a> RouteResolver<'a> {
 pub(crate) fn route_models(
     config: &CodeyConfig,
     profile: &crate::config::ProviderProfile,
-    provider_id: &str,
 ) -> Vec<String> {
+    let list_key = config.model_list_key_for_profile(profile);
     let mut models = if profile.official_account {
-        config.enabled_official_route_models(provider_id)
+        config.enabled_official_route_models(&list_key)
     } else {
-        config.enabled_route_models(provider_id)
+        config.enabled_route_models(&list_key)
     };
     let supports_auto_review = profile.official_account || profile.supports_auto_review;
     if supports_auto_review

@@ -201,40 +201,57 @@ pub(crate) fn current_model_state(
             .map_err(|error| format!("读取当前 Codex 线路失败：{error:#}"))?;
         return native_model_state_for_provider(config, &provider, codex_home());
     }
-    let active_profile = config
+    if let Some(profile) = config
         .profiles
         .iter()
         .find(|profile| profile.enabled && profile.id == config.active_profile_id)
-        .or_else(|| config.profiles.iter().find(|profile| profile.enabled));
-    let Some(active_profile) = active_profile else {
-        return Ok(model_catalog::ModelSelectionState::default());
-    };
-    let provider_id = active_profile.provider_id();
-    let official = active_profile.official_account && config.official_account_available_this_launch;
-    let selected_models = if official {
-        config
-            .selected_models_by_provider
-            .get(provider_id)
-            .cloned()
-            .unwrap_or_default()
-    } else {
-        config.enabled_route_models(provider_id)
-    };
-    let requested_default_model = config.default_model_for_profile(active_profile);
+        .or_else(|| config.profiles.iter().find(|profile| profile.enabled))
+    {
+        return model_state_for_profile(config, profile);
+    }
+    let official = false;
+    let selected_models = config
+        .current_model_list_key()
+        .map(|provider_id| config.enabled_route_models(provider_id))
+        .unwrap_or_default();
     model_catalog::selection_state_with_manual_models(
         codex_home(),
         official,
-        config
-            .upstream_models_by_provider
-            .get(provider_id)
-            .map(Vec::as_slice),
+        config.upstream_models_snapshot(),
         &selected_models,
-        config
-            .manual_third_party_models_by_provider
-            .get(provider_id)
-            .map(Vec::as_slice)
-            .unwrap_or_default(),
-        requested_default_model.as_deref(),
+        config.manual_third_party_models(),
+        None,
+    )
+    .map_err(|error| error.to_string())
+}
+
+pub(crate) fn model_state_for_profile(
+    config: &CodeyConfig,
+    profile: &ProviderProfile,
+) -> Result<model_catalog::ModelSelectionState, String> {
+    let list_key = config.model_list_key_for_profile(profile);
+    let official = profile.official_account && config.official_account_available_this_launch;
+    let selected_models = if official {
+        config.enabled_official_route_models(&list_key)
+    } else {
+        config.enabled_route_models(&list_key)
+    };
+    let upstream_models = config
+        .upstream_models_by_provider
+        .get(&list_key)
+        .map(Vec::as_slice);
+    let manual_models = config
+        .manual_third_party_models_by_provider
+        .get(&list_key)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    model_catalog::selection_state_with_manual_models(
+        codex_home(),
+        official,
+        upstream_models,
+        &selected_models,
+        manual_models,
+        config.default_model_for_profile(profile).as_deref(),
     )
     .map_err(|error| error.to_string())
 }

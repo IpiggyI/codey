@@ -40,12 +40,18 @@ pub(crate) fn config_after_route_deletion(
     if previous.profiles.len() <= 1 {
         return Err("至少需要保留一条线路".to_string());
     }
-    let removed_provider_id = previous
+    let removed_keys = previous
         .profiles
         .iter()
         .find(|profile| profile.id == route_id)
-        .map(|profile| profile.provider_id().to_string())
+        .map(|profile| {
+            (
+                profile.provider_id().to_string(),
+                previous.model_list_key_for_profile(profile),
+            )
+        })
         .ok_or_else(|| "找不到要删除的线路".to_string())?;
+    let (removed_provider_id, removed_list_key) = removed_keys;
     let mut config = previous.clone();
     config
         .model_context_by_provider
@@ -55,18 +61,12 @@ pub(crate) fn config_after_route_deletion(
         .supports_1m_context_by_provider
         .remove(&removed_provider_id);
     config.profiles.retain(|profile| profile.id != route_id);
-    config
-        .selected_models_by_provider
-        .remove(&removed_provider_id);
-    config
-        .manual_third_party_models_by_provider
-        .remove(&removed_provider_id);
-    config
-        .declared_official_models_by_provider
-        .remove(&removed_provider_id);
-    config
-        .upstream_models_by_provider
-        .remove(&removed_provider_id);
+    for map_key in [&removed_provider_id, &removed_list_key] {
+        config.selected_models_by_provider.remove(map_key);
+        config.manual_third_party_models_by_provider.remove(map_key);
+        config.declared_official_models_by_provider.remove(map_key);
+        config.upstream_models_by_provider.remove(map_key);
+    }
     if config.active_profile_id == route_id
         && let Some(first) = config.profiles.first()
     {
@@ -124,9 +124,10 @@ pub async fn fetch_route_models(
     if latest_profile.provider_id() != provider_id {
         return Err("同步模型期间线路接入配置已变化，请重试".to_string());
     }
+    let list_key = latest.model_list_key_for_profile(latest_profile);
     latest = config_with_provider_model_sync(
         &latest,
-        &provider_id,
+        &list_key,
         fetched_models.clone(),
         codex_home(),
     );
@@ -201,7 +202,9 @@ pub(crate) fn config_with_provider_model_sync(
             .insert(provider_id.to_string(), manual_models);
     }
     next = next.normalize();
-    if next.current_provider_id() == Some(provider_id) {
+    if next.current_model_list_key() == Some(provider_id)
+        || next.current_provider_id() == Some(provider_id)
+    {
         subagent_policy::reconcile_for_current_provider(&mut next, codex_home, false);
     }
     next

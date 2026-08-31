@@ -460,13 +460,13 @@ async fn prepare_startup_model_catalog(
         config.official_account_available_this_launch && use_builtin_official_catalog;
     let refresh_upstream_models =
         (!use_builtin_official_catalog).then_some(runtime_upstream_models);
-    let current_provider_id = current_profile.provider_id();
+    let list_key = config.model_list_key_for_profile(current_profile);
     let upstream_models = current_profile
         .enabled
         .then(|| {
             config
                 .upstream_models_by_provider
-                .get(current_provider_id)
+                .get(&list_key)
                 .cloned()
         })
         .flatten();
@@ -475,18 +475,18 @@ async fn prepare_startup_model_catalog(
     } else if official_provider {
         config
             .selected_models_by_provider
-            .get(current_provider_id)
+            .get(&list_key)
             .cloned()
             .unwrap_or_default()
     } else {
-        config.enabled_route_models(current_provider_id)
+        config.enabled_route_models(&list_key)
     };
     let manual_models = current_profile
         .enabled
         .then(|| {
             config
                 .manual_third_party_models_by_provider
-                .get(current_provider_id)
+                .get(&list_key)
                 .cloned()
         })
         .flatten()

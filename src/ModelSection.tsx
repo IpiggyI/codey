@@ -16,8 +16,14 @@ import {
   IconWorld,
 } from "@tabler/icons-react";
 
-import type { Config, ModelContextConfig, ModelState, Profile, ProviderStatus } from "./App.types";
-import {
+import type {
+  Config,
+  CurrentProviderSnapshot,
+  ModelContextConfig,
+  ModelState,
+  Profile,
+  ProviderStatus,
+} from "./App.types";import {
   Badge,
   Button,
   Card,
@@ -34,7 +40,7 @@ import {
   Switch,
 } from "./components/mantine";
 import { modelIdsEqual, modelKey, uniqueModelIds } from "./modelIds";
-import { globalDefaultForRoute, routeProviderId } from "./modelRoutes";
+import { globalDefaultForRoute, modelListKey, routeProviderId } from "./modelRoutes";
 import { SETTINGS_OVERLAY_Z_INDEX } from "./overlay.constants";
 import { validateThirdPartyRouteShortName } from "./routeShortNames";
 import { flushCardClass } from "./uiClasses";
@@ -73,6 +79,7 @@ export function ModelContextFields({ model, policy, disabled, onChange }: {
 type ModelSectionProps = {
   config: Config;
   currentProvider: ProviderStatus["provider"] | null;
+  currentProviderSnapshot: CurrentProviderSnapshot | null;
   officialAccountAvailable: boolean;
   popupContainer: HTMLElement | null;
   modelState: ModelState;
@@ -171,6 +178,7 @@ const routeProtocolOptions: Array<{
 function ModelSectionComponent({
   config,
   currentProvider,
+  currentProviderSnapshot,
   officialAccountAvailable,
   popupContainer,
   modelState,
@@ -278,7 +286,8 @@ function ModelSectionComponent({
       return visibleProfiles.filter((profile) => profile.enabled !== false).map((profile) => {
         const providerId = routeProviderId(profile);
         const official = profile.authMode === "officialAccount";
-        const configuredModels = config.selectedModelsByProvider[providerId] || [];
+        const listKey = modelListKey(profile, currentProviderSnapshot);
+        const configuredModels = config.selectedModelsByProvider[listKey] || [];
         const models = routeConfigReadOnly
           ? official
             ? uniqueModelIds(
@@ -293,7 +302,7 @@ function ModelSectionComponent({
               : officialCatalog
             : uniqueModelIds([
                 ...configuredModels,
-                ...(config.declaredOfficialModelsByProvider[providerId] || []),
+                ...(config.declaredOfficialModelsByProvider[listKey] || []),
               ]);
         return {
           profile,
@@ -306,8 +315,14 @@ function ModelSectionComponent({
         };
       });
     },
-    [config, modelState, officialCatalog, routeConfigReadOnly, visibleProfiles],
-  );
+    [
+      config,
+      currentProviderSnapshot,
+      modelState,
+      officialCatalog,
+      routeConfigReadOnly,
+      visibleProfiles,
+    ],  );
   const modelGroupByProviderId = useMemo(
     () => new Map(modelGroups.map((group) => [group.providerId, group])),
     [modelGroups],
@@ -340,11 +355,10 @@ function ModelSectionComponent({
     setRouteValidationAttempted(false);
     setRouteApiKeyVisible(false);
     if (official) {
-      const providerId = routeProviderId(profile);
-      const configuredModels = config.selectedModelsByProvider[providerId] || [];
-      setOfficial1MModelDraft(config.supports1MContextByProvider?.[providerId] || []);
-      setOfficialContextDraft(config.modelContextByProvider?.[providerId] || {});
-      setOfficialModelDraft(
+      const listKey = modelListKey(profile, currentProviderSnapshot);
+      const configuredModels = config.selectedModelsByProvider[listKey] || [];
+      setOfficial1MModelDraft(config.supports1MContextByProvider?.[listKey] || []);
+      setOfficialContextDraft(config.modelContextByProvider?.[listKey] || {});      setOfficialModelDraft(
         configuredModels.length > 0
           ? configuredModels
           : officialCatalog,
@@ -439,6 +453,40 @@ function ModelSectionComponent({
           )}
         </div>
       </div>
+
+      {currentProviderSnapshot ? (
+        <aside
+          className="current-provider-snapshot"
+          aria-label="当前 Codex provider"
+        >
+          <div className="current-provider-snapshot-heading">
+            <strong>当前 Codex provider</strong>
+            <small>只读来自你的 Codex 配置，Codey 不会改写它</small>
+          </div>
+          <dl className="current-provider-snapshot-fields">
+            <div>
+              <dt>标识</dt>
+              <dd title={currentProviderSnapshot.id}>
+                {currentProviderSnapshot.id}
+              </dd>
+            </div>
+            <div>
+              <dt>地址</dt>
+              <dd title={currentProviderSnapshot.baseUrl || "（默认）"}>
+                {currentProviderSnapshot.baseUrl || "（默认）"}
+              </dd>
+            </div>
+            <div>
+              <dt>接口格式</dt>
+              <dd>{currentProviderSnapshot.wireApi}</dd>
+            </div>
+            <div>
+              <dt>官方账号鉴权</dt>
+              <dd>{currentProviderSnapshot.usesOfficialAccountAuth ? "是" : "否"}</dd>
+            </div>
+          </dl>
+        </aside>
+      ) : null}
 
       <Card className={`route-card ${flushCardClass}`}>
         <div

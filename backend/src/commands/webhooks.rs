@@ -782,10 +782,11 @@ fn webhook_display_model(config: &CodeyConfig, requested_model: &str) -> String 
             return format_webhook_model_name(profile, model);
         }
 
+        let list_key = config.model_list_key_for_profile(profile);
         let enabled_models = if profile.official_account {
-            config.enabled_official_route_models(provider_id)
+            config.enabled_official_route_models(&list_key)
         } else {
-            config.enabled_route_models(provider_id)
+            config.enabled_route_models(&list_key)
         };
         if enabled_models
             .iter()

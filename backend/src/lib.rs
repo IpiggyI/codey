@@ -22,6 +22,7 @@ mod message_delete;
 mod model_catalog;
 mod model_id;
 mod model_list;
+mod model_ownership;
 #[cfg(target_os = "macos")]
 mod native_update_ui;
 mod notifications;

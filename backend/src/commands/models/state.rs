@@ -335,19 +335,20 @@ pub(crate) fn renderer_route_model_catalog(
         if provider_id.is_empty() {
             continue;
         }
+        let list_key = config.model_list_key_for_profile(profile);
         let selected_models = if profile.official_account {
-            config.enabled_official_route_models(&provider_id)
+            config.enabled_official_route_models(&list_key)
         } else {
-            config.enabled_route_models(&provider_id)
+            config.enabled_route_models(&list_key)
         };
         let manual_models = config
             .manual_third_party_models_by_provider
-            .get(&provider_id)
+            .get(&list_key)
             .map(Vec::as_slice)
             .unwrap_or_default();
         let upstream_models = config
             .upstream_models_by_provider
-            .get(&provider_id)
+            .get(&list_key)
             .map(Vec::as_slice);
         let default_model = config.default_model_for_profile(profile);
         let state = if provider_id == config.current_provider_id().unwrap_or_default() {

@@ -194,6 +194,14 @@ export type PluginMarketplaceStatus = {
   message?: string;
 };
 
+export type CurrentProviderSnapshot = {
+  id: string;
+  baseUrl: string;
+  wireApi: string;
+  usesOfficialAccountAuth: boolean;
+  ownershipKey: string;
+};
+
 export type ProviderStatus = {
   changed: boolean;
   provider: {

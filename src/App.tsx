@@ -23,7 +23,7 @@ import type { NotificationChannel } from "./notifications";
 import { errorText, withTimeout } from "./appUtils";
 import { formatBytes } from "./formatters";
 import { modelIdsEqual, uniqueModelIds } from "./modelIds";
-import { globalDefaultForRoute, routeProviderId } from "./modelRoutes";
+import { globalDefaultForRoute, modelListKey } from "./modelRoutes";
 import { CodeyBrandMark, SettingsModalShell } from "./SettingsModalShell";
 import { useModelSelection } from "./useModelSelection";
 import type { CrashpadPendingStats, TraceLogStats } from "./traceLogTypes";
@@ -40,6 +40,7 @@ import {
 import { useStableEvent } from "./useStableEvent";
 import type {
   AppProps,
+  CurrentProviderSnapshot,
   ProviderStatus,
   Config,
   CrashpadCleanup,
@@ -72,8 +73,9 @@ function thirdPartyRouteModelState(
   config: Config,
   route: Profile,
   catalog: ModelState,
+  snapshot?: CurrentProviderSnapshot | null,
 ): ModelState {
-  const providerId = routeProviderId(route);
+  const providerId = modelListKey(route, snapshot);
   const selectedModels = uniqueModelIds([
     ...(config.selectedModelsByProvider[providerId] || []),
     ...(config.declaredOfficialModelsByProvider[providerId] || []),
@@ -125,6 +127,8 @@ export function App({
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(
     null,
   );
+  const [currentProviderSnapshot, setCurrentProviderSnapshot] =
+    useState<CurrentProviderSnapshot | null>(null);
   const [fastContextToolsStatus, setFastContextToolsStatus] =
     useState<FastContextToolsStatus>(UNKNOWN_FAST_CONTEXT_TOOLS_STATUS);
   const [dirty, setDirty] = useState(false);
@@ -255,10 +259,12 @@ export function App({
         startupError?: string;
         officialAccountAvailable?: boolean;
         providerStatus?: ProviderStatus;
+        currentProviderSnapshot?: CurrentProviderSnapshot | null;
         fastContextToolsStatus?: FastContextToolsStatus;
       }>("load_codey_config");
       setPersistedConfig(result.config);
       setProviderStatus(result.providerStatus ?? null);
+      setCurrentProviderSnapshot(result.currentProviderSnapshot ?? null);
       if (typeof result.officialAccountAvailable === "boolean") {
         setStatus((current) => ({
           ...current,
@@ -318,6 +324,7 @@ export function App({
     const result = await invoke<{
       config: Config;
       providerStatus?: ProviderStatus;
+      currentProviderSnapshot?: CurrentProviderSnapshot | null;
       modelState?: ModelState;
       restartRequired?: boolean;
       modelHotReloaded?: boolean;
@@ -348,6 +355,9 @@ export function App({
       }),
     );
     if (result.providerStatus) setProviderStatus(result.providerStatus);
+    if (result.currentProviderSnapshot !== undefined) {
+      setCurrentProviderSnapshot(result.currentProviderSnapshot);
+    }
     if (result.modelState) setModelState(result.modelState);
     if (typeof result.restartRequired === "boolean") {
       setStatus((current) => ({
@@ -443,11 +453,13 @@ export function App({
       const result = await invoke<{
         config: Config;
         providerStatus: ProviderStatus;
+        currentProviderSnapshot?: CurrentProviderSnapshot | null;
         modelState: ModelState;
         restartRequired?: boolean;
       }>("sync_current_provider");
       setPersistedConfig(result.config);
       setProviderStatus(result.providerStatus);
+      setCurrentProviderSnapshot(result.currentProviderSnapshot ?? null);
       setModelState(result.modelState);
       setStatus((current) => ({
         ...current,
@@ -476,11 +488,15 @@ export function App({
   function applyRouteResult(result: {
     config: Config;
     providerStatus?: ProviderStatus;
+    currentProviderSnapshot?: CurrentProviderSnapshot | null;
     modelState?: ModelState;
     restartRequired?: boolean;
   }) {
     setPersistedConfig(result.config);
     if (result.providerStatus) setProviderStatus(result.providerStatus);
+    if (result.currentProviderSnapshot !== undefined) {
+      setCurrentProviderSnapshot(result.currentProviderSnapshot);
+    }
     if (result.modelState) setModelState(result.modelState);
     if (typeof result.restartRequired === "boolean") {
       setStatus((current) => ({
@@ -635,7 +651,12 @@ export function App({
       } catch (error) {
         const warning = `自动同步失败：${errorText(error)}。仍可手动录入当前线路支持的模型 ID。`;
         openModelPicker(
-          thirdPartyRouteModelState(savedConfig, savedRoute, modelState),
+          thirdPartyRouteModelState(
+            savedConfig,
+            savedRoute,
+            modelState,
+            currentProviderSnapshot,
+          ),
           warning,
           savedRoute.id,
           savedRoute.supportsAutoReview === true,
@@ -694,7 +715,7 @@ export function App({
     if (!config) return;
     const profile = config.profiles.find((candidate) => candidate.id === routeId);
     if (!profile) return;
-    const providerId = profile.sourceProviderId || profile.id;
+    const providerId = modelListKey(profile, currentProviderSnapshot);
     const configuredOfficialModels = config.selectedModelsByProvider[providerId] || [];
     const enabledModels = profile.authMode === "officialAccount"
       ? configuredOfficialModels.length > 0
@@ -1224,6 +1245,7 @@ export function App({
             <ModelSection
               config={config}
               currentProvider={provider ?? null}
+              currentProviderSnapshot={currentProviderSnapshot}
               officialAccountAvailable={status.officialAccountAvailable === true}
               popupContainer={popupContainer}
               modelState={modelState}

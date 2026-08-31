@@ -85,6 +85,10 @@
     flex-direction: column;
   }
 
+  .current-provider-snapshot-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .provider-model-group-actions {
     justify-content: flex-start;
   }

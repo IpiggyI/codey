@@ -435,7 +435,11 @@ async fn runtime_start_failure_context(state: &Arc<AppState>, restart: bool, err
 }
 
 fn classify_runtime_start_error(error: &str) -> &'static str {
-    if error.contains("认证诊断：") || error.contains("没有可用的官方账号登录") {
+    if error.starts_with(super::USER_CONFIG_PARSE_ERROR_PREFIX)
+        || error.contains("解析 Codex 用户配置失败")
+    {
+        "user_config_invalid"
+    } else if error.contains("认证诊断：") || error.contains("没有可用的官方账号登录") {
         "official_auth_unavailable"
     } else if error.contains("Codex App") || error.contains("codex.exe") {
         "codex_app_unavailable"

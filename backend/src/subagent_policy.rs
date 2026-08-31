@@ -20,20 +20,34 @@ pub(crate) fn reconcile_for_current_provider(
     official_provider: bool,
 ) {
     prepare_subagent_roles(config);
-    let selected_models = if official_provider {
-        config.selected_models().to_vec()
-    } else {
-        config
-            .current_provider_id()
-            .map(|provider_id| config.enabled_route_models(provider_id))
-            .unwrap_or_default()
-    };
+    let list_key = config
+        .active_profile()
+        .map(|profile| config.model_list_key_for_profile(&profile));
+    let selected_models = list_key
+        .as_deref()
+        .map(|key| {
+            if official_provider {
+                config.enabled_official_route_models(key)
+            } else {
+                config.enabled_route_models(key)
+            }
+        })
+        .unwrap_or_default();
+    let upstream_models = list_key
+        .as_deref()
+        .and_then(|key| config.upstream_models_by_provider.get(key))
+        .map(Vec::as_slice);
+    let manual_models = list_key
+        .as_deref()
+        .and_then(|key| config.manual_third_party_models_by_provider.get(key))
+        .map(Vec::as_slice)
+        .unwrap_or_default();
     let state = model_catalog::selection_state_with_manual_models(
         codex_home,
         official_provider,
-        config.upstream_models_snapshot(),
+        upstream_models,
         &selected_models,
-        config.manual_third_party_models(),
+        manual_models,
         Some(&config.subagent_model),
     )
     .ok();

@@ -184,9 +184,16 @@ pub(crate) async fn model_state_for_route_async(
     config: &CodeyConfig,
     route_id: &str,
 ) -> Result<model_catalog::ModelSelectionState, String> {
-    let mut scoped = config.clone();
-    scoped.active_profile_id = route_id.to_string();
-    current_model_state_async(&scoped).await
+    let profile = config
+        .profiles
+        .iter()
+        .find(|profile| profile.id == route_id)
+        .cloned()
+        .ok_or_else(|| "找不到要同步模型的线路".to_string())?;
+    let config = config.clone();
+    tokio::task::spawn_blocking(move || model_state_for_profile(&config, &profile))
+        .await
+        .map_err(|error| format!("读取线路模型目录的任务异常退出：{error}"))?
 }
 
 pub(crate) fn current_renderer_model_catalog(config: &CodeyConfig) -> Result<Value, String> {

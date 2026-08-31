@@ -1,8 +1,26 @@
-import type { Config, Profile } from "./App.types";
+import type { Config, CurrentProviderSnapshot, Profile } from "./App.types";
 import { modelIdsEqual } from "./modelIds";
 
 export function routeProviderId(profile: Profile) {
   return profile.sourceProviderId || profile.id;
+}
+
+export function normalizeProviderBaseUrl(baseUrl: string) {
+  return baseUrl.trim().replace(/\/+$/, "");
+}
+
+export function modelListKey(
+  profile: Profile,
+  snapshot?: CurrentProviderSnapshot | null,
+) {
+  if (
+    snapshot?.ownershipKey
+    && routeProviderId(profile) === snapshot.id
+    && normalizeProviderBaseUrl(profile.baseUrl || "") === snapshot.baseUrl
+  ) {
+    return snapshot.ownershipKey;
+  }
+  return routeProviderId(profile);
 }
 
 function encodeRouteComponent(value: string) {

@@ -88,6 +88,7 @@ pub async fn sync_current_provider_command(state: &Arc<AppState>) -> Result<Valu
         "status":"ok",
         "config":public_config,
         "providerStatus":provider_status,
+        "currentProviderSnapshot": super::json_current_provider_snapshot(&config),
         "modelState":model_state,
         "restartRequired":restart_required,
     }))
@@ -303,7 +304,7 @@ pub(crate) fn config_with_current_provider_models(
     config: &CodeyConfig,
     models: Vec<String>,
 ) -> CodeyConfig {
-    let Some(provider_id) = config.current_provider_id().map(ToString::to_string) else {
+    let Some(provider_id) = config.current_model_list_key().map(ToString::to_string) else {
         return config.clone();
     };
     let mut next = config.clone();
@@ -350,10 +351,22 @@ pub(crate) fn set_provider_auto_review_support(
     provider_id: &str,
     supported: bool,
 ) {
+    let profile_id = config.profiles.iter().find_map(|profile| {
+        if profile.official_account {
+            return None;
+        }
+        if profile.provider_id() == provider_id
+            || config.model_list_key_for_profile(profile) == provider_id
+        {
+            Some(profile.id.clone())
+        } else {
+            None
+        }
+    });
     if let Some(profile) = config
         .profiles
         .iter_mut()
-        .find(|profile| profile.provider_id() == provider_id && !profile.official_account)
+        .find(|profile| Some(profile.id.as_str()) == profile_id.as_deref())
     {
         profile.supports_auto_review = supported;
     }
@@ -365,7 +378,7 @@ pub(crate) fn config_with_current_provider_model_sync(
     synced: bool,
     codex_home: &std::path::Path,
 ) -> CodeyConfig {
-    let Some(provider_id) = config.current_provider_id().map(ToString::to_string) else {
+    let Some(provider_id) = config.current_model_list_key().map(ToString::to_string) else {
         return config.clone();
     };
     let supports_auto_review = models_support_auto_review(&provider_models);
