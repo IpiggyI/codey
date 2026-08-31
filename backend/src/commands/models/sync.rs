@@ -64,10 +64,6 @@ pub(crate) fn add_subagent_hot_reload_to_response(
 }
 
 pub async fn sync_current_provider_command(state: &Arc<AppState>) -> Result<Value, String> {
-    if !state.config.read().await.local_router_enabled {
-        let _provider_model_sync_guard = state.provider_model_sync_lock.lock().await;
-        return sync_native_current_provider_models(state, None).await;
-    }
     crate::commands::prepare_routes_for_current_launch(state).await?;
     let current_provider = current_codex_provider().await?;
     let provider_status = if current_provider.official {
@@ -88,156 +84,10 @@ pub async fn sync_current_provider_command(state: &Arc<AppState>) -> Result<Valu
         "status":"ok",
         "config":public_config,
         "providerStatus":provider_status,
-        "currentProviderSnapshot": super::json_current_provider_snapshot(&config),
+        "currentProviderSnapshot": super::super::json_current_provider_snapshot(&config),
         "modelState":model_state,
         "restartRequired":restart_required,
     }))
-}
-
-pub(crate) struct NativeProviderContext {
-    pub(crate) provider: codex_provider::CurrentProvider,
-    pub(crate) fetch_profile: Option<ProviderProfile>,
-    pub(crate) route_id: String,
-}
-
-pub(crate) async fn native_provider_context(
-    config: &CodeyConfig,
-) -> Result<NativeProviderContext, String> {
-    let config = config.clone();
-    let home = codex_home().to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        let provider = codex_provider::current_provider(&home)
-            .map_err(|error| format!("读取当前 Codex 线路失败：{error:#}"))?;
-        if provider.official {
-            return Ok(NativeProviderContext {
-                route_id: provider.id.clone(),
-                provider,
-                fetch_profile: None,
-            });
-        }
-        let (projected, _) = codex_provider::sync_current_third_party_provider(&config, &home)
-            .map_err(|error| format!("读取当前 Codex 线路失败：{error:#}"))?;
-        let fetch_profile = projected
-            .active_profile()
-            .ok_or_else(|| "当前 Codex 线路缺少可用的 Provider 配置".to_string())?;
-        Ok(NativeProviderContext {
-            route_id: fetch_profile.id.clone(),
-            provider,
-            fetch_profile: Some(fetch_profile),
-        })
-    })
-    .await
-    .map_err(|error| format!("读取当前 Codex 线路任务异常退出：{error}"))?
-}
-
-pub(crate) async fn sync_native_current_provider_models(
-    state: &Arc<AppState>,
-    expected_route: Option<(String, u64)>,
-) -> Result<Value, String> {
-    let previous = state.config.read().await.clone();
-    if previous.local_router_enabled {
-        return Err("本地路由已启用，请使用线路模型同步".to_string());
-    }
-    if let Some((_, expected_revision)) = expected_route.as_ref() {
-        ensure_route_revision(&previous, *expected_revision)?;
-    }
-    let context = native_provider_context(&previous).await?;
-    if let Some((expected_route_id, _)) = expected_route.as_ref()
-        && expected_route_id.trim() != context.route_id
-        && expected_route_id.trim() != context.provider.id
-    {
-        return Err("只能同步当前 Codex 线路的模型".to_string());
-    }
-    let visible_fetched_models = if let Some(fetch_profile) = context.fetch_profile.clone() {
-        fetch_profile.validate()?;
-        let fetched_models = fetch_provider_models(fetch_profile, &state.http_client)
-            .await
-            .map_err(|error| error.to_string())?;
-        regular_route_models(fetched_models)
-    } else {
-        Vec::new()
-    };
-
-    let current_provider = current_codex_provider().await?;
-    if current_provider != context.provider {
-        return Err("同步模型期间当前 Codex 线路已变化，请重试".to_string());
-    }
-    let _config_write_guard = state.config_write_lock.lock().await;
-    let latest = state.config.read().await.clone();
-    if latest.local_router_enabled {
-        return Err("同步模型期间本地路由已启用，请重试".to_string());
-    }
-    if latest.settings_revision != previous.settings_revision {
-        return Err("Codey 设置在同步模型期间已更新，请重新载入后再操作".to_string());
-    }
-    if let Some((_, expected_revision)) = expected_route.as_ref() {
-        ensure_route_revision(&latest, *expected_revision)?;
-    }
-
-    let mut next = latest.clone();
-    if !context.provider.official {
-        let mut cached_models = visible_fetched_models.clone();
-        if let Some(manual_models) = next
-            .manual_third_party_models_by_provider
-            .get(&context.provider.id)
-        {
-            cached_models = preserve_selected_third_party_models(cached_models, manual_models);
-        }
-        next.upstream_models_by_provider
-            .insert(context.provider.id.clone(), cached_models.clone());
-        next.retain_1m_context_models(&context.provider.id, &cached_models);
-    }
-    let model_state = native_model_state_for_provider(&next, &context.provider, codex_home())?;
-    let visible_models = if context.provider.official {
-        let supported = model_state
-            .official_models
-            .iter()
-            .filter(|model| model.supported)
-            .map(|model| model.slug.clone())
-            .collect::<Vec<_>>();
-        if supported.is_empty() {
-            model_state.official_model_ids.clone()
-        } else {
-            supported
-        }
-    } else {
-        visible_fetched_models
-    };
-    reconcile_subagent_models_for_mode(&mut next, &model_state);
-    next = next.normalize();
-    let changed = next != latest;
-    if changed {
-        next.settings_revision = latest.settings_revision.saturating_add(1);
-        save_config_to_store(state, &next)
-            .await
-            .map_err(|error| format!("保存当前线路模型同步结果失败：{error}"))?;
-        *state.config.write().await = next.clone();
-    }
-    drop(_config_write_guard);
-
-    let hot_reload = hot_reload_runtime_models(state, &next, &model_state).await;
-    let subagent_hot_reload = if changed {
-        hot_reload_runtime_subagent_config(state, &next).await
-    } else {
-        SubagentHotReloadOutcome::default()
-    };
-    let restart_required = runtime_config_requires_restart(state, &next).await;
-    let provider_status = codex_provider::ProviderStatus {
-        changed,
-        provider: context.provider,
-    };
-    Ok(add_subagent_hot_reload_to_response(
-        hot_reload.add_to_response(json!({
-            "status": "ok",
-            "config": redacted_config(&next),
-            "providerStatus": provider_status,
-            "models": visible_models,
-            "modelState": model_state,
-            "routeModelState": model_state,
-            "restartRequired": restart_required,
-        })),
-        subagent_hot_reload,
-    ))
 }
 
 pub(crate) async fn current_codex_provider() -> Result<codex_provider::CurrentProvider, String> {
@@ -482,37 +332,38 @@ pub(crate) fn preserve_declared_official_models(
     }
 }
 
-pub(crate) async fn fetch_provider_models(
-    profile: ProviderProfile,
-    http_client: &reqwest::Client,
-) -> anyhow::Result<Vec<String>> {
-    let home = codex_home();
-    let fetch_profile = tokio::task::spawn_blocking(move || {
-        codex_provider::provider_model_fetch_profile(&profile, home)
-    })
-    .await
-    .map_err(|error| anyhow::anyhow!("解析模型源 API 配置任务异常退出：{error}"))??;
-    provider_models::fetch(&fetch_profile, http_client).await
-}
-
 pub(crate) async fn sync_provider_models_for_launch(
     state: &Arc<AppState>,
     allow_third_party_sync: bool,
 ) -> CodeyConfig {
     let config = state.config.read().await.clone();
-    if !config.local_router_enabled {
-        return reconcile_current_subagent_defaults(state, None)
-            .await
-            .map(|(config, _)| config)
-            .unwrap_or_else(|error| {
-                eprintln!("启动时刷新当前 Codex 线路的子代理模型失败，沿用当前设置：{error}");
-                config
-            });
-    }
-    let Some(profile) = config.active_profile() else {
-        return config;
+    let home = codex_home().to_path_buf();
+    let sync = match tokio::task::spawn_blocking(move || {
+        codex_provider::current_provider_model_sync(&home)
+    })
+    .await
+    {
+        Ok(Ok(sync)) => sync,
+        Ok(Err(error)) => {
+            eprintln!(
+                "启动时解析当前 provider 模型同步配置失败，沿用已保存的模型支持配置：{error:#}"
+            );
+            return reconcile_current_subagent_defaults(state, None)
+                .await
+                .map(|(config, _)| config)
+                .unwrap_or_else(|error| {
+                    eprintln!("启动时刷新已保存第三方线路模型目录失败，沿用当前设置：{error}");
+                    config
+                });
+        }
+        Err(error) => {
+            eprintln!(
+                "启动时解析当前 provider 模型同步配置任务异常退出，沿用已保存的模型支持配置：{error}"
+            );
+            return config;
+        }
     };
-    if profile.official_account {
+    if sync.snapshot.uses_official_account_auth {
         return reconcile_current_subagent_defaults(state, None)
             .await
             .map(|(config, _)| config)
@@ -530,13 +381,12 @@ pub(crate) async fn sync_provider_models_for_launch(
                 config
             });
     }
-    let Some(provider_id) = config.current_provider_id().map(ToString::to_string) else {
-        return config;
-    };
+    let ownership_key = sync.snapshot.ownership_key.clone();
+    let provider_label = sync.snapshot.id.clone();
 
     let (models, synced) = match tokio::time::timeout(
         STARTUP_PROVIDER_MODEL_SYNC_TIMEOUT,
-        fetch_provider_models(profile.clone(), &state.http_client),
+        provider_models::fetch(&sync.request, &state.http_client),
     )
     .await
     {
@@ -546,18 +396,15 @@ pub(crate) async fn sync_provider_models_for_launch(
                 startup_model_sync_models_or_fallback(models, config.upstream_models_snapshot());
             if synced {
                 eprintln!(
-                    "启动时已从「{}」同步 {} 个上游模型",
-                    profile.name, fetched_model_count
+                    "启动时已从当前 provider「{provider_label}」同步 {fetched_model_count} 个上游模型"
                 );
             } else if config.upstream_models_snapshot().is_some() {
                 eprintln!(
-                    "启动时「{}」返回空模型列表，沿用已保存的模型支持配置",
-                    profile.name
+                    "启动时当前 provider「{provider_label}」返回空模型清单，沿用已保存的模型支持配置"
                 );
             } else {
                 eprintln!(
-                    "启动时「{}」返回空模型列表，等待用户同步或手动添加线路模型",
-                    profile.name
+                    "启动时当前 provider「{provider_label}」返回空模型清单，等待用户同步或手动添加模型"
                 );
             }
             (provider_models, synced)
@@ -569,13 +416,11 @@ pub(crate) async fn sync_provider_models_for_launch(
             );
             if config.upstream_models_snapshot().is_some() {
                 eprintln!(
-                    "启动时同步「{}」上游模型失败，沿用已保存的模型支持配置：{error:#}",
-                    profile.name
+                    "启动时同步当前 provider「{provider_label}」上游模型失败，沿用已保存的模型支持配置：{error:#}"
                 );
             } else {
                 eprintln!(
-                    "启动时同步「{}」上游模型失败，未注入未经确认的模型：{error:#}",
-                    profile.name
+                    "启动时同步当前 provider「{provider_label}」上游模型失败，未注入未经确认的模型：{error:#}"
                 );
             }
             (models, synced)
@@ -587,26 +432,23 @@ pub(crate) async fn sync_provider_models_for_launch(
             );
             if config.upstream_models_snapshot().is_some() {
                 eprintln!(
-                    "启动时同步「{}」上游模型超时，沿用已保存的模型支持配置",
-                    profile.name
+                    "启动时同步当前 provider「{provider_label}」上游模型超时，沿用已保存的模型支持配置"
                 );
             } else {
                 eprintln!(
-                    "启动时同步「{}」上游模型超时，未注入未经确认的模型",
-                    profile.name
+                    "启动时同步当前 provider「{provider_label}」上游模型超时，未注入未经确认的模型"
                 );
             }
             (models, synced)
         }
     };
     let _config_write_guard = state.config_write_lock.lock().await;
-    let latest = state.config.read().await.clone();
-    if !latest.local_router_enabled {
-        eprintln!("启动时同步模型期间本地路由已关闭，忽略旧线路的同步结果");
-        return latest;
+    let mut latest = state.config.read().await.clone();
+    if latest.current_provider_snapshot.is_none() {
+        latest.attach_current_provider_snapshot(sync.snapshot.clone());
     }
-    if latest.current_provider_id() != Some(provider_id.as_str()) {
-        eprintln!("启动时同步模型期间当前线路已变化，忽略旧线路的同步结果");
+    if latest.current_model_list_key() != Some(ownership_key.as_str()) {
+        eprintln!("启动时同步模型期间当前 provider 已变化，忽略旧的同步结果");
         return latest;
     }
     let persistence_base = (!synced).then(|| latest.clone());
@@ -628,9 +470,6 @@ pub(crate) async fn commit_startup_model_sync(
     next: CodeyConfig,
     synced: bool,
 ) -> CodeyConfig {
-    if !latest.local_router_enabled {
-        return latest;
-    }
     if synced && let Err(error) = save_config_to_store(state, &next).await {
         eprintln!("保存启动时模型同步结果失败，本次启动沿用已持久化模型：{error:#}");
         return latest;

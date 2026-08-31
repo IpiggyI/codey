@@ -23,7 +23,7 @@ import type { NotificationChannel } from "./notifications";
 import { errorText, withTimeout } from "./appUtils";
 import { formatBytes } from "./formatters";
 import { modelIdsEqual, uniqueModelIds } from "./modelIds";
-import { globalDefaultForRoute, modelListKey } from "./modelRoutes";
+import { globalDefaultForProvider, globalDefaultForRoute, modelListKey } from "./modelRoutes";
 import { CodeyBrandMark, SettingsModalShell } from "./SettingsModalShell";
 import { useModelSelection } from "./useModelSelection";
 import type { CrashpadPendingStats, TraceLogStats } from "./traceLogTypes";
@@ -67,6 +67,31 @@ function localDateCacheKey(date: Date) {
     String(date.getMonth() + 1).padStart(2, "0"),
     String(date.getDate()).padStart(2, "0"),
   ].join("");
+}
+
+function currentProviderModelState(
+  config: Config,
+  catalog: ModelState,
+  snapshot: CurrentProviderSnapshot,
+): ModelState {
+  const providerId = snapshot.ownershipKey;
+  const selectedModels = uniqueModelIds([
+    ...(config.selectedModelsByProvider[providerId] || []),
+    ...(config.declaredOfficialModelsByProvider[providerId] || []),
+  ]);
+  return {
+    officialModels: [],
+    officialModelIds: catalog.officialModelIds,
+    thirdPartyModels: selectedModels,
+    thirdPartyModelMetadata: catalog.thirdPartyModelMetadata,
+    manualThirdPartyModels:
+      config.manualThirdPartyModelsByProvider[providerId] || [],
+    upstreamModels: uniqueModelIds([
+      ...(config.upstreamModelsByProvider[providerId] || []),
+      ...selectedModels,
+    ]),
+    defaultModel: globalDefaultForProvider(config, snapshot.id, selectedModels),
+  };
 }
 
 function thirdPartyRouteModelState(
@@ -464,18 +489,18 @@ export function App({
     );
   }
 
-  async function fetchRouteModels(route: Profile) {
+  async function fetchRouteModels(route?: Profile) {
     if (!config) return;
-    if (route.authMode === "officialAccount") {
+    if (route?.authMode === "officialAccount") {
       await syncCurrentProvider();
       return;
     }
     await runOperation("fetch-route-models", async () => {
       const savedConfig = config;
-      const savedRoute = savedConfig.profiles.find(
-        (profile) => profile.id === route.id,
-      );
-      if (!savedRoute) throw new Error("找不到要同步模型的线路");
+      const savedRoute = route
+        ? savedConfig.profiles.find((profile) => profile.id === route.id)
+        : undefined;
+      if (route && !savedRoute) throw new Error("找不到要同步模型的线路");
       try {
         const result = await invoke<{
           config: Config;
@@ -486,33 +511,50 @@ export function App({
           restartRequired?: boolean;
           modelHotReloaded?: boolean;
         }>("fetch_route_models", {
-          routeId: savedRoute.id,
+          ...(savedRoute ? { routeId: savedRoute.id } : {}),
           expectedRevision: savedConfig.settingsRevision,
         });
         applyRouteResult(result);
+        const pickerRouteId =
+          savedRoute?.id
+          || result.config.profiles.find((profile) =>
+            currentProviderSnapshot
+            && modelListKey(profile, currentProviderSnapshot)
+              === currentProviderSnapshot.ownershipKey,
+          )?.id
+          || null;
         openModelPicker(
           { ...result.routeModelState, officialModels: [] },
           "",
-          savedRoute.id,
-          result.config.profiles.find((profile) => profile.id === savedRoute.id)
+          pickerRouteId,
+          result.config.profiles.find((profile) => profile.id === pickerRouteId)
             ?.supportsAutoReview === true,
         );
         setNotice({
           tone: "success",
-          text: `已同步「${savedRoute.name}」的 ${result.models.length} 个模型，请勾选要启用的模型`,
+          text: `已同步当前 provider 的 ${result.models.length} 个模型，请勾选要启用的模型`,
         });
       } catch (error) {
-        const warning = `自动同步失败：${errorText(error)}。仍可手动录入当前线路支持的模型 ID。`;
-        openModelPicker(
-          thirdPartyRouteModelState(
+        const warning = `自动同步失败：${errorText(error)}。仍可手动录入当前 provider 支持的模型 ID。`;
+        const fallbackState = savedRoute
+          ? thirdPartyRouteModelState(
             savedConfig,
             savedRoute,
             modelState,
             currentProviderSnapshot,
-          ),
+          )
+          : currentProviderSnapshot
+            ? currentProviderModelState(
+              savedConfig,
+              modelState,
+              currentProviderSnapshot,
+            )
+            : modelState;
+        openModelPicker(
+          fallbackState,
           warning,
-          savedRoute.id,
-          savedRoute.supportsAutoReview === true,
+          savedRoute?.id || null,
+          savedRoute?.supportsAutoReview === true,
         );
         setNotice({
           tone: "error",
@@ -566,11 +608,18 @@ export function App({
 
   async function setRouteDefaultModel(routeId: string, model: string) {
     if (!config) return;
-    const profile = config.profiles.find((candidate) => candidate.id === routeId);
-    if (!profile) return;
-    const providerId = modelListKey(profile, currentProviderSnapshot);
+    const profile = routeId
+      ? config.profiles.find((candidate) => candidate.id === routeId)
+      : undefined;
+    const providerId = profile
+      ? modelListKey(profile, currentProviderSnapshot)
+      : currentProviderSnapshot?.ownershipKey;
+    if (!providerId) {
+      setNotice({ tone: "error", text: `模型 ${model} 不属于当前 provider` });
+      return;
+    }
     const configuredOfficialModels = config.selectedModelsByProvider[providerId] || [];
-    const enabledModels = profile.authMode === "officialAccount"
+    const enabledModels = profile?.authMode === "officialAccount"
       ? configuredOfficialModels.length > 0
         ? configuredOfficialModels
         : modelState.officialModelIds
@@ -579,7 +628,7 @@ export function App({
           ...(config.declaredOfficialModelsByProvider[providerId] || []),
         ];
     if (!enabledModels.some((candidate) => modelIdsEqual(candidate, model))) {
-      setNotice({ tone: "error", text: `模型 ${model} 不属于该线路` });
+      setNotice({ tone: "error", text: `模型 ${model} 不属于当前 provider` });
       return;
     }
     await runOperation("save-default-model", async () => {
@@ -588,13 +637,13 @@ export function App({
         modelState: ModelState;
         restartRequired?: boolean;
       }>("save_default_model", {
-        routeId,
+        ...(routeId ? { routeId } : {}),
         model,
       });
       applyRouteResult(result);
       setNotice({
         tone: result.restartRequired ? "info" : "success",
-        text: `已将全局默认模型设为「${profile.name} / ${model}」`,
+        text: `已将全局默认模型设为「${profile?.name || currentProviderSnapshot?.id || "当前 provider"} / ${model}」`,
       });
     });
   }
@@ -822,8 +871,8 @@ export function App({
   );
   const handleSyncCurrentProvider = useStableEvent(
     () => void syncCurrentProvider(),
-  );  const handleFetchRouteModels = useStableEvent((route: Profile) => {
-    void fetchRouteModels(route);
+  );
+  const handleFetchRouteModels = useStableEvent((route?: Profile) => {    void fetchRouteModels(route);
   });
   const handleToggleAccountUsage = useStableEvent((checked: boolean) => {
     if (!config) return;

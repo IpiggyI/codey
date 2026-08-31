@@ -197,6 +197,8 @@ impl Default for AppState {
             http_client: reqwest::Client::builder()
                 .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
                 .connect_timeout(Duration::from_secs(5))
+                // TLS: system trust store via rustls native roots. Model sync
+                // does not carry Codey-owned certificates.
                 .build()
                 .expect("shared Codey HTTP client should be constructible"),
             #[cfg(test)]
@@ -887,7 +889,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
             (Err(error), _) | (_, Err(error)) => Err(error),
         },
         "fetch_route_models" => match (
-            string_argument(&args, "routeId"),
+            optional_argument::<String>(&args, "routeId"),
             argument::<u64>(&args, "expectedRevision"),
         ) {
             (Ok(route_id), Ok(expected_revision)) => {

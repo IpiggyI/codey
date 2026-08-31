@@ -29,38 +29,59 @@ pub async fn save_selected_models(
     validate_regular_route_model_list("其他模型", &requested_third_party_models)?;
     validate_regular_route_model_list("手动添加的其他模型", &requested_manual_third_party_models)?;
     validate_regular_route_model_list("待删除的其他模型", &requested_deleted_third_party_models)?;
-    if !state.config.read().await.local_router_enabled {
-        return save_native_selected_models(
-            state,
-            requested_official_models,
-            requested_third_party_models,
-            requested_manual_third_party_models,
-            requested_deleted_third_party_models,
-            requested_route_id,
-            requested_supports_1m_context_models,
-            requested_model_contexts,
-        )
-        .await;
-    }
     let _config_write_guard = state.config_write_lock.lock().await;
     let mut config = state.config.read().await.clone();
-    ensure_local_route_config_writable(&config)?;
-    let target_route_id = requested_route_id
+    let requested_route_id = requested_route_id
         .as_deref()
         .map(str::trim)
-        .filter(|route_id| !route_id.is_empty())
-        .unwrap_or(config.active_profile_id.as_str());
-    let profile = config
-        .profiles
-        .iter()
-        .find(|profile| profile.id == target_route_id)
-        .cloned()
-        .ok_or_else(|| "找不到要配置模型的线路".to_string())?;
-    if profile.official_account {
+        .filter(|route_id| !route_id.is_empty());
+    let profile = requested_route_id.and_then(|route_id| {
+        config
+            .profiles
+            .iter()
+            .find(|profile| profile.id == route_id)
+            .cloned()
+    });
+    if requested_route_id.is_some()
+        && profile.is_none()
+        && config.current_provider_snapshot.is_none()
+    {
+        return Err("找不到要配置模型的线路".to_string());
+    }
+    if let Some(profile) = &profile
+        && !profile_matches_current_snapshot(&config, profile)
+    {
+        return Err("只能维护当前 provider 的模型清单".to_string());
+    }
+    let official = config
+        .current_provider_snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.uses_official_account_auth)
+        || profile
+            .as_ref()
+            .is_some_and(|profile| profile.official_account);
+    if official {
         return Err("官方线路不支持添加第三方模型".to_string());
     }
-    let provider_id = profile.provider_id().to_string();
-    let list_key = config.model_list_key_for_profile(&profile);
+    let list_key = config
+        .current_model_list_key()
+        .map(ToString::to_string)
+        .or_else(|| {
+            profile
+                .as_ref()
+                .map(|profile| config.model_list_key_for_profile(profile))
+        })
+        .ok_or_else(|| "当前没有可用的 provider 模型清单".to_string())?;
+    let provider_id = profile
+        .as_ref()
+        .map(|profile| profile.provider_id().to_string())
+        .or_else(|| {
+            config
+                .current_provider_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.id.clone())
+        })
+        .unwrap_or_else(|| list_key.clone());
     let upstream_models = config
         .upstream_models_by_provider
         .get(&list_key)
@@ -176,99 +197,6 @@ pub async fn save_selected_models(
             "config":public_config,
             "modelState":model_state,
             "modelCatalogFallback":model_catalog_fallback,
-            "restartRequired":restart_required,
-        })),
-        subagent_hot_reload,
-    ))
-}
-
-// Keep the existing command fields explicit, as in save_selected_models.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn save_native_selected_models(
-    state: &Arc<AppState>,
-    requested_official_models: Vec<String>,
-    requested_third_party_models: Vec<String>,
-    requested_manual_third_party_models: Vec<String>,
-    requested_deleted_third_party_models: Vec<String>,
-    requested_route_id: Option<String>,
-    requested_supports_1m_context_models: Option<Vec<String>>,
-    requested_model_contexts: Option<BTreeMap<String, crate::config::ModelContextConfig>>,
-) -> Result<Value, String> {
-    let previous = state.config.read().await.clone();
-    if previous.local_router_enabled {
-        return Err("本地路由已启用，请使用线路模型配置".to_string());
-    }
-    let context = native_provider_context(&previous).await?;
-    if let Some(route_id) = requested_route_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|route_id| !route_id.is_empty())
-        && route_id != context.route_id
-        && route_id != context.provider.id
-    {
-        return Err("只能更新当前 Codex 线路的模型".to_string());
-    }
-    let current_provider = current_codex_provider().await?;
-    if current_provider != context.provider {
-        return Err("保存模型期间当前 Codex 线路已变化，请重试".to_string());
-    }
-
-    let _config_write_guard = state.config_write_lock.lock().await;
-    let latest = state.config.read().await.clone();
-    if latest.local_router_enabled {
-        return Err("保存模型期间本地路由已启用，请重试".to_string());
-    }
-    if latest.settings_revision != previous.settings_revision {
-        return Err("Codey 设置在保存模型期间已更新，请重新载入后再操作".to_string());
-    }
-    let mut next = config_with_native_selected_models(
-        &latest,
-        &context.provider,
-        &requested_official_models,
-        &requested_third_party_models,
-        &requested_manual_third_party_models,
-        &requested_deleted_third_party_models,
-    )?;
-    let available = if context.provider.official {
-        model_catalog::default_official_model_slugs()
-    } else {
-        next.upstream_models_by_provider
-            .get(&context.provider.id)
-            .cloned()
-            .unwrap_or_default()
-    };
-    set_supports_1m_context_models(
-        &mut next,
-        &context.provider.id,
-        requested_supports_1m_context_models.as_deref(),
-        &available,
-    )?;
-    let model_state = native_model_state_for_provider(&next, &context.provider, codex_home())?;
-    set_model_contexts(
-        &mut next,
-        &context.provider.id,
-        requested_model_contexts.as_ref(),
-        &available,
-    )?;
-    reconcile_subagent_models_for_mode(&mut next, &model_state);
-    next = next.normalize();
-    if next != latest {
-        next.settings_revision = latest.settings_revision.saturating_add(1);
-        save_config_to_store(state, &next)
-            .await
-            .map_err(|error| format!("保存当前线路模型选择失败：{error}"))?;
-        *state.config.write().await = next.clone();
-    }
-    let public_config = redacted_config(&next);
-    drop(_config_write_guard);
-    let hot_reload = hot_reload_runtime_models(state, &next, &model_state).await;
-    let subagent_hot_reload = hot_reload_runtime_subagent_config(state, &next).await;
-    let restart_required = runtime_config_requires_restart(state, &next).await;
-    Ok(add_subagent_hot_reload_to_response(
-        hot_reload.add_to_response(json!({
-            "status":"ok",
-            "config":public_config,
-            "modelState":model_state,
             "restartRequired":restart_required,
         })),
         subagent_hot_reload,

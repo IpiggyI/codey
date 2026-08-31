@@ -9,7 +9,7 @@ import {
   modelKey,
   uniqueModelIds,
 } from "../modelIds";
-import { routeModelAlias } from "../modelRoutes";
+import { modelListKey, routeModelAlias } from "../modelRoutes";
 import { previewOfficialModels, previewUpstreamModels } from "../previewModels";
 import {
   previewCrashpadPendingStats,
@@ -666,11 +666,15 @@ if (import.meta.env.DEV) {
       }
       if (command === "fetch_route_models") {
         const routeId = String(args.routeId || "");
-        const route = previewConfig.profiles.find((profile) => profile.id === routeId);
+        const snapshot = previewCurrentProviderSnapshot();
+        const route = routeId
+          ? previewConfig.profiles.find((profile) => profile.id === routeId)
+          : previewConfig.profiles.find((profile) =>
+              modelListKey(profile, snapshot) === snapshot.ownershipKey,
+            ) || previewConfig.profiles.find((profile) => profile.authMode !== "officialAccount");
         if (!route) return { status: "failed", message: "找不到要同步模型的线路" };
         if (route.enabled === false) return { status: "failed", message: "线路已禁用，不能同步模型" };
-        const providerId = routeProviderId(route);
-        const fetchedModels = uniqueModelIds([
+        const providerId = snapshot.ownershipKey || routeProviderId(route);        const fetchedModels = uniqueModelIds([
           ...previewUpstreamModels,
           ...(providerId === "backup" ? ["claude-sonnet-4-5"] : []),
         ]);

@@ -3000,6 +3000,24 @@ mod tests {
     }
 
     #[test]
+    fn saved_default_missing_from_current_provider_falls_back_to_the_first_available_model() {
+        let home = tempfile::tempdir().unwrap();
+        write_cache(home.path());
+        let upstream = vec!["live-model".to_string()];
+        let state = selection_state_with_manual_models(
+            home.path(),
+            false,
+            Some(&upstream),
+            &["live-model".into()],
+            &[],
+            Some("gone-model"),
+        )
+        .unwrap();
+
+        assert_eq!(state.default_model, "live-model");
+    }
+
+    #[test]
     fn official_selection_marks_only_enabled_models_as_supported() {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());

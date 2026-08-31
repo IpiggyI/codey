@@ -1454,7 +1454,7 @@ impl CodeyConfig {
             })
         {
             self.default_model = canonical;
-        } else {
+        } else if self.default_model.is_empty() {
             self.default_model = targets[0].alias.clone();
         }
     }

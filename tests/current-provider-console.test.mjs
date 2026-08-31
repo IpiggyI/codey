@@ -40,6 +40,11 @@ test("current provider is shown read-only with id, address, wire format and auth
   assert.match(modelSection, /只读来自你的 Codex 配置，Codey 不会改写它/);
 });
 
+test("current provider catalog can sync even without a matching saved profile", () => {
+  assert.match(modelSection, /同步或手动添加/);
+  assert.match(modelSection, /当前 provider 还没有对应的模型清单/);
+});
+
 test("saved profiles from other devices only appear when they match the current provider fingerprint", () => {
   assert.doesNotMatch(modelSection, /供应商线路/);
   assert.doesNotMatch(modelSection, /aria-label="线路列表"/);

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::time::Duration;
 
@@ -9,9 +9,30 @@ use reqwest::{
 };
 use serde_json::Value;
 
-use crate::config::{ProviderProfile, UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES};
+use crate::config::UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES;
 use crate::model_id;
 use crate::model_list::{self, ModelEndpointError};
+
+/// HTTP inputs for GET `/models` against the current Codex provider.
+///
+/// Every field is sourced from the user-owned `config.toml` (plus process env
+/// for `env_key` / `env_http_headers`). None of these values come from a stored
+/// `ProviderProfile`, and none are written back to user config.
+/// TLS uses the shared reqwest client’s system trust store (`rustls` native
+/// roots); there is no Codey-owned certificate setting.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelSyncRequest {
+    /// Source: `[model_providers.<id>].base_url`.
+    pub base_url: String,
+    /// Source: `[model_providers.<id>].wire_api`, mapped to Codey’s protocol.
+    pub upstream_protocol: String,
+    /// Source: user-config key chain (`experimental_bearer_token`, `env_key`,
+    /// aliases, then document-level `experimental_bearer_token`). Never a
+    /// Codey-stored `ProviderProfile.api_key`.
+    pub api_key: String,
+    /// Source: `[model_providers.<id>].http_headers` plus `env_http_headers`.
+    pub request_headers: BTreeMap<String, String>,
+}
 
 const PROVIDER_MODEL_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_PROVIDER_MODEL_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
@@ -41,7 +62,7 @@ impl fmt::Display for ModelListError {
         match self {
             Self::InvalidJson(error) => write!(formatter, "模型列表不是有效 JSON：{error}"),
             Self::UnsupportedFormat => formatter.write_str("上游模型列表格式不受支持"),
-            Self::Empty => formatter.write_str("上游返回空模型列表"),
+            Self::Empty => formatter.write_str("上游返回空模型清单，未覆盖已保存的清单"),
             Self::TooManyModels { limit } => {
                 write!(formatter, "上游模型数量超过安全上限 {limit}")
             }
@@ -54,36 +75,36 @@ impl fmt::Display for ModelListError {
 
 impl std::error::Error for ModelListError {}
 
-pub async fn fetch(profile: &ProviderProfile, client: &Client) -> Result<Vec<String>> {
-    let base = profile.normalized_base_url();
+pub async fn fetch(source: &ModelSyncRequest, client: &Client) -> Result<Vec<String>> {
+    let base = source.base_url.trim().trim_end_matches('/');
     if base.is_empty() {
         anyhow::bail!("API 地址不能为空");
     }
-    let endpoints = model_endpoints(&base)?;
-    let anthropic_messages = profile.upstream_protocol == UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES;
-    let has_custom_header = |header: &str| {
-        profile
-            .model_request_headers
-            .iter()
-            .any(|(name, value)| name.eq_ignore_ascii_case(header) && !value.trim().is_empty())
-    };
-    let has_custom_authorization = has_custom_header(AUTHORIZATION.as_str());
-    let has_custom_anthropic_key = has_custom_header("x-api-key");
-    let has_custom_anthropic_version = has_custom_header("anthropic-version");
+    let endpoints = model_endpoints(source.base_url.trim())?;
     for (index, endpoint) in endpoints.iter().enumerate() {
         let mut request = client.get(endpoint).header(ACCEPT, "application/json");
-        if anthropic_messages && !profile.api_key.trim().is_empty() && !has_custom_anthropic_key {
-            request = request.header("x-api-key", profile.api_key.trim());
+        let anthropic_messages = source.upstream_protocol == UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES;
+        let has_custom_authorization = source.request_headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case(AUTHORIZATION.as_str()) && !value.trim().is_empty()
+        });
+        let has_custom_anthropic_key = source.request_headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("x-api-key") && !value.trim().is_empty()
+        });
+        let has_custom_anthropic_version = source.request_headers.iter().any(|(name, value)| {
+            name.eq_ignore_ascii_case("anthropic-version") && !value.trim().is_empty()
+        });
+        if anthropic_messages && !source.api_key.trim().is_empty() && !has_custom_anthropic_key {
+            request = request.header("x-api-key", source.api_key.trim());
         } else if !anthropic_messages
-            && !profile.api_key.trim().is_empty()
+            && !source.api_key.trim().is_empty()
             && !has_custom_authorization
         {
-            request = request.bearer_auth(profile.api_key.trim());
+            request = request.bearer_auth(source.api_key.trim());
         }
         if anthropic_messages && !has_custom_anthropic_version {
             request = request.header("anthropic-version", "2023-06-01");
         }
-        for (name, value) in &profile.model_request_headers {
+        for (name, value) in &source.request_headers {
             if anthropic_messages && name.eq_ignore_ascii_case(AUTHORIZATION.as_str()) {
                 continue;
             }
@@ -309,11 +330,13 @@ mod tests {
             )
             .unwrap();
         });
-        let mut profile = ProviderProfile::new("test");
-        profile.base_url = format!("http://{address}/v1");
+        let source = ModelSyncRequest {
+            base_url: format!("http://{address}/v1"),
+            ..ModelSyncRequest::default()
+        };
         let client = Client::builder().no_proxy().build().unwrap();
 
-        let error = fetch(&profile, &client).await.unwrap_err();
+        let error = fetch(&source, &client).await.unwrap_err();
 
         let detail = error.to_string();
         assert!(detail.contains("响应超过安全上限"));
@@ -341,18 +364,20 @@ mod tests {
             )
             .unwrap();
         });
-        let mut profile = ProviderProfile::new("test");
-        profile.base_url = format!("http://{address}/v1");
-        profile.api_key = "fallback-key".to_string();
-        profile
-            .model_request_headers
+        let mut source = ModelSyncRequest {
+            base_url: format!("http://{address}/v1"),
+            api_key: "fallback-key".to_string(),
+            ..ModelSyncRequest::default()
+        };
+        source
+            .request_headers
             .insert("Authorization".to_string(), "Custom secret".to_string());
-        profile
-            .model_request_headers
+        source
+            .request_headers
             .insert("X-Route".to_string(), "manual".to_string());
         let client = Client::builder().no_proxy().build().unwrap();
 
-        let models = fetch(&profile, &client).await.unwrap();
+        let models = fetch(&source, &client).await.unwrap();
 
         assert_eq!(models, vec!["custom-model"]);
         server.join().unwrap();
@@ -383,15 +408,17 @@ mod tests {
             )
             .unwrap();
         });
-        let mut profile = ProviderProfile::new("test");
-        profile.base_url = format!("http://{address}/v1");
-        profile.api_key = "fallback-key".to_string();
-        profile
-            .model_request_headers
+        let mut source = ModelSyncRequest {
+            base_url: format!("http://{address}/v1"),
+            api_key: "fallback-key".to_string(),
+            ..ModelSyncRequest::default()
+        };
+        source
+            .request_headers
             .insert("Authorization".to_string(), " ".to_string());
         let client = Client::builder().no_proxy().build().unwrap();
 
-        let models = fetch(&profile, &client).await.unwrap();
+        let models = fetch(&source, &client).await.unwrap();
 
         assert_eq!(models, vec!["bearer-model"]);
         server.join().unwrap();
@@ -418,13 +445,15 @@ mod tests {
             )
             .unwrap();
         });
-        let mut profile = ProviderProfile::new("Anthropic");
-        profile.base_url = format!("http://{address}/v1/messages");
-        profile.api_key = "anthropic-key".to_string();
-        profile.upstream_protocol = UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES.to_string();
+        let source = ModelSyncRequest {
+            base_url: format!("http://{address}/v1/messages"),
+            api_key: "anthropic-key".to_string(),
+            upstream_protocol: UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES.to_string(),
+            ..ModelSyncRequest::default()
+        };
         let client = Client::builder().no_proxy().build().unwrap();
 
-        let models = fetch(&profile, &client).await.unwrap();
+        let models = fetch(&source, &client).await.unwrap();
 
         assert_eq!(models, vec!["claude-sonnet-test"]);
         server.join().unwrap();
@@ -452,11 +481,13 @@ mod tests {
                 .unwrap();
             }
         });
-        let mut profile = ProviderProfile::new("test");
-        profile.base_url = format!("http://{address}/api");
+        let source = ModelSyncRequest {
+            base_url: format!("http://{address}/api"),
+            ..ModelSyncRequest::default()
+        };
         let client = Client::builder().no_proxy().build().unwrap();
 
-        let models = fetch(&profile, &client).await.unwrap();
+        let models = fetch(&source, &client).await.unwrap();
 
         assert_eq!(models, vec!["fallback-model"]);
         server.join().unwrap();

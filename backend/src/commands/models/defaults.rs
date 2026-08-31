@@ -7,32 +7,53 @@ pub async fn save_default_model(
 ) -> Result<Value, String> {
     let _config_write_guard = state.config_write_lock.lock().await;
     let mut config = state.config.read().await.clone();
-    ensure_local_route_config_writable(&config)?;
     let requested_model = requested_model.trim();
     if requested_model.is_empty() {
         return Err("默认模型不能为空".to_string());
     }
-    let target_route_id = route_id
+    let requested_route_id = route_id
         .as_deref()
         .map(str::trim)
-        .filter(|route_id| !route_id.is_empty())
-        .unwrap_or(config.active_profile_id.as_str());
-    let target_profile = config
-        .profiles
-        .iter()
-        .find(|profile| profile.id == target_route_id)
-        .cloned()
-        .ok_or_else(|| "找不到要设置默认模型的线路".to_string())?;
-    if target_profile.official_account && !config.official_account_available_this_launch {
+        .filter(|route_id| !route_id.is_empty());
+    let target_profile = requested_route_id.and_then(|route_id| {
+        config
+            .profiles
+            .iter()
+            .find(|profile| profile.id == route_id)
+            .cloned()
+    });
+    if let Some(profile) = &target_profile
+        && !profile_matches_current_snapshot(&config, profile)
+    {
+        return Err("只能为当前 provider 设置默认模型".to_string());
+    }
+    if target_profile
+        .as_ref()
+        .is_some_and(|profile| profile.official_account)
+        && !config.official_account_available_this_launch
+    {
         return Err("本次 Codex 没有可用的官方账号登录态，不能选择官方模型".to_string());
     }
-    let target = config
-        .model_target_for_route(target_route_id, requested_model)
-        .ok_or_else(|| format!("模型 {requested_model} 当前不可用，无法设为默认"))?;
+    let target = if let Some(profile) = &target_profile {
+        config
+            .model_target_for_route(&profile.id, requested_model)
+            .ok_or_else(|| format!("模型 {requested_model} 当前不可用，无法设为默认"))?
+    } else {
+        model_target_for_current_provider(&config, requested_model)
+            .or_else(|| {
+                config.runtime_model_targets().into_iter().find(|target| {
+                    model_id::equal(&target.upstream_model, requested_model)
+                        || model_id::equal(&target.alias, requested_model)
+                })
+            })
+            .ok_or_else(|| format!("模型 {requested_model} 当前不可用，无法设为默认"))?
+    };
     config.default_model = target.alias;
     // `active_profile_id` remains a compatibility projection for older features.
     // The model default is authoritative and therefore owns that projection.
-    config.active_profile_id = target_profile.id;
+    if let Some(profile) = target_profile {
+        config.active_profile_id = profile.id;
+    }
     config = config.normalize();
     config.settings_revision = config.settings_revision.saturating_add(1);
     let model_state = current_model_state_async(&config).await?;

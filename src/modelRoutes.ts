@@ -34,8 +34,22 @@ function encodeRouteComponent(value: string) {
 }
 
 export function routeModelAlias(profile: Profile, model: string) {
+  return providerModelAlias(routeProviderId(profile), model);
+}
+
+export function providerModelAlias(providerId: string, model: string) {
   const normalized = model.trim();
-  return `${encodeRouteComponent(routeProviderId(profile))}/${normalized}`;
+  return `${encodeRouteComponent(providerId)}/${normalized}`;
+}
+
+export function globalDefaultForProvider(
+  config: Config,
+  providerId: string,
+  models: string[],
+) {
+  return models.find((model) =>
+    modelIdsEqual(providerModelAlias(providerId, model), config.defaultModel),
+  ) || models[0] || "";
 }
 
 export function globalDefaultForRoute(
@@ -43,7 +57,5 @@ export function globalDefaultForRoute(
   profile: Profile,
   models: string[],
 ) {
-  return models.find((model) =>
-    modelIdsEqual(routeModelAlias(profile, model), config.defaultModel),
-  ) || "";
+  return globalDefaultForProvider(config, routeProviderId(profile), models);
 }

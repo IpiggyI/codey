@@ -766,6 +766,163 @@ fn provider_sync_reclassifies_old_selected_models_by_the_raw_upstream_list() {
 }
 
 #[test]
+fn current_provider_sync_writes_the_fingerprint_key_and_keeps_manual_models() {
+    let home = tempfile::tempdir().unwrap();
+    let snapshot = crate::model_ownership::CurrentProviderSnapshot::from_parts(
+        "relay",
+        "https://relay.example/v1",
+        "responses",
+        false,
+    );
+    let list_key = snapshot.ownership_key.clone();
+    let mut config = CodeyConfig::default();
+    config.attach_current_provider_snapshot(snapshot);
+    config.selected_models_by_provider.insert(
+        list_key.clone(),
+        vec!["provider-synced".into(), "provider-manual".into()],
+    );
+
+    let synced = config_with_current_provider_model_sync(
+        &config,
+        vec!["provider-synced".into()],
+        true,
+        home.path(),
+    );
+
+    assert_eq!(
+        synced.manual_third_party_models_by_provider[&list_key],
+        ["provider-manual"]
+    );
+    assert_eq!(
+        synced.upstream_models_by_provider[&list_key],
+        ["provider-synced", "provider-manual"]
+    );
+    assert!(!synced.upstream_models_by_provider.contains_key("relay"));
+}
+
+#[test]
+fn empty_current_provider_sync_does_not_overwrite_the_saved_list() {
+    let saved = ["saved-model".to_string()];
+    let (models, synced) = startup_model_sync_models_or_fallback(Vec::new(), Some(&saved));
+
+    assert_eq!(models, saved);
+    assert!(!synced);
+}
+
+#[test]
+fn current_provider_sync_does_not_rewrite_a_saved_default_missing_from_the_new_list() {
+    let home = tempfile::tempdir().unwrap();
+    let snapshot = crate::model_ownership::CurrentProviderSnapshot::from_parts(
+        "relay",
+        "https://relay.example/v1",
+        "responses",
+        false,
+    );
+    let list_key = snapshot.ownership_key.clone();
+    let mut profile = ProviderProfile::new("Relay");
+    profile.id = "relay-route".into();
+    profile.source_provider_id = Some("relay".into());
+    profile.base_url = "https://relay.example/v1".into();
+    profile.api_key = "sk-relay".into();
+    profile.api_key_configured = true;
+    profile.normalize();
+    let mut config = CodeyConfig {
+        active_profile_id: profile.id.clone(),
+        profiles: vec![profile],
+        default_model: "relay/old-model".into(),
+        initial_route_import_completed: true,
+        ..CodeyConfig::default()
+    };
+    config.attach_current_provider_snapshot(snapshot);
+    config
+        .upstream_models_by_provider
+        .insert(list_key.clone(), vec!["old-model".into()]);
+
+    let synced = config_with_current_provider_model_sync(
+        &config,
+        vec!["new-model".into()],
+        true,
+        home.path(),
+    );
+
+    assert_eq!(synced.default_model, "relay/old-model");
+    assert_eq!(synced.upstream_models_by_provider[&list_key], ["new-model"]);
+}
+
+#[test]
+fn current_provider_sync_without_a_matching_profile_bumps_revision_once() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        r#"model_provider = "relay"
+
+[model_providers.relay]
+name = "Relay"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+experimental_bearer_token = "fresh-key"
+"#,
+    )
+    .unwrap();
+    let snapshot = crate::model_ownership::CurrentProviderSnapshot::from_parts(
+        "relay",
+        "https://relay.example/v1",
+        "responses",
+        false,
+    );
+    let list_key = snapshot.ownership_key.clone();
+    let mut config = CodeyConfig {
+        settings_revision: 7,
+        default_model: "relay/old-model".into(),
+        ..CodeyConfig::default()
+    };
+    config.attach_current_provider_snapshot(snapshot.clone());
+
+    let synced = apply_fetched_current_provider_models(
+        config,
+        snapshot,
+        vec!["new-model".into()],
+        7,
+        home.path(),
+    )
+    .unwrap();
+
+    assert_eq!(synced.settings_revision, 8);
+    assert_eq!(synced.upstream_models_by_provider[&list_key], ["new-model"]);
+    assert!(
+        matching_current_provider_profile(&synced).is_some(),
+        "sync should upsert a compatibility profile for the current provider"
+    );
+    assert_eq!(synced.default_model, "relay/old-model");
+}
+
+#[test]
+fn current_provider_default_target_uses_the_fingerprint_list_without_a_profile() {
+    let snapshot = crate::model_ownership::CurrentProviderSnapshot::from_parts(
+        "relay",
+        "https://relay.example/v1",
+        "responses",
+        false,
+    );
+    let list_key = snapshot.ownership_key.clone();
+    let mut config = CodeyConfig {
+        default_model: "relay/live-model".into(),
+        ..CodeyConfig::default()
+    };
+    config.attach_current_provider_snapshot(snapshot);
+    config
+        .selected_models_by_provider
+        .insert(list_key, vec!["live-model".into()]);
+
+    let target = model_target_for_current_provider(&config, "live-model").unwrap();
+
+    assert_eq!(target.provider_id, "relay");
+    assert_eq!(target.upstream_model, "live-model");
+    assert_eq!(target.alias, "relay/live-model");
+    assert!(target.route_id.is_empty());
+}
+
+#[test]
 fn successful_provider_sync_replaces_auto_review_capability() {
     let home = tempfile::tempdir().unwrap();
     let mut config = CodeyConfig::default();

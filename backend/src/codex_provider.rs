@@ -36,11 +36,6 @@ pub struct ProviderStatus {
     pub provider: CurrentProvider,
 }
 
-struct ProviderRequestExtensions {
-    api_key: Option<String>,
-    headers: BTreeMap<String, String>,
-}
-
 struct LocalProviderSnapshot {
     provider: CurrentProvider,
     api_key: String,
@@ -190,39 +185,57 @@ pub fn current_provider_snapshot(codex_home: &Path) -> Result<CurrentProviderSna
     ))
 }
 
-pub fn provider_model_fetch_profile(
-    profile: &ProviderProfile,
-    codex_home: &Path,
-) -> Result<ProviderProfile> {
-    let mut fetch_profile = profile.clone();
-    if let Some(extensions) = local_provider_model_request_extensions(codex_home, profile)? {
-        if let Some(api_key) = extensions.api_key {
-            fetch_profile.api_key = api_key;
-        }
-        fetch_profile.model_request_headers = extensions.headers;
-    }
-    Ok(fetch_profile)
+/// Current-provider model sync inputs. Built only from the user-owned Codex
+/// config and process environment. Never reads stored `ProviderProfile`
+/// credentials and never writes `config.toml`.
+#[derive(Debug, Clone)]
+pub struct CurrentProviderModelSync {
+    pub snapshot: CurrentProviderSnapshot,
+    pub request: crate::provider_models::ModelSyncRequest,
 }
 
-fn local_provider_model_request_extensions(
-    codex_home: &Path,
-    profile: &ProviderProfile,
-) -> Result<Option<ProviderRequestExtensions>> {
+pub fn current_provider_model_sync(codex_home: &Path) -> Result<CurrentProviderModelSync> {
+    let snapshot = current_provider_snapshot(codex_home)?;
     let config_path = codex_home.join("config.toml");
-    let snapshot = ConfigManager::new(&config_path).load()?;
-    if !snapshot.exists() {
-        return Ok(None);
-    }
-    let document = snapshot.document();
-    let provider_id = active_provider_id(document);
-    if provider_id != profile.provider_id() {
-        return Ok(None);
-    }
-    let provider = provider_table(document, provider_id);
-    Ok(provider.map(|provider| ProviderRequestExtensions {
-        api_key: provider_config_api_key(document, Some(provider)),
-        headers: provider_model_request_headers(provider),
-    }))
+    let config = ConfigManager::new(&config_path)
+        .load()
+        .context("解析 Codex 用户配置失败")?;
+    let document = config.document();
+    let table = provider_table(document, &snapshot.id);
+    let base_url = table
+        .and_then(|provider| provider.get("base_url"))
+        .and_then(Item::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(snapshot.base_url.as_str())
+        .to_string();
+    let upstream_protocol = if snapshot.uses_official_account_auth {
+        crate::config::UPSTREAM_PROTOCOL_OFFICIAL.to_string()
+    } else {
+        upstream_protocol_from_wire_api(&snapshot.wire_api)?.to_string()
+    };
+    let api_key = if snapshot.uses_official_account_auth {
+        String::new()
+    } else {
+        provider_config_api_key(document, table).ok_or_else(|| {
+            anyhow::anyhow!(
+                "当前 provider「{}」没有可用的密钥。请在用户配置中设置 env_key 指向的环境变量，或 experimental_bearer_token。Codey 不会使用已保存线路里的密钥，也不会把密钥写回你的配置。",
+                snapshot.id
+            )
+        })?
+    };
+    let request_headers = table
+        .map(provider_model_request_headers)
+        .unwrap_or_default();
+    Ok(CurrentProviderModelSync {
+        snapshot,
+        request: crate::provider_models::ModelSyncRequest {
+            base_url,
+            upstream_protocol,
+            api_key,
+            request_headers,
+        },
+    })
 }
 
 #[cfg(test)]
@@ -1398,7 +1411,7 @@ experimental_bearer_token = "sk-relay"
     }
 
     #[test]
-    fn model_fetch_uses_active_provider_key_and_headers() {
+    fn current_provider_model_sync_reads_user_config_and_does_not_write() {
         let home = TempDir::new().unwrap();
         write_config(
             home.path(),
@@ -1410,14 +1423,68 @@ base_url = "https://relay.example/v1"
 wire_api = "responses"
 experimental_bearer_token = "fresh-key"
 http_headers = { X-Static = "static-value" }
-env_http_headers = { X-Dynamic = "DYNAMIC_HEADER" }
 "#,
         );
-        let mut profile = ProviderProfile::new("Relay");
-        profile.id = "relay".into();
-        profile.base_url = "https://relay.example/v1".into();
-        profile.api_key = "old-key".into();
+        let before = fs::read(home.path().join("config.toml")).unwrap();
 
+        let sync = current_provider_model_sync(home.path()).unwrap();
+
+        assert_eq!(sync.snapshot.id, "relay");
+        assert_eq!(sync.snapshot.ownership_key, "relay#889271d70d18");
+        assert_eq!(sync.request.base_url, "https://relay.example/v1");
+        assert_eq!(
+            sync.request.upstream_protocol,
+            crate::config::UPSTREAM_PROTOCOL_OPENAI_RESPONSES
+        );
+        assert_eq!(sync.request.api_key, "fresh-key");
+        assert_eq!(sync.request.request_headers["X-Static"], "static-value");
+        assert_eq!(fs::read(home.path().join("config.toml")).unwrap(), before);
+    }
+
+    #[test]
+    fn current_provider_model_sync_fails_when_the_user_config_key_chain_is_empty() {
+        let home = TempDir::new().unwrap();
+        write_config(
+            home.path(),
+            r#"model_provider = "relay"
+
+[model_providers.relay]
+name = "Relay"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+env_key = "CODEY_MISSING_RELAY_TOKEN"
+"#,
+        );
+
+        let error = current_provider_model_sync(home.path()).unwrap_err();
+
+        assert!(format!("{error:#}").contains("没有可用的密钥"));
+        assert!(format!("{error:#}").contains("env_key"));
+    }
+
+    #[test]
+    fn current_provider_model_sync_uses_inline_token_when_env_key_is_unset() {
+        let home = TempDir::new().unwrap();
+        write_config(
+            home.path(),
+            r#"model_provider = "relay"
+
+[model_providers.relay]
+name = "Relay"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+experimental_bearer_token = "sk-inline"
+env_key = "CODEY_MISSING_RELAY_TOKEN"
+"#,
+        );
+
+        let sync = current_provider_model_sync(home.path()).unwrap();
+
+        assert_eq!(sync.request.api_key, "sk-inline");
+    }
+
+    #[test]
+    fn model_request_headers_merge_static_and_env_values() {
         let document = DocumentMut::from_str(
             r#"http_headers = { X-Static = "static-value" }
 env_http_headers = { X-Dynamic = "DYNAMIC_HEADER" }
@@ -1430,10 +1497,6 @@ env_http_headers = { X-Dynamic = "DYNAMIC_HEADER" }
         });
         assert_eq!(headers["X-Static"], "static-value");
         assert_eq!(headers["X-Dynamic"], "dynamic-value");
-
-        let fetch = provider_model_fetch_profile(&profile, home.path()).unwrap();
-        assert_eq!(fetch.api_key, "fresh-key");
-        assert_eq!(fetch.model_request_headers["X-Static"], "static-value");
     }
 
     #[test]

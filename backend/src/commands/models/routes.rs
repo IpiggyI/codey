@@ -82,57 +82,64 @@ pub(crate) fn config_after_route_deletion(
 
 pub async fn fetch_route_models(
     state: &Arc<AppState>,
-    route_id: String,
+    route_id: Option<String>,
     expected_revision: u64,
 ) -> Result<Value, String> {
     let _provider_model_sync_guard = state.provider_model_sync_lock.lock().await;
     let config = state.config.read().await.clone();
-    if !config.local_router_enabled {
-        return sync_native_current_provider_models(state, Some((route_id, expected_revision)))
-            .await;
-    }
-    ensure_local_route_config_writable(&config)?;
     ensure_route_revision(&config, expected_revision)?;
-    let route_id = route_id.trim();
-    let profile = config
-        .profiles
-        .iter()
-        .find(|profile| profile.id == route_id)
-        .cloned()
-        .ok_or_else(|| "找不到要同步模型的线路".to_string())?;
-    if !profile.enabled {
-        return Err("线路已禁用，不能同步模型".to_string());
+    let requested_route_id = route_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty());
+    if let Some(route_id) = requested_route_id {
+        match config
+            .profiles
+            .iter()
+            .find(|profile| profile.id == route_id)
+        {
+            Some(profile) => {
+                if !profile.enabled {
+                    return Err("线路已禁用，不能同步模型".to_string());
+                }
+                if !profile_matches_current_snapshot(&config, profile) {
+                    return Err("只能同步当前 provider 的模型清单".to_string());
+                }
+            }
+            None => return Err("找不到要同步的当前 provider".to_string()),
+        }
     }
-    if profile.official_account {
-        return Err("官方账号线路使用官方模型目录，无需同步第三方模型".to_string());
+
+    let home = codex_home().to_path_buf();
+    let sync_home = home.clone();
+    let sync = tokio::task::spawn_blocking(move || {
+        codex_provider::current_provider_model_sync(&sync_home)
+    })
+    .await
+    .map_err(|error| format!("解析当前 provider 模型同步配置任务异常退出：{error}"))?
+    .map_err(|error| error.to_string())?;
+    if sync.snapshot.uses_official_account_auth {
+        return Err("官方账号使用官方模型目录，无需同步第三方模型".to_string());
     }
-    profile.validate()?;
-    let provider_id = profile.provider_id().to_string();
-    let fetched_models = fetch_provider_models(profile, &state.http_client)
+    let fetched_models = provider_models::fetch(&sync.request, &state.http_client)
         .await
         .map_err(|error| error.to_string())?;
     let visible_fetched_models = regular_route_models(fetched_models.clone());
     let _config_write_guard = state.config_write_lock.lock().await;
-    let mut latest = state.config.read().await.clone();
-    ensure_local_route_config_writable(&latest)?;
-    ensure_route_revision(&latest, expected_revision)?;
-    let latest_profile = latest
-        .profiles
-        .iter()
-        .find(|profile| profile.id == route_id)
-        .ok_or_else(|| "同步模型期间线路已被删除，请重试".to_string())?;
-    if latest_profile.provider_id() != provider_id {
-        return Err("同步模型期间线路接入配置已变化，请重试".to_string());
-    }
-    let list_key = latest.model_list_key_for_profile(latest_profile);
-    latest = config_with_provider_model_sync(
-        &latest,
-        &list_key,
+    let latest = apply_fetched_current_provider_models(
+        state.config.read().await.clone(),
+        sync.snapshot.clone(),
         fetched_models.clone(),
-        codex_home(),
-    );
-    latest.settings_revision = latest.settings_revision.saturating_add(1);
-    let route_model_state = model_state_for_route_async(&latest, route_id).await?;
+        expected_revision,
+        &home,
+    )?;
+    let matching_route_id =
+        matching_current_provider_profile(&latest).map(|profile| profile.id.clone());
+    let route_model_state = if let Some(route_id) = matching_route_id.as_deref() {
+        model_state_for_route_async(&latest, route_id).await?
+    } else {
+        current_model_state_async(&latest).await?
+    };
     let (catalog_refresh, model_state) = refreshed_model_state_async(&latest, true).await?;
     if let Err(error) = save_config_to_store(state, &latest).await {
         return Err(rollback_model_catalog_after_config_save_async(catalog_refresh, error).await);
@@ -208,4 +215,86 @@ pub(crate) fn config_with_provider_model_sync(
         subagent_policy::reconcile_for_current_provider(&mut next, codex_home, false);
     }
     next
+}
+
+pub(crate) fn apply_fetched_current_provider_models(
+    mut latest: CodeyConfig,
+    snapshot: crate::model_ownership::CurrentProviderSnapshot,
+    fetched_models: Vec<String>,
+    expected_revision: u64,
+    home: &std::path::Path,
+) -> Result<CodeyConfig, String> {
+    ensure_route_revision(&latest, expected_revision)?;
+    if latest
+        .current_provider_snapshot
+        .as_ref()
+        .is_some_and(|current| current.ownership_key != snapshot.ownership_key)
+    {
+        return Err("同步模型期间当前 provider 已变化，请重试".to_string());
+    }
+    latest.attach_current_provider_snapshot(snapshot.clone());
+    if matching_current_provider_profile(&latest).is_none() {
+        let (upserted, _) = codex_provider::sync_current_third_party_provider(&latest, home)
+            .map_err(|error| error.to_string())?;
+        latest = upserted;
+        latest.attach_current_provider_snapshot(snapshot.clone());
+    }
+    let list_key = snapshot.ownership_key;
+    latest = config_with_provider_model_sync(&latest, &list_key, fetched_models, home);
+    latest.settings_revision = expected_revision.saturating_add(1);
+    Ok(latest)
+}
+
+pub(crate) fn matching_current_provider_profile(config: &CodeyConfig) -> Option<&ProviderProfile> {
+    let snapshot = config.current_provider_snapshot.as_ref()?;
+    config
+        .profiles
+        .iter()
+        .find(|profile| profile_matches_snapshot(profile, snapshot))
+}
+
+pub(crate) fn profile_matches_snapshot(
+    profile: &ProviderProfile,
+    snapshot: &crate::model_ownership::CurrentProviderSnapshot,
+) -> bool {
+    profile.provider_id() == snapshot.id && profile.normalized_base_url() == snapshot.base_url
+}
+
+pub(crate) fn profile_matches_current_snapshot(
+    config: &CodeyConfig,
+    profile: &ProviderProfile,
+) -> bool {
+    let Some(snapshot) = &config.current_provider_snapshot else {
+        return true;
+    };
+    profile_matches_snapshot(profile, snapshot)
+}
+
+pub(crate) fn model_target_for_current_provider(
+    config: &CodeyConfig,
+    requested_model: &str,
+) -> Option<crate::config::RuntimeModelTarget> {
+    let snapshot = config.current_provider_snapshot.as_ref()?;
+    let upstream = config
+        .enabled_route_models(&snapshot.ownership_key)
+        .into_iter()
+        .find(|model| {
+            model_id::equal(model, requested_model)
+                || model_id::equal(
+                    &local_router::model_alias(&snapshot.id, model),
+                    requested_model,
+                )
+        })?;
+    let alias = local_router::model_alias(&snapshot.id, &upstream);
+    Some(crate::config::RuntimeModelTarget {
+        route_id: matching_current_provider_profile(config)
+            .map(|profile| profile.id.clone())
+            .unwrap_or_default(),
+        provider_id: snapshot.id.clone(),
+        alias,
+        request_provider_id: config.runtime_gateway_provider_id().to_string(),
+        request_model: upstream.clone(),
+        upstream_model: upstream,
+        official: snapshot.uses_official_account_auth,
+    })
 }

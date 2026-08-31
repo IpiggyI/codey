@@ -22,7 +22,12 @@ import {
   Switch,
 } from "./components/mantine";
 import { modelIdsEqual, modelKey, uniqueModelIds } from "./modelIds";
-import { globalDefaultForRoute, modelListKey, routeProviderId } from "./modelRoutes";
+import {
+  globalDefaultForProvider,
+  globalDefaultForRoute,
+  modelListKey,
+  routeProviderId,
+} from "./modelRoutes";
 import { SETTINGS_OVERLAY_Z_INDEX } from "./overlay.constants";
 import { flushCardClass } from "./uiClasses";
 
@@ -37,7 +42,7 @@ type ModelSectionProps = {
   busy: string | null;
   showAccountUsageInHeader: boolean;
   onSyncCurrentProvider: () => void;
-  onFetchRouteModels: (route: Profile) => void;
+  onFetchRouteModels: (route?: Profile) => void;
   onToggleAccountUsage?: (checked: boolean) => void;
   onSaveOfficialRouteSettings?: (
     routeId: string,
@@ -48,7 +53,7 @@ type ModelSectionProps = {
 };
 
 type RouteModelGroup = {
-  profile: Profile;
+  profile: Profile | null;
   providerId: string;
   models: string[];
   defaultModel: string;
@@ -112,31 +117,54 @@ function ModelSectionComponent({
     () => new Set(officialModelDraft.map(modelKey)),
     [officialModelDraft],
   );
-  const modelGroups = useMemo<RouteModelGroup[]>(
-    () =>
-      visibleProfiles.map((profile) => {
-        const providerId = routeProviderId(profile);
-        const official = profile.authMode === "officialAccount";
-        const listKey = modelListKey(profile, currentProviderSnapshot);
-        const configuredModels = config.selectedModelsByProvider[listKey] || [];
-        const models = official
-          ? configuredModels.length > 0
-            ? configuredModels
-            : officialCatalog
-          : uniqueModelIds([
-              ...configuredModels,
-              ...(config.declaredOfficialModelsByProvider[listKey] || []),
-            ]);
-        return {
-          profile,
-          providerId,
+  const modelGroups = useMemo<RouteModelGroup[]>(() => {
+    const fromProfiles = visibleProfiles.map((profile) => {
+      const providerId = routeProviderId(profile);
+      const official = profile.authMode === "officialAccount";
+      const listKey = modelListKey(profile, currentProviderSnapshot);
+      const configuredModels = config.selectedModelsByProvider[listKey] || [];
+      const models = official
+        ? configuredModels.length > 0
+          ? configuredModels
+          : officialCatalog
+        : uniqueModelIds([
+            ...configuredModels,
+            ...(config.declaredOfficialModelsByProvider[listKey] || []),
+          ]);
+      return {
+        profile,
+        providerId,
+        models,
+        defaultModel: globalDefaultForRoute(config, profile, models),
+        official,
+      };
+    });
+    if (fromProfiles.length > 0 || !currentProviderSnapshot?.ownershipKey) {
+      return fromProfiles;
+    }
+    if (currentProviderSnapshot.usesOfficialAccountAuth) {
+      return fromProfiles;
+    }
+    const listKey = currentProviderSnapshot.ownershipKey;
+    const configuredModels = config.selectedModelsByProvider[listKey] || [];
+    const models = uniqueModelIds([
+      ...configuredModels,
+      ...(config.declaredOfficialModelsByProvider[listKey] || []),
+    ]);
+    return [
+      {
+        profile: null,
+        providerId: currentProviderSnapshot.id,
+        models,
+        defaultModel: globalDefaultForProvider(
+          config,
+          currentProviderSnapshot.id,
           models,
-          defaultModel: globalDefaultForRoute(config, profile, models),
-          official,
-        };
-      }),
-    [config, currentProviderSnapshot, officialCatalog, visibleProfiles],
-  );
+        ),
+        official: false,
+      },
+    ];
+  }, [config, currentProviderSnapshot, officialCatalog, visibleProfiles]);
 
   const totalModelCount = useMemo(
     () => modelGroups.reduce((count, group) => count + group.models.length, 0),
@@ -168,6 +196,14 @@ function ModelSectionComponent({
   };
 
   const catalogTitle = currentProviderSnapshot?.id || "当前 provider";
+
+  const syncOrConfigureGroup = (group: RouteModelGroup) => {
+    if (group.official) {
+      if (group.profile) openOfficialModelDialog(group.profile);
+      return;
+    }
+    onFetchRouteModels(group.profile ?? undefined);
+  };
 
   return (
     <section className="route-section" aria-labelledby="provider-title">
@@ -269,7 +305,7 @@ function ModelSectionComponent({
                   <section
                     className="provider-model-group"
                     key={group.providerId}
-                    aria-labelledby={`provider-model-${group.profile.id}`}
+                    aria-labelledby={`provider-model-${group.providerId}`}
                   >
                     <div className="provider-model-group-heading">
                       <div className="provider-heading-main">
@@ -284,7 +320,7 @@ function ModelSectionComponent({
                           )}
                         </div>
                         <div className="provider-heading-text">
-                          <strong id={`provider-model-${group.profile.id}`}>
+                          <strong id={`provider-model-${group.providerId}`}>
                             {catalogTitle}
                           </strong>
                           <small>
@@ -300,19 +336,14 @@ function ModelSectionComponent({
                           variant="ghost"
                           size="xs"
                           disabled={isBusy || dirty}
-                          onClick={() => {
-                            if (group.official) {
-                              openOfficialModelDialog(group.profile);
-                            } else {
-                              onFetchRouteModels(group.profile);
-                            }
-                          }}
+                          onClick={() => syncOrConfigureGroup(group)}
                         >
                           <RefreshCw
                             size={12}
                             className={
                               busy === "fetch-route-models" &&
-                              group.profile.id === config.activeProfileId
+                              (group.profile == null ||
+                                group.profile.id === config.activeProfileId)
                                 ? "animate-spin"
                                 : ""
                             }
@@ -336,7 +367,9 @@ function ModelSectionComponent({
                               key={`${group.providerId}:${model}`}
                               className={`model-tag-pill${isDefault ? " is-default" : ""}`}
                               disabled={isBusy || dirty || isDefault}
-                              onClick={() => onSetDefaultModel(group.profile.id, model)}
+                              onClick={() =>
+                                onSetDefaultModel(group.profile?.id || "", model)
+                              }
                               title={
                                 isDefault
                                   ? `${displayName}（当前默认模型）`
@@ -373,13 +406,7 @@ function ModelSectionComponent({
                           variant="outline"
                           size="xs"
                           disabled={isBusy || dirty}
-                          onClick={() => {
-                            if (group.official) {
-                              openOfficialModelDialog(group.profile);
-                            } else {
-                              onFetchRouteModels(group.profile);
-                            }
-                          }}
+                          onClick={() => syncOrConfigureGroup(group)}
                         >
                           <RefreshCw size={12} aria-hidden="true" />
                           {group.official ? "配置官方模型" : "同步或手动添加"}
