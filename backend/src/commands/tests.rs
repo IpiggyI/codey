@@ -600,10 +600,6 @@ async fn disabled_local_router_skips_automatic_route_import_without_writing() {
     });
 
     assert!(!ensure_default_route_imported(&state).await);
-    let error = mark_initial_route_import_completed(&state)
-        .await
-        .unwrap_err();
-    assert!(error.contains("只读"));
     assert_eq!(*state.config.read().await, initial);
     assert!(!state.store.path().exists());
 }
@@ -848,14 +844,14 @@ async fn custom_role_matrix_persists_official_models_for_the_current_provider() 
     assert_eq!(
         saved.subagent_roles["codey_quick_scan"],
         SubagentRoleConfig::new(
-            crate::model_id::model_alias(&provider_id, "gpt-5.6-luna"),
+            crate::model_id::model_alias("relay", "gpt-5.6-luna"),
             "low",
         )
     );
     assert_eq!(
         saved.subagent_roles["codey_worker"],
         SubagentRoleConfig::new(
-            crate::model_id::model_alias(&provider_id, "gpt-5.6-terra"),
+            crate::model_id::model_alias("relay", "gpt-5.6-terra"),
             "max",
         )
     );

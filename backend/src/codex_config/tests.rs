@@ -3,7 +3,70 @@ use crate::codex_config_guidance::{
     CODEY_FASTCTX_GUIDANCE, CODEY_FASTCTX_GUIDANCE_VERSIONS, codey_fastctx_guidance_for_namespace,
     remove_codey_fastctx_guidance,
 };
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 const LEGACY_GLOBAL_PROVIDER_ID: &str = "codey_global";
+
+const REALISTIC_USER_CONFIG: &[u8] = br#"model_provider = "gs"
+model = "gpt-5.6"
+
+[model_providers.gs]
+name = "GS"
+base_url = "https://gs.example/v1"
+wire_api = "responses"
+env_key = "GS_API_KEY"
+
+[mcp_servers.user_tools]
+command = "uvx"
+args = ["demo-mcp"]
+
+[projects."/workspace/app"]
+trust_level = "trusted"
+"#;
+
+fn isolated_runtime_fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("codex-home");
+    let state_dir = temp.path().join("codey-state");
+    let marker = state_dir.join("codex-lease.json");
+    let backup_root = state_dir.join("codex-backups");
+    fs::create_dir_all(&home).unwrap();
+    (temp, home, marker, backup_root)
+}
+
+fn apply_realistic_isolated_runtime(
+    home: &Path,
+    marker: &Path,
+    backup_root: &Path,
+) -> AppliedRuntimeRouterConfig {
+    apply_isolated_test_runtime_config(
+        home,
+        true,
+        Some(Path::new("/opt/codey/codey-fastctx")),
+        true,
+        DEFAULT_SUBAGENT_MODEL,
+        DEFAULT_SUBAGENT_REASONING_EFFORT,
+        None,
+        marker,
+        backup_root,
+    )
+    .unwrap()
+}
+
+struct RestoreConfigWritable<'a>(&'a Path);
+
+impl Drop for RestoreConfigWritable<'_> {
+    fn drop(&mut self) {
+        if let Ok(metadata) = fs::metadata(self.0) {
+            let mut permissions = metadata.permissions();
+            #[cfg(unix)]
+            permissions.set_mode(permissions.mode() | 0o200);
+            #[cfg(not(unix))]
+            permissions.set_readonly(false);
+            let _ = fs::set_permissions(self.0, permissions);
+        }
+    }
+}
 
 #[test]
 fn codex_home_is_resolved_once_per_process() {
@@ -135,7 +198,7 @@ fn discarding_a_cancelled_startup_clears_active_and_pending_runtime_policy() {
 }
 
 #[test]
-fn restore_without_a_lease_repairs_legacy_persistent_codey_runtime_config() {
+fn restore_without_a_lease_leaves_legacy_codey_runtime_config_untouched() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("codex-home");
     fs::create_dir_all(&home).unwrap();
@@ -179,54 +242,12 @@ default_subagent_reasoning_effort = "max"
 "#;
     fs::write(home.join("config.toml"), original).unwrap();
 
-    assert!(restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap());
-    let repaired = fs::read_to_string(home.join("config.toml")).unwrap();
-    let document = repaired.parse::<DocumentMut>().unwrap();
-
-    assert!(document.get("model").is_none());
-    assert!(document.get("model_provider").is_none());
-    assert!(document.get("model_catalog_json").is_none());
-    assert!(
-        document
-            .get("model_providers")
-            .and_then(Item::as_table_like)
-            .is_none_or(|providers| !providers.contains_key("codey_router"))
-    );
-    assert_eq!(
-        document["model_providers"]["user_relay"]["base_url"].as_str(),
-        Some("https://relay.example/v1")
-    );
-    assert!(document["agents"].get("default_subagent_model").is_none());
-    assert!(
-        document["agents"]
-            .get("default_subagent_reasoning_effort")
-            .is_none()
-    );
-    assert!(document["agents"].get("default").is_none());
-    assert!(document["agents"].get("codey_worker").is_none());
-    assert_eq!(document["agents"]["enabled"].as_bool(), Some(true));
-    assert!(
-        document
-            .get("features")
-            .and_then(Item::as_table)
-            .and_then(|features| features.get("multi_agent_v2"))
-            .is_some()
-    );
-    assert!(
-        document["features"]["multi_agent_v2"]
-            .get("default_subagent_model")
-            .is_none()
-    );
-    assert!(
-        document["features"]["multi_agent_v2"]
-            .get("default_subagent_reasoning_effort")
-            .is_none()
-    );
-    assert_eq!(fs::read(home.join("config.toml.bak")).unwrap(), original);
-}
+    assert!(!restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap());
+    assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
+    assert!(!home.join("config.toml.bak").exists());}
 
 #[test]
-fn restore_without_a_lease_repairs_dangling_codey_router_selection() {
+fn restore_without_a_lease_leaves_dangling_codey_router_selection_untouched() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("codex-home");
     fs::create_dir_all(&home).unwrap();
@@ -240,28 +261,12 @@ base_url = "https://relay.example/v1"
 "#;
     fs::write(home.join("config.toml"), original).unwrap();
 
-    assert!(restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap());
-    let repaired = fs::read_to_string(home.join("config.toml")).unwrap();
-    let document = repaired.parse::<DocumentMut>().unwrap();
-
-    assert!(document.get("model_provider").is_none());
-    assert!(document.get("model").is_none());
-    assert!(document.get("model_catalog_json").is_none());
-    assert!(
-        document
-            .get("model_providers")
-            .and_then(Item::as_table_like)
-            .is_none_or(|providers| !providers.contains_key("codey_router"))
-    );
-    assert_eq!(
-        document["model_providers"]["relay"]["base_url"].as_str(),
-        Some("https://relay.example/v1")
-    );
-    assert_eq!(fs::read(home.join("config.toml.bak")).unwrap(), original);
-}
+    assert!(!restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap());
+    assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
+    assert!(!home.join("config.toml.bak").exists());}
 
 #[test]
-fn legacy_repair_keeps_a_user_owned_codey_router_provider() {
+fn restore_without_a_lease_keeps_a_user_owned_codey_router_provider() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("codex-home");
     fs::create_dir_all(&home).unwrap();
@@ -280,7 +285,7 @@ wire_api = "responses"
 }
 
 #[test]
-fn legacy_repair_keeps_an_inline_user_owned_codey_router_provider() {
+fn restore_without_a_lease_keeps_an_inline_user_owned_codey_router_provider() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("codex-home");
     fs::create_dir_all(&home).unwrap();
@@ -295,7 +300,7 @@ model_providers = { codey_router = { name = "User-Owned Router", base_url = "htt
 }
 
 #[test]
-fn legacy_repair_keeps_user_subagent_defaults_without_codey_ownership_evidence() {
+fn restore_without_a_lease_keeps_user_subagent_defaults_without_codey_ownership_evidence() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("codex-home");
     fs::create_dir_all(&home).unwrap();
@@ -466,61 +471,51 @@ fn configured_model_catalog_keeps_user_files_as_user_owned() {
 
 #[test]
 fn isolated_runtime_preserves_computer_use_without_adding_an_mcp() {
-    let endpoint = RuntimeRouterEndpoint {
-        base_url: "http://127.0.0.1:43127/v1".into(),
-        token: "test-router-token".into(),
-        supports_websockets: false,
-        supports_remote_compaction: false,
-        requires_openai_auth: false,
-    };
-    for local_router in [None, Some(&endpoint)] {
-        for enabled in [false, true] {
-            let temp = tempfile::tempdir().unwrap();
-            let home = temp.path().join("codex-home");
-            let marker = temp.path().join("codey-state/codex-lease.json");
-            let backup_root = temp.path().join("codey-state/codex-backups");
-            let client_path = "Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient";
-            let client = home.join("computer-use").join(client_path);
-            fs::create_dir_all(client.parent().unwrap()).unwrap();
-            fs::write(client, b"test client").unwrap();
-            let original = format!(
-                "[plugins.\"unified-computer-use@openai-bundled\"]\nenabled = true\n\n\
-                 [mcp_servers.computer-use]\ncommand = './{client_path}'\nargs = ['mcp']\n\
-                 cwd = '.'\nenabled = {enabled}\n"
-            );
-            fs::write(home.join("config.toml"), &original).unwrap();
+    for enabled in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex-home");
+        let marker = temp.path().join("codey-state/codex-lease.json");
+        let backup_root = temp.path().join("codey-state/codex-backups");
+        let client_path = "Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient";
+        let client = home.join("computer-use").join(client_path);
+        fs::create_dir_all(client.parent().unwrap()).unwrap();
+        fs::write(client, b"test client").unwrap();
+        let original = format!(
+            "[plugins.\"unified-computer-use@openai-bundled\"]\nenabled = true\n\n\
+             [mcp_servers.computer-use]\ncommand = './{client_path}'\nargs = ['mcp']\n\
+             cwd = '.'\nenabled = {enabled}\n"
+        );
+        fs::write(home.join("config.toml"), &original).unwrap();
 
-            let applied = apply_isolated_runtime_router_config(
-                &home,
-                RouterApplyOptions {
-                    local_router,
-                    model_catalog_path: None,
-                    default_model: None,
-                    fastctx_command: None,
-                    subagent_optimization: false,
-                    subagent_model: DEFAULT_SUBAGENT_MODEL,
-                    subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
-                    subagent_roles: None,
-                    subagent_catalog: Default::default(),
-                    marker: &marker,
-                    backup_root: &backup_root,
-                },
-            )
-            .unwrap();
+        let applied = apply_isolated_runtime_router_config(
+            &home,
+            RouterApplyOptions {
+                model_catalog_path: None,
+                default_model: None,
+                fastctx_command: None,
+                subagent_optimization: false,
+                subagent_model: DEFAULT_SUBAGENT_MODEL,
+                subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
+                subagent_roles: None,
+                subagent_catalog: Default::default(),
+                marker: &marker,
+                backup_root: &backup_root,
+            },
+        )
+        .unwrap();
 
-            assert_eq!(
-                fs::read_to_string(home.join("config.toml")).unwrap(),
-                original
-            );
-            assert!(applied.runtime_config_overrides.iter().all(|entry| {
-                !entry.starts_with("mcp_servers.") && !entry.starts_with("plugins.")
-            }));
-            assert!(restore_runtime_config_at(&home, &marker, false).unwrap());
-            assert_eq!(
-                fs::read_to_string(home.join("config.toml")).unwrap(),
-                original
-            );
-        }
+        assert_eq!(
+            fs::read_to_string(home.join("config.toml")).unwrap(),
+            original
+        );
+        assert!(applied.runtime_config_overrides.iter().all(|entry| {
+            !entry.starts_with("mcp_servers.") && !entry.starts_with("plugins.")
+        }));
+        assert!(restore_runtime_config_at(&home, &marker, false).unwrap());
+        assert_eq!(
+            fs::read_to_string(home.join("config.toml")).unwrap(),
+            original
+        );
     }
 }
 
@@ -1475,7 +1470,8 @@ command = "echo preserve-user-hook"
         Some(ROOT_AGENT_MULTI_AGENT_MODE_HINT)
     );
     // Hook definitions are delivered through the runtime hooks.json; the
-    // effective TOML keeps only the user's own hook group untouched.    let pre_tool_use = document["hooks"]["PreToolUse"]
+    // effective TOML keeps only the user's own hook group untouched.
+    let pre_tool_use = document["hooks"]["PreToolUse"]
         .as_array_of_tables()
         .unwrap();
     assert_eq!(pre_tool_use.len(), 1);
@@ -1493,7 +1489,9 @@ command = "echo preserve-user-hook"
             .to_string()
             .contains(crate::subagent_gate::HOOK_ARGUMENT)
     );
-    assert!(document["hooks"].get("state").is_none());}
+    assert!(document["hooks"].get("state").is_none());
+}
+
 #[test]
 fn subagent_optimization_keeps_explicit_agents_concurrency_over_legacy_max_threads() {
     let existing = r#"
@@ -2389,4 +2387,96 @@ fn pre_isolation_lease_is_released_without_the_removed_restore_path() {
         "user guidance\n",
         "user files are left untouched"
     );
+}
+
+fn assert_runtime_overrides_are_codex_enhancements(overrides: &[String]) {
+    let rendered = overrides.join("\n");
+    assert!(!rendered.contains("codey_router"));
+    assert!(!rendered.contains("model_provider="));
+    for required_key in [
+        "model_catalog_json",
+        "desktop.enabled-reasoning-efforts",
+        "service_tier",
+        "features.hooks",
+        "mcp_servers.codey_fastctx.command",
+        "agents.enabled",
+        "features.multi_agent_v2.enabled",
+    ] {
+        assert!(
+            overrides
+                .iter()
+                .any(|entry| entry.starts_with(&format!("{required_key}="))),
+            "missing runtime override {required_key}"
+        );
+    }
+}
+
+#[test]
+fn realistic_apply_and_restore_leave_user_config_bytes_and_hooks_untouched() {
+    let (_temp, home, marker, backup_root) = isolated_runtime_fixture();
+    fs::write(home.join("config.toml"), REALISTIC_USER_CONFIG).unwrap();
+    assert!(!home.join("hooks.json").exists());
+
+    let applied = apply_realistic_isolated_runtime(&home, &marker, &backup_root);
+    assert_eq!(
+        fs::read(home.join("config.toml")).unwrap(),
+        REALISTIC_USER_CONFIG
+    );
+    assert!(home.join("hooks.json").exists());
+    assert_runtime_overrides_are_codex_enhancements(&applied.runtime_config_overrides);
+
+    assert!(restore_runtime_config_at(&home, &marker, true).unwrap());
+    assert_eq!(
+        fs::read(home.join("config.toml")).unwrap(),
+        REALISTIC_USER_CONFIG
+    );
+    assert!(!home.join("hooks.json").exists());
+    assert!(!marker.exists());
+}
+
+#[test]
+fn read_only_user_config_survives_isolated_apply_and_restore() {
+    let (_temp, home, marker, backup_root) = isolated_runtime_fixture();
+    let config_path = home.join("config.toml");
+    fs::write(&config_path, REALISTIC_USER_CONFIG).unwrap();
+    let mut permissions = fs::metadata(&config_path).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&config_path, permissions).unwrap();
+    let _restore_writable = RestoreConfigWritable(&config_path);
+
+    apply_realistic_isolated_runtime(&home, &marker, &backup_root);
+    assert_eq!(fs::read(&config_path).unwrap(), REALISTIC_USER_CONFIG);
+    assert!(restore_runtime_config_at(&home, &marker, true).unwrap());
+    assert_eq!(fs::read(&config_path).unwrap(), REALISTIC_USER_CONFIG);
+    assert!(!home.join("hooks.json").exists());
+}
+
+#[test]
+fn lifecycle_production_paths_do_not_write_user_config() {
+    let sources = [
+        ("codex_config.rs", include_str!("../codex_config.rs")),
+        ("launcher.rs", include_str!("../launcher.rs")),
+        (
+            "commands/runtime.rs",
+            include_str!("../commands/runtime.rs"),
+        ),
+        ("lib.rs", include_str!("../lib.rs")),
+        ("codex_provider.rs", include_str!("../codex_provider.rs")),
+    ];
+    let write_calls = [
+        "replace_document(",
+        "replace_text(",
+        "repair_persistent_codey_runtime_config",
+        "write_codex_live_atomic",
+        "manager.update(",
+        "atomic_write(&config_path",
+    ];
+    for (name, source) in sources {
+        for needle in write_calls {
+            assert!(
+                !source.contains(needle),
+                "{name} must not write config.toml via {needle}"
+            );
+        }
+    }
 }

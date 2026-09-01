@@ -254,7 +254,7 @@ release 应用通过 `plutil -lint`、`codesign --verify --deep --strict` 和可
 - Codey 配置由 directories crate 放在系统配置目录的 config.json，并保留三份有效滚动备份。Unix 下配置、备份、日志和本地请求日志应限制为当前用户可读写。
 - CODEX_HOME 非空时始终优先；否则使用 Codex 默认目录。
 - auth.json 只读，Codey 不修改官方登录凭据。
-- config.toml 在启动准备和正式启动前做快照复核。除 Codey 自有 codey_router 恢复桩和明确识别的旧版污染外，不改写用户 Provider、MCP、模型或未知字段。
+- config.toml 在启动准备和正式启动前做快照复核。apply 与 restore 都不改写用户 Provider、MCP、模型或未知字段，也不改写用户 config.toml。
 - codex-lease.json、hooks.json 中的 Codey 组、角色运行副本和证明状态均属于临时运行资产，异常退出后由下次启动恢复。
 - 第三方 API Key、通知地址和机器人令牌目前仍以明文保存在 Codey 私有配置及备份中；后端不会把已保存值返回前端。后续若迁移系统凭据库，应同时处理备份格式和升级兼容。
 - codey-errors.log 只记录脱敏后的失败信息。不要把提示词、响应正文、认证值或完整敏感地址写入日志。

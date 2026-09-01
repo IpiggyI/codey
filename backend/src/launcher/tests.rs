@@ -171,7 +171,7 @@ async fn startup_fallback_removes_search_from_a_stale_chat_route_catalog() {
         .insert("route-chat".into(), vec!["gpt-5.6-sol".into()]);
     config = config.normalize();
 
-    let startup = prepare_startup_model_catalog(&config, &config.profiles[0], home.path())
+    let startup = prepare_startup_model_catalog(&config, home.path())
         .await
         .unwrap();
 
@@ -219,71 +219,6 @@ fn subagent_runtime_models_keep_bare_ids() {
         "shared-model"
     );
     assert_eq!(runtime_subagent_model("gone-model", &catalog), "gone-model");
-}
-
-#[test]
-fn validate_router_provider_rejects_a_user_owned_router_before_maintenance() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(
-        temp.path().join("config.toml"),
-        format!(
-            "[model_providers.{ROUTER_PROVIDER_ID}]\n\
-             name = \"User Router\"\n\
-             base_url = \"https://example.com/v1\"\n"
-        ),
-    )
-    .unwrap();
-
-    let error = validate_router_provider(temp.path()).unwrap_err();
-    assert!(error.to_string().contains("已占用 Codey 内部 Provider ID"));
-}
-
-#[test]
-fn validate_router_provider_allows_a_codey_owned_resume_shim() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(
-        temp.path().join("config.toml"),
-        format!(
-            "model_provider = \"codey_global\"\n\
-             \n\
-             [model_providers.codey_global]\n\
-             name = \"OpenAI\"\n\
-             base_url = \"https://chatgpt.com/backend-api/codex\"\n\
-             wire_api = \"responses\"\n\
-             requires_openai_auth = true\n\
-             \n\
-             [model_providers.{ROUTER_PROVIDER_ID}]\n\
-             name = \"Codey Local Router\"\n\
-             base_url = \"https://chatgpt.com/backend-api/codex\"\n\
-             wire_api = \"responses\"\n\
-             requires_openai_auth = true\n\
-             supports_websockets = false\n"
-        ),
-    )
-    .unwrap();
-
-    validate_router_provider(temp.path()).unwrap();
-}
-
-#[test]
-fn validate_router_provider_reads_legacy_codey_global_after_resume_shim() {
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(
-        temp.path().join("config.toml"),
-        "model_provider = \"codey_global\"\n\
-         \n\
-         [model_providers]\n\
-         \n\
-         [model_providers.codey_global]\n\
-         name = \"OpenAI\"\n\
-         base_url = \"https://chatgpt.com/backend-api/codex\"\n\
-         wire_api = \"responses\"\n\
-         requires_openai_auth = true\n",
-    )
-    .unwrap();
-
-    assert!(crate::codex_config::prepare_persistent_router_resume_shim_at(temp.path()).unwrap());
-    validate_router_provider(temp.path()).unwrap();
 }
 
 #[tokio::test]
@@ -387,6 +322,7 @@ async fn session_maintenance_does_not_rewrite_historical_session_providers() {
     run_startup_session_maintenance(temp.path()).await.unwrap();
 
     assert_eq!(std::fs::read_to_string(&rollout).unwrap(), original);
+}
 
 #[cfg(target_os = "macos")]
 #[test]
