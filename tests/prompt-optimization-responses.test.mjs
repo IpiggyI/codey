@@ -14,24 +14,22 @@ const backendSource = readFileSync(
   new URL("../backend/src/prompt_optimization.rs", import.meta.url),
   "utf8",
 );
-const commandSource = readFileSync(
-  new URL("../backend/src/commands/prompt_optimization.rs", import.meta.url),
-  "utf8",
-);
 const appSource = readFileSync(
   new URL("../src/App.tsx", import.meta.url),
   "utf8",
 );
 
-test("prompt optimization switches between Codey routing and manual upstream configuration", () => {
-  assert.match(cardSource, /使用 Codey 路由/);
+test("prompt optimization switches between official account, current provider, and manual configuration", () => {
+  assert.match(cardSource, /官方账号/);
+  assert.match(cardSource, /沿用当前 provider/);
   assert.match(cardSource, /手动配置/);
+  assert.match(cardSource, /改为手工填写/);
   assert.match(cardSource, /OpenAI Responses/);
   assert.match(cardSource, /OpenAI Chat Completions/);
   assert.match(cardSource, /Anthropic Messages/);
-  assert.match(cardSource, /<ModelCombobox/);
-  assert.doesNotMatch(cardSource, /同步当前线路配置/);
-  assert.doesNotMatch(commandSource, /sync_prompt_optimization_current_provider/);
+  assert.doesNotMatch(cardSource, /使用 Codey 路由/);
+  assert.doesNotMatch(cardSource, /<ModelCombobox/);
+  assert.doesNotMatch(cardSource, /所有线路均暂无模型/);
 });
 
 const manualComboboxSource = readFileSync(
@@ -67,11 +65,6 @@ test("prompt optimization supports all manual upstream request formats", () => {
   assert.match(backendSource, /extract_anthropic_optimized_text/);
   assert.match(backendSource, /extract_responses_optimized_text\(response\)/);
   assert.match(backendSource, /extract_responses_stream_optimized_text/);
-  assert.match(commandSource, /optimization\.uses_codey_route\(\)/);
-  assert.match(commandSource, /ROUTER_AUTH_HEADER/);
-  assert.match(commandSource, /response_store: uses_official_account\.then_some\(false\)/);
-  assert.match(commandSource, /response_stream: uses_official_account\.then_some\(true\)/);
-  assert.match(commandSource, /response_omit_max_output_tokens: uses_official_account/);
   assert.match(backendSource, /remove\("max_output_tokens"\)/);
 });
 

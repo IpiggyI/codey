@@ -798,11 +798,13 @@
         configLoadBackoffMs = 120;
         try {
           const optimization = config?.promptOptimization;
-          applyEnabledState(
-            optimization?.enabled === true &&
-              (optimization?.mode === "codeyRoute" ||
-                optimization?.apiKeyConfigured === true),
-          );
+          const mode = optimization?.mode;
+          const credentialsReady =
+            optimization?.credentialsReady === true ||
+            (mode !== "officialAccount" &&
+              mode !== "currentProvider" &&
+              optimization?.apiKeyConfigured === true);
+          applyEnabledState(optimization?.enabled === true && credentialsReady);
         } catch (error) {
           // A script-side error must not look like a missing bridge; report
           // it once and leave the switch in its last known state.

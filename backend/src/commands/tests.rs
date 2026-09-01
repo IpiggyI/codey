@@ -254,7 +254,7 @@ fn renderer_settings_keep_api_keys_and_clear_notification_secrets() {
 
     assert_eq!(public["profiles"][0]["apiKey"], "renderer-secret");
     assert_eq!(public["profiles"][0]["apiKeyConfigured"], true);
-    assert_eq!(public["promptOptimization"]["apiKey"], "optimizer-secret");
+    assert_eq!(public["promptOptimization"]["apiKey"], "");
     assert_eq!(public["promptOptimization"]["apiKeyConfigured"], true);
     assert!(public["profiles"][0].get("clearApiKey").is_none());
     assert_eq!(public["hideFullAccessWarning"], true);
@@ -273,13 +273,57 @@ fn renderer_settings_keep_api_keys_and_clear_notification_secrets() {
         true
     );
     assert!(public.to_string().contains("renderer-secret"));
-    assert!(public.to_string().contains("optimizer-secret"));
+    assert!(!public.to_string().contains("optimizer-secret"));
     assert!(!public.to_string().contains("feishu-secret"));
     assert!(!public.to_string().contains("telegram-secret"));
     assert!(!public.to_string().contains("wecom-secret"));
     assert!(!public.to_string().contains("wechat-claw-secret"));
     assert!(!public.to_string().contains("wechat-context-secret"));
     assert!(!public.to_string().contains("legacy-secret"));
+}
+
+#[test]
+fn renderer_prompt_optimization_response_omits_current_provider_env_key() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("config.toml"),
+        r#"model_provider = "relay"
+
+[model_providers.relay]
+name = "Relay"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+env_key = "CODEY_PROMPT_OPT_RESPONSE"
+"#,
+    )
+    .unwrap();
+    let secret = "sk-codey-opt-leak-response-ee55";
+    let mut config = CodeyConfig::default();
+    config.prompt_optimization.enabled = true;
+    config.prompt_optimization.mode =
+        crate::config::PROMPT_OPTIMIZATION_MODE_CURRENT_PROVIDER.to_string();
+    config.prompt_optimization.model = "gpt-test".to_string();
+    config.prompt_optimization.api_key = "optimizer-secret".to_string();
+
+    let public = serde_json::to_value(redacted_config_at(&config, home.path(), &|name| {
+        (name == "CODEY_PROMPT_OPT_RESPONSE").then(|| secret.to_string())
+    }))
+    .unwrap();
+
+    let dumped = public.to_string();
+    assert!(!dumped.contains(secret));
+    assert!(!dumped.contains("optimizer-secret"));
+    assert_eq!(public["promptOptimization"]["apiKey"], "");
+    assert_eq!(public["promptOptimization"]["apiKeyConfigured"], true);
+    assert_eq!(
+        public["promptOptimization"]["currentProviderKeyStatus"],
+        "ready"
+    );
+    assert_eq!(public["promptOptimization"]["credentialsReady"], true);
+    assert_eq!(
+        public["promptOptimization"]["currentProviderEnvKeyName"],
+        "CODEY_PROMPT_OPT_RESPONSE"
+    );
 }
 
 #[test]

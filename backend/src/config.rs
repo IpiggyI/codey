@@ -271,16 +271,15 @@ impl ProviderProfile {
     }
 }
 
-/// Prompt-optimization settings. The local renderer receives the API key and
-/// masks it with a password input; clearing still requires an explicit request.
+/// Prompt-optimization settings. Renderer JSON never includes the API key;
+/// it only carries `apiKeyConfigured` plus overlay credential status.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct PromptOptimizationConfig {
     #[serde(default)]
     pub enabled: bool,
-    /// Chooses whether optimization requests use an enabled Codey route or a
-    /// separately configured upstream service. Existing configurations keep
-    /// the manual mode so their connection settings remain usable.
+    /// `officialAccount`, `currentProvider`, or `manual`. Legacy `codeyRoute`
+    /// values normalize to `currentProvider`.
     #[serde(default = "default_prompt_optimization_mode")]
     pub mode: String,
     #[serde(default)]
@@ -299,6 +298,22 @@ pub struct PromptOptimizationConfig {
     /// default system prompt is used.
     #[serde(default)]
     pub instruction: String,
+    /// Renderer overlay: the selected mode currently has usable credentials.
+    /// Never persisted.
+    #[serde(
+        default,
+        skip_deserializing,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub credentials_ready: bool,
+    #[serde(default, skip_deserializing, skip_serializing_if = "String::is_empty")]
+    pub current_provider_key_status: String,
+    #[serde(default, skip_deserializing, skip_serializing_if = "String::is_empty")]
+    pub current_provider_key_message: String,
+    #[serde(default, skip_deserializing, skip_serializing_if = "String::is_empty")]
+    pub current_provider_env_key_name: String,
+    #[serde(default, skip_deserializing, skip_serializing_if = "String::is_empty")]
+    pub current_provider_upstream_protocol: String,
 }
 
 impl Default for PromptOptimizationConfig {
@@ -313,6 +328,11 @@ impl Default for PromptOptimizationConfig {
             model: String::new(),
             upstream_protocol: default_prompt_optimization_upstream_protocol(),
             instruction: String::new(),
+            credentials_ready: false,
+            current_provider_key_status: String::new(),
+            current_provider_key_message: String::new(),
+            current_provider_env_key_name: String::new(),
+            current_provider_upstream_protocol: String::new(),
         }
     }
 }
@@ -328,10 +348,19 @@ impl PromptOptimizationConfig {
         self.upstream_protocol =
             normalize_prompt_optimization_upstream_protocol(&self.upstream_protocol);
         self.instruction = self.instruction.trim().to_string();
+        self.credentials_ready = false;
+        self.current_provider_key_status.clear();
+        self.current_provider_key_message.clear();
+        self.current_provider_env_key_name.clear();
+        self.current_provider_upstream_protocol.clear();
     }
 
-    pub(crate) fn uses_codey_route(&self) -> bool {
-        self.mode == PROMPT_OPTIMIZATION_MODE_CODEY_ROUTE
+    pub(crate) fn uses_official_account(&self) -> bool {
+        self.mode == PROMPT_OPTIMIZATION_MODE_OFFICIAL_ACCOUNT
+    }
+
+    pub(crate) fn uses_current_provider(&self) -> bool {
+        self.mode == PROMPT_OPTIMIZATION_MODE_CURRENT_PROVIDER
     }
 
     pub fn merge_redacted_secrets(&mut self, previous: &Self) {
@@ -347,9 +376,9 @@ impl PromptOptimizationConfig {
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
-        if self.uses_codey_route() {
+        if self.uses_official_account() || self.uses_current_provider() {
             if self.enabled && self.model.trim().is_empty() {
-                return Err("启用提示词优化前，请选择 Codey 路由模型".to_string());
+                return Err("启用提示词优化前，请先选择或填写模型".to_string());
             }
             return Ok(());
         }
@@ -373,6 +402,8 @@ impl PromptOptimizationConfig {
 }
 
 pub const PROMPT_OPTIMIZATION_MODE_CODEY_ROUTE: &str = "codeyRoute";
+pub const PROMPT_OPTIMIZATION_MODE_OFFICIAL_ACCOUNT: &str = "officialAccount";
+pub const PROMPT_OPTIMIZATION_MODE_CURRENT_PROVIDER: &str = "currentProvider";
 pub const PROMPT_OPTIMIZATION_MODE_MANUAL: &str = "manual";
 
 fn default_prompt_optimization_mode() -> String {
@@ -381,7 +412,12 @@ fn default_prompt_optimization_mode() -> String {
 
 fn normalize_prompt_optimization_mode(value: &str) -> String {
     match value.trim() {
-        PROMPT_OPTIMIZATION_MODE_CODEY_ROUTE => PROMPT_OPTIMIZATION_MODE_CODEY_ROUTE.to_string(),
+        PROMPT_OPTIMIZATION_MODE_OFFICIAL_ACCOUNT => {
+            PROMPT_OPTIMIZATION_MODE_OFFICIAL_ACCOUNT.to_string()
+        }
+        PROMPT_OPTIMIZATION_MODE_CURRENT_PROVIDER | PROMPT_OPTIMIZATION_MODE_CODEY_ROUTE => {
+            PROMPT_OPTIMIZATION_MODE_CURRENT_PROVIDER.to_string()
+        }
         _ => PROMPT_OPTIMIZATION_MODE_MANUAL.to_string(),
     }
 }
@@ -2113,9 +2149,15 @@ mod tests {
         optimization.model = "gpt-test".to_string();
         assert!(optimization.validate().is_ok());
 
-        optimization.mode = PROMPT_OPTIMIZATION_MODE_CODEY_ROUTE.to_string();
+        optimization.mode = PROMPT_OPTIMIZATION_MODE_CURRENT_PROVIDER.to_string();
         optimization.base_url.clear();
         optimization.api_key.clear();
+        assert!(optimization.validate().is_ok());
+
+        optimization.mode = PROMPT_OPTIMIZATION_MODE_OFFICIAL_ACCOUNT.to_string();
+        optimization.model.clear();
+        assert!(optimization.validate().unwrap_err().contains("模型"));
+        optimization.model = "gpt-test".to_string();
         assert!(optimization.validate().is_ok());
     }
 
@@ -3629,6 +3671,32 @@ mod tests {
         assert!(
             serialized["promptOptimization"]
                 .get("clearApiKey")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn legacy_codey_route_mode_normalizes_to_current_provider() {
+        let config = serde_json::from_str::<CodeyConfig>(
+            r#"{"promptOptimization":{"mode":"codeyRoute","enabled":true,"model":"gpt-x"}}"#,
+        )
+        .unwrap()
+        .normalize();
+
+        assert_eq!(
+            config.prompt_optimization.mode,
+            PROMPT_OPTIMIZATION_MODE_CURRENT_PROVIDER
+        );
+        assert!(config.prompt_optimization.validate().is_ok());
+        let serialized = serde_json::to_value(&config).unwrap();
+        assert!(
+            serialized["promptOptimization"]
+                .get("credentialsReady")
+                .is_none()
+        );
+        assert!(
+            serialized["promptOptimization"]
+                .get("currentProviderKeyStatus")
                 .is_none()
         );
     }

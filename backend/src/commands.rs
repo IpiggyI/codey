@@ -1,14 +1,12 @@
 use std::collections::{BTreeMap, HashMap};
 #[cfg(all(test, windows))]
 use std::fs;
-#[cfg(windows)]
-use std::path::Path;
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex as BlockingMutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
+use std::process::Command;
 use std::time::Duration;
 
 mod diagnostics;
@@ -30,19 +28,18 @@ use tokio::sync::{Mutex, Notify, RwLock, oneshot, watch};
 use diagnostics::{
     clear_diagnostic_storage, refresh_diagnostic_storage_stats, refresh_trace_log_stats,
 };
-pub(crate) use models::native_subagent_model_state;
 #[cfg(test)]
 use models::{
     config_with_current_provider_models, preserve_selected_third_party_models,
-    preserve_selected_third_party_models_except, provider_route_requires_restart,
-    renderer_model_catalog_value, should_refresh_model_catalog,
-    startup_model_sync_models_or_fallback, sync_provider_state_with,
+    preserve_selected_third_party_models_except, renderer_model_catalog_value,
+    should_refresh_model_catalog, startup_model_sync_models_or_fallback, sync_provider_state_with,
     validate_deleted_third_party_models, validate_manual_model_selection,
 };
 use models::{
     current_model_state_async, current_provider_status_async, current_renderer_model_catalog_async,
     hot_reload_runtime_models, native_web_search_capability_requires_restart,
-    official_route_snapshots, reconcile_subagent_models_for_mode,
+    official_route_snapshots, provider_route_requires_restart,
+    reconcile_subagent_models_for_mode, remote_compaction_transport_requires_restart,
     runtime_supports_current_routes_for_hot_reload, sync_current_third_party_provider_state,
     sync_provider_models_for_launch, websocket_transport_requires_restart,
 };
@@ -50,6 +47,7 @@ pub use models::{
     delete_route, fetch_route_models, save_default_model, save_official_route_models,
     save_selected_models, sync_current_provider_command,
 };
+pub(crate) use models::native_subagent_model_state;
 use plugins::{plugin_marketplace_status, repair_plugin_marketplace};
 use prompt_optimization::{
     fetch_prompt_optimization_models_command, optimize_prompt_command,
@@ -102,6 +100,7 @@ use crate::route_request_log::RouteRequestLogReconfigure;
 use crate::session_delete;
 use crate::session_metadata;
 use crate::session_transfer;
+use crate::subagent_policy;
 use crate::trace_log_guard;
 use crate::trace_log_stats::TraceLogStatsHandle;
 
@@ -132,6 +131,7 @@ pub struct AppState {
     runtime_generation: AtomicU64,
     session_titles: RwLock<HashMap<String, String>>,
     session_metadata_cache: BlockingMutex<session_metadata::SessionMetadataCache>,
+    completion_probe_cache: BlockingMutex<pending_approval::RecentSessionEventCache>,
     #[cfg(test)]
     session_metadata_cache_contended: Notify,
     webhook_notifications: Mutex<WebhookNotificationState>,
@@ -220,6 +220,9 @@ impl Default for AppState {
             session_titles: RwLock::new(HashMap::new()),
             session_metadata_cache: BlockingMutex::new(
                 session_metadata::SessionMetadataCache::default(),
+            ),
+            completion_probe_cache: BlockingMutex::new(
+                pending_approval::RecentSessionEventCache::default(),
             ),
             #[cfg(test)]
             session_metadata_cache_contended: Notify::new(),
@@ -317,11 +320,12 @@ impl AppState {
             "/codex-model-catalog" => {
                 let current_config = self.config.read().await.clone();
                 let runtime = self.runtime.lock().await.clone();
-                let catalog_config = model_catalog_config_for_runtime(
-                    &current_config,
-                    runtime.as_ref().map(|runtime| &runtime.applied_config),
-                )
-                .clone();
+                let catalog_config = runtime
+                    .as_ref()
+                    .map(|runtime| &runtime.applied_config)
+                    .filter(|applied| provider_route_requires_restart(applied, &current_config))
+                    .cloned()
+                    .unwrap_or(current_config);
                 current_renderer_model_catalog_async(catalog_config)
                     .await
                     .unwrap_or_else(api_error_message)
@@ -338,6 +342,20 @@ impl AppState {
             "/session/wake-watcher" => {
                 self.session_scan_wake.notify_one();
                 json!({"status":"ok"})
+            }
+            "/session/completion-state" => {
+                let session_id = bridge_string(&payload, "sessionId").trim().to_string();
+                let turn_id = bridge_string(&payload, "turnId").trim().to_string();
+                if session_id.is_empty() || turn_id.is_empty() {
+                    return api_error_message("缺少会话或轮次 ID");
+                }
+                if session_id.len() > 256 || turn_id.len() > 256 {
+                    return api_error_message("会话或轮次 ID 过长");
+                }
+                match with_completion_probe_cache(self, session_id, turn_id).await {
+                    Ok(result) => result,
+                    Err(error) => api_error_message(error),
+                }
             }
             "/session/titles" => cache_session_titles(self, &payload).await,
             "/session/timestamps" => {
@@ -530,6 +548,87 @@ where
     .map_err(|error| format!("{operation}任务异常退出：{error}"))
 }
 
+async fn with_completion_probe_cache(
+    state: &Arc<AppState>,
+    session_id: String,
+    turn_id: String,
+) -> Result<Value, String> {
+    let state = Arc::clone(state);
+    tokio::task::spawn_blocking(move || {
+        let mut cache = state
+            .completion_probe_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let events = cache.refresh(&codex_home());
+        completion_state_response(&events, &session_id, &turn_id)
+    })
+    .await
+    .map_err(|error| format!("确认会话完成状态任务异常退出：{error}"))
+}
+
+fn completion_state_response(
+    events: &pending_approval::RecentSessionEvents,
+    session_id: &str,
+    turn_id: &str,
+) -> Value {
+    let lifecycle = match events.session_statuses.get(session_id) {
+        Some(pending_approval::SessionLifecycleStatus::Idle) => "idle",
+        Some(pending_approval::SessionLifecycleStatus::Running) => "running",
+        Some(pending_approval::SessionLifecycleStatus::Error) => "error",
+        Some(pending_approval::SessionLifecycleStatus::Waiting) => "waiting",
+        None => "unknown",
+    };
+    let completed = events.completed_turns.iter().find(|completed| {
+        completed.session_id == session_id
+            && completed.turn_id == turn_id
+            && !completed.is_snapshot_replay
+    });
+    let aborted = events.aborted_turns.iter().find(|aborted| {
+        aborted.session_id == session_id
+            && aborted.turn_id == turn_id
+            && !aborted.is_snapshot_replay
+    });
+    let terminal_kind = if completed.is_some() {
+        Some("completed")
+    } else if aborted.is_some() {
+        Some("aborted")
+    } else {
+        None
+    };
+    let turn_known = events
+        .started_turns
+        .iter()
+        .any(|started| started.session_id == session_id && started.turn_id == turn_id)
+        || events
+            .completed_turns
+            .iter()
+            .any(|completed| completed.session_id == session_id && completed.turn_id == turn_id)
+        || events
+            .aborted_turns
+            .iter()
+            .any(|aborted| aborted.session_id == session_id && aborted.turn_id == turn_id)
+        || events
+            .pending_approvals
+            .iter()
+            .any(|pending| pending.session_id == session_id && pending.turn_id == turn_id)
+        || events
+            .turn_configurations
+            .get(session_id)
+            .is_some_and(|configurations| configurations.contains_key(turn_id));
+
+    json!({
+        "status": "ok",
+        "sessionId": session_id,
+        "turnId": turn_id,
+        "sessionKnown": events.session_statuses.contains_key(session_id),
+        "turnKnown": turn_known,
+        "lifecycle": lifecycle,
+        "terminal": terminal_kind.is_some(),
+        "terminalKind": terminal_kind,
+        "completedAt": completed.and_then(|completed| completed.completed_at),
+    })
+}
+
 async fn save_config_to_store(state: &AppState, config: &CodeyConfig) -> Result<(), String> {
     let store = state.store.clone();
     let config = config.clone();
@@ -633,11 +732,6 @@ pub(super) async fn prepare_routes_for_current_launch(state: &Arc<AppState>) -> 
 
     let _config_write_guard = state.config_write_lock.lock().await;
     let previous = state.config.read().await.clone();
-    if !previous.local_router_enabled {
-        let next = read_only_config_for_official_probe(previous, official_status);
-        *state.config.write().await = next;
-        return Ok(());
-    }
     let mut next = route_config_for_official_probe(&previous, official_status)?;
     let migration = next.migrate_current_provider_model_lists(&snapshot);
 
@@ -656,28 +750,6 @@ pub(super) async fn prepare_routes_for_current_launch(state: &Arc<AppState>) -> 
     next.attach_current_provider_snapshot(snapshot);
     *state.config.write().await = next;
     Ok(())
-}
-
-fn read_only_config_for_official_probe(
-    mut config: CodeyConfig,
-    official_status: OfficialAccountProfileStatus,
-) -> CodeyConfig {
-    match official_status {
-        OfficialAccountProfileStatus::Available(_) => {
-            config.official_account_available_this_launch = true;
-            config.official_account_status_this_launch = LaunchOfficialAccountStatus::Authenticated;
-        }
-        OfficialAccountProfileStatus::Unavailable { .. } => {
-            config.official_account_available_this_launch = false;
-            config.official_account_status_this_launch =
-                LaunchOfficialAccountStatus::Unauthenticated;
-        }
-        OfficialAccountProfileStatus::Unknown { .. } => {
-            config.official_account_available_this_launch = false;
-            config.official_account_status_this_launch = LaunchOfficialAccountStatus::Unknown;
-        }
-    }
-    config
 }
 
 fn route_config_for_official_probe(
@@ -944,7 +1016,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         },
         "save_default_model" => match (
             string_argument(&args, "model"),
-            optional_argument::<Option<String>>(&args, "routeId").map(Option::flatten),
+            optional_argument::<String>(&args, "routeId"),
         ) {
             (Ok(model), Ok(route_id)) => save_default_model(state, model, route_id).await,
             (Err(error), _) | (_, Err(error)) => Err(error),
@@ -1149,6 +1221,7 @@ pub async fn clear_route_request_logs(state: &Arc<AppState>) -> Result<Value, St
     serde_json::to_value(result).map_err(|error| format!("请求日志清理结果序列化失败：{error}"))
 }
 
+
 pub async fn load_codey_config(state: &Arc<AppState>) -> Result<Value, String> {
     let runtime_running = state.runtime.lock().await.is_some();
     if !runtime_running && let Err(error) = prepare_routes_for_current_launch(state).await {
@@ -1191,7 +1264,7 @@ pub async fn load_codey_config(state: &Arc<AppState>) -> Result<Value, String> {
         config = next;
     }
     let startup_error = state.startup_error.read().await.clone();
-    let provider_status = current_provider_status_async(&config).await?;
+    let provider_status = codex_provider::status_from_config(&config);
     let model_state = current_model_state_async(&config).await?;
     let fast_context_tools_status = current_fast_context_tools_status();
     let mut public_config = redacted_config(&config);
@@ -1214,10 +1287,7 @@ pub async fn load_codey_config(state: &Arc<AppState>) -> Result<Value, String> {
 
 pub(super) async fn ensure_default_route_imported(state: &Arc<AppState>) -> bool {
     let config = state.config.read().await.clone();
-    if !config.local_router_enabled
-        || !config.needs_initial_route_import()
-        || config.official_account_available_this_launch
-    {
+    if !config.needs_initial_route_import() || config.official_account_available_this_launch {
         return false;
     }
     let current_provider = match current_codex_provider_for_initial_import().await {
@@ -1269,7 +1339,6 @@ async fn current_codex_provider_for_initial_import()
 async fn mark_initial_route_import_completed(state: &Arc<AppState>) -> Result<bool, String> {
     let _config_write_guard = state.config_write_lock.lock().await;
     let previous = state.config.read().await.clone();
-    ensure_local_route_config_writable(&previous)?;
     if previous.initial_route_import_completed {
         return Ok(false);
     }
@@ -1627,22 +1696,12 @@ async fn save_codey_config_locked(
     config.show_account_usage_in_header = config_input.show_account_usage_in_header;
     let mut config = config.normalize();
     validate_official_account_config_change(&previous, &config)?;
-    if previous.local_router_enabled && config.local_router_enabled {
-        config.remember_current_provider_official_model_support(
-            explicitly_configured_subagent_models,
-        );
-    }
+    config.remember_current_provider_official_model_support(explicitly_configured_subagent_models);
     config = config.normalize();
-    // The input was checked before normalization. Re-enabling can migrate
-    // native model selections back into the router's legacy model maps.
-    if !config.local_router_enabled {
-        ensure_local_route_config_change_allowed(&previous, &config)?;
-    }
-    if (config.subagent_optimization
-        || (previous.local_router_enabled && !config.local_router_enabled))
+    if config.subagent_optimization
         && let Ok(model_state) = current_model_state_async(&config).await
     {
-        reconcile_subagent_models_for_mode(&mut config, &model_state);
+        subagent_policy::reconcile_with_model_state(&mut config, Some(&model_state));
         config = config.normalize();
     }
     // Codex reads each registered role config_file again when spawning a child.
@@ -1856,12 +1915,12 @@ async fn finish_codey_config_save(
     schedule_crashpad_pending_refresh(state, saved.config.protect_crashpad_pending);
     let model_state = current_model_state_async(&saved.config).await?;
     let model_hot_reload = hot_reload_runtime_models(state, &saved.config, &model_state).await;
-    let route_request_log_hot_reload = hot_reload_runtime_request_log(state, &saved.config).await;
     let subagent_hot_reload = if saved.reconcile_subagent_config {
         hot_reload_runtime_subagent_config(state, &saved.config).await
     } else {
         SubagentHotReloadOutcome::default()
     };
+    let route_request_log_hot_reload = hot_reload_runtime_request_log(state, &saved.config).await;
     let restart_required = subagent_hot_reload.requires_restart()
         || runtime_config_requires_restart(state, &saved.config).await;
     let subagent_config_hot_reloaded = subagent_hot_reload.reloaded();
@@ -1869,7 +1928,7 @@ async fn finish_codey_config_save(
     let subagent_config_health = subagent_hot_reload.health();
     let subagent_config_repair_reasons = subagent_hot_reload.repair_reasons();
     let subagent_config_hot_reload_error = subagent_hot_reload.error();
-    let provider_status = current_provider_status_async(&saved.config).await?;
+    let provider_status = codex_provider::status_from_config(&saved.config);
     let public_config = redacted_config(&saved.config);
     Ok(model_hot_reload.add_to_response(json!({
         "status":"ok",
@@ -1879,15 +1938,86 @@ async fn finish_codey_config_save(
         "modelState":model_state,
         "fastContextToolsStatus":saved.fast_context_tools_status,
         "restartRequired":restart_required,
-        "routeRequestLogHotReloaded":route_request_log_hot_reload.reloaded(),
-        "routeRequestLogHealth":route_request_log_hot_reload.health(),
-        "routeRequestLogHotReloadError":route_request_log_hot_reload.error(),
         "subagentConfigHotReloaded":subagent_config_hot_reloaded,
         "subagentConfigRepaired":subagent_config_repaired,
         "subagentConfigHealth":subagent_config_health,
         "subagentConfigRepairReasons":subagent_config_repair_reasons,
         "subagentConfigHotReloadError":subagent_config_hot_reload_error,
+        "routeRequestLogHotReloaded":route_request_log_hot_reload.reloaded(),
+        "routeRequestLogHealth":route_request_log_hot_reload.health(),
+        "routeRequestLogHotReloadError":route_request_log_hot_reload.error(),
     })))
+}
+
+fn schedule_crashpad_pending_refresh(state: &Arc<AppState>, protection_enabled: bool) {
+    if !state
+        .crashpad_pending_stats
+        .begin_refresh(protection_enabled)
+    {
+        return;
+    }
+    let stats = state.crashpad_pending_stats.clone();
+    tokio::spawn(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            if protection_enabled {
+                crashpad_pending_guard::enforce_system_limit()
+            } else {
+                crashpad_pending_guard::CrashpadGuardRun {
+                    cleanup: crashpad_pending_guard::CrashpadCleanupReport::default(),
+                    snapshot: crashpad_pending_guard::snapshot_system(false),
+                }
+            }
+        })
+        .await;
+        match result {
+            Ok(run) => {
+                if !run.cleanup.errors.is_empty() || run.cleanup.still_over_limit {
+                    error_log::record_failure(
+                        "cleanup_failed",
+                        "refresh_crashpad_pending_protection",
+                        if run.cleanup.still_over_limit {
+                            "Crashpad pending 仍超过安全上限".to_string()
+                        } else {
+                            format!(
+                                "{} 个 Crashpad 待处理文件未能完成收敛",
+                                run.cleanup.errors.len()
+                            )
+                        },
+                        json!({
+                            "errorCount": run.cleanup.errors.len(),
+                            "stillOverLimit": run.cleanup.still_over_limit,
+                            "bytesReclaimed": run.cleanup.bytes_reclaimed,
+                        }),
+                    );
+                }
+                stats.replace(run.snapshot);
+            }
+            Err(error) => {
+                let mut snapshot = CrashpadPendingStatsSnapshot::idle(protection_enabled);
+                snapshot
+                    .errors
+                    .push(format!("Crashpad 磁盘保护任务异常退出：{error}"));
+                stats.replace(snapshot);
+            }
+        }
+    });
+}
+
+fn subagent_hot_reload_commit_is_current(
+    shutting_down: bool,
+    restart_in_progress: bool,
+    captured_generation: u64,
+    current_generation: u64,
+    same_runtime: bool,
+    config_matches: bool,
+    has_startup_error: bool,
+) -> bool {
+    !shutting_down
+        && !restart_in_progress
+        && captured_generation == current_generation
+        && same_runtime
+        && config_matches
+        && !has_startup_error
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2007,77 +2137,6 @@ async fn hot_reload_runtime_request_log(
             RouteRequestLogHotReloadOutcome::failed(error)
         }
     }
-}
-
-fn schedule_crashpad_pending_refresh(state: &Arc<AppState>, protection_enabled: bool) {
-    if !state
-        .crashpad_pending_stats
-        .begin_refresh(protection_enabled)
-    {
-        return;
-    }
-    let stats = state.crashpad_pending_stats.clone();
-    tokio::spawn(async move {
-        let result = tokio::task::spawn_blocking(move || {
-            if protection_enabled {
-                crashpad_pending_guard::enforce_system_limit()
-            } else {
-                crashpad_pending_guard::CrashpadGuardRun {
-                    cleanup: crashpad_pending_guard::CrashpadCleanupReport::default(),
-                    snapshot: crashpad_pending_guard::snapshot_system(false),
-                }
-            }
-        })
-        .await;
-        match result {
-            Ok(run) => {
-                if !run.cleanup.errors.is_empty() || run.cleanup.still_over_limit {
-                    error_log::record_failure(
-                        "cleanup_failed",
-                        "refresh_crashpad_pending_protection",
-                        if run.cleanup.still_over_limit {
-                            "Crashpad pending 仍超过安全上限".to_string()
-                        } else {
-                            format!(
-                                "{} 个 Crashpad 待处理文件未能完成收敛",
-                                run.cleanup.errors.len()
-                            )
-                        },
-                        json!({
-                            "errorCount": run.cleanup.errors.len(),
-                            "stillOverLimit": run.cleanup.still_over_limit,
-                            "bytesReclaimed": run.cleanup.bytes_reclaimed,
-                        }),
-                    );
-                }
-                stats.replace(run.snapshot);
-            }
-            Err(error) => {
-                let mut snapshot = CrashpadPendingStatsSnapshot::idle(protection_enabled);
-                snapshot
-                    .errors
-                    .push(format!("Crashpad 磁盘保护任务异常退出：{error}"));
-                stats.replace(snapshot);
-            }
-        }
-    });
-}
-
-fn subagent_hot_reload_commit_is_current(
-    shutting_down: bool,
-    restart_in_progress: bool,
-    captured_generation: u64,
-    current_generation: u64,
-    same_runtime: bool,
-    config_matches: bool,
-    has_startup_error: bool,
-) -> bool {
-    !shutting_down
-        && !restart_in_progress
-        && captured_generation == current_generation
-        && same_runtime
-        && config_matches
-        && !has_startup_error
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2223,7 +2282,7 @@ pub(super) async fn hot_reload_runtime_subagent_config(
         );
     }
 
-    let runtime_config = runtime.subagent_reconcile_config(&current_config);
+    let runtime_config = current_config.clone();
     let result = tokio::task::spawn_blocking(move || {
         reconcile_runtime_subagent_roles(&runtime_config).map_err(|error| format!("{error:#}"))
     })
@@ -2291,6 +2350,14 @@ pub(super) fn json_current_provider_snapshot(config: &CodeyConfig) -> Value {
 }
 
 fn redacted_config(config: &CodeyConfig) -> CodeyConfig {
+    redacted_config_at(config, codex_home(), &|name| std::env::var(name).ok())
+}
+
+fn redacted_config_at(
+    config: &CodeyConfig,
+    codex_home: &Path,
+    env: &impl Fn(&str) -> Option<String>,
+) -> CodeyConfig {
     let mut public = config.clone();
     for profile in &mut public.profiles {
         profile.api_key_configured = !profile.api_key.trim().is_empty();
@@ -2305,8 +2372,16 @@ fn redacted_config(config: &CodeyConfig) -> CodeyConfig {
         channel.context_token.clear();
         channel.get_updates_buf.clear();
     }
-    public.prompt_optimization.api_key_configured =
-        !public.prompt_optimization.api_key.trim().is_empty();
+    let api_key_configured = !config.prompt_optimization.api_key.trim().is_empty();
+    public.prompt_optimization.api_key_configured = api_key_configured;
+    public.prompt_optimization.api_key.clear();
+    let overlay = prompt_optimization::current_prompt_optimization_overlay(codex_home, env);
+    let official_login_available = prompt_optimization::official_login_available(codex_home);
+    prompt_optimization::apply_prompt_optimization_overlay(
+        &mut public.prompt_optimization,
+        overlay.as_ref(),
+        official_login_available,
+    );
     public
 }
 
@@ -2389,14 +2464,16 @@ pub(super) fn provider_route_restart_required_for_runtime(
         || official_route_snapshots(applied) != official_route_snapshots(current)
         || websocket_transport_requires_restart(applied, current)
         || native_web_search_capability_requires_restart(applied, current)
+        || remote_compaction_transport_requires_restart(applied, current)
 }
 
+#[cfg(test)]
 fn model_catalog_config_for_runtime<'a>(
     current: &'a CodeyConfig,
     runtime_applied: Option<&'a CodeyConfig>,
 ) -> &'a CodeyConfig {
     runtime_applied
-        .filter(|applied| !runtime_supports_current_routes_for_hot_reload(applied, current))
+        .filter(|applied| provider_route_requires_restart(applied, current))
         .unwrap_or(current)
 }
 

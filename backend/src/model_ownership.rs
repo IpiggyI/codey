@@ -111,14 +111,16 @@ fn matching_legacy_key(
     legacy_profiles: impl IntoIterator<Item = (String, String)>,
     snapshot: &CurrentProviderSnapshot,
 ) -> Option<String> {
-    legacy_profiles.into_iter().find_map(|(provider_id, base_url)| {
-        let provider_id = provider_id.trim();
-        if provider_id == snapshot.id && normalize_base_url(&base_url) == snapshot.base_url {
-            Some(provider_id.to_string())
-        } else {
-            None
-        }
-    })
+    legacy_profiles
+        .into_iter()
+        .find_map(|(provider_id, base_url)| {
+            let provider_id = provider_id.trim();
+            if provider_id == snapshot.id && normalize_base_url(&base_url) == snapshot.base_url {
+                Some(provider_id.to_string())
+            } else {
+                None
+            }
+        })
 }
 
 #[cfg(test)]
@@ -134,15 +136,8 @@ mod tests {
         CurrentProviderSnapshot::from_parts("relay", url, "responses", false)
     }
 
-    fn four_maps(
-        selected: BTreeMap<String, Vec<String>>,
-    ) -> [BTreeMap<String, Vec<String>>; 4] {
-        [
-            selected,
-            BTreeMap::new(),
-            BTreeMap::new(),
-            BTreeMap::new(),
-        ]
+    fn four_maps(selected: BTreeMap<String, Vec<String>>) -> [BTreeMap<String, Vec<String>>; 4] {
+        [selected, BTreeMap::new(), BTreeMap::new(), BTreeMap::new()]
     }
 
     #[test]
@@ -173,7 +168,10 @@ mod tests {
                 key: format!("relay#{OTHER_FINGERPRINT}"),
             }
         );
-        assert_eq!(maps[0].get("relay").unwrap(), &vec!["old-model".to_string()]);
+        assert_eq!(
+            maps[0].get("relay").unwrap(),
+            &vec!["old-model".to_string()]
+        );
         assert!(!maps[0].contains_key(&format!("relay#{OTHER_FINGERPRINT}")));
     }
 
@@ -208,7 +206,10 @@ mod tests {
         let mut declared = BTreeMap::new();
         declared.insert("relay".into(), vec!["gpt-5.6-sol".into()]);
         let mut upstream = BTreeMap::new();
-        upstream.insert("relay".into(), vec!["gpt-relay".into(), "gpt-5.6-sol".into()]);
+        upstream.insert(
+            "relay".into(),
+            vec!["gpt-relay".into(), "gpt-5.6-sol".into()],
+        );
         let outcome = migrate_model_maps(
             [&mut selected, &mut manual, &mut declared, &mut upstream],
             vec![("relay".into(), "https://relay.example/v1/".into())],
@@ -223,9 +224,18 @@ mod tests {
                 to: new_key.clone(),
             }
         );
-        assert_eq!(selected.get("relay").unwrap(), &vec!["gpt-relay".to_string()]);
-        assert_eq!(selected.get(&new_key).unwrap(), &vec!["gpt-relay".to_string()]);
-        assert_eq!(manual.get(&new_key).unwrap(), &vec!["hand-typed".to_string()]);
+        assert_eq!(
+            selected.get("relay").unwrap(),
+            &vec!["gpt-relay".to_string()]
+        );
+        assert_eq!(
+            selected.get(&new_key).unwrap(),
+            &vec!["gpt-relay".to_string()]
+        );
+        assert_eq!(
+            manual.get(&new_key).unwrap(),
+            &vec!["hand-typed".to_string()]
+        );
         assert_eq!(
             declared.get(&new_key).unwrap(),
             &vec!["gpt-5.6-sol".to_string()]
@@ -245,8 +255,12 @@ mod tests {
         {
             let [selected, manual, declared, upstream] = &mut maps;
             assert!(
-                migrate_model_maps([selected, manual, declared, upstream], vec![("relay".into(), RELAY_URL.into())], &snapshot)
-                    .changed()
+                migrate_model_maps(
+                    [selected, manual, declared, upstream],
+                    vec![("relay".into(), RELAY_URL.into())],
+                    &snapshot
+                )
+                .changed()
             );
         }
         maps[0].insert("relay".into(), vec!["changed-after-migrate".into()]);
@@ -264,10 +278,7 @@ mod tests {
                 key: new_key.clone(),
             }
         );
-        assert_eq!(
-            maps[0].get(&new_key).unwrap(),
-            &vec!["first".to_string()]
-        );
+        assert_eq!(maps[0].get(&new_key).unwrap(), &vec!["first".to_string()]);
         assert_eq!(
             maps[0].get("relay").unwrap(),
             &vec!["changed-after-migrate".to_string()]

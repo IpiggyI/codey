@@ -972,7 +972,10 @@ fn sanitize_error(error: &str, api_key: &str) -> String {
     error.replace(api_key, "***")
 }
 
-fn sanitize_resolved_error(error: &str, config: &ResolvedPromptOptimizationConfig) -> String {
+pub(crate) fn sanitize_resolved_error(
+    error: &str,
+    config: &ResolvedPromptOptimizationConfig,
+) -> String {
     let mut sanitized = sanitize_error(error, config.api_key.trim());
     for value in config.request_headers.values() {
         let value = value.trim();
@@ -1402,6 +1405,13 @@ mod tests {
                 body
             );
             socket.write_all(response.as_bytes()).await.unwrap();
+            let mut drain = [0_u8; 64];
+            loop {
+                match socket.read(&mut drain).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
         });
 
         let mut config = configured();

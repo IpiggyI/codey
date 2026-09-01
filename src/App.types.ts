@@ -28,7 +28,7 @@ export type Profile = {
 
 export type PromptOptimizationConfig = {
   enabled: boolean;
-  mode: "codeyRoute" | "manual";
+  mode: "officialAccount" | "currentProvider" | "manual";
   baseUrl: string;
   apiKey: string;
   apiKeyConfigured: boolean;
@@ -39,6 +39,20 @@ export type PromptOptimizationConfig = {
     | "openaiChatCompletions"
     | "anthropicMessages";
   instruction: string;
+  credentialsReady?: boolean;
+  currentProviderKeyStatus?:
+    | "ready"
+    | "missing"
+    | "undeclared"
+    | "notApplicable"
+    | "unsupported";
+  currentProviderKeyMessage?: string;
+  currentProviderEnvKeyName?: string;
+  currentProviderUpstreamProtocol?:
+    | "openaiResponses"
+    | "openaiChatCompletions"
+    | "anthropicMessages"
+    | "";
 };
 
 export type SubagentRoleId =

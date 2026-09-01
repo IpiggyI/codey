@@ -96,6 +96,7 @@ pub struct ModelSelectionState {
 }
 
 impl ModelSelectionState {
+    #[cfg(test)]
     pub fn available_model(&self, requested: &str) -> Option<&str> {
         let requested = requested.trim();
         if requested.is_empty() {
@@ -113,6 +114,7 @@ impl ModelSelectionState {
             })
     }
 
+    #[cfg(test)]
     pub fn first_available_model(&self) -> Option<&str> {
         self.official_models
             .iter()

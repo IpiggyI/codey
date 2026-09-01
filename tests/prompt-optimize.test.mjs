@@ -121,6 +121,8 @@ const createEnvironment = (options = {}) => {
     promptOptimization: {
       enabled: options.enabled ?? true,
       apiKeyConfigured: options.apiKeyConfigured ?? true,
+      credentialsReady:
+        options.credentialsReady ?? options.apiKeyConfigured ?? true,
       mode: options.mode ?? "manual",
     },
   };
@@ -539,11 +541,12 @@ test("mounts the optimize button when enabled and an API key is configured", asy
   });
 });
 
-test("mounts the optimize button for an enabled Codey route without a manual key", async () => {
+test("mounts the optimize button for an enabled current provider without a manual key", async () => {
   const env = createEnvironment({
     enabled: true,
     apiKeyConfigured: false,
-    mode: "codeyRoute",
+    credentialsReady: true,
+    mode: "currentProvider",
   });
   await flush();
 

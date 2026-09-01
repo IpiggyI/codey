@@ -47,7 +47,7 @@ test("subagent settings expose the five supported role controls", async () => {
     modelHookSource,
     /buildCurrentProviderSubagentModelOptions\(\s*config,\s*modelState,\s*officialAccountAvailable,\s*currentProviderSnapshot/,
   );
-  assert.match(
+  assert.doesNotMatch(
     modelHookSource,
     /buildSubagentModelOptions\(\s*config,\s*modelState,\s*officialAccountAvailable/,
   );

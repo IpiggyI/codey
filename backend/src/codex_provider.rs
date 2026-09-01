@@ -194,6 +194,97 @@ pub struct CurrentProviderModelSync {
     pub request: crate::provider_models::ModelSyncRequest,
 }
 
+pub const PROMPT_OPTIMIZATION_KEY_STATUS_READY: &str = "ready";
+pub const PROMPT_OPTIMIZATION_KEY_STATUS_MISSING: &str = "missing";
+pub const PROMPT_OPTIMIZATION_KEY_STATUS_UNDECLARED: &str = "undeclared";
+pub const PROMPT_OPTIMIZATION_KEY_STATUS_NOT_APPLICABLE: &str = "notApplicable";
+pub const PROMPT_OPTIMIZATION_KEY_STATUS_UNSUPPORTED: &str = "unsupported";
+
+/// Read-only overlay for prompt optimization. Never includes the secret value.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptOptimizationProviderOverlay {
+    pub upstream_protocol: String,
+    pub key_status: String,
+    pub env_key_name: String,
+    pub message: String,
+}
+
+pub fn prompt_optimization_provider_overlay_with_env(
+    codex_home: &Path,
+    env: &impl Fn(&str) -> Option<String>,
+) -> Result<PromptOptimizationProviderOverlay> {
+    let snapshot = current_provider_snapshot(codex_home)?;
+    if snapshot.uses_official_account_auth {
+        return Ok(PromptOptimizationProviderOverlay {
+            upstream_protocol: crate::config::UPSTREAM_PROTOCOL_OPENAI_RESPONSES.to_string(),
+            key_status: PROMPT_OPTIMIZATION_KEY_STATUS_NOT_APPLICABLE.to_string(),
+            env_key_name: String::new(),
+            message: "当前 provider 使用官方账号鉴权，提示词优化会复用登录态。".to_string(),
+        });
+    }
+
+    let protocol = match upstream_protocol_from_wire_api(&snapshot.wire_api) {
+        Ok(protocol) => protocol.to_string(),
+        Err(_) => {
+            return Ok(PromptOptimizationProviderOverlay {
+                upstream_protocol: String::new(),
+                key_status: PROMPT_OPTIMIZATION_KEY_STATUS_UNSUPPORTED.to_string(),
+                env_key_name: String::new(),
+                message: format!(
+                    "当前 provider 的接口格式「{}」不受提示词优化支持。请改用手工配置，或把 Codex 配置改成 responses、chat 或 Anthropic messages。",
+                    snapshot.wire_api
+                ),
+            });
+        }
+    };
+
+    let config_path = codex_home.join("config.toml");
+    let config = ConfigManager::new(&config_path)
+        .load()
+        .context("解析 Codex 用户配置失败")?;
+    let document = config.document();
+    let table = provider_table(document, &snapshot.id);
+    let env_key_name = table
+        .and_then(|provider| provider.get("env_key"))
+        .and_then(Item::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_default()
+        .to_string();
+
+    if env_key_name.is_empty() {
+        return Ok(PromptOptimizationProviderOverlay {
+            upstream_protocol: protocol,
+            key_status: PROMPT_OPTIMIZATION_KEY_STATUS_UNDECLARED.to_string(),
+            env_key_name: String::new(),
+            message: format!(
+                "当前 provider「{}」未声明 env_key。可以改用手工填写密钥。",
+                snapshot.id
+            ),
+        });
+    }
+
+    let env_value = env(&env_key_name)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if env_value.is_some() {
+        return Ok(PromptOptimizationProviderOverlay {
+            upstream_protocol: protocol,
+            key_status: PROMPT_OPTIMIZATION_KEY_STATUS_READY.to_string(),
+            env_key_name,
+            message: "已从环境变量读取密钥，不会写入 Codey 或用户配置。".to_string(),
+        });
+    }
+
+    Ok(PromptOptimizationProviderOverlay {
+        upstream_protocol: protocol,
+        key_status: PROMPT_OPTIMIZATION_KEY_STATUS_MISSING.to_string(),
+        env_key_name: env_key_name.clone(),
+        message: format!("环境变量「{env_key_name}」未设置。可以改用手工填写密钥。"),
+    })
+}
+
 pub fn current_provider_model_sync(codex_home: &Path) -> Result<CurrentProviderModelSync> {
     let snapshot = current_provider_snapshot(codex_home)?;
     let config_path = codex_home.join("config.toml");
@@ -933,7 +1024,7 @@ fn is_official_base_url(base_url: &str) -> bool {
     base_url.contains("chatgpt.com/backend-api/codex") || base_url.contains("api.openai.com")
 }
 
-fn upstream_protocol_from_wire_api(value: &str) -> Result<&'static str> {
+pub(crate) fn upstream_protocol_from_wire_api(value: &str) -> Result<&'static str> {
     let value = value.trim().to_ascii_lowercase();
     if value.contains("anthropic") || value == "messages" || value.ends_with("/messages") {
         return Ok(crate::config::UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES);
@@ -1512,5 +1603,151 @@ env_key = "RELAY_TOKEN"
             (name == "RELAY_TOKEN").then(|| "env-secret".to_string())
         });
         assert_eq!(key.as_deref(), Some("env-secret"));
+    }
+
+    #[test]
+    fn prompt_optimization_overlay_reports_env_ready_without_the_secret() {
+        let home = TempDir::new().unwrap();
+        write_config(
+            home.path(),
+            r#"model_provider = "relay"
+
+[model_providers.relay]
+name = "Relay"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+experimental_bearer_token = "inline-must-not-be-used"
+env_key = "CODEY_PROMPT_OPT_OVERLAY_READY"
+"#,
+        );
+        let secret = "sk-codey-opt-overlay-ready-aa11";
+        let overlay = prompt_optimization_provider_overlay_with_env(home.path(), &|name| {
+            (name == "CODEY_PROMPT_OPT_OVERLAY_READY").then(|| secret.to_string())
+        })
+        .unwrap();
+
+        assert_eq!(overlay.key_status, PROMPT_OPTIMIZATION_KEY_STATUS_READY);
+        assert_eq!(overlay.env_key_name, "CODEY_PROMPT_OPT_OVERLAY_READY");
+        assert_eq!(
+            overlay.upstream_protocol,
+            crate::config::UPSTREAM_PROTOCOL_OPENAI_RESPONSES
+        );
+        let json = serde_json::to_string(&overlay).unwrap();
+        assert!(!json.contains(secret));
+        assert!(!json.contains("inline-must-not-be-used"));
+        assert!(
+            !fs::read_to_string(home.path().join("config.toml"))
+                .unwrap()
+                .contains(secret)
+        );
+    }
+
+    #[test]
+    fn prompt_optimization_overlay_does_not_use_inline_token_when_env_key_is_missing() {
+        let home = TempDir::new().unwrap();
+        write_config(
+            home.path(),
+            r#"model_provider = "relay"
+
+[model_providers.relay]
+name = "Relay"
+base_url = "https://relay.example/v1"
+wire_api = "chat"
+experimental_bearer_token = "inline-must-not-be-used"
+"#,
+        );
+        let overlay =
+            prompt_optimization_provider_overlay_with_env(home.path(), &|_| None).unwrap();
+
+        assert_eq!(
+            overlay.key_status,
+            PROMPT_OPTIMIZATION_KEY_STATUS_UNDECLARED
+        );
+        assert!(overlay.message.contains("env_key"));
+        assert_eq!(
+            overlay.upstream_protocol,
+            crate::config::UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS
+        );
+        let json = serde_json::to_string(&overlay).unwrap();
+        assert!(!json.contains("inline-must-not-be-used"));
+    }
+
+    #[test]
+    fn prompt_optimization_overlay_reports_declared_but_empty_env() {
+        let home = TempDir::new().unwrap();
+        write_config(
+            home.path(),
+            r#"model_provider = "relay"
+
+[model_providers.relay]
+name = "Relay"
+base_url = "https://relay.example/v1"
+wire_api = "responses"
+env_key = "CODEY_PROMPT_OPT_OVERLAY_MISSING"
+"#,
+        );
+        let overlay = prompt_optimization_provider_overlay_with_env(home.path(), &|name| {
+            (name == "CODEY_PROMPT_OPT_OVERLAY_MISSING").then(String::new)
+        })
+        .unwrap();
+
+        assert_eq!(overlay.key_status, PROMPT_OPTIMIZATION_KEY_STATUS_MISSING);
+        assert_eq!(overlay.env_key_name, "CODEY_PROMPT_OPT_OVERLAY_MISSING");
+        assert!(overlay.message.contains("CODEY_PROMPT_OPT_OVERLAY_MISSING"));
+    }
+
+    #[test]
+    fn prompt_optimization_overlay_rejects_unsupported_wire_api() {
+        let home = TempDir::new().unwrap();
+        write_config(
+            home.path(),
+            r#"model_provider = "relay"
+
+[model_providers.relay]
+name = "Relay"
+base_url = "https://relay.example/v1"
+wire_api = "gemini"
+env_key = "CODEY_PROMPT_OPT_OVERLAY_READY"
+"#,
+        );
+        let overlay = prompt_optimization_provider_overlay_with_env(home.path(), &|_| {
+            Some("sk-unused".to_string())
+        })
+        .unwrap();
+
+        assert_eq!(
+            overlay.key_status,
+            PROMPT_OPTIMIZATION_KEY_STATUS_UNSUPPORTED
+        );
+        assert!(overlay.message.contains("gemini"));
+        assert!(overlay.upstream_protocol.is_empty());
+        let json = serde_json::to_string(&overlay).unwrap();
+        assert!(!json.contains("sk-unused"));
+    }
+
+    #[test]
+    fn prompt_optimization_overlay_marks_official_account_auth_not_applicable() {
+        let home = TempDir::new().unwrap();
+        write_config(
+            home.path(),
+            r#"model_provider = "openai"
+
+[model_providers.openai]
+name = "OpenAI"
+base_url = "https://chatgpt.com/backend-api/codex"
+wire_api = "responses"
+"#,
+        );
+        let overlay = prompt_optimization_provider_overlay_with_env(home.path(), &|_| {
+            Some("sk-must-not-be-used".to_string())
+        })
+        .unwrap();
+
+        assert_eq!(
+            overlay.key_status,
+            PROMPT_OPTIMIZATION_KEY_STATUS_NOT_APPLICABLE
+        );
+        let json = serde_json::to_string(&overlay).unwrap();
+        assert!(!json.contains("sk-must-not-be-used"));
     }
 }

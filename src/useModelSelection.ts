@@ -146,15 +146,6 @@ export function useModelSelection({
       officialSlugKeys,
     ],
   );
-  const promptOptimizationModelOptions = useMemo(
-    () =>
-      buildSubagentModelOptions(
-        config,
-        modelState,
-        officialAccountAvailable,
-      ),
-    [config, modelState, officialAccountAvailable],
-  );
   const subagentModelOptions = useMemo(
     () =>
       buildCurrentProviderSubagentModelOptions(
@@ -393,7 +384,6 @@ export function useModelSelection({
 
   return {
     subagentModelOptions,
-    promptOptimizationModelOptions,
     modelState,
     modelEditorState,
     setModelState,

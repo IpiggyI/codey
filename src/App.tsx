@@ -223,7 +223,6 @@ export function App({
   );
   const {
     subagentModelOptions,
-    promptOptimizationModelOptions,
     modelState,
     modelEditorState,
     setModelState,
@@ -1120,9 +1119,10 @@ export function App({
             <div className="prompt-column">
               <PromptOptimizationCard
                 config={config}
+                currentProviderSnapshot={currentProviderSnapshot}
+                officialAccountAvailable={status.officialAccountAvailable === true}
                 isBusy={isBusy}
                 popupContainer={popupContainer}
-                subagentModelOptions={promptOptimizationModelOptions}
                 onConfigChange={handleConfigChange}
                 onNotice={setNotice}
               />

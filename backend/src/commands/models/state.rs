@@ -1,6 +1,5 @@
 use super::*;
 
-#[cfg(test)]
 pub(crate) fn provider_route_requires_restart(
     applied: &CodeyConfig,
     current: &CodeyConfig,

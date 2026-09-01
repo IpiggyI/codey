@@ -1,3 +1,4 @@
+#[cfg(test)]
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -25,6 +26,7 @@ impl SubagentCatalogSnapshot {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn allowing_bound_models(
         provider_id: &str,
         roles: &BTreeMap<String, SubagentRoleConfig>,

@@ -439,7 +439,8 @@ fn classify_runtime_start_error(error: &str) -> &'static str {
         || error.contains("解析 Codex 用户配置失败")
     {
         "user_config_invalid"
-    } else if error.contains("认证诊断：") || error.contains("没有可用的官方账号登录") {
+    } else if error.contains("认证诊断：") || error.contains("没有可用的官方账号登录")
+    {
         "official_auth_unavailable"
     } else if error.contains("Codex App") || error.contains("codex.exe") {
         "codex_app_unavailable"
