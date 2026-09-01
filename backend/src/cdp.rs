@@ -189,10 +189,9 @@ pub fn prepare_injection_scripts(
             MODEL_WHITELIST_INJECT_SCRIPT,
             r#"(() => {
               const patch = window.__codeyModelWhitelistPatch;
-              if (!patch || typeof patch.snapshot !== "function") return "";
-              const snapshot = patch.snapshot();
-              return snapshot?.loaded === true
-                ? `模型目录已加载（${Array.isArray(snapshot.models) ? snapshot.models.length : 0} 个模型）`
+              if (!patch || typeof patch.delivery !== "function") return "";
+              return patch.delivery()?.responsePatchInstalled === true
+                ? "模型列表响应补丁已安装"
                 : "";
             })()"#
                 .to_string(),
@@ -709,9 +708,9 @@ async fn record_failed_injection_statuses(websocket_url: &str, statuses: &[Injec
 
 #[derive(Debug)]
 pub struct ModelWhitelistRefresh {
-    /// The catalog was accepted and the transport patch guarantees future
-    /// `model/list` responses carry it, but no live model query existed yet
-    /// to patch in place (cold renderer, picker not mounted).
+    /// The response patch is installed, so the next native `model/list`
+    /// fetch will carry Fast and thinking-strength repairs. The live picker
+    /// is not rewritten in place.
     pub deferred: bool,
 }
 
@@ -750,23 +749,15 @@ fn model_whitelist_refresh_script(expected_catalog: &serde_json::Value) -> Strin
     && snapshot.models.every((model, index) => model === expectedModels[index])
     && snapshot.defaultModel === expectedDefaultModel
   );
-  // The response patch rewrites every future `model/list` bridge reply and
-  // the scheduled/interaction passes keep patching the query cache, so a
-  // renderer whose model picker has not mounted yet still receives the
-  // catalog — just lazily. That counts as a deferred delivery, not a
-  // failure; only a missing Statsig or response patch is a real failure.
+  // The inject patch only rewrites native `model/list` responses. Saving a
+  // catalog therefore cannot patch an already mounted picker in place; the
+  // next fetch applies Fast and thinking-strength repairs. That is a
+  // deferred delivery, not a failure. Only a missing response patch is.
   const catalogAccepted = (delivery) => (
     delivery?.responsePatchInstalled === true
-    && Number(delivery.statsigClients) > 0
-    && Number(delivery.notifiedClients) > 0
-  );
-  const reachedActiveModelPicker = (delivery) => (
-    catalogAccepted(delivery)
-    && Number(delivery.queryClients) > 0
-    && Number(delivery.queryEntries) > 0
   );
   const deliverySummary = (delivery) => delivery
-    ? `（statsigClients=${{Number(delivery.statsigClients)}}, notifiedClients=${{Number(delivery.notifiedClients)}}, queryClients=${{Number(delivery.queryClients)}}, queryEntries=${{Number(delivery.queryEntries)}}）`
+    ? `（responsePatchInstalled=${{Boolean(delivery.responsePatchInstalled)}}）`
     : "";
   let snapshot = null;
   let delivery = null;
@@ -793,18 +784,10 @@ fn model_whitelist_refresh_script(expected_catalog: &serde_json::Value) -> Strin
         lastError = "模型白名单拒绝了后端推送的目录";
       }} else if (!matchesExpected(snapshot)) {{
         lastError = "模型白名单快照与已保存配置不一致";
-      }} else if (reachedActiveModelPicker(delivery)) {{
-        return JSON.stringify({{ ok: true, delivered: "active", snapshot, delivery }});
       }} else if (catalogAccepted(delivery)) {{
-        // Catalog is on the transport patch; waiting for a mounted picker
-        // would only upgrade deferred to active while holding evaluate open.
         return JSON.stringify({{ ok: true, delivered: "deferred", snapshot, delivery }});
-      }} else if (delivery?.responsePatchInstalled !== true) {{
-        lastError = "模型响应补丁未安装";
-      }} else if (Number(delivery.statsigClients) < 1) {{
-        lastError = "未找到 Codex 的 Statsig 客户端";
       }} else {{
-        lastError = "未能通知 Codex 的 Statsig 客户端";
+        lastError = "模型响应补丁未安装";
       }}
     }} catch (error) {{
       lastError = error instanceof Error ? error.message : String(error);
@@ -1417,7 +1400,7 @@ assert.equal(nextPage.window.attempts, 1);
         assert!(script.contains("model_metadata"));
         assert!(script.contains(r#"provider-\"quoted"#));
         assert!(script.contains("snapshot.defaultModel === expectedDefaultModel"));
-        assert!(script.contains("delivery.queryEntries"));
+        assert!(script.contains("delivery.responsePatchInstalled"));
         assert!(script.contains("catalogAccepted"));
         assert!(script.contains("} else if (catalogAccepted(delivery)) {"));
         assert!(script.contains(
@@ -1443,13 +1426,13 @@ assert.equal(nextPage.window.attempts, 1);
             "result": {
                 "result": {
                     "type": "string",
-                    "value": r#"{"ok":false,"error":"模型白名单快照与已保存配置不一致（statsigClients=1, notifiedClients=1, queryClients=1, queryEntries=0）"}"#
+                    "value": r#"{"ok":false,"error":"模型白名单快照与已保存配置不一致（responsePatchInstalled=false）"}"#
                 }
             }
         });
         let error = verify_model_whitelist_refresh_response(&mismatch).unwrap_err();
         assert!(format!("{error:#}").contains("快照与已保存配置不一致"));
-        assert!(format!("{error:#}").contains("queryEntries=0"));
+        assert!(format!("{error:#}").contains("responsePatchInstalled=false"));
     }
 
     #[test]
@@ -1481,7 +1464,7 @@ assert.equal(nextPage.window.attempts, 1);
         assert!(!core.contains("__codeyGitRequestGuard"));
         assert!(!core.contains("__codeyWindowsWmiSamplerGuard"));
         assert!(core.contains("window.__codeyModelWhitelistPatch"));
-        assert!(core.contains("/codex-model-catalog"));
+        assert!(core.contains("1.5x speed, increased usage"));
         let shared_runtime_offset = core
             .find("window.__codeySharedRuntime=Object.freeze")
             .expect("bridge helpers must initialize the shared runtime");
@@ -1528,7 +1511,7 @@ assert.equal(nextPage.window.attempts, 1);
         assert!(snapshot_script.contains("entry.status = \"inactive\""));
         assert!(snapshot_script.contains("[\"executed\", \"effective\", \"inactive\"].includes"));
         assert!(snapshot_script.contains("Object.prototype.hasOwnProperty.call"));
-        assert!(snapshot_script.contains("模型目录已加载"));
+        assert!(snapshot_script.contains("模型列表响应补丁已安装"));
         assert!(snapshot_script.contains("插件市场桥接已接管"));
         assert!(snapshot_script.contains("for (const delay of [50, 200, 750])"));
         assert!(!snapshot_script.contains("user-script-1\": () =>"));
