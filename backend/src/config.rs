@@ -1570,26 +1570,14 @@ impl CodeyConfig {
             return;
         }
 
-        let fallback_alias = targets
-            .iter()
-            .find(|target| model_id::equal(&target.alias, &self.default_model))
-            .unwrap_or(&targets[0])
-            .alias
-            .clone();
-        let provider_prefixes = self
-            .profiles
-            .iter()
-            .map(|profile| local_router::model_alias(profile.provider_id(), ""))
-            .collect::<Vec<_>>();
-        let qualify_unique_models = self.local_router_enabled;
         for selection in self.subagent_roles.values_mut() {
             let requested = selection.model.trim();
-            let canonical = targets
+            if let Some(canonical) = targets
                 .iter()
                 .find(|target| model_id::equal(&target.alias, requested))
                 .map(|target| target.alias.clone())
                 .or_else(|| {
-                    if !qualify_unique_models {
+                    if !self.local_router_enabled {
                         return None;
                     }
                     // Preserve the model's route identity for subagents. The
@@ -1611,18 +1599,9 @@ impl CodeyConfig {
                     let target = matches.next()?;
                     matches.next().is_none().then(|| target.alias.clone())
                 })
-                .unwrap_or_else(|| {
-                    if provider_prefixes.iter().any(|prefix| {
-                        requested
-                            .get(..prefix.len())
-                            .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
-                    }) {
-                        fallback_alias.clone()
-                    } else {
-                        requested.to_string()
-                    }
-                });
-            selection.model = canonical;
+            {
+                selection.model = canonical;
+            }
         }
         if let Some(default_role) = self.subagent_roles.get(SUBAGENT_ROLE_DEFAULT) {
             self.subagent_model.clone_from(&default_role.model);
@@ -1630,6 +1609,7 @@ impl CodeyConfig {
                 .clone_from(&default_role.reasoning_effort);
         }
     }
+
 
     pub(crate) fn reconcile_after_route_removal(&mut self, removed_provider_id: &str) {
         self.normalize_global_default_model();
@@ -1642,14 +1622,7 @@ impl CodeyConfig {
             .map(|target| target.alias.clone());
 
         if model_references_provider(&self.default_model, removed_provider_id) {
-            self.default_model = fallback_alias.clone().unwrap_or_default();
-        }
-        for selection in self.subagent_roles.values_mut() {
-            if model_references_provider(&selection.model, removed_provider_id) {
-                selection.model = fallback_alias
-                    .clone()
-                    .unwrap_or_else(|| DEFAULT_SUBAGENT_MODEL.to_string());
-            }
+            self.default_model = fallback_alias.unwrap_or_default();
         }
         if let Some(default_role) = self.subagent_roles.get(SUBAGENT_ROLE_DEFAULT) {
             self.subagent_model.clone_from(&default_role.model);
@@ -1657,6 +1630,7 @@ impl CodeyConfig {
                 .clone_from(&default_role.reasoning_effort);
         }
     }
+
 }
 
 fn runtime_catalog_model_id(profile: &ProviderProfile, model: &str) -> String {

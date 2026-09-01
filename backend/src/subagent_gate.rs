@@ -12,6 +12,7 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::subagent::protocol::{self, AgentState as ObservedAgentState};
+use crate::subagent_policy::SubagentCatalogSnapshot;
 use crate::subagent::rules::{RuleActor, RuleContext, RuleEffect, ToolClass};
 use crate::subagent::{
     api::TraceContext,
@@ -25,6 +26,7 @@ use runtime_policy::{RuntimeSubagentPolicy, read_optional_runtime_policy_file};
 pub(crate) use runtime_policy::{
     begin_runtime_subagent_policy_update, clear_runtime_subagent_policy,
     commit_runtime_subagent_policy, runtime_subagent_policy_matches, runtime_subagent_policy_paths,
+    write_runtime_subagent_policy,
 };
 use state::*;
 
@@ -41,7 +43,7 @@ pub(crate) const STATE_DIRECTORY: &str = "codey-subagent-gate-v3";
 const ACTIVE_MARKER_SCHEMA_VERSION: u32 = 1;
 const RUNTIME_SUBAGENT_POLICY_FILE: &str = "runtime-subagent-policy.json";
 const RUNTIME_SUBAGENT_POLICY_PENDING_FILE: &str = "runtime-subagent-policy.pending.json";
-const RUNTIME_SUBAGENT_POLICY_SCHEMA_VERSION: u32 = 1;
+const RUNTIME_SUBAGENT_POLICY_SCHEMA_VERSION: u32 = 2;
 const RUNTIME_SUBAGENT_ATTESTATION_SCHEMA_VERSION: u32 = 1;
 const RUNTIME_SUBAGENT_ATTESTATION_PREFIX: &str = "runtime-attestation-";
 const MAX_RUNTIME_ATTESTATION_TRANSCRIPT_BYTES: u64 = 2 * 1024 * 1024;
@@ -1115,7 +1117,17 @@ fn runtime_role_admission_denial(state_root: &Path, role: &str) -> Result<Option
             )));
         }
     };
-    if policy.roles.contains_key(role) {
+    if let Some(selection) = policy.roles.get(role) {
+        let catalog = SubagentCatalogSnapshot::new(
+            policy.catalog_provider_id.clone(),
+            policy.available_models.clone(),
+        );
+        if catalog.canonical_model(&selection.model).is_none() {
+            return Ok(Some(format!(
+                "CODEY_SUBAGENT_MODEL_UNAVAILABLE: 子代理角色 `{role}` 绑定的模型 `{}` 在当前 provider 清单中不可用；请在设置中重新选择后再派生。未创建调度账本记录。",
+                selection.model.trim()
+            )));
+        }
         Ok(None)
     } else if crate::config::SUBAGENT_ROLE_IDS.contains(&role) {
         Ok(Some(format!(
@@ -1127,6 +1139,7 @@ fn runtime_role_admission_denial(state_root: &Path, role: &str) -> Result<Option
         )))
     }
 }
+
 
 fn runtime_policy_missing_reason() -> &'static str {
     "CODEY_SUBAGENT_RUNTIME_POLICY_MISSING: 子代理运行时策略缺失，无法验证角色和运行配置；请在 Codey 中重新保存子代理设置，或通过 Codey 重启 Codex 后重试。"
@@ -2503,6 +2516,13 @@ fn powershell_executable_invocation(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ProviderProfile;
+
+    fn test_policy_catalog(
+        roles: &BTreeMap<String, crate::config::SubagentRoleConfig>,
+    ) -> SubagentCatalogSnapshot {
+        SubagentCatalogSnapshot::allowing_bound_models("test-provider", roles)
+    }
 
     fn input(event: &str, session: &str) -> HookInput {
         HookInput {
@@ -2535,6 +2555,7 @@ mod tests {
             runtime_policy::runtime_subagent_policy_bytes(
                 &crate::config::default_subagent_roles(),
                 &BTreeMap::new(),
+                &test_policy_catalog(&crate::config::default_subagent_roles()),
             )
             .unwrap(),
         )
@@ -2608,7 +2629,7 @@ mod tests {
         fs::create_dir_all(&sessions).unwrap();
         let roles = crate::config::default_subagent_roles();
         let hashes = BTreeMap::new();
-        commit_runtime_subagent_policy(home, &roles, &hashes).unwrap();
+        commit_runtime_subagent_policy(home, &roles, &hashes, &test_policy_catalog(&roles)).unwrap();
         let role = crate::config::SUBAGENT_ROLE_QUICK_SCAN;
         let expected = roles.get(role).unwrap();
         let session_id = "attestation-parent";
@@ -2659,7 +2680,7 @@ mod tests {
             None
         );
 
-        begin_runtime_subagent_policy_update(home, &roles, &hashes).unwrap();
+        begin_runtime_subagent_policy_update(home, &roles, &hashes, &test_policy_catalog(&roles)).unwrap();
         // Already-attested children may finish their existing turn while new
         // children are fenced until the pending generation is committed.
         assert_eq!(
@@ -2680,7 +2701,7 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(pending.contains("CODEY_SUBAGENT_RUNTIME_UPDATE_IN_PROGRESS"));
-        commit_runtime_subagent_policy(home, &roles, &hashes).unwrap();
+        commit_runtime_subagent_policy(home, &roles, &hashes, &test_policy_catalog(&roles)).unwrap();
 
         let wrong_agent = "01a01f94-0000-7000-8000-000000000003";
         let wrong_transcript = write_transcript(
@@ -2827,7 +2848,7 @@ mod tests {
         let state_root = home.join(STATE_DIRECTORY);
         let mut roles = crate::config::default_subagent_roles();
         roles.remove(crate::config::SUBAGENT_ROLE_WORKER);
-        commit_runtime_subagent_policy(home, &roles, &BTreeMap::new()).unwrap();
+        commit_runtime_subagent_policy(home, &roles, &BTreeMap::new(), &test_policy_catalog(&roles)).unwrap();
 
         let mut spawn = input("PreToolUse", "disabled-role-session");
         spawn.turn_id = Some("root-turn-a".to_string());
@@ -2867,6 +2888,194 @@ mod tests {
             .unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn unavailable_role_model_is_rejected_before_spawn_reservation() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let state_root = home.join(STATE_DIRECTORY);
+        let mut roles = crate::config::default_subagent_roles();
+        roles.insert(
+            crate::config::SUBAGENT_ROLE_WORKER.into(),
+            crate::config::SubagentRoleConfig::new("gone-model", "medium"),
+        );
+        let catalog = SubagentCatalogSnapshot::new(
+            "route-a",
+            vec![crate::config::DEFAULT_SUBAGENT_MODEL.to_string()],
+        );
+        write_runtime_subagent_policy(home, &roles, &BTreeMap::new(), &catalog).unwrap();
+
+        let mut spawn = input("PreToolUse", "stale-model-session");
+        spawn.turn_id = Some("root-turn-a".to_string());
+        spawn.cwd = Some("/repo".to_string());
+        spawn.tool_name = Some("agents.spawn_agent".to_string());
+        spawn.tool_input = Some(json!({
+            "task_name": "stale_worker",
+            "agent_type": "codey_worker",
+            "fork_turns": "none",
+            "message": "implement"
+        }));
+        let denied = handle_hook_for_runtime_at(&spawn, &state_root, "runtime-a", 20).unwrap();
+        assert_eq!(
+            denied["hookSpecificOutput"]["permissionDecision"].as_str(),
+            Some("deny")
+        );
+        let reason = denied["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(reason.contains("CODEY_SUBAGENT_MODEL_UNAVAILABLE"));
+        assert!(reason.contains("codey_worker"));
+        assert!(reason.contains("gone-model"));
+        assert_eq!(
+            crate::subagent_orchestrator::active_reservation_count(
+                &state_root,
+                "runtime-a",
+                "stale-model-session",
+                30,
+            )
+            .unwrap(),
+            None
+        );
+
+        let restored = SubagentCatalogSnapshot::new("route-a", vec!["gone-model".into()]);
+        write_runtime_subagent_policy(home, &roles, &BTreeMap::new(), &restored).unwrap();
+        let admitted = runtime_role_admission_denial(&state_root, "codey_worker").unwrap();
+        assert_eq!(admitted, None);
+    }
+
+    #[test]
+    fn reselecting_a_catalog_member_restores_spawn_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let state_root = home.join(STATE_DIRECTORY);
+        let mut roles = crate::config::default_subagent_roles();
+        roles.insert(
+            crate::config::SUBAGENT_ROLE_WORKER.into(),
+            crate::config::SubagentRoleConfig::new("gone-model", "medium"),
+        );
+        let catalog = SubagentCatalogSnapshot::new(
+            "route-a",
+            vec![crate::config::DEFAULT_SUBAGENT_MODEL.to_string()],
+        );
+        write_runtime_subagent_policy(home, &roles, &BTreeMap::new(), &catalog).unwrap();
+        assert!(
+            runtime_role_admission_denial(&state_root, "codey_worker")
+                .unwrap()
+                .is_some_and(|reason| reason.contains("CODEY_SUBAGENT_MODEL_UNAVAILABLE"))
+        );
+
+        roles.insert(
+            crate::config::SUBAGENT_ROLE_WORKER.into(),
+            crate::config::SubagentRoleConfig::new(crate::config::DEFAULT_SUBAGENT_MODEL, "medium"),
+        );
+        write_runtime_subagent_policy(home, &roles, &BTreeMap::new(), &catalog).unwrap();
+        assert_eq!(
+            runtime_role_admission_denial(&state_root, "codey_worker").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_switch_keeps_binding_then_spawn_rejects_until_reselect() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let state_root = home.join(STATE_DIRECTORY);
+        let mut previous = ProviderProfile::new("Previous");
+        previous.id = "route-a".into();
+        previous.official_account = false;
+        let mut current = ProviderProfile::new("Current");
+        current.id = "route-b".into();
+        current.official_account = false;
+        let mut config = crate::config::CodeyConfig {
+            active_profile_id: "route-b".into(),
+            profiles: vec![previous, current],
+            selected_models_by_provider: BTreeMap::from([
+                ("route-a".into(), vec!["stale-model".into()]),
+                ("route-b".into(), vec!["live-model".into()]),
+            ]),
+            subagent_optimization: true,
+            subagent_model: "stale-model".into(),
+            subagent_roles: crate::config::uniform_subagent_roles("stale-model", "medium"),
+            ..crate::config::CodeyConfig::default()
+        };
+        crate::subagent_policy::reconcile_with_model_state(&mut config, None);
+        assert_eq!(
+            config.subagent_roles[crate::config::SUBAGENT_ROLE_WORKER].model,
+            "stale-model"
+        );
+
+        let catalog = crate::subagent_policy::catalog_snapshot_for_config(&config);
+        write_runtime_subagent_policy(home, &config.subagent_roles, &BTreeMap::new(), &catalog)
+            .unwrap();
+        assert!(
+            runtime_role_admission_denial(&state_root, "codey_worker")
+                .unwrap()
+                .is_some_and(|reason| {
+                    reason.contains("CODEY_SUBAGENT_MODEL_UNAVAILABLE")
+                        && reason.contains("codey_worker")
+                        && reason.contains("stale-model")
+                })
+        );
+
+        config.subagent_roles.insert(
+            crate::config::SUBAGENT_ROLE_WORKER.into(),
+            crate::config::SubagentRoleConfig::new("live-model", "medium"),
+        );
+        let catalog = crate::subagent_policy::catalog_snapshot_for_config(&config);
+        write_runtime_subagent_policy(home, &config.subagent_roles, &BTreeMap::new(), &catalog)
+            .unwrap();
+        assert_eq!(
+            runtime_role_admission_denial(&state_root, "codey_worker").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn missing_agent_type_gates_the_default_compatibility_role() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let state_root = home.join(STATE_DIRECTORY);
+        let mut roles = crate::config::default_subagent_roles();
+        roles.insert(
+            crate::config::SUBAGENT_ROLE_DEFAULT.into(),
+            crate::config::SubagentRoleConfig::new("legacy-gone", "low"),
+        );
+        let catalog = SubagentCatalogSnapshot::new(
+            "route-a",
+            vec![crate::config::DEFAULT_SUBAGENT_MODEL.to_string()],
+        );
+        write_runtime_subagent_policy(home, &roles, &BTreeMap::new(), &catalog).unwrap();
+
+        let mut spawn = input("PreToolUse", "default-role-session");
+        spawn.turn_id = Some("root-turn-a".to_string());
+        spawn.cwd = Some("/repo".to_string());
+        spawn.tool_name = Some("agents.spawn_agent".to_string());
+        spawn.tool_input = Some(json!({
+            "task_name": "anonymous",
+            "fork_turns": "none",
+            "message": "scan"
+        }));
+        let denied = handle_hook_for_runtime_at(&spawn, &state_root, "runtime-a", 20).unwrap();
+        let reason = denied["hookSpecificOutput"]["permissionDecisionReason"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(reason.contains("CODEY_SUBAGENT_MODEL_UNAVAILABLE"));
+        assert!(reason.contains("default"));
+        assert!(reason.contains("legacy-gone"));
+    }
+
+    #[test]
+    fn catalog_change_without_role_edits_is_visible_to_policy_matching() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        let roles = crate::config::default_subagent_roles();
+        let hashes = BTreeMap::new();
+        let first = SubagentCatalogSnapshot::new("route-a", vec!["model-a".into()]);
+        write_runtime_subagent_policy(home, &roles, &hashes, &first).unwrap();
+        let second = SubagentCatalogSnapshot::new("route-a", vec!["model-b".into()]);
+        assert!(!runtime_subagent_policy_matches(home, &roles, &hashes, &second).unwrap());
+        assert!(runtime_subagent_policy_matches(home, &roles, &hashes, &first).unwrap());
     }
 
     #[test]

@@ -268,6 +268,7 @@ pub(crate) struct RuntimeRouterConfigOptions<'a> {
     pub subagent_model: &'a str,
     pub subagent_reasoning_effort: &'a str,
     pub subagent_roles: Option<&'a BTreeMap<String, SubagentRoleConfig>>,
+    pub subagent_catalog: crate::subagent_policy::SubagentCatalogSnapshot,
 }
 
 #[derive(Debug)]
@@ -294,6 +295,7 @@ struct RouterApplyOptions<'a> {
     subagent_model: &'a str,
     subagent_reasoning_effort: &'a str,
     subagent_roles: Option<&'a BTreeMap<String, SubagentRoleConfig>>,
+    subagent_catalog: crate::subagent_policy::SubagentCatalogSnapshot,
     marker: &'a Path,
     backup_root: &'a Path,
 }
@@ -341,6 +343,7 @@ pub(crate) fn apply_runtime_router_config(
             subagent_model: options.subagent_model,
             subagent_reasoning_effort: options.subagent_reasoning_effort,
             subagent_roles: options.subagent_roles,
+            subagent_catalog: options.subagent_catalog,
             marker: &marker,
             backup_root: &backup_root,
         },
@@ -420,6 +423,7 @@ fn apply_isolated_runtime_router_config(
         subagent_model,
         subagent_reasoning_effort,
         subagent_roles,
+        subagent_catalog,
         marker,
         backup_root,
     } = options;
@@ -616,6 +620,7 @@ fn apply_isolated_runtime_router_config(
             home,
             &state.subagent_roles,
             &state.runtime_agent_hashes,
+            &subagent_catalog,
         )
     } else {
         crate::subagent_gate::clear_runtime_subagent_policy(home)
@@ -668,6 +673,7 @@ fn apply_isolated_test_runtime_config(
             subagent_model,
             subagent_reasoning_effort,
             subagent_roles,
+            subagent_catalog: Default::default(),
             marker,
             backup_root,
         },
@@ -1106,10 +1112,12 @@ fn reconcile_runtime_subagent_roles_at(
         && state.runtime_agent_schema_version == RUNTIME_AGENT_SCHEMA_VERSION
         && state.runtime_agent_hashes == expected_hashes;
     let generated_files_match = runtime_agent_files_match(&plans)?;
+    let catalog = crate::subagent_policy::catalog_snapshot_for_config(config);
     let runtime_policy_matches = crate::subagent_gate::runtime_subagent_policy_matches(
         &runtime_home,
         &runtime_roles,
         &expected_hashes,
+        &catalog,
     )?;
     let mut reasons = Vec::new();
     if !lease_matches {

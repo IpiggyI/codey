@@ -9,10 +9,10 @@ import {
 import { invoke } from "./api";
 import type {
   Config,
+  CurrentProviderSnapshot,
   ModelState,
   ModelContextConfig,
   Notice,
-  ProviderStatus,
   RuntimeStatus,
 } from "./App.types";
 import {
@@ -23,9 +23,8 @@ import {
   uniqueModelIds,
   withoutModelId,
 } from "./modelIds";
-import { buildSubagentModelOptions } from "./subagentModels";
-import { routeProviderId } from "./modelRoutes";
-import { modelSelectionNotice, type ModelRuntimeUpdate } from "./modelSelectionNotice";
+import { buildCurrentProviderSubagentModelOptions, buildSubagentModelOptions } from "./subagentModels";
+import { routeProviderId } from "./modelRoutes";import { modelSelectionNotice, type ModelRuntimeUpdate } from "./modelSelectionNotice";
 
 const MAX_MODEL_ID_BYTES = 512;
 const MAX_MODEL_COUNT = 10_000;
@@ -42,7 +41,7 @@ const pickerSelection = (state: ModelState) =>
 
 type UseModelSelectionOptions = {
   config: Config | null;
-  currentProvider: ProviderStatus["provider"] | null;
+  currentProviderSnapshot: CurrentProviderSnapshot | null;
   officialAccountAvailable: boolean;
   runOperation: (name: string, action: () => Promise<void>) => Promise<void>;
   setPersistedConfig: (config: Config) => void;
@@ -52,7 +51,7 @@ type UseModelSelectionOptions = {
 
 export function useModelSelection({
   config,
-  currentProvider,
+  currentProviderSnapshot,
   officialAccountAvailable,
   runOperation,
   setPersistedConfig,
@@ -147,15 +146,29 @@ export function useModelSelection({
       officialSlugKeys,
     ],
   );
-  const subagentModelOptions = useMemo(
+  const promptOptimizationModelOptions = useMemo(
     () =>
       buildSubagentModelOptions(
         config,
         modelState,
         officialAccountAvailable,
-        currentProvider,
       ),
-    [config, currentProvider, modelState, officialAccountAvailable],
+    [config, modelState, officialAccountAvailable],
+  );
+  const subagentModelOptions = useMemo(
+    () =>
+      buildCurrentProviderSubagentModelOptions(
+        config,
+        modelState,
+        officialAccountAvailable,
+        currentProviderSnapshot,
+      ),
+    [
+      config,
+      currentProviderSnapshot,
+      modelState,
+      officialAccountAvailable,
+    ],
   );
 
   const openModelPicker = useCallback((
@@ -322,8 +335,7 @@ export function useModelSelection({
           includesModelId(modelEditorState.officialModelIds, model) ||
           includesModelId(thirdPartyModelOptions, model),
       ),
-      ...(modelPickerRouteId == null ? {} : { routeId: modelPickerRouteId }),
-    });
+      ...(modelPickerRouteId == null ? {} : { routeId: modelPickerRouteId }),    });
     setPersistedConfig(result.config);
     setModelState(result.modelState);
     setStatus((current) => ({
@@ -365,7 +377,7 @@ export function useModelSelection({
         manualThirdPartyModels,
         deletedThirdPartyModels,
         draftAutoReviewSupported,
-        `已保存 ${officialModels.length + thirdPartyModels.length} 个当前线路模型`,
+        `已更新模型声明：${thirdPartyModels.length} 个线路模型`,
         true,
       );
     });
@@ -381,6 +393,7 @@ export function useModelSelection({
 
   return {
     subagentModelOptions,
+    promptOptimizationModelOptions,
     modelState,
     modelEditorState,
     setModelState,

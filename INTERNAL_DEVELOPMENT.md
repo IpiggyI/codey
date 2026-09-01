@@ -506,6 +506,8 @@ Computer Use 沿用 Codex 管理的 `unified-computer-use` 插件及其 `cua_rep
 
 子代理门禁与 FastCtx 路由 Hook 的定义只写入运行期 hooks.json，并通过 `-c features.hooks=true` 与 `hooks.state.*.trusted_hash` 覆盖项交给 Codex；启动补丁生成的临时 config.toml 文档不再携带 `[[hooks.*]]` 表，相关 TOML 写入和旧组清理代码已于 2026-09-06 删除。同日移除了隔离运行时设计之前的租约恢复路径（AGENTS.md / agents/default.toml 快照回滚）：旧版本遗留的 codex-lease.json 仍会被读取并释放，hooks.json 与策略文件按当前流程回滚，但不再回写 AGENTS.md 与 default.toml。
 
+不可用的子代理角色模型会明确标出，不会悄悄替换。
+
 提示词优化可使用运行中的 Codey 路由，也可使用独立配置。地址、认证和模型由后端校验；日志不保存提示词正文或凭据。
 
 子代理模型校正保留线路别名，并校正对应的思考深度。第三方模型优先使用精确别名元数据；只有当前线路可以回退到原始模型名元数据，避免把另一线路的同名模型能力混用。官方模型使用官方能力列表。其他线路缺少对应元数据时保留原设置，由后续运行校验处理，不推断支持能力；实际模型与思考深度的严格校验保持不变。

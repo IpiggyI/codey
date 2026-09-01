@@ -223,6 +223,7 @@ export function App({
   );
   const {
     subagentModelOptions,
+    promptOptimizationModelOptions,
     modelState,
     modelEditorState,
     setModelState,
@@ -248,6 +249,7 @@ export function App({
     saveModelSelection,
   } = useModelSelection({
     config,
+    currentProviderSnapshot,
     officialAccountAvailable: status.officialAccountAvailable === true,
     runOperation,
     setPersistedConfig,
@@ -1120,7 +1122,7 @@ export function App({
                 config={config}
                 isBusy={isBusy}
                 popupContainer={popupContainer}
-                subagentModelOptions={subagentModelOptions}
+                subagentModelOptions={promptOptimizationModelOptions}
                 onConfigChange={handleConfigChange}
                 onNotice={setNotice}
               />

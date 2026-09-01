@@ -16,9 +16,8 @@ import {
   Tooltip,
 } from "./components/mantine";
 import { ModelCombobox } from "./components/ModelCombobox";
-import { routeProviderId } from "./modelRoutes";
 import {
-  resolveSubagentModelOption,
+  resolveCurrentProviderModelOption,
   type SubagentModelOption,
 } from "./subagentModels";
 import { compactSelectInputClass, surfaceCardPaddingClass } from "./uiClasses";
@@ -103,12 +102,6 @@ export function SubagentPolicyCardComponent({
   onSubagentOptimizationChange,
 }: SubagentPolicyCardProps) {
   const subagentPolicyControlsDisabled = isBusy;
-  const preferredProfile =
-    config.profiles.find((profile) => profile.id === config.activeProfileId) ??
-    config.profiles[0];
-  const preferredProviderId = preferredProfile
-    ? routeProviderId(preferredProfile)
-    : undefined;
   const enabledRoleCount = SUBAGENT_TASK_TYPES.filter(
     ({ id }) => config.subagentRoles[id]?.enabled !== false,
   ).length;
@@ -159,7 +152,7 @@ export function SubagentPolicyCardComponent({
                       <Table.Th style={{ width: "44px" }}>启用</Table.Th>
                       <Table.Th style={{ width: "135px" }}>任务角色</Table.Th>
                       <Table.Th>指定模型</Table.Th>
-                      <Table.Th style={{ width: "115px" }}>思考深度</Table.Th>
+                      <Table.Th style={{ width: "115px" }}>思考强度</Table.Th>
                     </Table.Tr>
                   </Table.Thead>
                   <Table.Tbody>
@@ -169,10 +162,9 @@ export function SubagentPolicyCardComponent({
                         model: config.subagentModel,
                         reasoningEffort: config.subagentReasoningEffort,
                       };
-                      const selectedModel = resolveSubagentModelOption(
+                      const selectedModel = resolveCurrentProviderModelOption(
                         subagentModelOptions,
                         selection.model,
-                        preferredProviderId,
                       );
                       const reasoningEfforts =
                         selectedModel?.supportedReasoningEfforts ?? [];
@@ -245,7 +237,7 @@ export function SubagentPolicyCardComponent({
                               value={selection.model}
                               placeholder={
                                 subagentModelOptions.length === 0
-                                  ? "所有线路均暂无模型"
+                                  ? "当前 provider 暂无模型"
                                   : "请选择模型"
                               }
                               disabled={
@@ -254,7 +246,7 @@ export function SubagentPolicyCardComponent({
                                 subagentModelOptions.length === 0
                               }
                               options={subagentModelOptions}
-                              preferredProviderId={preferredProviderId}
+                              showLaneIdentity={false}
                               getPopupContainer={() => popupContainer ?? document.body}
                               zIndex={SETTINGS_OVERLAY_Z_INDEX}
                               onChange={(value) => {
@@ -280,7 +272,7 @@ export function SubagentPolicyCardComponent({
                               className="w-full min-w-0"
                               inputClassName={compactSelectInputClass}
                               sectionClassName="text-[#6e6e73]"
-                              aria-label={`${task.name}思考深度`}
+                              aria-label={`${task.name}思考强度`}
                               value={
                                 reasoningEfforts.includes(selection.reasoningEffort)
                                   ? selection.reasoningEffort
@@ -316,10 +308,10 @@ export function SubagentPolicyCardComponent({
                 <IconInfoCircle size={14} className="subagent-callout-icon" aria-hidden="true" />
                 <div className="subagent-callout-text">
                   {subagentModelOptions.length === 0
-                    ? "请先在模型管理中为任一可用线路启用模型。"
+                    ? "请先在模型管理中为当前 provider 启用模型。"
                     : writableRolesDisabled
-                      ? `${writableRolesDisabledMessage}角色启用状态变更需重启 Codex，模型和思考深度保存后对下次派生生效。`
-                      : "可搜索并选择任意可用线路模型；角色启用状态变更需重启 Codex，模型和思考深度保存后对下次派生生效。角色权限仍受父任务权限模式约束。"}
+                      ? `${writableRolesDisabledMessage}角色启用状态变更需重启 Codex，模型和思考强度保存后对下次派生生效。`
+                      : "可从当前 provider 清单中选择模型；失效绑定会标记为待重选，重新选择前不会派生该角色。角色启用状态变更需重启 Codex，模型和思考强度保存后对下次派生生效。角色权限仍受父任务权限模式约束。"}
                 </div>
               </div>
             </>

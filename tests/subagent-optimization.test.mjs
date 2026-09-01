@@ -38,18 +38,25 @@ test("subagent settings expose the five supported role controls", async () => {
   assert.doesNotMatch(featurePolicySource, /关闭全部可写角色/);
   assert.doesNotMatch(featurePolicySource, /disableWritableRoles/);
   assert.match(featurePolicySource, /<ModelCombobox/);
+  assert.match(featurePolicySource, /showLaneIdentity=\{false\}/);
+  assert.match(featurePolicySource, /待重选/);
+  assert.match(featurePolicySource, /当前 provider 清单/);
+  assert.match(featurePolicySource, /resolveCurrentProviderModelOption/);
+  assert.doesNotMatch(featurePolicySource, /所有线路均暂无模型/);
+  assert.match(
+    modelHookSource,
+    /buildCurrentProviderSubagentModelOptions\(\s*config,\s*modelState,\s*officialAccountAvailable,\s*currentProviderSnapshot/,
+  );
   assert.match(
     modelHookSource,
     /buildSubagentModelOptions\(\s*config,\s*modelState,\s*officialAccountAvailable/,
   );
-  assert.match(modelHookSource, /officialAccountAvailable,\s*currentProvider/);
-  assert.match(modelOptionsSource, /for \(const profile of config\.profiles\)/);
-  assert.match(modelOptionsSource, /value: routeModelAlias\(profile, modelId\)/);
-  assert.match(modelOptionsSource, /if \(!config\.localRouterEnabled\)/);
-  assert.match(modelOptionsSource, /currentProvider\?\.id/);
+  assert.match(modelOptionsSource, /export function buildCurrentProviderSubagentModelOptions/);
   assert.match(modelOptionsSource, /value: modelId/);
-  assert.match(modelOptionsSource, /: modelState\.thirdPartyModels/);
-  assert.match(modelOptionsSource, /official && officialModelMetadata/);
+  assert.match(modelOptionsSource, /providerModelAlias\(providerId, option\.modelId\)/);
+  assert.match(modelOptionsSource, /for \(const profile of config\.profiles\)/);
+  assert.match(modelOptionsSource, /value = routeModelAlias\(profile, modelId\)/);
+  assert.match(modelOptionsSource, /const usesOfficialMetadata = official/);
   assert.match(
     modelOptionsSource,
     /THIRD_PARTY_REASONING_EFFORTS\s*=\s*\["low",\s*"medium",\s*"high",\s*"xhigh"\]/,
@@ -60,7 +67,9 @@ test("subagent settings expose the five supported role controls", async () => {
   );
   assert.match(modelOptionsSource, /modelState\.thirdPartyModelMetadata/);
   assert.match(modelOptionsSource, /resolveSubagentModelOption/);
+  assert.match(modelOptionsSource, /resolveCurrentProviderModelOption/);
   assert.match(comboboxSource, /<Combobox\.Search/);
   assert.match(comboboxSource, /搜索模型或线路/);
+  assert.match(comboboxSource, /待重选/);
   assert.match(comboboxSource, /<Combobox\.Group/);
 });

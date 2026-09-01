@@ -3,15 +3,17 @@ import { useVirtualizedCombobox } from "@mantine/core";
 import { IconAlertTriangle, IconCheck, IconSearch } from "@tabler/icons-react";
 
 import type { SubagentModelOption } from "../subagentModels";
-import { resolveSubagentModelOption } from "../subagentModels";
+import {
+  resolveCurrentProviderModelOption,
+  resolveSubagentModelOption,
+} from "../subagentModels";
 import {
   MODEL_GROUP_HEIGHT,
   MODEL_LIST_HEIGHT,
   MODEL_OPTION_HEIGHT,
   modelComboboxLayout,
   visibleModelGroups,
-} from "../modelComboboxWindow";
-import { compactSelectInputClass } from "../uiClasses";
+} from "../modelComboboxWindow";import { compactSelectInputClass } from "../uiClasses";
 import { Combobox, InputBase } from "./mantine";
 
 type ModelComboboxProps = {
@@ -22,6 +24,7 @@ type ModelComboboxProps = {
   options: SubagentModelOption[];
   placeholder?: string;
   preferredProviderId?: string;
+  showLaneIdentity?: boolean;
   value: string;
   zIndex?: number;
 };
@@ -38,6 +41,7 @@ export function ModelCombobox({
   options,
   placeholder = "请选择模型",
   preferredProviderId,
+  showLaneIdentity = true,
   value,
   zIndex,
 }: ModelComboboxProps) {
@@ -47,8 +51,11 @@ export function ModelCombobox({
   const viewportRef = useRef<HTMLDivElement>(null);
   const optionId = useId();
   const selectedOption = useMemo(
-    () => resolveSubagentModelOption(options, value, preferredProviderId),
-    [options, preferredProviderId, value],
+    () =>
+      showLaneIdentity
+        ? resolveSubagentModelOption(options, value, preferredProviderId)
+        : resolveCurrentProviderModelOption(options, value),
+    [options, preferredProviderId, showLaneIdentity, value],
   );
   const validValues = useMemo(
     () => new Set(options.map((option) => option.value)),
@@ -58,17 +65,21 @@ export function ModelCombobox({
     () =>
       options.map((option) => ({
         option,
-        searchText: [
-          option.label,
-          option.modelId,
-          option.routeName,
-          option.routePrefix,
-          option.providerId,
-        ]
+        searchText: (
+          showLaneIdentity
+            ? [
+              option.label,
+              option.modelId,
+              option.routeName,
+              option.routePrefix,
+              option.providerId,
+            ]
+            : [option.label, option.modelId]
+        )
           .map(normalizedSearchText)
           .join("\u0000"),
       })),
-    [options],
+    [options, showLaneIdentity],
   );
   const normalizedSearch = normalizedSearchText(search);
   const filteredOptions = useMemo(
@@ -126,9 +137,11 @@ export function ModelCombobox({
   const portalTarget = getPopupContainer?.();
   const unavailableValue = value.trim() && !selectedOption ? value.trim() : "";
   const triggerText = selectedOption
-    ? `[${selectedOption.routePrefix}] ${selectedOption.label}`
+    ? showLaneIdentity
+      ? `[${selectedOption.routePrefix}] ${selectedOption.label}`
+      : selectedOption.label
     : unavailableValue
-      ? `${unavailableValue} · 已不可用`
+      ? `${unavailableValue} · ${showLaneIdentity ? "已不可用" : "待重选"}`
       : placeholder;
 
   return (
@@ -197,7 +210,7 @@ export function ModelCombobox({
           }}
           leftSection={<IconSearch size={14} aria-hidden="true" />}
           onChange={(event) => setSearch(event.currentTarget.value)}
-          placeholder="搜索模型或线路"
+          placeholder={showLaneIdentity ? "搜索模型或线路" : "搜索模型"}
           value={search}
         />
         <Combobox.Options
@@ -258,7 +271,11 @@ export function ModelCombobox({
           </div>
           {layout.groups.length === 0 && (
             <Combobox.Empty className="py-6 text-xs text-[#8e8e93]">
-              {options.length === 0 ? "还没有可用于子代理的模型" : "没有匹配的模型或线路"}
+              {options.length === 0
+                ? "还没有可用于子代理的模型"
+                : showLaneIdentity
+                  ? "没有匹配的模型或线路"
+                  : "没有匹配的模型"}
             </Combobox.Empty>
           )}
         </Combobox.Options>

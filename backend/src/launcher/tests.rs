@@ -53,28 +53,6 @@ fn windows_stop_survivors_match_targets_by_creation_identity() {
 }
 
 #[test]
-fn windows_owned_process_ids_include_descendants_from_snapshot() {
-    let app_dir = Path::new(r"C:\Users\kim\AppData\Local\OpenAI Codex");
-    let owned_executable = Path::new(r"C:\Users\kim\AppData\Local\OpenAI Codex\ChatGPT.exe");
-    let unrelated_executable = Path::new(r"C:\Other\ChatGPT.exe");
-    let processes = [
-        (10, 0, Some(owned_executable)),
-        (11, 10, None),
-        (12, 11, None),
-        (13, 0, Some(unrelated_executable)),
-        (14, 13, None),
-    ];
-
-    let process_ids = windows_owned_process_ids_from_snapshot(app_dir, None, processes);
-
-    assert!(process_ids.contains(&10));
-    assert!(process_ids.contains(&11));
-    assert!(process_ids.contains(&12));
-    assert!(!process_ids.contains(&13));
-    assert!(!process_ids.contains(&14));
-}
-
-#[test]
 fn windows_stop_failure_summary_lists_surviving_executables() {
     let remaining = vec![
         (10, "ChatGPT.exe".to_string(), Some(100)),
@@ -91,18 +69,6 @@ fn windows_stop_failure_summary_lists_surviving_executables() {
     let summary = windows_stop_failure_summary(&many);
     assert!(summary.starts_with("7 个进程仍在运行："));
     assert!(summary.ends_with("等共 7 个"));
-}
-
-#[test]
-fn windows_stop_tracking_absorbs_late_descendants() {
-    let mut process_ids = HashSet::from([10]);
-
-    windows_extend_tracked_descendants_from_snapshot(
-        &mut process_ids,
-        vec![(10, 0, None), (11, 10, None), (12, 11, None), (20, 0, None)],
-    );
-
-    assert_eq!(process_ids, HashSet::from([10, 11, 12]));
 }
 
 #[test]
@@ -234,248 +200,37 @@ fn generated_catalog_uses_the_route_aware_default_selector() {
         runtime_default_model(&config, false, &state).as_deref(),
         Some("shared-model")
     );
-
-    let mut official = ProviderProfile::new("Official");
-    official.source_provider_id = Some("openai".into());
-    official.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.into();
-    official.normalize();
-    let mut official_config = CodeyConfig {
-        active_profile_id: official.id.clone(),
-        profiles: vec![official],
-        default_model: "openai/gpt-5.6-sol".into(),
-        official_account_available_this_launch: true,
-        ..CodeyConfig::default()
-    };
-    official_config
-        .selected_models_by_provider
-        .insert("openai".into(), vec!["gpt-5.6-sol".into()]);
-    assert_eq!(
-        runtime_default_model(&official_config, true, &state).as_deref(),
-        Some("gpt-5.6-sol")
-    );
 }
 
 #[test]
-fn subagent_runtime_models_use_route_aware_aliases() {
-    let target = |provider: &str, model: &str, official: bool| RuntimeModelTarget {
-        route_id: provider.into(),
-        provider_id: provider.into(),
-        alias: local_router::model_alias(provider, model),
-        request_provider_id: ROUTER_PROVIDER_ID.into(),
-        request_model: model.into(),
-        upstream_model: model.into(),
-        official,
-    };
-    let targets = vec![
-        target("route-b", "shared-model", false),
-        target("route-b", "vendor/model", false),
-        target("openai", "gpt-5.6-sol", true),
+fn subagent_runtime_models_alias_only_catalog_members() {
+    let route_aliases = vec![
+        "route-a/shared-model".to_string(),
+        "route-b/shared-model".to_string(),
     ];
-    for (requested, expected) in [
-        ("shared-model", "route-b/shared-model"),
-        (" SHARED-MODEL ", "route-b/shared-model"),
-        ("route-b/shared-model", "route-b/shared-model"),
-        ("vendor/model", "route-b/vendor/model"),
-        ("gpt-5.6-sol", "gpt-5.6-sol"),
-        ("unknown-model", "route-a/unknown-model"),
-    ] {
-        assert_eq!(
-            route_subagent_model("route-a", requested, &targets, false),
-            expected,
-            "requested: {requested}"
-        );
-    }
-
-    let mut ambiguous = targets.clone();
-    ambiguous.push(target("route-a", "shared-model", false));
+    let catalog = crate::subagent_policy::SubagentCatalogSnapshot::new(
+        "route-a",
+        vec!["shared-model".into(), "gpt-5.6-sol".into()],
+    );
     assert_eq!(
-        route_subagent_model("route-a", "shared-model", &ambiguous, false),
+        route_subagent_model("route-a", "shared-model", &route_aliases, &catalog),
         "route-a/shared-model"
     );
     assert_eq!(
-        route_subagent_model("route-a", "route-b/shared-model", &ambiguous, false),
+        route_subagent_model("route-a", "gpt-5.6-sol", &route_aliases, &catalog),
+        "route-a/gpt-5.6-sol"
+    );
+    assert_eq!(
+        route_subagent_model("route-a", "route-a/shared-model", &route_aliases, &catalog),
+        "route-a/shared-model"
+    );
+    assert_eq!(
+        route_subagent_model("route-a", "route-b/shared-model", &route_aliases, &catalog),
         "route-b/shared-model"
     );
-
-    let official_targets = vec![target("openai", "gpt-5.6-sol", true)];
-    for requested in ["gpt-5.6-sol", "openai/gpt-5.6-sol"] {
-        assert_eq!(
-            route_subagent_model("openai", requested, &official_targets, true),
-            "gpt-5.6-sol"
-        );
-    }
     assert_eq!(
-        route_subagent_model("openai", "unknown-model", &official_targets, true),
-        "unknown-model"
-    );
-}
-
-#[test]
-fn native_subagent_runtime_models_use_upstream_model_ids() {
-    let mut route = ProviderProfile::new("Relay");
-    route.id = "route-a".to_string();
-    route.short_name = "R".to_string();
-    route.base_url = "https://relay.example/v1".to_string();
-    route.api_key = "secret".to_string();
-    route.normalize();
-    let mut config = CodeyConfig {
-        active_profile_id: route.id.clone(),
-        profiles: vec![route],
-        subagent_model: local_router::model_alias("route-a", "shared-model"),
-        ..CodeyConfig::default()
-    };
-    config.selected_models_by_provider.insert(
-        "route-a".to_string(),
-        vec!["shared-model".to_string(), "worker-model".to_string()],
-    );
-    config.subagent_roles.get_mut("codey_worker").unwrap().model =
-        local_router::model_alias("route-a", "worker-model");
-    config
-        .subagent_roles
-        .get_mut("codey_quick_scan")
-        .unwrap()
-        .model = local_router::model_alias("route-a", "gpt-5.6-terra");
-    config
-        .subagent_roles
-        .get_mut("codey_visual_worker")
-        .unwrap()
-        .model = "custom/gpt-5.6-luna".to_string();
-    let native = native_subagent_runtime_config(&config);
-
-    assert_eq!(native.subagent_model, "shared-model");
-    assert_eq!(native.subagent_roles["codey_worker"].model, "worker-model");
-    assert_eq!(
-        native.subagent_roles["codey_quick_scan"].model,
-        "gpt-5.6-terra"
-    );
-    assert_eq!(
-        native.subagent_roles["codey_visual_worker"].model,
-        "custom/gpt-5.6-luna"
-    );
-}
-
-#[test]
-fn native_subagent_runtime_strips_official_provider_prefix_without_route_targets() {
-    let mut route = ProviderProfile::new("Custom");
-    route.id = "custom".to_string();
-    route.short_name = "C".to_string();
-    route.base_url = "https://relay.example/v1".to_string();
-    route.api_key = "secret".to_string();
-    route.normalize();
-    let mut config = CodeyConfig {
-        active_profile_id: route.id.clone(),
-        local_router_enabled: false,
-        profiles: vec![route],
-        subagent_model: "custom/gpt-5.6-sol".into(),
-        subagent_roles: crate::config::uniform_subagent_roles("custom/gpt-5.6-sol", "high"),
-        ..CodeyConfig::default()
-    };
-    config
-        .subagent_roles
-        .get_mut("codey_quick_scan")
-        .unwrap()
-        .model = "custom/gpt-5.6-terra".to_string();
-    config
-        .subagent_roles
-        .get_mut("codey_visual_worker")
-        .unwrap()
-        .model = "custom/gpt-5.6-luna".to_string();
-    config
-        .subagent_roles
-        .get_mut("codey_deep_research")
-        .unwrap()
-        .model = "custom/vendor/model".to_string();
-    let native = native_subagent_runtime_config(&config);
-
-    assert_eq!(native.subagent_model, "gpt-5.6-sol");
-    assert_eq!(
-        native.subagent_roles["codey_quick_scan"].model,
-        "gpt-5.6-terra"
-    );
-    assert_eq!(
-        native.subagent_roles["codey_visual_worker"].model,
-        "gpt-5.6-luna"
-    );
-    assert_eq!(
-        native.subagent_roles["codey_deep_research"].model,
-        "custom/vendor/model"
-    );
-}
-
-#[test]
-fn native_subagent_runtime_uses_synced_upstream_model_without_route_targets() {
-    let mut route = ProviderProfile::new("Custom");
-    route.id = "custom".to_string();
-    route.base_url = "https://relay.example/v1".to_string();
-    route.api_key = "secret".to_string();
-    route.normalize();
-    let mut config = CodeyConfig {
-        active_profile_id: route.id.clone(),
-        local_router_enabled: false,
-        profiles: vec![route],
-        subagent_model: "custom/vendor/model".into(),
-        ..CodeyConfig::default()
-    };
-    config
-        .upstream_models_by_provider
-        .insert("custom".into(), vec!["vendor/model".into()]);
-
-    let native = native_subagent_runtime_config(&config);
-
-    assert_eq!(native.subagent_model, "vendor/model");
-}
-
-#[test]
-fn native_subagent_runtime_follows_the_current_provider_models_and_efforts() {
-    let home = tempfile::tempdir().unwrap();
-    std::fs::write(
-        home.path().join("config.toml"),
-        r#"model_provider = "route-a"
-
-[model_providers.route-a]
-name = "Route A"
-base_url = "https://route-a.example/v1"
-wire_api = "responses"
-experimental_bearer_token = "secret"
-"#,
-    )
-    .unwrap();
-    let mut route_a = ProviderProfile::new("Route A");
-    route_a.id = "route-a".into();
-    route_a.base_url = "https://route-a.example/v1".into();
-    route_a.api_key = "secret".into();
-    route_a.normalize();
-    let mut route_b = ProviderProfile::new("Route B");
-    route_b.id = "route-b".into();
-    route_b.base_url = "https://route-b.example/v1".into();
-    route_b.api_key = "secret".into();
-    route_b.normalize();
-    let config = CodeyConfig {
-        local_router_enabled: false,
-        active_profile_id: route_b.id.clone(),
-        profiles: vec![route_a, route_b],
-        selected_models_by_provider: std::collections::BTreeMap::from([
-            ("route-a".into(), vec!["model-a".into()]),
-            ("route-b".into(), vec!["model-b".into()]),
-        ]),
-        upstream_models_by_provider: std::collections::BTreeMap::from([
-            ("route-a".into(), vec!["model-a".into()]),
-            ("route-b".into(), vec!["model-b".into()]),
-        ]),
-        subagent_model: "route-b/model-b".into(),
-        subagent_reasoning_effort: "max".into(),
-        subagent_roles: crate::config::uniform_subagent_roles("route-b/model-b", "max"),
-        ..CodeyConfig::default()
-    };
-
-    let native = reconciled_native_subagent_runtime_config(&config, home.path());
-
-    assert_eq!(native.subagent_model, "model-a");
-    assert_eq!(native.subagent_reasoning_effort, "low");
-    assert!(
-        native.subagent_roles.values().all(|selection| {
-            selection.model == "model-a" && selection.reasoning_effort == "low"
-        })
+        route_subagent_model("route-a", "gone-model", &route_aliases, &catalog),
+        "gone-model"
     );
 }
 

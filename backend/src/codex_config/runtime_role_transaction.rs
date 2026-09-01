@@ -57,11 +57,13 @@ pub(super) fn refresh_runtime_subagent_roles_at(config: &CodeyConfig, marker: &P
         path: runtime_policy_pending_path,
     });
 
+    let catalog = crate::subagent_policy::catalog_snapshot_for_config(config);
     let update = (|| -> Result<()> {
         crate::subagent_gate::begin_runtime_subagent_policy_update(
             &runtime_home,
             &runtime_roles,
             &expected_hashes,
+            &catalog,
         )?;
         let registrations = prepare_runtime_agent_files(
             &constraints_dir,
@@ -82,6 +84,7 @@ pub(super) fn refresh_runtime_subagent_roles_at(config: &CodeyConfig, marker: &P
             &runtime_home,
             &runtime_roles,
             &expected_hashes,
+            &catalog,
         )
     })();
 

@@ -174,8 +174,26 @@ fn discarding_a_cancelled_startup_clears_active_and_pending_runtime_policy() {
     fs::write(&marker, b"lease").unwrap();
     let roles = crate::config::uniform_subagent_roles("provider-model", "high");
     let hashes = BTreeMap::from([("default".to_string(), "digest".to_string())]);
-    crate::subagent_gate::commit_runtime_subagent_policy(&home, &roles, &hashes).unwrap();
-    crate::subagent_gate::begin_runtime_subagent_policy_update(&home, &roles, &hashes).unwrap();
+    crate::subagent_gate::commit_runtime_subagent_policy(
+        &home,
+        &roles,
+        &hashes,
+        &crate::subagent_policy::SubagentCatalogSnapshot::allowing_bound_models(
+            "test-provider",
+            &roles,
+        ),
+    )
+    .unwrap();
+    crate::subagent_gate::begin_runtime_subagent_policy_update(
+        &home,
+        &roles,
+        &hashes,
+        &crate::subagent_policy::SubagentCatalogSnapshot::allowing_bound_models(
+            "test-provider",
+            &roles,
+        ),
+    )
+    .unwrap();
 
     discard_runtime_lease(&home, &marker, &backup_dir).unwrap();
 
@@ -507,6 +525,7 @@ fn isolated_runtime_restores_live_disk_provider_to_resume_shim() {
             subagent_model: DEFAULT_SUBAGENT_MODEL,
             subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
             subagent_roles: None,
+            subagent_catalog: Default::default(),
             marker: &marker,
             backup_root: &backup_root,
         },
@@ -616,6 +635,7 @@ fn local_router_accepts_a_codey_owned_resume_shim() {
             subagent_model: DEFAULT_SUBAGENT_MODEL,
             subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
             subagent_roles: None,
+            subagent_catalog: Default::default(),
             marker: &marker,
             backup_root: &backup_root,
         },
@@ -875,6 +895,7 @@ fn isolated_runtime_preserves_computer_use_without_adding_an_mcp() {
                     subagent_model: DEFAULT_SUBAGENT_MODEL,
                     subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
                     subagent_roles: None,
+                    subagent_catalog: Default::default(),
                     marker: &marker,
                     backup_root: &backup_root,
                 },
@@ -925,6 +946,7 @@ wire_api = "responses"
             subagent_model: DEFAULT_SUBAGENT_MODEL,
             subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
             subagent_roles: None,
+            subagent_catalog: Default::default(),
             marker: &marker,
             backup_root: &backup_root,
         },
@@ -2254,6 +2276,7 @@ experimental_bearer_token = "upstream-secret-token"
             subagent_model: DEFAULT_SUBAGENT_MODEL,
             subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
             subagent_roles: None,
+            subagent_catalog: Default::default(),
             marker: &marker,
             backup_root: &backup_root,
         },
@@ -2337,6 +2360,7 @@ fn official_login_uses_the_websocket_router_without_overriding_builtin_openai() 
             subagent_model: DEFAULT_SUBAGENT_MODEL,
             subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
             subagent_roles: None,
+            subagent_catalog: Default::default(),
             marker: &marker,
             backup_root: &backup_root,
         },
@@ -2385,6 +2409,7 @@ wire_api = "responses"
             subagent_model: DEFAULT_SUBAGENT_MODEL,
             subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
             subagent_roles: None,
+            subagent_catalog: Default::default(),
             marker: &marker,
             backup_root: &backup_root,
         },

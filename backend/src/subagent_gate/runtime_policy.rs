@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::subagent_policy::SubagentCatalogSnapshot;
+
 use super::{
     RUNTIME_SUBAGENT_POLICY_FILE, RUNTIME_SUBAGENT_POLICY_PENDING_FILE,
     RUNTIME_SUBAGENT_POLICY_SCHEMA_VERSION, STATE_DIRECTORY,
@@ -21,6 +23,10 @@ pub(super) struct RuntimeSubagentPolicy {
     pub(super) schema_version: u32,
     pub(super) roles: BTreeMap<String, crate::config::SubagentRoleConfig>,
     pub(super) runtime_agent_hashes: BTreeMap<String, String>,
+    #[serde(default)]
+    pub(super) catalog_provider_id: String,
+    #[serde(default)]
+    pub(super) available_models: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -41,11 +47,14 @@ pub(crate) fn runtime_subagent_policy_paths(home: &Path) -> (PathBuf, PathBuf) {
 pub(crate) fn runtime_subagent_policy_bytes(
     roles: &BTreeMap<String, crate::config::SubagentRoleConfig>,
     runtime_agent_hashes: &BTreeMap<String, String>,
+    catalog: &SubagentCatalogSnapshot,
 ) -> Result<Vec<u8>> {
     serde_json::to_vec_pretty(&RuntimeSubagentPolicy {
         schema_version: RUNTIME_SUBAGENT_POLICY_SCHEMA_VERSION,
         roles: roles.clone(),
         runtime_agent_hashes: runtime_agent_hashes.clone(),
+        catalog_provider_id: catalog.provider_id.clone(),
+        available_models: catalog.models.clone(),
     })
     .context("序列化 Codey 子代理运行时策略失败")
 }
@@ -54,9 +63,10 @@ pub(crate) fn begin_runtime_subagent_policy_update(
     home: &Path,
     roles: &BTreeMap<String, crate::config::SubagentRoleConfig>,
     runtime_agent_hashes: &BTreeMap<String, String>,
+    catalog: &SubagentCatalogSnapshot,
 ) -> Result<()> {
     let (_, pending_path) = runtime_subagent_policy_paths(home);
-    let target = runtime_subagent_policy_bytes(roles, runtime_agent_hashes)?;
+    let target = runtime_subagent_policy_bytes(roles, runtime_agent_hashes, catalog)?;
     let pending = serde_json::to_vec_pretty(&RuntimeSubagentPolicyUpdate {
         schema_version: RUNTIME_SUBAGENT_POLICY_SCHEMA_VERSION,
         target_policy_sha256: crate::fs_util::sha256_hex(&target),
@@ -74,18 +84,29 @@ pub(crate) fn commit_runtime_subagent_policy(
     home: &Path,
     roles: &BTreeMap<String, crate::config::SubagentRoleConfig>,
     runtime_agent_hashes: &BTreeMap<String, String>,
+    catalog: &SubagentCatalogSnapshot,
 ) -> Result<()> {
     let (policy_path, pending_path) = runtime_subagent_policy_paths(home);
-    let policy = runtime_subagent_policy_bytes(roles, runtime_agent_hashes)?;
+    let policy = runtime_subagent_policy_bytes(roles, runtime_agent_hashes, catalog)?;
     crate::fs_util::atomic_write_private_with_parent(&policy_path, &policy)
         .with_context(|| format!("写入 Codey 子代理运行时策略失败：{}", policy_path.display()))?;
     remove_optional_runtime_policy_file(&pending_path)
+}
+
+pub(crate) fn write_runtime_subagent_policy(
+    home: &Path,
+    roles: &BTreeMap<String, crate::config::SubagentRoleConfig>,
+    runtime_agent_hashes: &BTreeMap<String, String>,
+    catalog: &SubagentCatalogSnapshot,
+) -> Result<()> {
+    commit_runtime_subagent_policy(home, roles, runtime_agent_hashes, catalog)
 }
 
 pub(crate) fn runtime_subagent_policy_matches(
     home: &Path,
     roles: &BTreeMap<String, crate::config::SubagentRoleConfig>,
     runtime_agent_hashes: &BTreeMap<String, String>,
+    catalog: &SubagentCatalogSnapshot,
 ) -> Result<bool> {
     let (policy_path, pending_path) = runtime_subagent_policy_paths(home);
     if read_optional_runtime_policy_file(&pending_path)?.is_some() {
@@ -94,7 +115,7 @@ pub(crate) fn runtime_subagent_policy_matches(
     let Some(actual) = read_optional_runtime_policy_file(&policy_path)? else {
         return Ok(false);
     };
-    Ok(actual == runtime_subagent_policy_bytes(roles, runtime_agent_hashes)?)
+    Ok(actual == runtime_subagent_policy_bytes(roles, runtime_agent_hashes, catalog)?)
 }
 
 pub(crate) fn clear_runtime_subagent_policy(home: &Path) -> Result<()> {
@@ -114,7 +135,7 @@ pub(super) fn read_optional_runtime_policy_file(path: &Path) -> Result<Option<Ve
         "Codey 子代理运行时策略状态不是可信普通文件：{}",
         path.display()
     );
-    crate::fs_util::read_bounded(path, 256 * 1024)
+    fs::read(path)
         .map(Some)
         .with_context(|| format!("读取 Codey 子代理运行时策略状态失败：{}", path.display()))
 }

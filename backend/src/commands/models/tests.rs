@@ -448,7 +448,7 @@ fn route_mutations_reject_a_stale_settings_revision() {
 }
 
 #[test]
-fn deleting_a_route_falls_back_global_default_and_dependent_subagent_roles() {
+fn deleting_a_route_keeps_subagent_bindings_and_falls_back_only_the_global_default() {
     let route_a = configured_route("route-a", Some("model-a"));
     let route_b = configured_route("route-b", Some("model-b"));
     let mut roles = crate::config::uniform_subagent_roles("route-b/model-b", "high");
@@ -489,11 +489,16 @@ fn deleting_a_route_falls_back_global_default_and_dependent_subagent_roles() {
     assert_eq!(next.settings_revision, 8);
     assert_eq!(next.active_profile_id, "route-a");
     assert_eq!(next.default_model, "route-a/model-a");
-    assert_eq!(next.subagent_model, "route-a/model-a");
+    assert_eq!(next.subagent_model, "route-b/model-b");
+    assert_eq!(
+        next.subagent_roles[crate::config::SUBAGENT_ROLE_WORKER].model,
+        "route-a/model-a"
+    );
     assert!(
         next.subagent_roles
-            .values()
-            .all(|selection| selection.model == "route-a/model-a")
+            .iter()
+            .filter(|(role, _)| role.as_str() != crate::config::SUBAGENT_ROLE_WORKER)
+            .all(|(_, selection)| selection.model == "route-b/model-b")
     );
     assert!(!next.selected_models_by_provider.contains_key("route-b"));
     assert!(
@@ -515,14 +520,18 @@ fn deleting_a_route_falls_back_global_default_and_dependent_subagent_roles() {
         .collect::<HashSet<_>>();
     assert!(valid_aliases.contains(&next.default_model));
     assert!(
+        valid_aliases.contains(&next.subagent_roles[crate::config::SUBAGENT_ROLE_WORKER].model)
+    );
+    assert!(
         next.subagent_roles
-            .values()
-            .all(|selection| valid_aliases.contains(&selection.model))
+            .iter()
+            .filter(|(role, _)| role.as_str() != crate::config::SUBAGENT_ROLE_WORKER)
+            .all(|(_, selection)| !valid_aliases.contains(&selection.model))
     );
 }
 
 #[test]
-fn deleting_a_route_used_only_by_one_role_falls_back_to_the_existing_default() {
+fn deleting_a_route_used_only_by_one_role_keeps_that_role_binding() {
     let route_a = configured_route("route-a", Some("model-a"));
     let route_b = configured_route("route-b", Some("model-b"));
     let mut roles = crate::config::uniform_subagent_roles("route-a/model-a", "high");
@@ -551,7 +560,7 @@ fn deleting_a_route_used_only_by_one_role_falls_back_to_the_existing_default() {
     assert_eq!(next.subagent_model, "route-a/model-a");
     assert_eq!(
         next.subagent_roles[crate::config::SUBAGENT_ROLE_QUICK_SCAN].model,
-        "route-a/model-a"
+        "route-b/model-b"
     );
     assert_eq!(
         next.subagent_roles[crate::config::SUBAGENT_ROLE_QUICK_SCAN].reasoning_effort,
@@ -590,7 +599,7 @@ fn deleting_an_unrelated_route_preserves_valid_global_model_references() {
 }
 
 #[test]
-fn deleting_the_only_modeled_route_clears_stale_default_and_uses_product_subagent_default() {
+fn deleting_the_only_modeled_route_clears_stale_default_and_keeps_subagent_bindings() {
     let route_a = configured_route("route-a", None);
     let route_b = configured_route("route-b", Some("model-b"));
     let previous = CodeyConfig {
@@ -608,11 +617,11 @@ fn deleting_the_only_modeled_route_clears_stale_default_and_uses_product_subagen
     let next = config_after_route_deletion(&previous, "route-b").unwrap();
 
     assert!(next.default_model.is_empty());
-    assert_eq!(next.subagent_model, crate::config::DEFAULT_SUBAGENT_MODEL);
+    assert_eq!(next.subagent_model, "route-b/model-b");
     assert!(
         next.subagent_roles
             .values()
-            .all(|selection| { selection.model == crate::config::DEFAULT_SUBAGENT_MODEL })
+            .all(|selection| selection.model == "route-b/model-b")
     );
 }
 

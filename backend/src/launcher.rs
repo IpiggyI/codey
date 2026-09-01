@@ -348,41 +348,20 @@ struct PreparedCodexStartupState {
 fn route_subagent_model(
     route_provider: &str,
     model: &str,
-    targets: &[RuntimeModelTarget],
-    builtin_official_catalog: bool,
+    route_aliases: &[String],
+    catalog: &subagent_policy::SubagentCatalogSnapshot,
 ) -> String {
     let requested = model.trim();
-    let target = targets
+    let Some(canonical) = catalog.canonical_model(requested) else {
+        return requested.to_string();
+    };
+    if let Some(alias) = route_aliases
         .iter()
-        .find(|target| model_id::equal(&target.alias, requested))
-        .or_else(|| {
-            let mut matches = targets
-                .iter()
-                .filter(|target| model_id::equal(&target.upstream_model, requested));
-            let target = matches.next()?;
-            matches.next().is_none().then_some(target)
-        })
-        .or_else(|| {
-            targets.iter().find(|target| {
-                target.provider_id == route_provider
-                    && model_id::equal(&target.upstream_model, requested)
-            })
-        });
-    if let Some(target) = target {
-        return if target.official {
-            target.upstream_model.clone()
-        } else {
-            target.alias.clone()
-        };
+        .find(|alias| model_id::equal(alias, requested))
+    {
+        return alias.clone();
     }
-    let official_route = targets
-        .iter()
-        .any(|target| target.official && target.provider_id == route_provider);
-    if builtin_official_catalog || official_route {
-        requested.to_string()
-    } else {
-        local_router::model_alias(route_provider, requested)
-    }
+    local_router::model_alias(route_provider, canonical)
 }
 
 fn should_install_codey_model_catalog(
@@ -624,15 +603,18 @@ async fn prepare_codex_startup_state(
     let mut runtime_subagent_config = config.clone();
     runtime_subagent_config.active_profile_id = current_profile.id.clone();
     subagent_policy::reconcile_with_model_state(&mut runtime_subagent_config, Some(&model_state));
-    let route_model_targets = runtime_subagent_config.runtime_model_targets();
-    let builtin_official_catalog =
-        model_catalog_path.is_none() && !runtime_subagent_config.has_third_party_route();
+    let subagent_catalog = subagent_policy::catalog_snapshot_for_config(&runtime_subagent_config);
+    let route_model_aliases = runtime_subagent_config
+        .runtime_model_targets()
+        .into_iter()
+        .map(|target| target.alias)
+        .collect::<Vec<_>>();
     let subagent_optimization = runtime_subagent_config.subagent_optimization;
     let subagent_model = route_subagent_model(
         &router_route_provider,
         &runtime_subagent_config.subagent_model,
-        &route_model_targets,
-        builtin_official_catalog,
+        &route_model_aliases,
+        &subagent_catalog,
     );
     let subagent_reasoning_effort = runtime_subagent_config.subagent_reasoning_effort.clone();
     let mut subagent_roles = runtime_subagent_config.subagent_roles.clone();
@@ -640,8 +622,8 @@ async fn prepare_codex_startup_state(
         selection.model = route_subagent_model(
             &router_route_provider,
             &selection.model,
-            &route_model_targets,
-            builtin_official_catalog,
+            &route_model_aliases,
+            &subagent_catalog,
         );
     }
     let runtime_config = tokio::task::spawn_blocking(move || {
@@ -656,6 +638,7 @@ async fn prepare_codex_startup_state(
                 subagent_model: &subagent_model,
                 subagent_reasoning_effort: &subagent_reasoning_effort,
                 subagent_roles: Some(&subagent_roles),
+                subagent_catalog,
             },
         )
     })
@@ -1352,6 +1335,9 @@ async fn prepare_native_runtime_state(
                 subagent_model: &native_subagent_config.subagent_model,
                 subagent_reasoning_effort: &native_subagent_config.subagent_reasoning_effort,
                 subagent_roles: Some(&native_subagent_config.subagent_roles),
+                subagent_catalog: subagent_policy::catalog_snapshot_for_config(
+                    &native_subagent_config,
+                ),
             },
         )
     })
