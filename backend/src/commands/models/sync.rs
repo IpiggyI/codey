@@ -186,13 +186,13 @@ pub(crate) fn selected_models_not_in_upstream(
 pub(crate) fn models_support_auto_review(models: &[String]) -> bool {
     models
         .iter()
-        .any(|model| model_id::equal(model, local_router::CODEX_AUTO_REVIEW_MODEL))
+        .any(|model| model_id::equal(model, model_id::CODEX_AUTO_REVIEW_MODEL))
 }
 
 pub(crate) fn regular_route_models(models: Vec<String>) -> Vec<String> {
     models
         .into_iter()
-        .filter(|model| !model_id::equal(model, local_router::CODEX_AUTO_REVIEW_MODEL))
+        .filter(|model| !model_id::equal(model, model_id::CODEX_AUTO_REVIEW_MODEL))
         .collect()
 }
 

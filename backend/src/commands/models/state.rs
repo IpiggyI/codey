@@ -451,13 +451,13 @@ pub(crate) fn route_model_alias(
     model: &str,
     aliases: &mut HashSet<String>,
 ) -> String {
-    let mut alias = local_router::model_alias(provider_id, model);
+    let mut alias = model_id::model_alias(provider_id, model);
     if aliases.insert(alias.clone()) {
         return alias;
     }
     let mut suffix = 2;
     loop {
-        alias = format!("{}#{suffix}", local_router::model_alias(provider_id, model));
+        alias = format!("{}#{suffix}", model_id::model_alias(provider_id, model));
         if aliases.insert(alias.clone()) {
             return alias;
         }

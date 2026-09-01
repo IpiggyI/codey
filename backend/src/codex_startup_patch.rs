@@ -786,7 +786,7 @@ pub(crate) fn local_router_runtime_enabled(overrides: &[String]) -> bool {
     overrides.iter().rev().find_map(|entry| {
         let (key, value) = entry.split_once('=')?;
         (key.trim() == "model_provider").then(|| value.trim().trim_matches(['\'', '"']))
-    }) == Some(crate::local_router::ROUTER_PROVIDER_ID)
+    }) == Some(crate::codey_router_session_migrate::ROUTER_PROVIDER_ID)
 }
 
 #[cfg(any(windows, target_os = "macos", test))]

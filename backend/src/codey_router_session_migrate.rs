@@ -14,9 +14,10 @@ use toml_edit::{DocumentMut, Item};
 
 use crate::codex_config::BUILTIN_OPENAI_PROVIDER_ID;
 use crate::fs_util::timestamp_millis;
-use crate::local_router::ROUTER_PROVIDER_ID;
 use crate::session_metadata::normalize_session_id;
 use crate::sqlite_util::table_columns;
+
+pub(crate) const ROUTER_PROVIDER_ID: &str = "codey_router";
 
 const SESSION_DIRS: [&str; 2] = ["sessions", "archived_sessions"];
 const LOCK_DIR: &str = "tmp/codey-router-session-migrate.lock";

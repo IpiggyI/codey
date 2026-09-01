@@ -20,7 +20,6 @@ use crate::config::{
     validate_provider_profiles,
 };
 use crate::error_log;
-use crate::local_router;
 use crate::model_catalog;
 use crate::model_id;
 use crate::provider_models;

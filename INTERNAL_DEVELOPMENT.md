@@ -6,9 +6,9 @@
 
 - Codey 是 Rust 桌面辅助进程，负责启动、监控和停止官方 Codex Electron 客户端。
 - 配置界面由 React 实现，构建后嵌入 Codey，并通过 CDP 注入 Codex 页面；通常没有独立常驻配置窗口。
-- 本地路由开启时，Codex 只连接本次启动的回环网关。官方账号沿用 Codex 登录，第三方线路使用 Codey 保存的凭据。
-- 线路、模型和上游格式分别识别。模型选择器使用带线路信息的稳定 ID，由本地路由在转发前还原为供应商原始模型 ID；关闭本地路由后，历史标识由会话恢复入口还原。
-- Codey 配置与 Codex 配置分开保存。用户 Codex 配置原则上只读，只允许维护 Codey 自有的路由恢复桩和清理旧版 Codey 遗留项。
+- Codex 直连用户当前 provider。本分叉不在进程内代理、别名或绑定线程。
+- 线路、模型和上游格式分别识别。控制台只读展示当前 Codex 线路；模型清单按 provider 地址指纹归属。
+- Codey 配置与 Codex 配置分开保存。用户 Codex 配置原则上只读，异常退出后只恢复 Codey 自有临时状态。
 - 无法确认线路、模型归属或兼容能力时应停止请求并给出错误，不猜测、不跨线路自动切换，也不重放可能已经送达的请求。
 - 账号额度摘要在 `/account/usage` 返回错误时回退到 `account/rateLimits/read`，仅使用顶层 `rateLimits`，不合并 `rateLimitsByLimitId` 中的模型专属额度。5 小时窗口是否显示取决于账号通用额度实际返回的窗口，不按套餐名称隐藏。
 
@@ -16,7 +16,7 @@
 
 - src/：Codey 控制台、请求日志页和前端状态逻辑。
 - public/：注入 Codex 页面的轻量脚本。
-- backend/src/：启动器、配置、CDP、本地路由、会话、通知和诊断实现。
+- backend/src/：启动器、配置、CDP、会话、通知和诊断实现。
 - backend/resources/：随二进制分发的运行时规则数据。
 - vendor/CodeyRuntime/：backend 实际消费的跨平台能力子集：应用位置发现、CDP 桥接、Codex config.toml 事务读写、Codex SQLite 会话发现与删除、插件市场快照、诊断日志、端口守卫、Windows 进程工具和启动命令构造。2026-09-06 起未被 backend 引用的旧模块（独立启动器、relay/settings 存储、Zed 远程、worktree、stepwise、更新器、旧注入脚本等）及其测试已删除，历史实现从 Git 获取。 2026-09-07 又按 `cargo check --all-targets` 的 dead_code 结果删除了 backend 未引用的零散函数（回环端口守卫锁、CDP 周期求值与新文档脚本注入、旧会话库路径探测、config_manager 备份恢复与 wire_api 写入、运行时版本缓存等）；Windows 专属的 `windows_open_url`、`windows_activate_process_window`、`windows_apply_codey_icon_to_process_window`、`windows_process_control_strategy` 在 backend 中同样无引用，但本机无法交叉编译核实，暂保留。
 - scripts/：开发、构建、前端打包和发布脚本。
@@ -164,12 +164,12 @@ v* 标签会触发 macOS arm64、macOS x64 和 Windows x64 构建，并附加到
 1. 恢复上次异常退出留下的 Codey 自有临时状态。
 2. 加载 Codey 配置，只读检查 Codex 配置、登录状态和应用位置；首次空配置可导入当前第三方线路。
 3. 在 Codex 未运行时完成会话索引维护、旧版 Codey 状态清理和诊断保护准备。
-4. 按设置启动本地路由、生成本次进程覆盖、Hook、子代理角色和注入脚本。
+4. 按设置生成本次进程覆盖、Hook、子代理角色和注入脚本。
 5. 启动 Codex，通过启动补丁或 CLI 包装入口传递本次 app-server 配置，再通过 CDP 安装桥接与页面增强。macOS 的 `CODEX_CLI_PATH` 指向私有可执行包装脚本，由脚本恢复可能被 Codex 子进程过滤的兼容环境后再进入 Codey CLI 包装分支，禁止把完整 Codey 桌面入口直接暴露为 CLI。包装器使用官方 CLI 的 `-c` 参数，执行目标程序后才完成握手；握手证明目标已执行，不代表 app-server 已完成初始化或接受了所有配置。Inspector 不可用时，以已确认的 CLI 包装入口正常运行；两条入口都失败且存在必须的运行时约束时停止 Codex。
 6. 启动健康检查、退出监听、通知和平台保护任务。设置保存后，支持热更新的项目立即替换；影响启动参数、角色集合或能力目录的项目标记为需要重启。
-7. Codex 退出或系统信号时，先确认受控 Codex 已停止，再关闭 watcher、回收 Child、恢复临时配置，最后停止路由。停止进程失败时保留 watcher、桥接、配置和路由；配置恢复失败时保留路由，使同一运行时可以重试。只有清理完成后才释放 Hook、租约及其他 Codey 自有运行状态。
+7. Codex 退出或系统信号时，先确认受控 Codex 已停止，再关闭 watcher、回收 Child、恢复临时配置。停止进程失败时保留 watcher、桥接和配置；只有清理完成后才释放 Hook、租约及其他 Codey 自有运行状态。
 
-启动必需步骤失败都应走同一清理路径。会话数据的安全修复不会在退出时回滚；临时路由、Hook 和运行文件必须可恢复。初始 Trace/Crashpad 任务在 profile 与路由 Provider 校验通过后创建；应用定位、旧进程停止或维护失败时，仍等待已启动任务结束并更新状态，再返回原始错误。Trace 失败也会等待 Crashpad，避免丢弃 JoinHandle 后后台清理继续运行。旧 Codex 停止后，模型目录准备与会话维护并行；两者及存储保护全部结束后，才启动路由并写入最终运行配置。并行减少串行步骤，尚未测量问题设备上的冷启动耗时收益。
+启动任一步失败都应走同一清理路径。会话数据的安全修复不会在退出时回滚；Hook 和运行文件必须可恢复。初始 Trace/Crashpad 任务在 profile 与路由 Provider 校验通过后创建；应用定位、旧进程停止或维护失败时，仍等待已启动任务结束并更新状态，再返回原始错误。Trace 失败也会等待 Crashpad，避免丢弃 JoinHandle 后后台清理继续运行。旧 Codex 停止后，模型目录准备与会话维护并行；两者及存储保护全部结束后，才写入最终运行配置。并行减少串行步骤，尚未测量问题设备上的冷启动耗时收益。
 
 启动前先读取 Codex Electron 二进制的 fuse wire（`backend/src/electron_fuses.rs`，按 @electron/fuses 的 sentinel 与 v1 位序解析，结果按路径、大小和修改时间缓存在状态目录 `electron-fuses.json`）。`EnableNodeCliInspectArguments` 为关闭或移除时，Electron 会在解析命令行时丢弃 `--inspect-brk`，主进程 Inspector 永远不会出现：Windows 直接以 CLI 包装器作为唯一入口启动，不再传 `--inspect-brk`，也不等待 Inspector；macOS 保留该参数作为进程清理标记，但只等待 CLI 包装器。fuse 未知（二进制缺失、扫描失败）时保留 Inspector 尝试，由运行时证据决定是否放弃。2026-09-06 本机 ChatGPT.app 的 Codex Framework 读到 wire `010011001`，Inspect 位为关闭；Windows 商店包按同一打包配置，实机日志 `launcher.electron_fuses` 会记录实际值。
 
@@ -185,7 +185,6 @@ CLI 包装器在目标校验和创建进程前建立认证连接。回连单次 
 浏览器和计算机操作执行器会从 Codex 获取 `CODEX_CLI_PATH`，但其子进程环境可能过滤 `CODEY_CODEX_CLI_WRAPPER_*`。CLI 包装分流因此不能只依赖目标环境变量：辅助参数先由各自入口处理；其余带参数的调用从 Codey 保存的应用位置恢复真实内置 CLI，Windows Store 继续复用已校验的用户运行目录。定位该目录时优先采用绝对路径的 `LOCALAPPDATA`；变量被辅助进程过滤、为空或为相对路径时，通过现有 `directories` 依赖调用 Windows Known Folder API 获取本地应用数据目录，不拼接用户主目录，也不扩大子进程的环境变量集合。正常启动与 CLI 回退共用此解析，保留运行文件完整性校验；回归覆盖缺失、空值、相对路径及有效目录优先级。找不到目标、配置损坏或执行失败时直接报错，禁止进入桌面启动及 Codex 进程清理流程。无参数启动、旧 watcher 的 `--debug-port` 和 macOS 的 `-psn_` 启动参数保留桌面行为。此恢复不依赖主进程 Inspector；现有兼容环境完整时仍优先使用本次启动指定的目标和运行配置。回归覆盖环境缺失、保存位置无效、参数及退出码转发和正常桌面分流；Windows 下的 Chrome 端到端行为仍需实机验证。
 
 诊断日志记录 fuse 探测结果与扫描耗时（`launcher.electron_fuses`）、Store 临时环境启用与清理、激活返回的 PID、线程恢复结果、Inspector 发现或探测汇总（`launcher.inspector_probe_summary`：拒绝/超时/其他错误次数、渲染端口是否就绪）、尝试次数及是否为无断点 CLI 启动、包装器自身的启动时间与回连结果（`launcher.cli_wrapper_started`、`launcher.cli_wrapper_handshake_connect`）、CLI 认证和执行确认、记录文件确认（`launcher.cli_wrapper_marker_*`）以及进程提前退出（`launcher.startup_process_exited`）；环境只记录是否存在，不记录令牌或完整配置。CLI 超时区分未收到有效握手与已认证但未确认执行，便于识别桌面未启动包装器和目标程序启动缓慢。Inspector 探测报「被拒绝」还是「超时」是关键区分：fuse 关闭时无人监听，应当立即被拒绝；连续超时说明回环连接被拖住，同一原因也会拖慢包装器回连。
-
 ### 启动与补丁核验基线（2026-09-05）
 
 Codey 当前声明版本为 0.9.18，不固定安装某一版 Codex。macOS 根据应用位置启动桌面客户端，CLI 包装器的目标来自该应用的 Resources，不能用 PATH 中的 `codex --version` 代替桌面运行版本。
@@ -267,33 +266,12 @@ release 应用通过 `plutil -lint`、`codesign --verify --deep --strict` 和可
 
 官方模型目录包含 `gpt-6-astra`，优先使用本机 Codex 缓存中的运行参数与推理强度；内置兼容元数据不包含提示词。GPT-6 的第三方线路别名仅在原模型模板声明 Ultra 和多代理能力时保留对应能力，通用第三方模型不继承这些参数。运行时只校验本次生成的模型条目；旧缓存缺少 GPT-6 模板时仍可使用已有模型，使用 GPT-6 前需直接启动官方 Codex 刷新缓存。
 
-local_router.rs 维护不可变线路快照，按明确线路元数据、带线路的模型 ID 和可信会话绑定解析请求。保存线路后只影响新请求，已有流继续使用原快照。
+本分叉删除进程内本地路由。Codex 使用用户当前 provider 直连，Codey 不代理、不绑定线程。第三方模型清单按当前 Codex provider 的 id 加规范化地址指纹归属；换模板不会复用旧地址目录。模型目录同步读取当前 Codex provider，不使用已保存线路上的清单。用户 config.toml 解析失败则拒绝启动。历史会话可在控制台显式迁移。
 
-本地路由开启时，启动环境和 Inspector 补丁均设置 Codex 原生的 `CODEX_APP_SERVER_FORCE_CLI=1`，避免本机任务复用不接收本次配置的 daemon 或外部 WebSocket。自定义 `app-server proxy/daemon` 启动命令直接报错；CLI 包装入口若丢失本次运行配置，也停止启动，不以空配置继续。Inspector 和 CLI 包装器都把运行参数放在 app-server 参数末尾，防止后续 `model_providers` 父表覆盖本地端点。关闭路由时保留原有传输选择。
-
-仅校验启动参数不能保证旧任务经过路由。实际 CLI 回归已复现：启动默认为 `codey_router`，但 `thread/resume` 传入 `modelProvider:null` 时，会恢复 rollout 中的旧 Provider，带线路前缀的模型直接到达旧端点。桌面主进程的内部恢复请求会绕过页面脚本，因此发送前还需要统一处理 `thread/start`、`thread/resume`、`thread/fork`：显式设置 `modelProvider=codey_router`，删除请求 config 中的 `model_provider`、`model_providers` 及其点号子键，保留模型、任务标识与其他配置。
-
-启动补丁 v39 在 Vite 共享 transport chunk 编译时安装该处理，位置在 Codex 自身 `transformOutgoingMessage` 之后、序列化之前，仅作用于本地 host。缺少匹配的发送入口时停止该启动路径，不将参数存在视为路由成功。Inspector 不可用时，CLI 包装器通过独立输入转发进程处理相同请求；其余 JSON-RPC 消息和无效输入原样交给 CLI。macOS 保留 exec 和 PID，桌面关闭输入管道后转发进程退出；Windows 在 CLI 退出后回收转发进程。非 app-server 调用及关闭路由时不经过该输入处理。
-
-回归包括分段输入、旧 Provider 配置覆盖、原始模型保留、远程 host 不变、缺少主进程匹配时停止启动，以及包装器的 PID、退出码和非路由调用。`tests/codex-runtime-optimization-patch.test.mjs` 可用 `CODEY_TEST_CODEX_CLI` 指定实际 CLI、`CODEY_TEST_CODEX_WRAPPER` 指定构建后的 Codey，运行临时 HOME/CODEX_HOME 中的旧任务持久化、进程重启、恢复和发起下一轮；两个 HTTP mock 分别记录旧端点和本地入口，测试不使用真实账号，也不替代问题设备验证。
-
-同一真实 CLI 回归还覆盖新任务：创建时 Provider 为空、显式指定远端 Provider、config 覆盖默认 Provider、config 覆盖本地 Provider 的端点。未处理请求时，后三种情况均会绕过本地入口；主进程请求处理和 CLI 包装器分别验证四种情况，均只向本地测试入口发送请求。测试包装器路径应使用本次 Cargo 构建产物，不使用构建缓存目录中的旧二进制。
-
-页面脚本 v50 移除旧官方任务直连例外；模型目录未加载、未知模型和缺少模型的恢复请求也经过统一供应商检查。新建、恢复和分支任务统一使用 `codey_router`，清除请求配置中可覆盖供应商及其端点的字段，保留其余配置和原始模型。升级脚本版本使已有页面重新注入时替换旧闭包，不能只刷新旧实现的模型目录。回归覆盖官方任务、目录加载失败、未知模型、任务配置覆盖、共享后台服务和启动配置缺失。使用临时 HOME/CODEX_HOME 与两个本地测试服务启动实际 Codex CLI，确认旧默认供应商及冲突父表存在时，有效供应商仍为 `codey_router`，错误端点收到 0 个请求，指定回环端点收到 1 个 `/v1/responses` 请求；此检查不使用真实账号，不代表问题机型已完成验证。
-
-模型选择器采用 `percent_encode(provider_id)/upstream_model`，用于区分不同线路上的同名模型；显示名称和短名称不参与标识。`modelAliasHistory` 在配置规范化、线路保存和删除前记录已发布别名与原始模型的对应关系，删除线路或关闭路由后继续保留，不保存凭据。旧配置缺少该字段时自动补齐当前已知别名；升级前已经删除且没有记录的任意前缀不做推断，仅对旧 `codey/` 格式保留兼容入口。
-
-解析先匹配当前有效别名及原始模型，再按完整历史别名还原一次，使用现有线路提示、官方模型优先规则、会话绑定和唯一候选规则选择同一模型。比较沿用模型目录的大小写无关规则，转发保留该线路配置的原始拼写。真实模型名称可以含 `/`，历史还原结果只按原始模型查询，避免递归解释成另一条线路。无候选或存在无法消除的歧义时返回可操作的错误，不替换成无关默认模型。默认模型和子代理配置在原线路失效时也优先迁移到同一模型。
-
-渲染目录通过 `legacy_model_aliases` 发布兼容记录；注入脚本同时兼容没有该字段的旧目录，并记录本次页面见过的别名。线程绑定仍使用原来的 v1 数据格式，恢复后按需写回有效线路；未能解析的绑定继续保留，避免省略模型的恢复请求错误采用全局默认值。关闭本地路由时，历史请求在恢复阶段还原模型并切换到当前原生 Provider；仅当前模型目录确认支持时放行，迁移失败不会标记成已成功。正常原生请求保持原有参数，不批量改写 rollout 或 SQLite 历史。
-
-配置热更新替换路由快照，并仅清理已变化线路的 WebSocket 能力缓存；Prompt cache key 已包含线路和上游模型，迁移沿用隔离规则。兼容处理只发生在发送前，不提供请求失败后的跨供应商重试。回归测试位于 `model_id.rs`、`config.rs`、`local_router.rs`、`commands/models.rs` 和 `tests/codey-model-whitelist-inject.test.mjs`，覆盖带前缀与原始模型、删除/停用、重命名/切换、重启恢复、原生模式、歧义和旧数据。
-
-启动维护不再把 rollout 和 SQLite 中的任务 Provider 批量改成 config.toml 的默认 Provider。该旧行为会使带第二条线路模型别名的任务直连第一条供应商，本地路由因未收到请求而没有日志。已有 `codey_router` 任务通过启动前写入的本地路由表恢复，其他任务沿用恢复入口的运行时迁移。保留陈旧锁、已删除消息和会话索引清理，删除不再使用的 Provider 同步缓存。恢复响应顶层 `modelProvider` 明确返回实际供应商时，以它为准；旧响应仅含 rollout 中的 Provider 时仍兼容成功请求的迁移记录。页面注入较晚、尚未取得任务供应商状态时，`turn/start` 同样要求先恢复任务，不能假定它已使用本地路由。回归检查覆盖配置、普通及归档 rollout、SQLite 保持原值，以及供应商未知或迁移响应明确返回旧供应商时阻止第三方模型请求。
 
 第三方模型清单按当前 Codex provider 的 id 加规范化地址指纹归属；换模板不会复用旧地址目录。模型目录同步读取当前 Codex provider，不使用已保存线路上的清单。用户 config.toml 解析失败则拒绝启动。
 
-本地路由负责官方与第三方认证隔离、模型 ID 还原、流式转发和上游格式适配。图片生成请求按明确线路元数据、会话绑定或全局默认模型的顺序选择线路，并只向 OpenAI 兼容上游透明转发 Images API，不尝试转换为 Anthropic Messages。WebSocket 能力由共享 Provider 开启，再通过模型目录的 `prefer_websockets` 按线路选择；支持的线路使用 WebSocket，不支持的线路继续使用 SSE。线路的 WebSocket 开关仅控制上游传输；已有 Codex 会话仍可能通过本地 WebSocket 入口访问关闭 WebSocket 的线路，此时上游使用 HTTP/SSE。该路径的响应读取、解析或提前断开错误按上游 HTTP 响应失败返回，保留线路与错误原因，避免被入口的通用 WebSocket 错误覆盖。第三方线路的网页搜索、自动审核和远程压缩能力只有在配置与模型目录都能确认时才启用。本地路由关闭时，不安装路由覆盖，模型列表使用当前 Codex Provider 的可用模型，历史任务在恢复入口完成模型兼容转换。
+Codex 直连用户当前 provider。本分叉不在进程内做认证隔离、模型别名或流式转发。网页搜索、自动审核和远程压缩能力由当前 Codex provider 与模型目录共同决定。
 
 仅在主进程 Inspector 可用且标题补丁安装成功时，Codey 才调整 Codex 自动标题模型：优先使用可用官方账号的 `gpt-5.6-luna`；没有官方账号时，依次使用当前默认第三方线路的同名模型和当前默认模型，推理强度保持 `low`，请求失败则保留客户端临时标题。CLI 包装入口沿用 Codex 自身的标题生成行为。
 

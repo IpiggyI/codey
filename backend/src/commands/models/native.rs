@@ -26,7 +26,7 @@ pub(crate) fn native_upstream_model(config: &CodeyConfig, model: &str) -> String
 pub(crate) fn native_provider_prefixed_model(config: &CodeyConfig, model: &str) -> Option<String> {
     for profile in &config.profiles {
         let provider_id = profile.provider_id();
-        let prefix = local_router::model_alias(provider_id, "");
+        let prefix = model_id::model_alias(provider_id, "");
         let Some(upstream_model) = strip_model_provider_prefix(model, &prefix) else {
             continue;
         };
@@ -138,33 +138,28 @@ pub(crate) fn reconcile_subagent_models_for_mode(
     config: &mut CodeyConfig,
     model_state: &model_catalog::ModelSelectionState,
 ) {
-    if !config.local_router_enabled {
-        config.subagent_model = native_upstream_model(config, &config.subagent_model);
-        let native_models = config
-            .subagent_roles
-            .iter()
-            .map(|(role, selection)| {
-                (
-                    role.clone(),
-                    native_upstream_model(config, &selection.model),
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
-        for (role, model) in native_models {
-            if let Some(selection) = config.subagent_roles.get_mut(&role) {
-                selection.model = model;
-            }
+    config.subagent_model = native_upstream_model(config, &config.subagent_model);
+    let native_models = config
+        .subagent_roles
+        .iter()
+        .map(|(role, selection)| {
+            (
+                role.clone(),
+                native_upstream_model(config, &selection.model),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    for (role, model) in native_models {
+        if let Some(selection) = config.subagent_roles.get_mut(&role) {
+            selection.model = model;
         }
     }
     subagent_policy::reconcile_with_model_state(config, Some(model_state));
 }
 
 pub(crate) async fn current_provider_status_async(
-    config: &CodeyConfig,
+    _config: &CodeyConfig,
 ) -> Result<codex_provider::ProviderStatus, String> {
-    if config.local_router_enabled {
-        return Ok(codex_provider::status_from_config(config));
-    }
     let provider = current_codex_provider().await?;
     Ok(codex_provider::ProviderStatus {
         changed: false,

@@ -11,7 +11,6 @@ import type {
   Config,
   CurrentProviderSnapshot,
   ModelState,
-  Profile,
   RouterSessionDiagnosis,
 } from "./App.types";
 import {
@@ -28,12 +27,7 @@ import {
   Switch,
 } from "./components/mantine";
 import { modelIdsEqual, modelKey, uniqueModelIds } from "./modelIds";
-import {
-  globalDefaultForProvider,
-  globalDefaultForRoute,
-  modelListKey,
-  routeProviderId,
-} from "./modelRoutes";
+import { globalDefaultForProvider } from "./modelRoutes";
 import { SETTINGS_OVERLAY_Z_INDEX } from "./overlay.constants";
 import { flushCardClass } from "./uiClasses";
 
@@ -48,20 +42,18 @@ type ModelSectionProps = {
   busy: string | null;
   showAccountUsageInHeader: boolean;
   onSyncCurrentProvider: () => void;
-  onFetchRouteModels: (route?: Profile) => void;
+  onFetchRouteModels: () => void;
   onToggleAccountUsage?: (checked: boolean) => void;
   onSaveOfficialRouteSettings?: (
-    routeId: string,
     models: string[],
     showAccountUsageInHeader: boolean,
   ) => Promise<boolean>;
-  onSetDefaultModel: (routeId: string, model: string) => void;
+  onSetDefaultModel: (model: string) => void;
   routerSessionDiagnosis: RouterSessionDiagnosis | null;
   onMigrateRouterSessions: (targetProvider: string) => void;
 };
 
 type RouteModelGroup = {
-  profile: Profile | null;
   providerId: string;
   models: string[];
   defaultModel: string;
@@ -86,9 +78,7 @@ function ModelSectionComponent({
   routerSessionDiagnosis,
   onMigrateRouterSessions,
 }: ModelSectionProps) {
-  const [officialEditorProfile, setOfficialEditorProfile] = useState<Profile | null>(
-    null,
-  );
+  const [officialEditorOpen, setOfficialEditorOpen] = useState(false);
   const [officialModelDraft, setOfficialModelDraft] = useState<string[]>([]);
   const [migrateTargetProvider, setMigrateTargetProvider] = useState<string>("");
   const migrateTargets = routerSessionDiagnosis?.targetProviders ?? [];
@@ -96,20 +86,6 @@ function ModelSectionComponent({
     ? migrateTargetProvider
     : (migrateTargets[0] ?? "");
 
-  const visibleProfiles = useMemo(
-    () =>
-      config.profiles.filter((profile) => {
-        const available =
-          profile.authMode !== "officialAccount" || officialAccountAvailable;
-        return (
-          available &&
-          currentProviderSnapshot != null &&
-          Boolean(currentProviderSnapshot.ownershipKey) &&
-          modelListKey(profile, currentProviderSnapshot) === currentProviderSnapshot.ownershipKey
-        );
-      }),
-    [config.profiles, currentProviderSnapshot, officialAccountAvailable],
-  );
   const officialDisplayNames = useMemo(
     () =>
       new Map(
@@ -133,80 +109,59 @@ function ModelSectionComponent({
     [officialModelDraft],
   );
   const modelGroups = useMemo<RouteModelGroup[]>(() => {
-    const fromProfiles = visibleProfiles.map((profile) => {
-      const providerId = routeProviderId(profile);
-      const official = profile.authMode === "officialAccount";
-      const listKey = modelListKey(profile, currentProviderSnapshot);
-      const configuredModels = config.selectedModelsByProvider[listKey] || [];
-      const models = official
-        ? configuredModels.length > 0
-          ? configuredModels
-          : officialCatalog
-        : uniqueModelIds([
-            ...configuredModels,
-            ...(config.declaredOfficialModelsByProvider[listKey] || []),
-          ]);
-      return {
-        profile,
-        providerId,
-        models,
-        defaultModel: globalDefaultForRoute(config, profile, models),
-        official,
-      };
-    });
-    if (fromProfiles.length > 0 || !currentProviderSnapshot?.ownershipKey) {
-      return fromProfiles;
-    }
-    if (currentProviderSnapshot.usesOfficialAccountAuth) {
-      return fromProfiles;
-    }
+    if (!currentProviderSnapshot?.ownershipKey) return [];
+    const official = currentProviderSnapshot.usesOfficialAccountAuth;
+    if (official && !officialAccountAvailable) return [];
     const listKey = currentProviderSnapshot.ownershipKey;
     const configuredModels = config.selectedModelsByProvider[listKey] || [];
-    const models = uniqueModelIds([
-      ...configuredModels,
-      ...(config.declaredOfficialModelsByProvider[listKey] || []),
-    ]);
+    const models = official
+      ? configuredModels.length > 0
+        ? configuredModels
+        : officialCatalog
+      : uniqueModelIds([
+          ...configuredModels,
+          ...(config.declaredOfficialModelsByProvider[listKey] || []),
+        ]);
     return [
       {
-        profile: null,
         providerId: currentProviderSnapshot.id,
         models,
-        defaultModel: globalDefaultForProvider(
-          config,
-          currentProviderSnapshot.id,
-          models,
-        ),
-        official: false,
+        defaultModel: globalDefaultForProvider(config, models),
+        official,
       },
     ];
-  }, [config, currentProviderSnapshot, officialCatalog, visibleProfiles]);
+  }, [
+    config,
+    currentProviderSnapshot,
+    officialAccountAvailable,
+    officialCatalog,
+  ]);
 
   const totalModelCount = useMemo(
     () => modelGroups.reduce((count, group) => count + group.models.length, 0),
     [modelGroups],
   );
 
-  const openOfficialModelDialog = (profile: Profile) => {
-    if (profile.authMode !== "officialAccount") return;
-    const listKey = modelListKey(profile, currentProviderSnapshot);
+  const openOfficialModelDialog = () => {
+    if (!currentProviderSnapshot?.usesOfficialAccountAuth) return;
+    const listKey = currentProviderSnapshot.ownershipKey;
     const configuredModels = config.selectedModelsByProvider[listKey] || [];
-    setOfficialEditorProfile({ ...profile });
     setOfficialModelDraft(
       configuredModels.length > 0 ? configuredModels : officialCatalog,
     );
+    setOfficialEditorOpen(true);
   };
 
   const saveOfficialModels = async () => {
-    if (!officialEditorProfile) return;
+    if (!officialEditorOpen) return;
     const saved = onSaveOfficialRouteSettings
       ? await onSaveOfficialRouteSettings(
-          officialEditorProfile.id,
           officialModelDraft,
           showAccountUsageInHeader,
         )
       : true;
     if (saved) {
-      setOfficialEditorProfile(null);
+      setOfficialEditorOpen(false);
     }
   };
 
@@ -214,10 +169,10 @@ function ModelSectionComponent({
 
   const syncOrConfigureGroup = (group: RouteModelGroup) => {
     if (group.official) {
-      if (group.profile) openOfficialModelDialog(group.profile);
+      openOfficialModelDialog();
       return;
     }
-    onFetchRouteModels(group.profile ?? undefined);
+    onFetchRouteModels();
   };
 
   return (
@@ -405,9 +360,7 @@ function ModelSectionComponent({
                           <RefreshCw
                             size={12}
                             className={
-                              busy === "fetch-route-models" &&
-                              (group.profile == null ||
-                                group.profile.id === config.activeProfileId)
+                              busy === "fetch-route-models"
                                 ? "animate-spin"
                                 : ""
                             }
@@ -431,9 +384,7 @@ function ModelSectionComponent({
                               key={`${group.providerId}:${model}`}
                               className={`model-tag-pill${isDefault ? " is-default" : ""}`}
                               disabled={isBusy || dirty || isDefault}
-                              onClick={() =>
-                                onSetDefaultModel(group.profile?.id || "", model)
-                              }
+                              onClick={() => onSetDefaultModel(model)}
                               title={
                                 isDefault
                                   ? `${displayName}（当前默认模型）`
@@ -486,14 +437,14 @@ function ModelSectionComponent({
       </Card>
 
       <Dialog
-        open={officialEditorProfile !== null}
+        open={officialEditorOpen}
         onOpenChange={(open) => {
           if (!isBusy && !open) {
-            setOfficialEditorProfile(null);
+            setOfficialEditorOpen(false);
           }
         }}
       >
-        {officialEditorProfile && (
+        {officialEditorOpen && (
           <DialogContent
             className="route-editor-dialog"
             container={popupContainer ?? undefined}
@@ -515,7 +466,7 @@ function ModelSectionComponent({
             <div className="official-route-editor">
               <div className="official-route-summary">
                 <span>
-                  <strong>{officialEditorProfile.name}</strong>
+                  <strong>{currentProviderSnapshot?.id || "官方账号"}</strong>
                   <small>使用当前 Codex 官方账号登录状态</small>
                 </span>
                 <Badge variant="info">官方账号</Badge>
@@ -567,7 +518,7 @@ function ModelSectionComponent({
               <Button
                 variant="outline"
                 disabled={isBusy}
-                onClick={() => setOfficialEditorProfile(null)}
+                onClick={() => setOfficialEditorOpen(false)}
               >
                 取消
               </Button>

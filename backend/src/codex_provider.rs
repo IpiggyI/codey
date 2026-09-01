@@ -16,7 +16,7 @@ use serde_json::Value;
 use toml_edit::{DocumentMut, Item, TableLike};
 
 use crate::codex_config::BUILTIN_OPENAI_PROVIDER_ID;
-use crate::config::{CodeyConfig, DERIVED_OFFICIAL_PROFILE_ID, ProviderProfile};
+use crate::config::CodeyConfig;
 use crate::model_ownership::CurrentProviderSnapshot;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -38,8 +38,6 @@ pub struct ProviderStatus {
 
 struct LocalProviderSnapshot {
     provider: CurrentProvider,
-    api_key: String,
-    upstream_protocol: String,
     official_account_auth: OfficialAccountAuthProbe,
 }
 
@@ -60,12 +58,11 @@ enum NativeLoginStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OfficialAccountProfileStatus {
-    Available(ProviderProfile),
+    Available,
     Unavailable {
         reason: String,
     },
     Unknown {
-        profile: ProviderProfile,
         reason: String,
     },
 }
@@ -87,14 +84,13 @@ fn current_official_account_profile_status_with_probe(
     let mut snapshot = local_provider_with_auth_policy(codex_home, AuthProbePolicy::Lenient)?;
     snapshot.official_account_auth =
         official_auth_probe_from_native(snapshot.official_account_auth, native_probe(codex_home));
-    let profile = official_profile_from_snapshot(&snapshot);
     Ok(match snapshot.official_account_auth {
-        OfficialAccountAuthProbe::Available(_) => OfficialAccountProfileStatus::Available(profile),
+        OfficialAccountAuthProbe::Available(_) => OfficialAccountProfileStatus::Available,
         OfficialAccountAuthProbe::Unavailable(reason) => {
             OfficialAccountProfileStatus::Unavailable { reason }
         }
         OfficialAccountAuthProbe::Unknown(reason) => {
-            OfficialAccountProfileStatus::Unknown { profile, reason }
+            OfficialAccountProfileStatus::Unknown { reason }
         }
     })
 }
@@ -127,27 +123,6 @@ fn official_auth_probe_from_native(
             }
         },
     }
-}
-
-fn official_profile_from_snapshot(snapshot: &LocalProviderSnapshot) -> ProviderProfile {
-    if snapshot.provider.official {
-        let provider_id = snapshot.provider.id.clone();
-        let mut profile = profile_from_provider(
-            &snapshot.provider,
-            String::new(),
-            &snapshot.upstream_protocol,
-        );
-        profile.id = DERIVED_OFFICIAL_PROFILE_ID.to_string();
-        profile.source_provider_id = Some(provider_id);
-        profile.normalize();
-        return profile;
-    }
-
-    let mut profile = profile_from_provider(&builtin_official_provider(), String::new(), "");
-    profile.id = DERIVED_OFFICIAL_PROFILE_ID.to_string();
-    profile.source_provider_id = Some(BUILTIN_OPENAI_PROVIDER_ID.to_string());
-    profile.normalize();
-    profile
 }
 
 pub fn current_provider(codex_home: &Path) -> Result<CurrentProvider> {
@@ -310,7 +285,7 @@ pub fn current_provider_model_sync(codex_home: &Path) -> Result<CurrentProviderM
     } else {
         provider_config_api_key(document, table).ok_or_else(|| {
             anyhow::anyhow!(
-                "当前 provider「{}」没有可用的密钥。请在用户配置中设置 env_key 指向的环境变量，或 experimental_bearer_token。Codey 不会使用已保存线路里的密钥，也不会把密钥写回你的配置。",
+                "当前 provider「{}」没有可用的密钥。请在用户配置中设置 env_key 指向的环境变量，或 experimental_bearer_token。Codey 不会使用自己保存的密钥，也不会把密钥写回你的配置。",
                 snapshot.id
             )
         })?
@@ -329,106 +304,53 @@ pub fn current_provider_model_sync(codex_home: &Path) -> Result<CurrentProviderM
     })
 }
 
-#[cfg(test)]
-pub fn sync_current_provider(
-    config: &CodeyConfig,
-    codex_home: &Path,
-) -> Result<(CodeyConfig, ProviderStatus)> {
-    let snapshot = local_provider(codex_home)?;
-    sync_provider_profile(
-        config,
-        snapshot.provider,
-        snapshot.api_key,
-        &snapshot.upstream_protocol,
-    )
-}
-
 pub fn sync_current_third_party_provider(
     config: &CodeyConfig,
     codex_home: &Path,
 ) -> Result<(CodeyConfig, ProviderStatus)> {
     let snapshot = local_provider(codex_home)?;
     if snapshot.provider.official {
-        bail!("当前 Codex 配置是官方账号线路，不自动导入为第三方线路");
+        bail!("当前 Codex 配置是官方账号，不自动导入为第三方 provider");
     }
-    sync_provider_profile(
-        config,
-        snapshot.provider,
-        snapshot.api_key,
-        &snapshot.upstream_protocol,
-    )
+    let next = config.clone().normalize();
+    Ok((
+        next,
+        ProviderStatus {
+            changed: false,
+            provider: snapshot.provider,
+        },
+    ))
 }
 
-fn sync_provider_profile(
+#[cfg(test)]
+pub fn sync_current_provider(
     config: &CodeyConfig,
-    provider: CurrentProvider,
-    api_key: String,
-    upstream_protocol: &str,
+    codex_home: &Path,
 ) -> Result<(CodeyConfig, ProviderStatus)> {
-    let profile = profile_from_provider(&provider, api_key, upstream_protocol);
-    let mut next = config.clone();
-    let imported_id = profile.id.clone();
-    let imported_provider_id = profile.provider_id().to_string();
-    let mut active_profile_id = imported_id.clone();
-    let replace_placeholder =
-        next.profiles.len() == 1 && next.profiles[0].is_unconfigured_default();
-    if replace_placeholder {
-        let placeholder_provider_id = next.profiles[0].provider_id().to_string();
-        next.profiles = vec![profile];
-        next.selected_models_by_provider
-            .remove(&placeholder_provider_id);
-        next.supports_1m_context_by_provider
-            .remove(&placeholder_provider_id);
-        next.model_context_by_provider
-            .remove(&placeholder_provider_id);
-        next.manual_third_party_models_by_provider
-            .remove(&placeholder_provider_id);
-        next.declared_official_models_by_provider
-            .remove(&placeholder_provider_id);
-        next.upstream_models_by_provider
-            .remove(&placeholder_provider_id);
-    } else if let Some(existing) = next.profiles.iter_mut().find(|existing| {
-        existing.provider_id() == imported_provider_id || existing.id == imported_id
-    }) {
-        // Keep the Codey UI identity stable when a previously imported route
-        // has a different runtime provider id.
-        active_profile_id = existing.id.clone();
-        let mut replacement = profile;
-        replacement.enabled = existing.enabled;
-        replacement.short_name.clone_from(&existing.short_name);
-        if replacement.id != active_profile_id {
-            replacement.id = active_profile_id.clone();
-            replacement.source_provider_id = Some(imported_provider_id);
-        }
-        *existing = replacement;
-    } else {
-        next.profiles.push(profile);
-    }
-    next.active_profile_id = active_profile_id;
-    next.initial_route_import_completed = true;
-    next = next.normalize();
-    // Compare the persisted shape only: `#[serde(skip)]` request headers and
-    // one-shot flags must not bump `settings_revision`.
-    let changed = serde_json::to_value(&next)? != serde_json::to_value(config)?;
-    if changed {
-        next.settings_revision = config.settings_revision.saturating_add(1);
-    }
-    Ok((next, ProviderStatus { changed, provider }))
-}
+    let snapshot = local_provider(codex_home)?;
+    let next = config.clone().normalize();
+    Ok((
+        next,
+        ProviderStatus {
+            changed: false,
+            provider: snapshot.provider,
+        },
+    ))}
 
 pub fn status_from_config(config: &CodeyConfig) -> ProviderStatus {
-    let profile = config
-        .profiles
-        .iter()
-        .find(|profile| profile.id == config.active_profile_id)
-        .or_else(|| config.profiles.first());
-    let provider = profile
-        .map(|profile| CurrentProvider {
-            id: profile.id.clone(),
-            name: profile.name.clone(),
-            official: profile.official_account,
-            supports_remote_compaction: profile.supports_remote_compaction,
-            base_url: profile.base_url.clone(),
+    let provider = config
+        .current_provider_snapshot
+        .as_ref()
+        .map(|snapshot| CurrentProvider {
+            id: snapshot.id.clone(),
+            name: if snapshot.uses_official_account_auth {
+                "OpenAI 官方直登".to_string()
+            } else {
+                snapshot.id.clone()
+            },
+            official: snapshot.uses_official_account_auth,
+            supports_remote_compaction: snapshot.uses_official_account_auth,
+            base_url: snapshot.base_url.clone(),
         })
         .unwrap_or_else(|| CurrentProvider {
             id: BUILTIN_OPENAI_PROVIDER_ID.to_string(),
@@ -440,40 +362,6 @@ pub fn status_from_config(config: &CodeyConfig) -> ProviderStatus {
     ProviderStatus {
         changed: false,
         provider,
-    }
-}
-
-fn profile_from_provider(
-    provider: &CurrentProvider,
-    api_key: String,
-    upstream_protocol: &str,
-) -> ProviderProfile {
-    ProviderProfile {
-        id: provider.id.clone(),
-        enabled: true,
-        name: provider.name.clone(),
-        short_name: String::new(),
-        base_url: provider.base_url.clone(),
-        api_key,
-        upstream_protocol: if provider.official {
-            crate::config::UPSTREAM_PROTOCOL_OFFICIAL.to_string()
-        } else {
-            upstream_protocol.to_string()
-        },
-        auth_mode: if provider.official {
-            crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.to_string()
-        } else {
-            crate::config::AUTH_MODE_API_KEY.to_string()
-        },
-        api_key_configured: !provider.official,
-        clear_api_key: false,
-        model_request_headers: BTreeMap::new(),
-        source_provider_id: None,
-        official_account: provider.official,
-        supports_remote_compaction: provider.supports_remote_compaction,
-        supports_websockets: provider.official,
-        supports_native_web_search: provider.official,
-        supports_auto_review: provider.official,
     }
 }
 
@@ -518,7 +406,7 @@ fn local_provider_with_auth_policy(
         .and_then(|provider| provider.get("wire_api"))
         .and_then(Item::as_str)
         .unwrap_or("responses");
-    let upstream_protocol = upstream_protocol_from_wire_api(wire_api)?;
+    let _upstream_protocol = upstream_protocol_from_wire_api(wire_api)?;
     let auth_path = codex_home.join("auth.json");
     let auth_store = document
         .get("cli_auth_credentials_store")
@@ -566,12 +454,6 @@ fn local_provider_with_auth_policy(
             official,
             supports_remote_compaction: official || name == "OpenAI",
             base_url,
-        },
-        api_key: if official { String::new() } else { api_key },
-        upstream_protocol: if official {
-            crate::config::UPSTREAM_PROTOCOL_OFFICIAL.to_string()
-        } else {
-            upstream_protocol.to_string()
         },
         official_account_auth: auth.status,
     })
@@ -652,16 +534,6 @@ fn read_auth_probe(
         value: Some(value),
         status,
     })
-}
-
-fn builtin_official_provider() -> CurrentProvider {
-    CurrentProvider {
-        id: BUILTIN_OPENAI_PROVIDER_ID.to_string(),
-        name: "OpenAI 官方直登".to_string(),
-        official: true,
-        supports_remote_compaction: true,
-        base_url: String::new(),
-    }
 }
 
 fn active_provider_id(document: &DocumentMut) -> &str {
@@ -1132,7 +1004,7 @@ experimental_bearer_token = "sk-relay"
 
     #[test]
     fn imports_supported_wire_protocols() {
-        for (wire_api, expected) in [
+        for (wire_api, _) in [
             (
                 "chat_completions",
                 crate::config::UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS,
@@ -1148,11 +1020,12 @@ experimental_bearer_token = "sk-relay"
         ] {
             let home = TempDir::new().unwrap();
             write_config(home.path(), &third_party_config(wire_api));
-            let (config, status) =
+            let (_, status) =
                 sync_current_third_party_provider(&CodeyConfig::default(), home.path()).unwrap();
-            assert_eq!(config.profiles[0].upstream_protocol, expected);
-            assert!(!config.profiles[0].supports_native_web_search);
+            let snapshot = current_provider_snapshot(home.path()).unwrap();
+            assert_eq!(snapshot.wire_api, wire_api);
             assert_eq!(status.provider.id, "relay");
+            assert!(!status.provider.official);
         }
     }
 
@@ -1167,16 +1040,11 @@ experimental_bearer_token = "sk-relay"
                 "tokens": { "access_token": "token" }
             }),
         );
-        let OfficialAccountProfileStatus::Available(profile) =
+        let OfficialAccountProfileStatus::Available =
             status_with_unknown_native(home.path()).unwrap()
         else {
             panic!("auth.json ChatGPT tokens should make official auth available");
         };
-        assert!(profile.official_account);
-        assert!(profile.supports_websockets);
-        assert!(profile.supports_native_web_search);
-        assert_eq!(profile.provider_id(), "openai");
-        assert!(profile.api_key.is_empty());
 
         fs::remove_file(home.path().join("auth.json")).unwrap();
         write_config(home.path(), r#"cli_auth_credentials_store = "file""#);
@@ -1210,13 +1078,9 @@ experimental_bearer_token = "sk-relay"
             NativeLoginStatus::Unknown("probe unavailable".into())
         })
         .unwrap();
-        let OfficialAccountProfileStatus::Unknown { profile, reason } = status else {
+        let OfficialAccountProfileStatus::Unknown { reason } = status else {
             panic!("missing auth.json under auto store should be unknown");
         };
-        assert!(profile.official_account);
-        assert!(profile.supports_websockets);
-        assert!(profile.supports_native_web_search);
-        assert_eq!(profile.provider_id(), "openai");
         assert!(reason.contains("auth.json"));
     }
 
@@ -1229,10 +1093,9 @@ experimental_bearer_token = "sk-relay"
             NativeLoginStatus::ChatGpt
         })
         .unwrap();
-        let OfficialAccountProfileStatus::Available(profile) = status else {
+        let OfficialAccountProfileStatus::Available = status else {
             panic!("native ChatGPT login should be authoritative");
         };
-        assert!(profile.official_account);
 
         write_auth(
             home.path(),
@@ -1376,16 +1239,11 @@ experimental_bearer_token = "sk-relay"
             }),
         );
 
-        let OfficialAccountProfileStatus::Available(profile) =
+        let OfficialAccountProfileStatus::Available =
             status_with_unknown_native(home.path()).unwrap()
         else {
             panic!("retained ChatGPT tokens should make official auth available");
         };
-
-        assert!(profile.official_account);
-        assert!(profile.supports_websockets);
-        assert_eq!(profile.provider_id(), "openai");
-        assert!(profile.api_key.is_empty());
 
         let current = current_provider(home.path()).unwrap();
         assert!(!current.official);
@@ -1414,20 +1272,16 @@ experimental_bearer_token = "sk-relay"
             }),
         );
 
-        let OfficialAccountProfileStatus::Available(official) =
+        let OfficialAccountProfileStatus::Available =
             status_with_unknown_native(home.path()).unwrap()
         else {
             panic!("retained ChatGPT login should remain available");
         };
-        assert_eq!(official.provider_id(), "openai");
-        assert!(official.official_account);
 
-        let (imported, status) =
+        let (_, status) =
             sync_current_third_party_provider(&CodeyConfig::default(), home.path()).unwrap();
         assert!(!status.provider.official);
         assert_eq!(status.provider.id, "relay");
-        assert_eq!(imported.profiles[0].api_key, "sk-relay");
-        assert!(!imported.profiles[0].official_account);
     }
 
     #[test]
@@ -1442,63 +1296,9 @@ experimental_bearer_token = "sk-relay"
                 "tokens": { "access_token": "retained-token" }
             }),
         );
-        let (config, _) = sync_current_provider(&CodeyConfig::default(), home.path()).unwrap();
-        assert_eq!(config.profiles[0].api_key, "sk-relay");
-        assert!(!config.profiles[0].official_account);
-    }
-
-    #[test]
-    fn synchronization_upserts_without_removing_saved_routes() {
-        let home = TempDir::new().unwrap();
-        write_config(home.path(), &third_party_config("responses"));
-        let mut saved = ProviderProfile::new("Saved");
-        saved.id = "saved".into();
-        saved.base_url = "https://saved.example/v1".into();
-        saved.api_key = "sk-saved".into();
-        saved.normalize();
-        let config = CodeyConfig {
-            profiles: vec![saved],
-            active_profile_id: "saved".into(),
-            initial_route_import_completed: true,
-            ..CodeyConfig::default()
-        };
-        let (synced, _) = sync_current_third_party_provider(&config, home.path()).unwrap();
-        assert_eq!(synced.profiles.len(), 2);
-        assert!(synced.profiles.iter().any(|profile| profile.id == "saved"));
-        assert!(synced.profiles.iter().any(|profile| profile.id == "relay"));
-    }
-
-    #[test]
-    fn synchronization_preserves_an_existing_route_short_name() {
-        let mut saved = ProviderProfile::new("Relay");
-        saved.id = "relay".into();
-        saved.short_name = "中".into();
-        saved.base_url = "https://old.example/v1".into();
-        saved.api_key = "old-key".into();
-        saved.normalize();
-        let config = CodeyConfig {
-            profiles: vec![saved],
-            active_profile_id: "relay".into(),
-            initial_route_import_completed: true,
-            ..CodeyConfig::default()
-        };
-
-        let (synced, _) = sync_provider_profile(
-            &config,
-            CurrentProvider {
-                id: "relay".into(),
-                name: "Relay Updated".into(),
-                official: false,
-                supports_remote_compaction: false,
-                base_url: "https://new.example/v1".into(),
-            },
-            "new-key".into(),
-            crate::config::UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
-        )
-        .unwrap();
-
-        assert_eq!(synced.profiles[0].short_name, "中");
-        assert_eq!(synced.profiles[0].name, "Relay Updated");
+        let (_, status) = sync_current_provider(&CodeyConfig::default(), home.path()).unwrap();
+        assert_eq!(status.provider.id, "relay");
+        assert!(!status.provider.official);
     }
 
     #[test]

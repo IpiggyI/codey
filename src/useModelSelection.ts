@@ -223,7 +223,7 @@ export function useModelSelection({
     }
     if (modelKey(model) === AUTO_REVIEW_MODEL_KEY) {
       setModelInputError(
-        `${AUTO_REVIEW_MODEL} 是线路能力，请使用上方 Auto Review 开关`,
+        `${AUTO_REVIEW_MODEL} 不进入用户模型目录，请使用上方 Auto Review 开关`,
       );
       return;
     }
@@ -368,7 +368,7 @@ export function useModelSelection({
         manualThirdPartyModels,
         deletedThirdPartyModels,
         draftAutoReviewSupported,
-        `已更新模型声明：${thirdPartyModels.length} 个线路模型`,
+        `已更新模型声明：${thirdPartyModels.length} 个模型`,
         true,
       );
     });

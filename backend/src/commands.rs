@@ -41,10 +41,9 @@ use models::{
     official_route_snapshots, provider_route_requires_restart,
     reconcile_subagent_models_for_mode, remote_compaction_transport_requires_restart,
     runtime_supports_current_routes_for_hot_reload, sync_current_third_party_provider_state,
-    sync_provider_models_for_launch, websocket_transport_requires_restart,
-};
+    sync_provider_models_for_launch, websocket_transport_requires_restart,};
 pub use models::{
-    delete_route, fetch_route_models, save_default_model, save_official_route_models,
+    fetch_route_models, save_default_model, save_official_route_models,
     save_selected_models, sync_current_provider_command,
 };
 pub(crate) use models::native_subagent_model_state;
@@ -81,7 +80,7 @@ use crate::codex_provider;
 use crate::codex_provider::OfficialAccountProfileStatus;
 use crate::config::{
     CodeyConfig, ConfigStore, LaunchOfficialAccountStatus, PromptOptimizationConfig,
-    SUBAGENT_ROLE_DEFAULT, SUBAGENT_ROLE_IDS, SubagentRoleConfig, validate_provider_profiles,
+    SUBAGENT_ROLE_DEFAULT, SUBAGENT_ROLE_IDS, SubagentRoleConfig,
 };
 use crate::crashpad_pending_guard::{
     self, CrashpadPendingStatsHandle, CrashpadPendingStatsSnapshot,
@@ -681,32 +680,9 @@ fn ensure_local_route_config_change_allowed(
 }
 
 pub(super) fn validate_official_account_config_change(
-    previous: &CodeyConfig,
-    next: &CodeyConfig,
+    _previous: &CodeyConfig,
+    _next: &CodeyConfig,
 ) -> Result<(), String> {
-    if previous.official_account_available_this_launch {
-        return Ok(());
-    }
-    if next
-        .active_profile()
-        .is_some_and(|profile| profile.enabled && profile.official_account)
-    {
-        return Err(
-            "本次 Codex 由 API Key 线路启动，不能启用官方账号线路；请先在 Codex 中完成官方账号登录并重新启动 Codey"
-                .to_string(),
-        );
-    }
-    if next.profiles.iter().any(|profile| {
-        profile.official_account
-            && !previous.profiles.iter().any(|previous_profile| {
-                previous_profile.id == profile.id && previous_profile.official_account
-            })
-    }) {
-        return Err(
-            "本次 Codex 由 API Key 线路启动，不能新增官方账号线路；请先在 Codex 中完成官方账号登录并重新启动 Codey"
-                .to_string(),
-        );
-    }
     Ok(())
 }
 
@@ -746,7 +722,7 @@ pub(super) async fn prepare_routes_for_current_launch(state: &Arc<AppState>) -> 
             if migration.changed() {
                 format!("迁移模型清单失败，已保持原数据：{error}")
             } else {
-                format!("保存启动线路准备结果失败：{error}")
+                format!("保存启动准备结果失败：{error}")
             }
         })?;
     }
@@ -761,9 +737,7 @@ fn route_config_for_official_probe(
 ) -> Result<CodeyConfig, String> {
     let mut next = previous.clone();
     match official_status {
-        OfficialAccountProfileStatus::Available(official_profile) => {
-            next.apply_launch_official_profile(Some(official_profile));
-            next.initial_route_import_completed = true;
+        OfficialAccountProfileStatus::Available => {
             next = next.normalize();
             next.official_account_available_this_launch = true;
             next.official_account_status_this_launch = LaunchOfficialAccountStatus::Authenticated;
@@ -771,10 +745,8 @@ fn route_config_for_official_probe(
         OfficialAccountProfileStatus::Unavailable { reason } => {
             next = apply_unavailable_official_probe(next, reason)?;
         }
-        OfficialAccountProfileStatus::Unknown { profile, reason } => {
+        OfficialAccountProfileStatus::Unknown { reason } => {
             if should_attempt_official_launch_when_auth_unknown(previous) {
-                next.apply_launch_official_profile(Some(profile));
-                next.initial_route_import_completed = true;
                 next = next.normalize();
                 next.official_account_available_this_launch = true;
                 next.official_account_status_this_launch = LaunchOfficialAccountStatus::Unknown;
@@ -803,7 +775,7 @@ fn route_config_for_official_probe(
                         stage: Some("startup.auth_probe".to_string()),
                         recoverable: Some(true),
                     },
-                    official_auth_route_diagnostics(previous, "unknown", "third_party_route"),
+                    official_auth_route_diagnostics(previous, "unknown", "third_party_provider"),
                 );
             }
         }
@@ -815,37 +787,33 @@ fn apply_unavailable_official_probe(
     mut next: CodeyConfig,
     reason: String,
 ) -> Result<CodeyConfig, String> {
-    let has_official_route = next
-        .profiles
-        .iter()
-        .any(|profile| profile.enabled && profile.official_account);
-    let fallback = if next.has_third_party_route() {
-        "third_party_route"
-    } else if has_official_route {
+    let official_current = next
+        .current_provider_snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.uses_official_account_auth);
+    let fallback = if next.current_provider_is_third_party() {
+        "third_party_provider"
+    } else if official_current {
         "startup_blocked"
     } else {
-        "no_official_route_configured"
+        "no_official_provider_configured"
     };
     let diagnostics = official_auth_route_diagnostics(&next, "unauthenticated", fallback);
-    if has_official_route {
-        if !next.has_third_party_route() {
-            let error = format!(
-                "当前 Codex 没有可用的官方账号登录，也没有已保存的 API Key 线路；请先在 Codex 中完成官方账号登录，或在 Codey 中添加第三方 API 线路。认证诊断：{reason}"
-            );
-            error_log::record_failure_with_metadata(
-                "official_auth_unavailable",
-                "prepare_routes_for_current_launch",
-                error.clone(),
-                error_log::FailureMetadata {
-                    stage: Some("startup.auth_probe".to_string()),
-                    recoverable: Some(true),
-                },
-                diagnostics,
-            );
-            return Err(error);
-        }
-        next.apply_launch_official_profile(None);
-        next = next.normalize();
+    if official_current && !next.current_provider_is_third_party() {
+        let error = format!(
+            "当前 Codex 没有可用的官方账号登录；请先在 Codex 中完成官方账号登录。认证诊断：{reason}"
+        );
+        error_log::record_failure_with_metadata(
+            "official_auth_unavailable",
+            "prepare_routes_for_current_launch",
+            error.clone(),
+            error_log::FailureMetadata {
+                stage: Some("startup.auth_probe".to_string()),
+                recoverable: Some(true),
+            },
+            diagnostics,
+        );
+        return Err(error);
     }
     error_log::record_failure_with_metadata(
         "official_auth_unavailable",
@@ -867,28 +835,15 @@ fn official_auth_route_diagnostics(
     probe_status: &str,
     fallback: &str,
 ) -> serde_json::Value {
-    let active_profile = config.active_profile();
-    let official_profile_count = config
-        .profiles
-        .iter()
-        .filter(|profile| profile.official_account)
-        .count();
-    let third_party_profile_count = config
-        .profiles
-        .iter()
-        .filter(|profile| !profile.official_account && !profile.is_unconfigured_default())
-        .count();
     serde_json::json!({
         "probeStatus": probe_status,
         "fallback": fallback,
-        "activeProfileId": active_profile.as_ref().map(|profile| profile.id.clone()),
-        "activeProfileOfficial": active_profile.as_ref().map(|profile| profile.official_account),
-        "profileCount": config.profiles.len(),
-        "officialProfileCount": official_profile_count,
-        "thirdPartyProfileCount": third_party_profile_count,
-        "hasThirdPartyRoute": config.has_third_party_route(),
-        "routerRequiresOpenaiAuth": config.router_requires_openai_auth(),
-        "initialRouteImportCompleted": config.initial_route_import_completed,
+        "currentProviderId": config.current_provider_id(),
+        "currentProviderOfficial": config
+            .current_provider_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.uses_official_account_auth),
+        "currentProviderIsThirdParty": config.current_provider_is_third_party(),
         "officialAccountAvailableBeforeProbe": config.official_account_available_this_launch,
         "officialAccountStatusBeforeProbe": config.official_account_status_this_launch,
         "credentialsIncluded": false,
@@ -903,23 +858,13 @@ fn should_attempt_official_launch_when_auth_unknown(config: &CodeyConfig) -> boo
         return true;
     }
     if config
-        .active_profile()
-        .is_some_and(|profile| profile.enabled && profile.official_account)
+        .current_provider_snapshot
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.uses_official_account_auth)
     {
         return true;
     }
-    if !config.has_third_party_route() {
-        return true;
-    }
-    let Some(default_model) = config.default_model() else {
-        return false;
-    };
-    config.profiles.iter().any(|profile| {
-        profile.enabled
-            && profile.official_account
-            && default_model
-                .starts_with(&crate::local_router::model_alias(profile.provider_id(), ""))
-    })
+    !config.current_provider_is_third_party()
 }
 
 fn persisted_config_changed(previous: &CodeyConfig, next: &CodeyConfig) -> bool {
@@ -954,15 +899,6 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
             Err(error) => Err(error),
         },
         "sync_current_provider" => sync_current_provider_command(state).await,
-        "delete_route" => match (
-            string_argument(&args, "routeId"),
-            argument::<u64>(&args, "expectedRevision"),
-        ) {
-            (Ok(route_id), Ok(expected_revision)) => {
-                delete_route(state, route_id, expected_revision).await
-            }
-            (Err(error), _) | (_, Err(error)) => Err(error),
-        },
         "fetch_route_models" => match (
             optional_argument::<String>(&args, "routeId"),
             argument::<u64>(&args, "expectedRevision"),
@@ -1127,19 +1063,8 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
     result.unwrap_or_else(api_error_message)
 }
 
-pub async fn open_route_request_logs(state: &Arc<AppState>) -> Result<Value, String> {
-    let endpoint = state
-        .runtime
-        .lock()
-        .await
-        .as_ref()
-        .and_then(|runtime| runtime.local_router_endpoint())
-        .ok_or_else(|| "本地路由尚未运行，无法打开请求日志".to_string())?;
-    let url = endpoint.request_log_url();
-    tokio::task::spawn_blocking(move || open_system_browser(&url))
-        .await
-        .map_err(|error| format!("打开系统浏览器任务异常退出：{error}"))??;
-    Ok(json!({"status":"ok"}))
+pub async fn open_route_request_logs(_state: &Arc<AppState>) -> Result<Value, String> {
+    Err("当前版本不再提供进程内请求日志".to_string())
 }
 
 fn open_system_browser(url: &str) -> Result<(), String> {
@@ -1199,34 +1124,24 @@ async fn query_route_request_log_stats(
 }
 
 pub async fn clear_route_request_logs(state: &Arc<AppState>) -> Result<Value, String> {
-    // Keep the runtime decision stable while the controller serializes the
-    // writer shutdown/delete/restart sequence. This does not stop or lock the
-    // request forwarding task itself.
     let _runtime_operation = state.runtime_operation.lock().await;
-    let runtime = state.runtime.lock().await.clone();
     let recording_enabled = {
         let config = state.config.read().await;
         config.route_request_log.enabled
             && config.route_request_log.sample_rate_per_million > 0
             && config.local_router_enabled
     };
-    let result = if let Some(runtime) = runtime
-        && let Some(result) = runtime.clear_request_logs().await
+    let root = codey_runtime_core::paths::default_app_state_dir();
+    let result = match tokio::task::spawn_blocking(move || {
+        crate::route_request_log::clear_route_request_log_files(&root, recording_enabled)
+    })
+    .await
     {
-        result
-    } else {
-        let root = codey_runtime_core::paths::default_app_state_dir();
-        match tokio::task::spawn_blocking(move || {
-            crate::route_request_log::clear_route_request_log_files(&root, recording_enabled)
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(error) => crate::route_request_log::RouteRequestLogClearResult::failed(
-                recording_enabled,
-                format!("请求日志清理任务异常退出：{error}"),
-            ),
-        }
+        Ok(result) => result,
+        Err(error) => crate::route_request_log::RouteRequestLogClearResult::failed(
+            recording_enabled,
+            format!("请求日志清理任务异常退出：{error}"),
+        ),
     };
     serde_json::to_value(result).map_err(|error| format!("请求日志清理结果序列化失败：{error}"))
 }
@@ -1297,7 +1212,7 @@ pub async fn load_codey_config(state: &Arc<AppState>) -> Result<Value, String> {
 
 pub(super) async fn ensure_default_route_imported(state: &Arc<AppState>) -> bool {
     let config = state.config.read().await.clone();
-    if !config.needs_initial_route_import() || config.official_account_available_this_launch {
+    if !config.needs_initial_model_sync() || config.official_account_available_this_launch {
         return false;
     }
     let current_provider = match current_codex_provider_for_initial_import().await {
@@ -1318,7 +1233,7 @@ pub(super) async fn ensure_default_route_imported(state: &Arc<AppState>) -> bool
     match sync_current_third_party_provider_state(state).await {
         Ok(status) => {
             if !status.changed {
-                let _ = mark_initial_route_import_completed(state).await;
+                return false;
             }
             status.changed
         }
@@ -1342,24 +1257,8 @@ async fn current_codex_provider_for_initial_import()
     let home = codex_home().to_path_buf();
     tokio::task::spawn_blocking(move || codex_provider::current_provider(&home))
         .await
-        .map_err(|error| format!("读取当前 Codex 线路任务异常退出：{error}"))?
-        .map_err(|error| format!("读取当前 Codex 线路失败：{error:#}"))
-}
-
-async fn mark_initial_route_import_completed(state: &Arc<AppState>) -> Result<bool, String> {
-    let _config_write_guard = state.config_write_lock.lock().await;
-    let previous = state.config.read().await.clone();
-    if previous.initial_route_import_completed {
-        return Ok(false);
-    }
-    let mut next = previous.clone();
-    next.initial_route_import_completed = true;
-    next.settings_revision = previous.settings_revision.saturating_add(1);
-    save_config_to_store(state, &next)
-        .await
-        .map_err(|error| format!("保存首次线路导入标记失败：{error}"))?;
-    *state.config.write().await = next;
-    Ok(true)
+        .map_err(|error| format!("读取当前 Codex provider 任务异常退出：{error}"))?
+        .map_err(|error| format!("读取当前 Codex provider 失败：{error:#}"))
 }
 
 #[cfg(windows)]
@@ -1527,112 +1426,6 @@ async fn save_codey_config_locked(
         return Err("Codey 设置已被其他操作更新，请关闭后重新打开设置页面再保存".to_string());
     }
     let mut config = previous.clone();
-    config.remember_model_aliases();
-    config.profiles = merge_profile_secrets(config_input.profiles, &previous)?;
-    config.active_profile_id = config_input.active_profile_id;
-    if model_context_present
-        && config_input.model_context_by_provider != previous.model_context_by_provider
-    {
-        for (provider_id, policies) in &config_input.model_context_by_provider {
-            let profile = config
-                .profiles
-                .iter()
-                .find(|profile| profile.provider_id() == provider_id)
-                .ok_or_else(|| format!("找不到上下文配置所属线路：{provider_id}"))?;
-            let available = if profile.official_account {
-                model_catalog::default_official_model_slugs()
-            } else {
-                config
-                    .upstream_models_by_provider
-                    .get(provider_id)
-                    .into_iter()
-                    .flatten()
-                    .chain(
-                        config
-                            .selected_models_by_provider
-                            .get(provider_id)
-                            .into_iter()
-                            .flatten(),
-                    )
-                    .chain(
-                        config
-                            .manual_third_party_models_by_provider
-                            .get(provider_id)
-                            .into_iter()
-                            .flatten(),
-                    )
-                    .cloned()
-                    .collect()
-            };
-            models::set_model_contexts(&mut config, provider_id, Some(policies), &available)?;
-        }
-        config.model_context_by_provider.retain(|provider, _| {
-            config_input
-                .model_context_by_provider
-                .contains_key(provider)
-        });
-    }
-    if supports_1m_context_present
-        && config_input.supports_1m_context_by_provider != previous.supports_1m_context_by_provider
-    {
-        for (provider_id, models) in &config_input.supports_1m_context_by_provider {
-            let profile = config
-                .profiles
-                .iter()
-                .find(|profile| profile.provider_id() == provider_id)
-                .ok_or_else(|| format!("找不到 1M 上下文配置所属线路：{provider_id}"))?;
-            let available = if profile.official_account {
-                model_catalog::default_official_model_slugs()
-            } else {
-                config
-                    .upstream_models_by_provider
-                    .get(provider_id)
-                    .into_iter()
-                    .flatten()
-                    .chain(
-                        config
-                            .selected_models_by_provider
-                            .get(provider_id)
-                            .into_iter()
-                            .flatten(),
-                    )
-                    .chain(
-                        config
-                            .manual_third_party_models_by_provider
-                            .get(provider_id)
-                            .into_iter()
-                            .flatten(),
-                    )
-                    .cloned()
-                    .collect()
-            };
-            models::set_supports_1m_context_models(
-                &mut config,
-                provider_id,
-                Some(models),
-                &available,
-            )?;
-        }
-        config
-            .supports_1m_context_by_provider
-            .retain(|provider_id, _| {
-                config_input
-                    .supports_1m_context_by_provider
-                    .contains_key(provider_id)
-            });
-    }
-    if local_router_enabled_present {
-        config.local_router_enabled = config_input.local_router_enabled;
-    }
-    if route_request_log_present {
-        config.route_request_log = config_input.route_request_log;
-    }
-    // Native providers can have model selections without a saved Codey route.
-    // Do not prune these caches during read-only saves or router transitions.
-    if previous.local_router_enabled && config.local_router_enabled {
-        retain_route_scoped_config(&mut config);
-    }
-    ensure_local_route_config_change_allowed(&previous, &config)?;
     config_input
         .webhook
         .merge_redacted_secrets(&previous.webhook);
@@ -1779,88 +1572,6 @@ async fn save_codey_config_locked(
         reconcile_subagent_config,
         fast_context_tools_status,
     })
-}
-
-fn merge_profile_secrets(
-    mut profiles: Vec<crate::config::ProviderProfile>,
-    previous: &CodeyConfig,
-) -> Result<Vec<crate::config::ProviderProfile>, String> {
-    let previous_by_id = previous
-        .profiles
-        .iter()
-        .map(|profile| (profile.id.as_str(), profile))
-        .collect::<std::collections::HashMap<_, _>>();
-    for profile in &mut profiles {
-        let previous_profile = previous_by_id.get(profile.id.as_str()).copied();
-        profile.merge_redacted_secret(previous_profile);
-        if let Some(previous_profile) = previous_profile {
-            let auth_mode_changed = !profile
-                .auth_mode
-                .trim()
-                .eq_ignore_ascii_case(previous_profile.auth_mode.trim());
-            if auth_mode_changed {
-                profile.model_request_headers.clear();
-                profile.source_provider_id = None;
-                profile.supports_remote_compaction = false;
-                // Official routes derive WebSocket support automatically. Do
-                // not carry that derived capability into a newly converted
-                // API-key route; third-party WebSocket remains explicit opt-in.
-                profile.supports_websockets = false;
-                profile.supports_auto_review = false;
-                if profile.auth_mode.trim() == crate::config::AUTH_MODE_API_KEY {
-                    profile.official_account = false;
-                }
-            } else {
-                // These fields are discovered from the trusted Codex source and
-                // are not editable renderer input. Keep them attached
-                // to the saved route even though the renderer receives a redacted
-                // profile and sends the whole form back on save.
-                profile.model_request_headers = previous_profile.model_request_headers.clone();
-                profile.source_provider_id = previous_profile.source_provider_id.clone();
-                profile.official_account = previous_profile.official_account;
-                profile.supports_remote_compaction = previous_profile.supports_remote_compaction;
-            }
-        }
-        profile.normalize();
-    }
-    validate_provider_profiles(&profiles)?;
-    Ok(profiles)
-}
-
-fn retain_route_scoped_config(config: &mut CodeyConfig) {
-    let provider_ids = config
-        .profiles
-        .iter()
-        .map(|profile| {
-            profile
-                .source_provider_id
-                .as_deref()
-                .unwrap_or(profile.id.as_str())
-                .to_string()
-        })
-        .collect::<std::collections::HashSet<_>>();
-    let keep_key = |provider_id: &String| {
-        provider_ids.contains(provider_id)
-            || crate::model_ownership::is_ownership_key(provider_id)
-    };
-    config
-        .model_context_by_provider
-        .retain(|provider_id, _| keep_key(provider_id));
-    config
-        .supports_1m_context_by_provider
-        .retain(|provider_id, _| keep_key(provider_id));
-    config
-        .selected_models_by_provider
-        .retain(|provider_id, _| keep_key(provider_id));
-    config
-        .manual_third_party_models_by_provider
-        .retain(|provider_id, _| keep_key(provider_id));
-    config
-        .declared_official_models_by_provider
-        .retain(|provider_id, _| keep_key(provider_id));
-    config
-        .upstream_models_by_provider
-        .retain(|provider_id, _| keep_key(provider_id));
 }
 
 fn current_fast_context_tools_status() -> FastContextToolsStatus {
@@ -2122,7 +1833,8 @@ async fn hot_reload_runtime_request_log(
         );
     }
 
-    match runtime.reconfigure_request_log(&desired).await {
+    let _ = (runtime, desired);
+    match Ok::<Option<RouteRequestLogReconfigure>, anyhow::Error>(None) {
         Ok(Some(RouteRequestLogReconfigure::Unchanged)) => RouteRequestLogHotReloadOutcome {
             status: RouteRequestLogHotReloadStatus::Unchanged,
             error: None,
@@ -2369,9 +2081,6 @@ fn redacted_config_at(
     env: &impl Fn(&str) -> Option<String>,
 ) -> CodeyConfig {
     let mut public = config.clone();
-    for profile in &mut public.profiles {
-        profile.api_key_configured = !profile.api_key.trim().is_empty();
-    }
     public.webhook.url.clear();
     for channel in &mut public.webhook.channels {
         channel.url_configured = !channel.url.trim().is_empty();
@@ -2474,8 +2183,7 @@ pub(super) fn provider_route_restart_required_for_runtime(
         || official_route_snapshots(applied) != official_route_snapshots(current)
         || websocket_transport_requires_restart(applied, current)
         || native_web_search_capability_requires_restart(applied, current)
-        || remote_compaction_transport_requires_restart(applied, current)
-}
+        || remote_compaction_transport_requires_restart(applied, current)}
 
 #[cfg(test)]
 fn model_catalog_config_for_runtime<'a>(

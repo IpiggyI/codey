@@ -1,5 +1,15 @@
 use std::collections::{BTreeMap, HashSet};
 
+pub(crate) const CODEX_AUTO_REVIEW_MODEL: &str = "codex-auto-review";
+
+pub(crate) fn strip_route_alias(value: &str) -> &str {
+    let value = value.trim();
+    match value.split_once('/') {
+        Some((_, model)) => model,
+        None => value,
+    }
+}
+
 pub(crate) fn key(model: &str) -> String {
     model.trim().to_ascii_lowercase()
 }
@@ -113,5 +123,14 @@ mod tests {
         ] {
             assert_eq!(historical_source(input, &aliases), expected, "{input}");
         }
+    }
+
+    #[test]
+    fn strip_route_alias_returns_the_model_after_the_first_slash() {
+        assert_eq!(strip_route_alias("relay/gpt-5.4"), "gpt-5.4");
+        assert_eq!(strip_route_alias("  openai/gpt-5.6-sol  "), "gpt-5.6-sol");
+        assert_eq!(strip_route_alias("gpt-5.4"), "gpt-5.4");
+        assert_eq!(strip_route_alias(" provider/with/slashes "), "with/slashes");
+        assert_eq!(strip_route_alias("   "), "");
     }
 }

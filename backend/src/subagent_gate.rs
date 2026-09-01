@@ -2516,7 +2516,6 @@ fn powershell_executable_invocation(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ProviderProfile;
 
     fn test_policy_catalog(
         roles: &BTreeMap<String, crate::config::SubagentRoleConfig>,
@@ -2981,24 +2980,24 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path();
         let state_root = home.join(STATE_DIRECTORY);
-        let mut previous = ProviderProfile::new("Previous");
-        previous.id = "route-a".into();
-        previous.official_account = false;
-        let mut current = ProviderProfile::new("Current");
-        current.id = "route-b".into();
-        current.official_account = false;
         let mut config = crate::config::CodeyConfig {
-            active_profile_id: "route-b".into(),
-            profiles: vec![previous, current],
-            selected_models_by_provider: BTreeMap::from([
-                ("route-a".into(), vec!["stale-model".into()]),
-                ("route-b".into(), vec!["live-model".into()]),
-            ]),
             subagent_optimization: true,
             subagent_model: "stale-model".into(),
             subagent_roles: crate::config::uniform_subagent_roles("stale-model", "medium"),
             ..crate::config::CodeyConfig::default()
         };
+        config.attach_current_provider_snapshot(
+            crate::model_ownership::CurrentProviderSnapshot::from_parts(
+                "route-b",
+                "https://route-b.example/v1",
+                "responses",
+                false,
+            ),
+        );
+        config.selected_models_by_provider.insert(
+            config.current_model_list_key().unwrap().to_string(),
+            vec!["live-model".into()],
+        );
         crate::subagent_policy::reconcile_with_model_state(&mut config, None);
         assert_eq!(
             config.subagent_roles[crate::config::SUBAGENT_ROLE_WORKER].model,

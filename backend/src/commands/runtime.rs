@@ -81,14 +81,9 @@ pub(super) async fn runtime_status_with_options(
         None => false,
     };
     let config = state.config.read().await;
-    let profile = config.active_profile();
-    let active_profile_id = profile
-        .as_ref()
-        .map(|profile| profile.id.clone())
-        .unwrap_or_default();
-    let active_profile_name = profile
-        .as_ref()
-        .map(|profile| profile.name.clone())
+    let snapshot = config.current_provider_snapshot.as_ref();
+    let active_provider_id = snapshot
+        .map(|snapshot| snapshot.id.clone())
         .unwrap_or_default();
     let configured_codex_app_path = config.codex_app_path.clone();
     let official_account_available = config.official_account_available_this_launch;
@@ -139,8 +134,7 @@ pub(super) async fn runtime_status_with_options(
         "running": runtime.is_some(),
         "appVersion": env!("CARGO_PKG_VERSION"),
         "clientPlatform": current_update_platform(),
-        "activeProfileId": active_profile_id,
-        "activeProfileName": active_profile_name,
+        "activeProviderId": active_provider_id,
         "officialAccountAvailable": official_account_available,
         "officialAccountStatus": official_account_status,
         "restartRequired": restart_required,
@@ -316,8 +310,7 @@ async fn launch_codey_inner_locked(state: &Arc<AppState>) -> Result<Value, Strin
     #[cfg(windows)]
     ensure_windows_codex_app_path(state).await?;
     stop_waiting_webhook_watcher(state).await;
-    let local_router_enabled = state.config.read().await.local_router_enabled;
-    restore_previous_runtime_state(codex_home(), local_router_enabled)
+    restore_previous_runtime_state(codex_home())
         .await
         .map_err(|error| format!("恢复上次 Codey 临时 Codex 配置失败：{error}"))?;
     prepare_routes_for_current_launch(state).await?;
@@ -403,31 +396,18 @@ pub async fn launch_codey_runtime(state: &Arc<AppState>) -> Result<Value, String
 
 async fn runtime_start_failure_context(state: &Arc<AppState>, restart: bool, error: &str) -> Value {
     let config = state.config.read().await;
-    let active_profile = config.active_profile();
-    let official_profile_count = config
-        .profiles
-        .iter()
-        .filter(|profile| profile.official_account)
-        .count();
-    let third_party_profile_count = config
-        .profiles
-        .iter()
-        .filter(|profile| !profile.official_account && !profile.is_unconfigured_default())
-        .count();
     json!({
         "restart": restart,
         "errorClass": classify_runtime_start_error(error),
         "codexHome": codex_home().to_string_lossy(),
         "codeyConfigPath": state.store.path().to_string_lossy(),
         "configuredCodexAppPath": config.codex_app_path.as_str(),
-        "activeProfileId": active_profile.as_ref().map(|profile| profile.id.clone()),
-        "activeProfileName": active_profile.as_ref().map(|profile| profile.name.clone()),
-        "activeProfileOfficial": active_profile.as_ref().map(|profile| profile.official_account),
-        "profileCount": config.profiles.len(),
-        "officialProfileCount": official_profile_count,
-        "thirdPartyProfileCount": third_party_profile_count,
-        "hasThirdPartyRoute": config.has_third_party_route(),
-        "routerRequiresOpenaiAuth": config.router_requires_openai_auth(),
+        "currentProviderId": config.current_provider_id(),
+        "currentProviderOfficial": config
+            .current_provider_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.uses_official_account_auth),
+        "currentProviderIsThirdParty": config.current_provider_is_third_party(),
         "officialAccountAvailable": config.official_account_available_this_launch,
         "officialAccountStatus": config.official_account_status_this_launch,
         "credentialsIncluded": false,
@@ -538,8 +518,7 @@ async fn stop_codey_runtime_locked(state: &Arc<AppState>) -> Result<Value, Strin
             return Err(format!("{error:#}"));
         }
     } else {
-        let local_router_enabled = state.config.read().await.local_router_enabled;
-        restore_previous_runtime_state(codex_home(), local_router_enabled)
+        restore_previous_runtime_state(codex_home())
             .await
             .map_err(|error| error.to_string())?;
     }
@@ -727,7 +706,7 @@ mod tests {
         runtime_feature_status_value, runtime_start_failure_context,
     };
     use crate::commands::{AppShutdownReason, AppState};
-    use crate::config::{CodeyConfig, ProviderProfile};
+    use crate::config::CodeyConfig;
 
     #[test]
     fn runtime_feature_status_has_a_stable_public_json_contract() {
@@ -751,17 +730,16 @@ mod tests {
     #[tokio::test]
     async fn runtime_start_failure_context_is_complete_and_does_not_include_credentials() {
         let state = Arc::new(AppState::default());
-        let mut relay = ProviderProfile::new("Relay");
-        relay.id = "relay".into();
-        relay.base_url = "https://relay.example/v1".into();
-        relay.api_key = "sk-private-runtime-key".into();
-        relay.normalize();
-        *state.config.write().await = CodeyConfig {
-            active_profile_id: relay.id.clone(),
-            profiles: vec![relay],
-            ..CodeyConfig::default()
-        }
-        .normalize();
+        let mut config = CodeyConfig::default();
+        config.attach_current_provider_snapshot(
+            crate::model_ownership::CurrentProviderSnapshot::from_parts(
+                "relay",
+                "https://relay.example/v1",
+                "responses",
+                false,
+            ),
+        );
+        *state.config.write().await = config;
 
         let context = runtime_start_failure_context(
             &state,
@@ -773,8 +751,8 @@ mod tests {
 
         assert_eq!(context["restart"], true);
         assert_eq!(context["errorClass"], "official_auth_unavailable");
-        assert_eq!(context["activeProfileId"], "relay");
-        assert_eq!(context["thirdPartyProfileCount"], 1);
+        assert_eq!(context["currentProviderId"], "relay");
+        assert_eq!(context["currentProviderIsThirdParty"], true);
         assert_eq!(context["credentialsIncluded"], false);
         assert!(context["codexHome"].is_string());
         assert!(context["codeyConfigPath"].is_string());
@@ -794,6 +772,10 @@ mod tests {
         );
         assert_eq!(
             classify_runtime_start_error("线路配置无效"),
+            "provider_route_invalid"
+        );
+        assert_eq!(
+            classify_runtime_start_error("Provider 配置无效"),
             "provider_route_invalid"
         );
         assert_eq!(classify_runtime_start_error("boom"), "runtime_start_failed");

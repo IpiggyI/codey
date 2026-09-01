@@ -120,7 +120,6 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
     }
   }
   const fakeElectron = {
-    app: { getVersion: () => "26.826.1724" },
     BrowserWindow: FakeBrowserWindow,
     protocol: {
       handle(scheme, handler) {
@@ -171,8 +170,7 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
   try {
     assert.equal(
       (0, eval)(await loadStartupPatchExpression(true, "C:\\Codey\\codey.exe")),
-      "codey-startup-patch-installed-v39",
-    );
+      "codey-startup-patch-installed-v39",    );
     const electron = Module._load("electron", undefined, false);
     const petSurface = new electron.BrowserWindow({ title: "Pet Surface test" });
     assert.equal(petSurface.destroyed, false);
@@ -254,7 +252,6 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
     // anchors so an incompatible field bundle can be adapted without access to
     // that exact build.
     for (const record of JSON.parse(asyncLogSpawns[0].input)) {
-      assert.equal(record.versions.codex, "26.826.1724");
       assert.equal(record.context.matchCount, 0);
       assert.ok(
         Array.isArray(record.context.excerpts) &&
@@ -506,7 +503,6 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       /globalThis\.__codeyModelWhitelistPatch\?\.rewriteOutgoingMessage\?\.\(e\)\?\?e/,
     );
     const sentMessages = [];
-    const blockedMessages = [];
     const testRouteWindow = {
       electronBridge: {
         async sendMessageFromView(message) {
@@ -518,13 +514,7 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
     const routeGlobal = {
       __codeyModelWhitelistPatch: {
         rewriteOutgoingMessage(message) {
-          return { ...message, routed: true };
-        },
-        isBlockedOutgoingMessage(message) {
-          return message.blocked === true;
-        },
-        notifyBlockedOutgoingMessage(message) {
-          blockedMessages.push(message);
+          return { ...message, tracked: true };
         },
       },
     };
@@ -543,17 +533,21 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
         }
       },
     );
-    routeTransport.postMessage({ type: "mcp-request" });
+    routeTransport.postMessage({ type: "mcp-request", modelProvider: "openai" });
     await Promise.resolve();
-    assert.deepEqual(sentMessages, [{ type: "mcp-request", routed: true }]);
-    routeTransport.postMessage({ type: "mcp-request", blocked: true });
-    await Promise.resolve();
-    assert.deepEqual(sentMessages, [{ type: "mcp-request", routed: true }]);
-    assert.deepEqual(blockedMessages, [{
+    assert.deepEqual(sentMessages, [{
       type: "mcp-request",
-      blocked: true,
-      routed: true,
+      modelProvider: "openai",
+      tracked: true,
     }]);
+    routeTransport.postMessage({ type: "mcp-request", modelProvider: "openai" });
+    await Promise.resolve();
+    assert.deepEqual(sentMessages, [
+      { type: "mcp-request", modelProvider: "openai", tracked: true },
+      { type: "mcp-request", modelProvider: "openai", tracked: true },
+    ]);
+    assert.doesNotMatch(patchedRouteBridgeSource, /isBlockedOutgoingMessage/);
+    assert.doesNotMatch(patchedRouteBridgeSource, /codey_router/);
     assert.equal(
       patchErrors.length,
       2,
@@ -564,8 +558,7 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       "class AppServerRequestClient{",
       "constructor(){this.hostId=`local`;this.sent=[];this.queuedRequests=[];this.requestPromises=new Map();this.useHostRequestScheduler=!1;this.dispatchMessage=(e,t)=>this.sent.push({type:e,payload:t})}",
       "createRequest(e,t,n,r=null){return{request:{id:`req-1`,method:e,params:t},promise:Promise.resolve({ok:!0})}}",
-      "startRequest(){} onError(){} emitRequestLifecycleEvent(){} pumpQueue(){let e=this.queuedRequests.shift();e?.dispatch()}",
-      "onResult(e,t,n){let r=this.requestPromises.get(e);if(r){this.requestPromises.delete(e),r.resolve(t),this.emitRequestLifecycleEvent({type:`completed`,hostId:this.hostId,method:r.method});return}}",
+      "startRequest(){} onError(){} pumpQueue(){let e=this.queuedRequests.shift();e?.dispatch()}",
       "enqueueRequest(e,t,n,r=t=>{this.dispatchMessage?.(`mcp-request`,{request:t,hostId:this.hostId,...t.trace==null?{}:{dispatchedAtMs:Date.now()},priority:Mjt(e,n),source:Ejt(e,n?.source),timeoutMs:n?.timeoutMs,expiresAtMs:n?.timeoutMs!=null&&n.timeoutMs>0?Date.now()+n.timeoutMs:void 0,widget:n?.widget})},i=null){let a=Mjt(e,n),o=Ejt(e,n?.source);let{request:s,promise:c}=this.createRequest(e,t,n,i);return this.queuedRequests.push({dispatch:()=>{this.startRequest(s);try{r(s)}catch(e){this.onError(s.id,e)}},priority:a}),this.pumpQueue(),c}",
       "async sendRequest(e,t,n){return this.enqueueRequest(e,t,n)}",
       "}",
@@ -581,40 +574,16 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       patchedAppServerRequestSource,
       /__codeyModelWhitelistPatch\?\.rewriteOutgoingMessage/,
     );
-    const blockedAppServerMessages = [];
     const routedAppServerTypes = [];
     const trackedAppServerMessages = [];
     const appServerGlobal = {
       __codeyModelWhitelistPatch: {
         rewriteOutgoingMessage(detail) {
           routedAppServerTypes.push(detail.type);
-          if (detail.request.params.model === "blocked-route/model") {
-            return { ...detail, blocked: true };
-          }
-          return {
-            ...detail,
-            request: {
-              ...detail.request,
-              params: {
-                model: "route-mt6lv4lx-i2bfax/gpt-5.5",
-                modelProvider: "codey_router",
-              },
-            },
-          };
-        },
-        isBlockedOutgoingMessage(detail) {
-          return detail.blocked === true;
-        },
-        notifyBlockedOutgoingMessage(detail) {
-          blockedAppServerMessages.push(detail);
+          return detail;
         },
         trackOutgoingMessage(detail) {
           trackedAppServerMessages.push(detail);
-        },
-        rewriteIncomingResult(method, result) {
-          return method === "model/list"
-            ? { ...result, data: [...result.data, { model: "route/model" }] }
-            : result;
         },
       },
     };
@@ -625,15 +594,15 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
     )(appServerGlobal, Date);
     const requestClient = new AppServerRequestClient();
     await requestClient.enqueueRequest("thread/start", {
-      model: "route-mt6lv4lx-i2bfax/gpt-5.5",
+      model: "gpt-5.5",
       model_provider: "openai",
     }, {});
     assert.deepEqual(requestClient.sent[0].payload.request.params, {
-      model: "route-mt6lv4lx-i2bfax/gpt-5.5",
-      modelProvider: "codey_router",
+      model: "gpt-5.5",
+      model_provider: "openai",
     });
     await requestClient.enqueueRequest("thread/start", {
-      model: "route-mt6lv4lx-i2bfax/gpt-5.5",
+      model: "gpt-5.5",
       model_provider: "openai",
     }, {}, (request) => {
       requestClient.dispatchMessage?.("thread-prewarm-start", {
@@ -643,31 +612,18 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
     });
     assert.equal(routedAppServerTypes.at(-1), "mcp-request");
     assert.deepEqual(requestClient.sent[1].payload.request.params, {
-      model: "route-mt6lv4lx-i2bfax/gpt-5.5",
-      modelProvider: "codey_router",
+      model: "gpt-5.5",
+      model_provider: "openai",
     });
-    await assert.rejects(
-      requestClient.enqueueRequest("thread/start", { model: "blocked-route/model" }, {}),
-      /Codey blocked cross-provider model request/,
-    );
-    assert.equal(requestClient.sent.length, 2);
-    assert.equal(blockedAppServerMessages.length, 1);
-    assert.equal(trackedAppServerMessages.length, 2);
+    await requestClient.enqueueRequest("thread/start", { model: "gpt-5.5" }, {});
+    assert.equal(requestClient.sent.length, 3);
+    assert.equal(trackedAppServerMessages.length, 3);
     assert.deepEqual(trackedAppServerMessages[0], {
       type: "mcp-request",
       request: requestClient.sent[0].payload.request,
     });
-    const modelListResults = [];
-    requestClient.requestPromises.set("model-list", {
-      method: "model/list",
-      resolve(result) {
-        modelListResults.push(result);
-      },
-    });
-    requestClient.onResult("model-list", { data: [{ model: "gpt-5.6-sol" }] });
-    assert.deepEqual(modelListResults, [{
-      data: [{ model: "gpt-5.6-sol" }, { model: "route/model" }],
-    }]);
+    assert.doesNotMatch(patchedAppServerRequestSource, /codey_router/);
+    assert.doesNotMatch(patchedAppServerRequestSource, /Codey blocked cross-provider/);
     assert.equal(
       patchErrors.length,
       2,
@@ -963,116 +919,6 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       globalThis.setTimeout = ownerNativeSetTimeout;
       globalThis.clearTimeout = ownerNativeClearTimeout;
       delete globalThis.__CODEY_THREAD_OWNER_DISCOVERY_V2__;
-    }
-
-    const completedReconciliationSource = [
-      "class RunningManager{",
-      "constructor(){this.conversation={inProgress:!0,resumeState:`resumed`};",
-      "this.role={role:`owner`};this.revision=1;this.statuses=[`idle`,`idle`];this.events=[];",
-      "this.productPolicy={runtimePolicy:{isLocalConversationInProgress:e=>e.inProgress===!0}};",
-      "this.inactiveThreadUnsubscriber={clearConversationStreamOwnership:e=>{this.events.push(`clear:${e}`);this.role=null}}}",
-      "getConversation(){return this.conversation}",
-      "getConversationStreamRevision(){return this.revision}",
-      "getStreamRole(){return this.role}",
-      "async sendRequest(e,t){this.events.push(`read:${e}:${t.threadId}:${t.includeTurns}`);return{thread:{status:this.statuses.shift()??`idle`}}}",
-      "updateConversationState(e,t){this.events.push(`state:${e}`);t(this.conversation)}",
-      "async maybeResumeConversation(e){this.events.push(`resume:${e.conversationId}`);this.conversation.inProgress=!1;this.role={role:`owner`}}",
-      "async resumeConversation(e){await this.maybeResumeConversation(e);return{activeTurnId:null}}",
-      "discardConversationFromCache(e){return this.productPolicy.runtimePolicy.isLocalConversationInProgress(this.conversation)&&this.inactiveThreadUnsubscriber.clearConversationStreamOwnership(e)}",
-      "}",
-    ].join("");
-    electron.protocol.handle(
-      "app",
-      async () => new Response(completedReconciliationSource),
-    );
-    const completedReconciliationResponse = await installedHandler({
-      url: "app://-/assets/app-initial-BHB6SClA.js",
-    });
-    const patchedCompletedReconciliationSource = await completedReconciliationResponse.text();
-    assert.match(
-      patchedCompletedReconciliationSource,
-      /async codeyReconcileCompletedConversation\(/,
-    );
-    const RunningManager = Function(
-      `${patchedCompletedReconciliationSource};return RunningManager`,
-    )();
-    const reconcileNativeSetTimeout = globalThis.setTimeout;
-    const reconcileDelays = [];
-    globalThis.setTimeout = (callback, delay) => {
-      reconcileDelays.push(delay);
-      callback();
-      return 1;
-    };
-    try {
-      const completedManager = new RunningManager();
-      assert.equal(
-        await completedManager.codeyReconcileCompletedConversation({
-          conversationId: "thread-completed",
-        }),
-        true,
-      );
-      assert.deepEqual(completedManager.events, [
-        "read:thread/read:thread-completed:false",
-        "read:thread/read:thread-completed:false",
-        "clear:thread-completed",
-        "state:thread-completed",
-        "resume:thread-completed",
-      ]);
-      assert.deepEqual(reconcileDelays, [250]);
-      assert.equal(completedManager.conversation.resumeState, "needs_resume");
-      assert.deepEqual(completedManager.role, { role: "owner" });
-
-      const activeManager = new RunningManager();
-      activeManager.statuses = ["running"];
-      assert.equal(
-        await activeManager.codeyReconcileCompletedConversation({
-          conversationId: "thread-running",
-        }),
-        false,
-      );
-      assert.deepEqual(activeManager.events, [
-        "read:thread/read:thread-running:false",
-      ]);
-
-      const changedRevisionManager = new RunningManager();
-      const sendRequest = changedRevisionManager.sendRequest.bind(changedRevisionManager);
-      changedRevisionManager.sendRequest = async (...args) => {
-        const response = await sendRequest(...args);
-        if (changedRevisionManager.events.length === 2) {
-          changedRevisionManager.revision += 1;
-        }
-        return response;
-      };
-      assert.equal(
-        await changedRevisionManager.codeyReconcileCompletedConversation({
-          conversationId: "thread-updated",
-        }),
-        false,
-      );
-      assert.deepEqual(changedRevisionManager.events, [
-        "read:thread/read:thread-updated:false",
-        "read:thread/read:thread-updated:false",
-      ]);
-
-      const idleManager = new RunningManager();
-      idleManager.conversation.inProgress = false;
-      assert.equal(
-        await idleManager.codeyReconcileCompletedConversation({ conversationId: "thread-idle" }),
-        false,
-      );
-      assert.deepEqual(idleManager.events, []);
-
-      const followerManager = new RunningManager();
-      followerManager.role = { role: "follower", ownerClientId: "other-window" };
-      assert.equal(
-        await followerManager.codeyReconcileCompletedConversation({
-          conversationId: "thread-followed",
-        }),
-        false,
-      );
-      assert.deepEqual(followerManager.events, []);
-    } finally {
-      globalThis.setTimeout = reconcileNativeSetTimeout;
     }
 
     const interactionPerformanceSource = [

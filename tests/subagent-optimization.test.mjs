@@ -53,9 +53,9 @@ test("subagent settings expose the five supported role controls", async () => {
   );
   assert.match(modelOptionsSource, /export function buildCurrentProviderSubagentModelOptions/);
   assert.match(modelOptionsSource, /value: modelId/);
-  assert.match(modelOptionsSource, /providerModelAlias\(providerId, option\.modelId\)/);
-  assert.match(modelOptionsSource, /for \(const profile of config\.profiles\)/);
-  assert.match(modelOptionsSource, /value = routeModelAlias\(profile, modelId\)/);
+  assert.doesNotMatch(modelOptionsSource, /for \(const profile of config\.profiles\)/);
+  assert.doesNotMatch(modelOptionsSource, /routeModelAlias/);
+  assert.doesNotMatch(modelOptionsSource, /routeDisplayPrefix/);
   assert.match(modelOptionsSource, /const usesOfficialMetadata = official/);
   assert.match(
     modelOptionsSource,
@@ -69,7 +69,8 @@ test("subagent settings expose the five supported role controls", async () => {
   assert.match(modelOptionsSource, /resolveSubagentModelOption/);
   assert.match(modelOptionsSource, /resolveCurrentProviderModelOption/);
   assert.match(comboboxSource, /<Combobox\.Search/);
-  assert.match(comboboxSource, /搜索模型或线路/);
+  assert.match(comboboxSource, /搜索模型/);
+  assert.doesNotMatch(comboboxSource, /搜索模型或线路/);
   assert.match(comboboxSource, /待重选/);
   assert.match(comboboxSource, /<Combobox\.Group/);
 });

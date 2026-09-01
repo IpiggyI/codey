@@ -24,8 +24,8 @@ test("third-party model sync can fall back to manual model support configuration
   assert.match(dialogSource, /modelState\.officialModels\.length > 0/);
   assert.match(dialogSource, /本次官方账号登录可用的模型/);
   assert.match(dialogSource, /modelState\.officialModels\.map/);
-  assert.match(dialogSource, /placeholder="输入当前线路模型 ID/);
-  assert.match(dialogSource, /当前线路支持 auto-review/);
+  assert.match(dialogSource, /placeholder="输入当前模型 ID/);
+  assert.match(dialogSource, /当前 provider 支持 auto-review/);
   assert.match(dialogSource, /<Switch/);
   assert.match(dialogSource, /manualThirdPartyModelKeys\.has/);
   assert.match(dialogSource, /aria-label=\{`删除其他模型 \$\{model\}`\}/);
@@ -38,7 +38,7 @@ test("third-party model sync can fall back to manual model support configuration
   assert.doesNotMatch(hookSource, /setDefaultModel/);
   assert.match(hookSource, /manualThirdPartyModels/);
   assert.match(hookSource, /supportsAutoReview/);
-  assert.match(hookSource, /AUTO_REVIEW_MODEL.*线路能力/s);
+  assert.match(hookSource, /AUTO_REVIEW_MODEL.*不进入用户模型目录/s);
   assert.match(hookSource, /deletedThirdPartyModels: deletedModels/);
   assert.match(
     hookSource,

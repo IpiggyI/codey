@@ -45,12 +45,10 @@ test("current provider catalog can sync even without a matching saved profile", 
   assert.match(modelSection, /当前 provider 还没有对应的模型清单/);
 });
 
-test("saved profiles from other devices only appear when they match the current provider fingerprint", () => {
+test("saved model lists belong to the current provider fingerprint, not a profile library", () => {
   assert.doesNotMatch(modelSection, /供应商线路/);
   assert.doesNotMatch(modelSection, /aria-label="线路列表"/);
   assert.doesNotMatch(modelSection, /className="route-list-pane"/);
-  assert.match(
-    modelSection,
-    /modelListKey\(profile, currentProviderSnapshot\) === currentProviderSnapshot\.ownershipKey/,
-  );
+  assert.doesNotMatch(modelSection, /config\.profiles/);
+  assert.doesNotMatch(modelSection, /activeProfileId/);
 });

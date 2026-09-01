@@ -7,25 +7,6 @@ export type UpstreamProtocol =
   | "openaiChatCompletions"
   | "anthropicMessages";
 
-export type Profile = {
-  enabled?: boolean;
-  id: string;
-  name: string;
-  shortName: string;
-  baseUrl: string;
-  apiKey: string;
-  upstreamProtocol: UpstreamProtocol;
-  authMode: "officialAccount" | "apiKey";
-  apiKeyConfigured: boolean;
-  clearApiKey?: boolean;
-  sourceProviderId?: string;
-  officialAccount: boolean;
-  supportsRemoteCompaction?: boolean;
-  supportsWebsockets?: boolean;
-  supportsNativeWebSearch?: boolean;
-  supportsAutoReview?: boolean;
-};
-
 export type PromptOptimizationConfig = {
   enabled: boolean;
   mode: "officialAccount" | "currentProvider" | "manual";
@@ -69,32 +50,8 @@ export type SubagentRoleConfig = {
   reasoningEffort: string;
 };
 
-export type RouteRequestLogConfig = {
-  enabled: boolean;
-  backend: "ndjson" | "sqlite";
-  queueCapacity: number;
-  batchSize: number;
-  flushIntervalMs: number;
-  shutdownFlushTimeoutMs: number;
-  sampleRatePerMillion: number;
-  maxFileBytes: number;
-  retainedFiles: number;
-  retentionDays: number;
-};
-
-export type ModelContextConfig = {
-  contextWindowTokens: number;
-  autoCompactTokenLimit?: number | null;
-  reserveOutputTokens?: number | null;
-};
-
 export type Config = {
   settingsRevision: number;
-  localRouterEnabled: boolean;
-  routeRequestLog: RouteRequestLogConfig;
-  activeProfileId: string;
-  profiles: Profile[];
-  initialRouteImportCompleted: boolean;
   webhook: { channels: NotificationChannel[] };
   promptOptimization: PromptOptimizationConfig;
   codexAppPath: string;
@@ -175,8 +132,6 @@ export type RuntimeStatus = {
   clientPlatform?: string;
   restartRequired?: boolean;
   restartInProgress?: boolean;
-  activeProfileId?: string;
-  activeProfileName?: string;
   officialAccountAvailable?: boolean;
   startupError?: string;
   codexAppPath?: string;
@@ -196,11 +151,11 @@ export type PluginMarketplaceStatus = {
   status: "ready" | "needs_repair" | "error";
   needsRepair?: boolean;
   officialMarketplace?: boolean;
+  officialRegistered?: boolean;
   officialPath?: string | null;
   remoteMarketplace?: boolean;
   remoteRegistered?: boolean;
   remotePath?: string | null;
-  managedConfigCompatible?: boolean;
   localMarketplacePath?: string;
   initializedRemote?: boolean;
   configuredRemote?: boolean;

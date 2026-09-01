@@ -13,7 +13,6 @@ use tokio::sync::{Mutex, oneshot};
 use super::AppState;
 use crate::codex_config::codex_home;
 use crate::config::{CodeyConfig, ConfigStore};
-use crate::local_router;
 use crate::notifications::{
     NotificationChannelConfig, NotificationChannelKind, NotificationDispatcher, NotificationEvent,
 };
@@ -760,28 +759,11 @@ fn webhook_session_configuration(
     (model, reasoning_effort)
 }
 
-fn webhook_display_model(config: &CodeyConfig, requested_model: &str) -> String {
-    let requested_model = requested_model.trim();
+fn webhook_display_model(_config: &CodeyConfig, requested_model: &str) -> String {
+    let requested_model = crate::model_id::strip_route_alias(requested_model.trim());
     if requested_model.is_empty() {
         return "Codex".to_string();
     }
-
-    for profile in &config.profiles {
-        let provider_id = profile.provider_id().trim();
-        if provider_id.is_empty() {
-            continue;
-        }
-
-        let alias_prefix = local_router::model_alias(provider_id, "");
-        if let Some(model) = requested_model
-            .strip_prefix(&alias_prefix)
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
-        {
-            return model.to_string();
-        }
-    }
-
     requested_model.to_string()
 }
 
@@ -1167,10 +1149,7 @@ async fn notify_webhook_completion(
         let config = state.config.read().await;
         (
             config.webhook.channels.clone(),
-            config
-                .active_profile()
-                .map(|profile| profile.id)
-                .unwrap_or_default(),
+            config.current_provider_id().unwrap_or_default().to_string(),
             webhook_display_model(&config, &model),
         )
     };
@@ -1272,10 +1251,7 @@ async fn notify_webhook_waiting(state: &Arc<AppState>, payload: &Value) -> Resul
         let config = state.config.read().await;
         (
             config.webhook.channels.clone(),
-            config
-                .active_profile()
-                .map(|profile| profile.id)
-                .unwrap_or_default(),
+            config.current_provider_id().unwrap_or_default().to_string(),
             webhook_display_model(&config, &model),
         )
     };
@@ -1797,42 +1773,14 @@ mod tests {
 
     #[test]
     fn webhook_models_use_raw_model_ids_without_short_name_prefixes() {
-        let mut official = crate::config::ProviderProfile::new("官方线路");
-        official.id = "official".into();
-        official.official_account = true;
-        official.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.into();
-        official.normalize();
-
-        let mut relay = crate::config::ProviderProfile::new("中转线路");
-        relay.id = "relay".into();
-        relay.short_name = "中转".into();
-        relay.base_url = "https://relay.example/v1".into();
-        relay.api_key = "relay-key".into();
-        relay.normalize();
-
-        let mut config = CodeyConfig {
-            profiles: vec![official, relay],
-            active_profile_id: "relay".into(),
-            official_account_available_this_launch: true,
-            ..CodeyConfig::default()
-        };
-        config
-            .selected_models_by_provider
-            .insert("relay".into(), vec!["claude-opus-4-8".into()]);
-        config = config.normalize();
+        let config = CodeyConfig::default();
 
         assert_eq!(
-            webhook_display_model(
-                &config,
-                &local_router::model_alias("relay", "claude-opus-4-8"),
-            ),
+            webhook_display_model(&config, "relay/claude-opus-4-8"),
             "claude-opus-4-8"
         );
         assert_eq!(
-            webhook_display_model(
-                &config,
-                &local_router::model_alias("official", "gpt-5.6-sol"),
-            ),
+            webhook_display_model(&config, "official/gpt-5.6-sol"),
             "gpt-5.6-sol"
         );
         assert_eq!(

@@ -1,4 +1,5 @@
 use super::*;
+use crate::codey_router_session_migrate::ROUTER_PROVIDER_ID;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -182,56 +183,42 @@ async fn startup_fallback_removes_search_from_a_stale_chat_route_catalog() {
 }
 
 #[test]
-fn generated_catalog_uses_the_route_aware_default_selector() {
+fn generated_catalog_uses_the_configured_default_selector() {
     let config = CodeyConfig {
-        default_model: "route-a/shared-model".into(),
+        default_model: "shared-model".into(),
         ..CodeyConfig::default()
     };
     let state = model_catalog::ModelSelectionState {
-        default_model: "shared-model".into(),
+        default_model: "catalog-default".into(),
         ..model_catalog::ModelSelectionState::default()
     };
 
     assert_eq!(
         runtime_default_model(&config, true, &state).as_deref(),
-        Some("route-a/shared-model")
+        Some("shared-model")
     );
     assert_eq!(
         runtime_default_model(&config, false, &state).as_deref(),
-        Some("shared-model")
+        Some("catalog-default")
     );
 }
 
 #[test]
-fn subagent_runtime_models_alias_only_catalog_members() {
-    let route_aliases = vec![
-        "route-a/shared-model".to_string(),
-        "route-b/shared-model".to_string(),
-    ];
+fn subagent_runtime_models_keep_bare_ids() {
     let catalog = crate::subagent_policy::SubagentCatalogSnapshot::new(
-        "route-a",
+        "relay",
         vec!["shared-model".into(), "gpt-5.6-sol".into()],
     );
+    assert_eq!(runtime_subagent_model("shared-model", &catalog), "shared-model");
     assert_eq!(
-        route_subagent_model("route-a", "shared-model", &route_aliases, &catalog),
-        "route-a/shared-model"
+        runtime_subagent_model("gpt-5.6-sol", &catalog),
+        "gpt-5.6-sol"
     );
     assert_eq!(
-        route_subagent_model("route-a", "gpt-5.6-sol", &route_aliases, &catalog),
-        "route-a/gpt-5.6-sol"
+        runtime_subagent_model("relay/shared-model", &catalog),
+        "shared-model"
     );
-    assert_eq!(
-        route_subagent_model("route-a", "route-a/shared-model", &route_aliases, &catalog),
-        "route-a/shared-model"
-    );
-    assert_eq!(
-        route_subagent_model("route-a", "route-b/shared-model", &route_aliases, &catalog),
-        "route-b/shared-model"
-    );
-    assert_eq!(
-        route_subagent_model("route-a", "gone-model", &route_aliases, &catalog),
-        "gone-model"
-    );
+    assert_eq!(runtime_subagent_model("gone-model", &catalog), "gone-model");
 }
 
 #[test]
@@ -521,8 +508,6 @@ async fn runtime_stop_preserves_resources_on_failure_and_allows_retry() {
     let config_path = temp.path().join("config.toml");
     std::fs::write(&config_path, "runtime config").unwrap();
     let config = CodeyConfig::default();
-    let router = LocalRouter::start(&config).await.unwrap();
-    let router_url = router.endpoint().base_url;
     let child = Command::new("sleep")
         .arg("30")
         .kill_on_drop(true)
@@ -565,7 +550,6 @@ async fn runtime_stop_preserves_resources_on_failure_and_allows_retry() {
         crashpad_guard_enabled: Arc::new(AtomicBool::new(false)),
         crashpad_guard_shutdown: Mutex::new(None),
         crashpad_guard_task: Mutex::new(None),
-        local_router: Some(router),
     };
     let restore = || async { std::fs::write(&config_path, "restored config").map_err(Into::into) };
     let failure = runtime
@@ -604,11 +588,8 @@ async fn runtime_stop_preserves_resources_on_failure_and_allows_retry() {
             .unwrap()
             .is_finished()
     );
-    let client = reqwest::Client::builder().no_proxy().build().unwrap();
-    assert!(client.get(&router_url).send().await.is_ok());
 
-    // The real test child exits while its watcher still owns Child. A failed
-    // config write must leave the router available until restoration succeeds.
+    // The real test child exits while its watcher still owns Child.
     let failure = runtime
         .stop_with_cleanup(
             stop_codex_processes(
@@ -629,7 +610,6 @@ async fn runtime_stop_preserves_resources_on_failure_and_allows_retry() {
         .await
         .unwrap();
     assert!(runtime.child.lock().await.is_none());
-    assert!(client.get(&router_url).send().await.is_ok());
     runtime
         .stop_with_cleanup(async { Ok(()) }, restore())
         .await
@@ -638,7 +618,6 @@ async fn runtime_stop_preserves_resources_on_failure_and_allows_retry() {
         std::fs::read_to_string(&config_path).unwrap(),
         "restored config"
     );
-    assert!(client.get(&router_url).send().await.is_err());
 }
 
 #[tokio::test]

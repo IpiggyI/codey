@@ -399,13 +399,13 @@
     ) {
       // The native renderer forwards the request through Electron before it
       // emits codex-message-from-view. Event-only injections therefore see an
-      // already-sent payload. Invoke Codey's synchronous route rewrite at the
-      // actual bridge boundary so thread/start is born with modelProvider.
+      // already-sent payload. Invoke Codey's optional rewrite at the actual
+      // bridge boundary so model/list tracking can observe the outgoing message.
       patched = replaceUniqueRendererGate(
         patched,
         /if\(([$A-Z_a-z][$\w]*)\?\.sendMessageFromView\)\{let ([$A-Z_a-z][$\w]*)=([$A-Z_a-z][$\w]*);\1\.sendMessageFromView\(\2\)\.catch\(([$A-Z_a-z][$\w]*)=>\{/g,
         (_match, bridgeName, messageName, sourceName, errorName) =>
-          `if(${bridgeName}?.sendMessageFromView){let ${messageName}=globalThis.__codeyModelWhitelistPatch?.rewriteOutgoingMessage?.(${sourceName})??${sourceName};if(globalThis.__codeyModelWhitelistPatch?.isBlockedOutgoingMessage?.(${messageName})){globalThis.__codeyModelWhitelistPatch?.notifyBlockedOutgoingMessage?.(${messageName});return}${bridgeName}.sendMessageFromView(${messageName}).catch(${errorName}=>{`,
+          `if(${bridgeName}?.sendMessageFromView){let ${messageName}=globalThis.__codeyModelWhitelistPatch?.rewriteOutgoingMessage?.(${sourceName})??${sourceName};${bridgeName}.sendMessageFromView(${messageName}).catch(${errorName}=>{`,
         "model route bridge preflight",
       );
     }
@@ -415,20 +415,19 @@
       && source.includes("this.dispatchMessage?.(`mcp-request`")
     ) {
       // Current Codex can create threads through AppServerRequestClient without
-      // touching the renderer bridge helper above. Rewrite at enqueue time so
-      // thread/start and prewarm requests bind the selected Codey route before
-      // they reach the app server.
+      // touching the renderer bridge helper above. Optional rewrite at enqueue
+      // time is only for model/list tracking; it must not change the user's
+      // request destination.
       patched = replaceUniqueRendererGate(
         patched,
         /(enqueueRequest\(([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*)=[$A-Z_a-z][$\w]*=>\{this\.dispatchMessage\?\.\(`mcp-request`,\{request:[$A-Z_a-z][$\w]*,hostId:this\.hostId,[\s\S]{0,700}?widget:\4\?\.widget\}\)\},[$A-Z_a-z][$\w]*=null\)\{)let /g,
         (_match, prefix, methodName, paramsName) =>
-          `${prefix}let __codeyRoute=globalThis.__codeyModelWhitelistPatch?.rewriteOutgoingMessage?.({type:\`mcp-request\`,request:{method:${methodName},params:${paramsName}}});if(__codeyRoute?.request){if(globalThis.__codeyModelWhitelistPatch?.isBlockedOutgoingMessage?.(__codeyRoute)){globalThis.__codeyModelWhitelistPatch?.notifyBlockedOutgoingMessage?.(__codeyRoute);return Promise.reject(Error(\`Codey blocked cross-provider model request\`))}${methodName}=__codeyRoute.request.method??${methodName},${paramsName}=__codeyRoute.request.params??${paramsName}}let `,
+          `${prefix}let __codeyRoute=globalThis.__codeyModelWhitelistPatch?.rewriteOutgoingMessage?.({type:\`mcp-request\`,request:{method:${methodName},params:${paramsName}}});if(__codeyRoute?.request){${methodName}=__codeyRoute.request.method??${methodName},${paramsName}=__codeyRoute.request.params??${paramsName}}let `,
         "app server request route preflight",
       );
       // AppServerRequestClient runs the preflight before createRequest assigns
-      // an id. Register the concrete request afterwards so a successful legacy
-      // OpenAI resume is remembered as a codey_router migration when its reply
-      // still exposes the rollout's persisted `openai` provider.
+      // an id. Register the concrete request afterwards so model/list tracking
+      // can correlate the reply. Do not rewrite the user's modelProvider.
       patched = replaceUniqueRendererGate(
         patched,
         /(let\{request:([$A-Z_a-z][$\w]*),promise:[$A-Z_a-z][$\w]*\}=this\.createRequest\([^;]{1,256}\);)/g,
@@ -1166,7 +1165,7 @@
       : "；未观察到 app-server 启动调用";
     return (
       "当前 Codex 版本的 app-server 启动参数结构与 Codey 不兼容，" +
-      `未能确认注入 model_provider=codey_router 与 model_providers.codey_router.*${missing}${observed}`
+      `未能确认注入本次启动的运行时配置${missing}${observed}`
     );
   };
   const finishAppServerRuntimeOverrideValidation = (status) => {

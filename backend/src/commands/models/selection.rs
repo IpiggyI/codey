@@ -401,11 +401,11 @@ pub(crate) fn validate_regular_route_model_list(
 ) -> Result<(), String> {
     if models
         .iter()
-        .any(|model| model_id::equal(model, local_router::CODEX_AUTO_REVIEW_MODEL))
+        .any(|model| model_id::equal(model, model_id::CODEX_AUTO_REVIEW_MODEL))
     {
         return Err(format!(
             "{label}不能包含 {}；请使用 Auto Review 线路能力开关",
-            local_router::CODEX_AUTO_REVIEW_MODEL
+            model_id::CODEX_AUTO_REVIEW_MODEL
         ));
     }
     Ok(())

@@ -29,8 +29,6 @@ test("GPT-6 preview matches the bundled model reasoning metadata", async () => {
 
 test("development preview fixtures cannot be mistaken for live credentials", () => {
   assert.match(source, /example\.invalid/);
-  assert.match(source, /apiKey: "preview-route-primary-key"/);
-  assert.match(source, /apiKey: "preview-route-backup-key"/);
   assert.match(source, /apiKey: "preview-prompt-optimization-key"/);
   assert.match(
     source,
@@ -74,10 +72,8 @@ test("development preview follows the current runtime-status contract", () => {
   assert.doesNotMatch(source, /command === "refresh_injection_status"/);
 });
 
-test("development preview exercises cross-route subagent model selection", () => {
-  assert.match(
-    source,
-    /backup: \["claude-sonnet-4-5", "claude-opus-4-1"\]/,
-  );
-  assert.match(source, /model: "backup\/claude-sonnet-4-5"/);
+test("development preview exercises current-provider subagent model selection", () => {
+  assert.match(source, /model: "claude-sonnet-4-5"/);
+  assert.match(source, /model: "provider-fast-coder"/);
+  assert.doesNotMatch(source, /backup\/claude-sonnet-4-5/);
 });

@@ -281,11 +281,11 @@ pub(crate) fn model_target_for_current_provider(
         .find(|model| {
             model_id::equal(model, requested_model)
                 || model_id::equal(
-                    &local_router::model_alias(&snapshot.id, model),
+                    &model_id::model_alias(&snapshot.id, model),
                     requested_model,
                 )
         })?;
-    let alias = local_router::model_alias(&snapshot.id, &upstream);
+    let alias = model_id::model_alias(&snapshot.id, &upstream);
     Some(crate::config::RuntimeModelTarget {
         route_id: matching_current_provider_profile(config)
             .map(|profile| profile.id.clone())

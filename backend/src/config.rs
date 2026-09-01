@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub use crate::notifications::WebhookConfig;
-use crate::{local_router, model_catalog, model_id};
+use crate::codey_router_session_migrate::ROUTER_PROVIDER_ID;
+use crate::{model_catalog, model_id};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -223,10 +224,10 @@ impl ProviderProfile {
         if self.id.trim().is_empty() {
             return Err("线路 ID 不能为空".to_string());
         }
-        if self.provider_id() == local_router::ROUTER_PROVIDER_ID {
+        if self.provider_id() == ROUTER_PROVIDER_ID {
             return Err(format!(
                 "线路不能使用 Codey 内部 Provider ID「{}」",
-                local_router::ROUTER_PROVIDER_ID
+                ROUTER_PROVIDER_ID
             ));
         }
         let name = self.name.trim();
@@ -977,6 +978,21 @@ impl CodeyConfig {
             .map(ProviderProfile::provider_id)
     }
 
+    pub fn current_provider_is_third_party(&self) -> bool {
+        self.current_provider_snapshot
+            .as_ref()
+            .is_some_and(|snapshot| !snapshot.uses_official_account_auth)
+    }
+
+    pub(crate) fn needs_initial_model_sync(&self) -> bool {
+        let Some(key) = self.current_model_list_key() else {
+            return false;
+        };
+        !self.selected_models_by_provider.contains_key(key)
+            && !self.manual_third_party_models_by_provider.contains_key(key)
+            && !self.upstream_models_by_provider.contains_key(key)
+    }
+
     pub fn attach_current_provider_snapshot(
         &mut self,
         snapshot: crate::model_ownership::CurrentProviderSnapshot,
@@ -1137,7 +1153,7 @@ impl CodeyConfig {
                 .iter()
                 .chain(declared.iter())
                 .map(String::as_str)
-                .filter(|model| !model_id::equal(model, local_router::CODEX_AUTO_REVIEW_MODEL)),
+                .filter(|model| !model_id::equal(model, model_id::CODEX_AUTO_REVIEW_MODEL)),
         )
     }
 
@@ -1164,7 +1180,7 @@ impl CodeyConfig {
     }
 
     pub(crate) fn runtime_gateway_provider_id(&self) -> &'static str {
-        local_router::ROUTER_PROVIDER_ID
+        ROUTER_PROVIDER_ID
     }
 
     /// Whether a route can use upstream Responses WebSocket this launch.
@@ -1173,7 +1189,7 @@ impl CodeyConfig {
     pub(crate) fn route_supports_websockets_this_launch(&self, profile: &ProviderProfile) -> bool {
         self.route_supports_websockets_this_launch_with_proxy(
             profile,
-            local_router::outbound_proxy_applies_to_route(profile),
+            false,
         )
     }
 
@@ -1442,7 +1458,7 @@ impl CodeyConfig {
                 self.enabled_route_models(&list_key)
             };
             for upstream_model in models {
-                let alias = local_router::model_alias(provider_id, &upstream_model);
+                let alias = model_id::model_alias(provider_id, &upstream_model);
                 let request_provider_id = self.runtime_gateway_provider_id().to_string();
                 targets.push(RuntimeModelTarget {
                     route_id: profile.id.clone(),
@@ -1531,14 +1547,14 @@ impl CodeyConfig {
                 upstream.extend(
                     models
                         .iter()
-                        .map(|model| local_router::model_alias(provider_id, model)),
+                        .map(|model| model_id::model_alias(provider_id, model)),
                 );
             }
             let enabled_models = self.enabled_route_models(&list_key);
             if !enabled_models.is_empty() {
                 let aliases = enabled_models
                     .iter()
-                    .map(|model| local_router::model_alias(provider_id, model))
+                    .map(|model| model_id::model_alias(provider_id, model))
                     .collect::<Vec<_>>();
                 upstream.extend(aliases.iter().cloned());
                 selected.extend(aliases);
@@ -1673,12 +1689,12 @@ fn runtime_catalog_model_id(profile: &ProviderProfile, model: &str) -> String {
     if profile.official_account {
         model.trim().to_string()
     } else {
-        local_router::model_alias(profile.provider_id(), model)
+        model_id::model_alias(profile.provider_id(), model)
     }
 }
 
 fn model_references_provider(model: &str, provider_id: &str) -> bool {
-    let prefix = local_router::model_alias(provider_id, "");
+    let prefix = model_id::model_alias(provider_id, "");
     model
         .get(..prefix.len())
         .is_some_and(|candidate| candidate.eq_ignore_ascii_case(&prefix))
@@ -1710,7 +1726,7 @@ fn remap_model_provider_alias(
     if previous_provider_id == official_provider_id {
         return;
     }
-    let previous_prefix = local_router::model_alias(previous_provider_id, "");
+    let previous_prefix = model_id::model_alias(previous_provider_id, "");
     if !model
         .get(..previous_prefix.len())
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&previous_prefix))
@@ -1720,7 +1736,7 @@ fn remap_model_provider_alias(
     let suffix = model[previous_prefix.len()..].to_string();
     *model = format!(
         "{}{}",
-        local_router::model_alias(official_provider_id, ""),
+        model_id::model_alias(official_provider_id, ""),
         suffix
     );
 }
@@ -1778,7 +1794,7 @@ fn normalize_model_list(models: &mut Vec<String>) {
         models
             .iter()
             .map(String::as_str)
-            .filter(|model| !model_id::equal(model, local_router::CODEX_AUTO_REVIEW_MODEL)),
+            .filter(|model| !model_id::equal(model, model_id::CODEX_AUTO_REVIEW_MODEL)),
     );
 }
 
@@ -2164,7 +2180,7 @@ mod tests {
     #[test]
     fn provider_profiles_cannot_shadow_the_internal_router_provider() {
         let mut profile = ProviderProfile::new("Reserved route");
-        profile.id = local_router::ROUTER_PROVIDER_ID.to_string();
+        profile.id = ROUTER_PROVIDER_ID.to_string();
         profile.base_url = "https://relay.example/v1".into();
         profile.api_key = "sk-test".into();
         profile.normalize();
@@ -2392,7 +2408,7 @@ mod tests {
         let provider_id = config.current_provider_id().unwrap().to_string();
         let models = vec![
             "provider-model".to_string(),
-            local_router::CODEX_AUTO_REVIEW_MODEL.to_string(),
+            model_id::CODEX_AUTO_REVIEW_MODEL.to_string(),
         ];
         config
             .selected_models_by_provider
@@ -2658,8 +2674,8 @@ mod tests {
         assert_eq!(
             config.runtime_websocket_model_aliases(),
             vec![
-                local_router::model_alias("route-ws", "shared-model"),
-                local_router::model_alias("route-ws", "ws-only"),
+                model_id::model_alias("route-ws", "shared-model"),
+                model_id::model_alias("route-ws", "ws-only"),
             ]
         );
 
@@ -2668,9 +2684,9 @@ mod tests {
         assert_eq!(
             config.runtime_websocket_model_aliases(),
             vec![
-                local_router::model_alias("route-ws", "shared-model"),
-                local_router::model_alias("route-ws", "ws-only"),
-                local_router::model_alias("route-http", "shared-model"),
+                model_id::model_alias("route-ws", "shared-model"),
+                model_id::model_alias("route-ws", "ws-only"),
+                model_id::model_alias("route-http", "shared-model"),
             ]
         );
     }
@@ -2713,7 +2729,7 @@ mod tests {
 
         assert_eq!(
             config.runtime_native_web_search_model_aliases(),
-            vec![local_router::model_alias("route-search", "gpt-5.6-sol")]
+            vec![model_id::model_alias("route-search", "gpt-5.6-sol")]
         );
     }
 

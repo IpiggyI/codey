@@ -363,10 +363,10 @@ pub fn selection_state_with_manual_models(
     manual_third_party_models: &[String],
     requested_default_model: Option<&str>,
 ) -> Result<ModelSelectionState> {
-    // Model provenance comes from the route, not from a slug prefix. An API-key
-    // provider may legitimately expose a model whose id also appears in the
-    // official catalog; it must remain a route-scoped model and go through the
-    // local router instead of acquiring official-account semantics.
+    // Model provenance comes from the current provider snapshot, not from a
+    // slug prefix. An API-key provider may legitimately expose a model whose
+    // id also appears in the official catalog; it must stay a third-party
+    // catalog entry instead of acquiring official-account semantics.
     let official_entries = match read_official_entries(home, catalog_dir) {
         Ok(entries) => entries,
         Err(error) if official_provider => return Err(error),

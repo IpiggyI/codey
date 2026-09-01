@@ -941,7 +941,7 @@ fn successful_provider_sync_replaces_auto_review_capability() {
         &config,
         vec![
             "provider-model".into(),
-            local_router::CODEX_AUTO_REVIEW_MODEL.into(),
+            model_id::CODEX_AUTO_REVIEW_MODEL.into(),
         ],
         true,
         home.path(),
@@ -986,7 +986,7 @@ fn failed_provider_sync_preserves_auto_review_capability() {
 fn auto_review_cannot_be_saved_as_a_regular_model() {
     let error = validate_regular_route_model_list(
         "其他模型",
-        &[local_router::CODEX_AUTO_REVIEW_MODEL.into()],
+        &[model_id::CODEX_AUTO_REVIEW_MODEL.into()],
     )
     .unwrap_err();
 
@@ -1178,7 +1178,7 @@ fn renderer_catalog_routes_every_model_through_the_codey_router_carrier() {
     assert_eq!(catalog["default_model"].as_str(), Some("relay/gpt-5.6-sol"));
     assert_eq!(
         catalog["model_provider"].as_str(),
-        Some(local_router::ROUTER_PROVIDER_ID)
+        Some(crate::codey_router_session_migrate::ROUTER_PROVIDER_ID)
     );
     assert_eq!(catalog["provider_name"].as_str(), Some("中转线路"));
 
@@ -1196,7 +1196,7 @@ fn renderer_catalog_routes_every_model_through_the_codey_router_carrier() {
     assert_eq!(official_metadata["route_prefix"].as_str(), Some("官"));
     assert_eq!(
         official_metadata["provider_id"].as_str(),
-        Some(local_router::ROUTER_PROVIDER_ID)
+        Some(crate::codey_router_session_migrate::ROUTER_PROVIDER_ID)
     );
     assert_eq!(
         official_metadata["source_model"].as_str(),

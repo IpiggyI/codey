@@ -2,11 +2,9 @@ import { memo, useEffect, useMemo, useState } from "react";
 import {
   IconAlertTriangle as AlertTriangle,
   IconCheck as Check,
-  IconCpu,
   IconLoader2 as LoaderCircle,
   IconPlus as Plus,
   IconRefresh as RefreshCw,
-  IconSearch,
   IconTrash as Trash2,
 } from "@tabler/icons-react";
 
@@ -35,7 +33,6 @@ import {
 
 type ModelPickerDialogProps = {
   open: boolean;
-  routeConfigReadOnly: boolean;
   isBusy: boolean;
   busy: string | null;
   container: HTMLElement | null;
@@ -62,7 +59,6 @@ type ModelPickerDialogProps = {
 
 function ModelPickerDialogComponent({
   open,
-  routeConfigReadOnly,
   isBusy,
   busy,
   container,
@@ -124,12 +120,11 @@ function ModelPickerDialogComponent({
         }}
       >
         <DialogHeader>
-          <DialogTitle>配置当前线路支持的模型</DialogTitle>
+          <DialogTitle>配置当前 provider 支持的模型</DialogTitle>
           <DialogDescription>
             {modelState.officialModels.length > 0
               ? "请选择本次官方账号登录可用的模型。"
-              : "请选择同步到的线路模型，或手动输入当前线路支持的模型 ID。"}
-            {routeConfigReadOnly && " 保存只更新模型选择，线路连接配置保持只读。"}
+              : "请选择同步到的模型，或手动输入当前 provider 支持的模型 ID。"}
           </DialogDescription>
         </DialogHeader>
         {modelSyncWarning && (
@@ -149,9 +144,9 @@ function ModelPickerDialogComponent({
                   onAddCustomModel();
                 }
               }}
-              placeholder="输入当前线路模型 ID，例如 provider-model-v2"
+              placeholder="输入当前模型 ID，例如 provider-model-v2"
               spellCheck={false}
-              aria-label="输入线路模型 ID"
+              aria-label="输入模型 ID"
               aria-invalid={Boolean(modelInputError)}
               disabled={isBusy}
             />
@@ -169,7 +164,7 @@ function ModelPickerDialogComponent({
         {modelInputError && (
           <p className="mt-1.5 text-[11px] leading-[1.45] text-[#d70015]" role="alert">{modelInputError}</p>
         )}
-        {!routeConfigReadOnly && <div className="mt-3 flex items-center justify-between gap-4 rounded-[9px] border border-black/8 bg-[#f7f7f8] px-3 py-2.5">
+        <div className="mt-3 flex items-center justify-between gap-4 rounded-[9px] border border-black/8 bg-[#f7f7f8] px-3 py-2.5">
           <div className="grid min-w-0 gap-0.5">
             <strong className="text-xs font-semibold text-[#1d1d1f]">Auto Review</strong>
             <small className="text-[10px] leading-[1.45] text-[#6e6e73]">
@@ -181,9 +176,9 @@ function ModelPickerDialogComponent({
             checked={autoReviewSupported}
             disabled={isBusy}
             onCheckedChange={onAutoReviewSupportedChange}
-            aria-label="当前线路支持 auto-review"
+            aria-label="当前 provider 支持 auto-review"
           />
-        </div>}
+        </div>
         <div className="my-3 max-h-[360px] overflow-y-auto rounded-[10px] border border-black/8 bg-[#fbfbfc] py-1 pl-1 pr-0.5 [scrollbar-color:rgba(99,99,104,0.46)_transparent] [scrollbar-gutter:stable] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-button]:hidden [&::-webkit-scrollbar-thumb]:min-h-11 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:border-2 [&::-webkit-scrollbar-thumb]:border-transparent [&::-webkit-scrollbar-thumb]:bg-black/40 [&::-webkit-scrollbar-thumb]:bg-clip-padding">
           {modelState.officialModels.length > 0 && (
             <>
@@ -201,7 +196,7 @@ function ModelPickerDialogComponent({
                     disabled={isBusy}
                     onCheckedChange={(checked) =>
                       onToggleDraftModel(model.slug, checked === true)}
-                    aria-label={`当前线路支持 ${model.slug}`}
+                    aria-label={`当前 provider 支持 ${model.slug}`}
                   />
                   <div className="grid min-w-0 flex-1 gap-px">
                     <strong className="break-words text-xs font-semibold text-[#1d1d1f]">{model.displayName}</strong>
@@ -221,16 +216,10 @@ function ModelPickerDialogComponent({
               ))}
             </>
           )}
-          <div
-            className={`mx-0.5 mb-0.5 flex items-center justify-between gap-3 rounded-[7px] bg-[#f5f5f7] px-2.5 py-2 ${
-              modelState.officialModels.length > 0
-                ? "mt-1.5 border-t border-black/6"
-                : "mt-0.5"
-            }`}
-          >
+          <div className="mx-0.5 mb-0.5 mt-1.5 flex items-center justify-between gap-3 rounded-[7px] border-t border-black/6 bg-[#f5f5f7] px-2.5 py-2">
             <div className="grid gap-0.5">
-              <strong className="text-xs font-semibold text-[#1d1d1f]">线路模型</strong>
-              <small className="text-[10px] leading-[1.35] text-[#6e6e73]">全部通过当前 API Key 线路调用，可同步发现或手动输入</small>
+              <strong className="text-xs font-semibold text-[#1d1d1f]">模型</strong>
+              <small className="text-[10px] leading-[1.35] text-[#6e6e73]">全部通过当前 provider 调用，可同步发现或手动输入</small>
             </div>
             <Badge variant="secondary">
               {filteredThirdPartyModels.length === thirdPartyModelOptions.length
@@ -264,7 +253,7 @@ function ModelPickerDialogComponent({
                   checked={draftModelSet.has(modelKey(model))}
                   disabled={isBusy}
                   onCheckedChange={(checked) => onToggleDraftModel(model, checked === true)}
-                  aria-label={`当前线路支持 ${model}`}
+                  aria-label={`当前 provider 支持 ${model}`}
                 />
                 <span className="min-w-0 flex-1 break-words text-xs font-semibold text-[#1d1d1f]">{model}</span>
                 <Checkbox
@@ -317,24 +306,10 @@ function ModelPickerDialogComponent({
             </div>
           )}
           {filteredThirdPartyModels.length === 0 && (
-            <div className="flex flex-col items-center justify-center px-4 py-8 text-center">
-              <div className="mb-2.5 flex h-10 w-10 items-center justify-center rounded-full bg-black/[0.04] text-[#86868b]">
-                {thirdPartyModelOptions.length === 0 ? (
-                  <IconCpu size={20} stroke={1.5} aria-hidden="true" />
-                ) : (
-                  <IconSearch size={20} stroke={1.5} aria-hidden="true" />
-                )}
-              </div>
-              <strong className="text-xs font-semibold text-[#1d1d1f]">
-                {thirdPartyModelOptions.length === 0
-                  ? "暂无线路模型"
-                  : "未找到匹配的线路模型"}
-              </strong>
-              <p className="mt-1 text-[11px] leading-relaxed text-[#86868b]">
-                {thirdPartyModelOptions.length === 0
-                  ? "可在上方输入模型 ID 手动添加"
-                  : "请尝试更换关键词后重试"}
-              </p>
+            <div className="empty-state">
+              {thirdPartyModelOptions.length === 0
+                ? "尚无模型，可在上方输入模型 ID 添加"
+                : "没有匹配的模型"}
             </div>
           )}
         </div>

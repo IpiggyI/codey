@@ -1,61 +1,25 @@
-import type { Config, CurrentProviderSnapshot, Profile } from "./App.types";
+import type { Config, CurrentProviderSnapshot } from "./App.types";
 import { modelIdsEqual } from "./modelIds";
 
-export function routeProviderId(profile: Profile) {
-  return profile.sourceProviderId || profile.id;
+export function modelListKey(snapshot: CurrentProviderSnapshot) {
+  return snapshot.ownershipKey;
 }
 
-export function normalizeProviderBaseUrl(baseUrl: string) {
-  return baseUrl.trim().replace(/\/+$/, "");
+export function stripRouteAlias(value: string) {
+  const trimmed = value.trim();
+  const separator = trimmed.indexOf("/");
+  return separator >= 0 ? trimmed.slice(separator + 1) : trimmed;
 }
 
-export function modelListKey(
-  profile: Profile,
-  snapshot?: CurrentProviderSnapshot | null,
-) {
-  if (
-    snapshot?.ownershipKey
-    && routeProviderId(profile) === snapshot.id
-    && normalizeProviderBaseUrl(profile.baseUrl || "") === snapshot.baseUrl
-  ) {
-    return snapshot.ownershipKey;
-  }
-  return routeProviderId(profile);
-}
-
-function encodeRouteComponent(value: string) {
-  const bytes = new TextEncoder().encode(value.trim());
-  return Array.from(bytes, (byte) => {
-    const char = String.fromCharCode(byte);
-    return /[A-Za-z0-9._-]/.test(char)
-      ? char
-      : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
-  }).join("");
-}
-
-export function routeModelAlias(profile: Profile, model: string) {
-  return providerModelAlias(routeProviderId(profile), model);
-}
-
-export function providerModelAlias(providerId: string, model: string) {
-  const normalized = model.trim();
-  return `${encodeRouteComponent(providerId)}/${normalized}`;
-}
-
-export function globalDefaultForProvider(
-  config: Config,
-  providerId: string,
-  models: string[],
-) {
-  return models.find((model) =>
-    modelIdsEqual(providerModelAlias(providerId, model), config.defaultModel),
-  ) || models[0] || "";
-}
-
-export function globalDefaultForRoute(
-  config: Config,
-  profile: Profile,
-  models: string[],
-) {
-  return globalDefaultForProvider(config, routeProviderId(profile), models);
+export function globalDefaultForProvider(config: Config, models: string[]) {
+  const requested = stripRouteAlias(config.defaultModel);
+  return (
+    models.find(
+      (model) =>
+        modelIdsEqual(model, requested) ||
+        modelIdsEqual(model, config.defaultModel),
+    ) ||
+    models[0] ||
+    ""
+  );
 }

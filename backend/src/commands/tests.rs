@@ -1,5 +1,4 @@
 use super::*;
-use crate::config::ProviderProfile;
 
 #[tokio::test]
 async fn model_save_routes_accept_missing_or_null_ids_without_weakening_required_routes() {
@@ -218,7 +217,6 @@ async fn session_metadata_cache_operations_are_serialized_in_blocking_workers() 
 #[test]
 fn renderer_settings_keep_api_keys_and_clear_notification_secrets() {
     let mut config = CodeyConfig::default();
-    config.profiles[0].api_key = "renderer-secret".to_string();
     config.prompt_optimization.api_key = "optimizer-secret".to_string();
     config.hide_full_access_warning = true;
     config.webhook.url = "https://open.feishu.cn/legacy-secret".to_string();
@@ -252,11 +250,8 @@ fn renderer_settings_keep_api_keys_and_clear_notification_secrets() {
 
     let public = serde_json::to_value(redacted_config(&config)).unwrap();
 
-    assert_eq!(public["profiles"][0]["apiKey"], "renderer-secret");
-    assert_eq!(public["profiles"][0]["apiKeyConfigured"], true);
     assert_eq!(public["promptOptimization"]["apiKey"], "");
     assert_eq!(public["promptOptimization"]["apiKeyConfigured"], true);
-    assert!(public["profiles"][0].get("clearApiKey").is_none());
     assert_eq!(public["hideFullAccessWarning"], true);
     assert!(public["webhook"].get("url").is_none());
     assert_eq!(public["webhook"]["channels"][0]["url"], "");
@@ -272,7 +267,6 @@ fn renderer_settings_keep_api_keys_and_clear_notification_secrets() {
         public["webhook"]["channels"][3]["contextTokenConfigured"],
         true
     );
-    assert!(public.to_string().contains("renderer-secret"));
     assert!(!public.to_string().contains("optimizer-secret"));
     assert!(!public.to_string().contains("feishu-secret"));
     assert!(!public.to_string().contains("telegram-secret"));
@@ -327,85 +321,40 @@ env_key = "CODEY_PROMPT_OPT_RESPONSE"
 }
 
 #[test]
-fn provider_secret_merge_allows_changing_official_routes_to_api_key() {
-    let mut official = crate::config::ProviderProfile::new("OpenAI 官方直登");
-    official.id = "official-route".to_string();
-    official.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.to_string();
-    official.source_provider_id = Some("local-official".to_string());
-    official.normalize();
-
-    let previous = CodeyConfig {
-        active_profile_id: official.id.clone(),
-        profiles: vec![official.clone()],
+fn inconclusive_official_auth_probe_keeps_active_third_party_provider() {
+    let mut previous = CodeyConfig {
+        default_model: "gpt-5.6-sol".to_string(),
+        selected_models_by_provider: std::collections::BTreeMap::from([(
+            "custom".into(),
+            vec!["gpt-5.6-sol".into()],
+        )]),
         ..CodeyConfig::default()
     };
-    let mut input = official;
-    input.auth_mode = crate::config::AUTH_MODE_API_KEY.to_string();
-    input.upstream_protocol = crate::config::UPSTREAM_PROTOCOL_OPENAI_RESPONSES.to_string();
-    input.base_url = "https://relay.example/v1".to_string();
-    input.api_key = "sk-relay".to_string();
-    input.api_key_configured = false;
-    input.official_account = false;
-    input.short_name = "中转".to_string();
-
-    let merged = merge_profile_secrets(vec![input], &previous).unwrap();
-    let route = &merged[0];
-
-    assert_eq!(route.auth_mode, crate::config::AUTH_MODE_API_KEY);
-    assert_eq!(
-        route.upstream_protocol,
-        crate::config::UPSTREAM_PROTOCOL_OPENAI_RESPONSES
+    previous.attach_current_provider_snapshot(
+        crate::model_ownership::CurrentProviderSnapshot::from_parts(
+            "custom",
+            "https://relay.example/v1",
+            "responses",
+            false,
+        ),
     );
-    assert_eq!(route.base_url, "https://relay.example/v1");
-    assert_eq!(route.api_key, "sk-relay");
-    assert_eq!(route.short_name, "中转");
-    assert!(!route.official_account);
-    assert!(route.source_provider_id.is_none());
-    assert!(!route.supports_remote_compaction);
-    assert!(!route.supports_websockets);
-}
-
-#[test]
-fn inconclusive_official_auth_probe_keeps_active_third_party_route() {
-    let mut third_party = ProviderProfile::new("第三方线路");
-    third_party.id = "custom".to_string();
-    third_party.base_url = "https://relay.example/v1".to_string();
-    third_party.api_key = "sk-relay".to_string();
-    third_party.normalize();
-    let mut official = ProviderProfile::new("OpenAI 官方直登");
-    official.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.to_string();
-    official.source_provider_id = Some("openai".to_string());
-    official.normalize();
-    let previous = CodeyConfig {
-        active_profile_id: third_party.id.clone(),
-        profiles: vec![third_party.clone()],
-        default_model: "custom/gpt-5.6-sol".to_string(),
-        initial_route_import_completed: true,
-        ..CodeyConfig::default()
-    }
-    .normalize();
 
     let next = route_config_for_official_probe(
         &previous,
         OfficialAccountProfileStatus::Unknown {
-            profile: official,
             reason: "probe unavailable".to_string(),
         },
     )
     .unwrap();
 
-    assert_eq!(next.active_profile_id, third_party.id);
-    assert!(
-        next.profiles
-            .iter()
-            .all(|profile| !profile.official_account)
-    );
+    assert_eq!(next.current_provider_id(), Some("custom"));
+    assert!(next.current_provider_is_third_party());
     assert!(!next.official_account_available_this_launch);
     assert_eq!(
         next.official_account_status_this_launch,
         LaunchOfficialAccountStatus::Unknown
     );
-    assert_eq!(next.default_model, "custom/gpt-5.6-sol");
+    assert_eq!(next.default_model, "gpt-5.6-sol");
 }
 
 #[test]
@@ -436,7 +385,6 @@ fn unavailable_official_auth_ignores_disabled_official_routes() {
 async fn settings_bridge_matches_the_redacted_config_contract() {
     let state = Arc::new(AppState::default());
     let mut config = state.config.read().await.clone();
-    config.profiles[0].api_key = "bridge-provider-secret".to_string();
     config.webhook.channels.push(NotificationChannelConfig {
         id: "bridge-feishu".to_string(),
         url: "https://open.feishu.cn/open-apis/bot/v2/hook/bridge-secret".to_string(),
@@ -450,7 +398,6 @@ async fn settings_bridge_matches_the_redacted_config_contract() {
         .await;
 
     assert_eq!(actual, expected);
-    assert!(actual.to_string().contains("bridge-provider-secret"));
     assert!(!actual.to_string().contains("bridge-secret"));
 }
 
@@ -851,8 +798,16 @@ async fn partial_subagent_role_payload_merges_with_existing_roles() {
 #[tokio::test]
 async fn custom_role_matrix_persists_official_models_for_the_current_provider() {
     let directory = tempfile::tempdir().unwrap();
-    let initial = CodeyConfig::default();
-    let provider_id = initial.current_provider_id().unwrap().to_string();
+    let mut initial = CodeyConfig::default();
+    initial.attach_current_provider_snapshot(
+        crate::model_ownership::CurrentProviderSnapshot::from_parts(
+            "relay",
+            "https://relay.example/v1",
+            "responses",
+            false,
+        ),
+    );
+    let list_key = initial.current_model_list_key().unwrap().to_string();
     let state = Arc::new(AppState {
         store: ConfigStore::new(directory.path().join("config.json")),
         config: RwLock::new(initial.clone()),
@@ -893,32 +848,36 @@ async fn custom_role_matrix_persists_official_models_for_the_current_provider() 
     assert_eq!(
         saved.subagent_roles["codey_quick_scan"],
         SubagentRoleConfig::new(
-            crate::local_router::model_alias(&provider_id, "gpt-5.6-luna"),
+            crate::model_id::model_alias(&provider_id, "gpt-5.6-luna"),
             "low",
         )
     );
     assert_eq!(
         saved.subagent_roles["codey_worker"],
         SubagentRoleConfig::new(
-            crate::local_router::model_alias(&provider_id, "gpt-5.6-terra"),
+            crate::model_id::model_alias(&provider_id, "gpt-5.6-terra"),
             "max",
         )
     );
     assert_eq!(
-        saved.declared_official_models_by_provider[&provider_id],
+        saved.declared_official_models_by_provider[&list_key],
         ["gpt-5.6-luna", "gpt-5.6-terra"]
     );
     assert_eq!(
-        saved.upstream_models_by_provider[&provider_id],
+        saved.upstream_models_by_provider[&list_key],
         ["gpt-5.6-luna", "gpt-5.6-terra"]
     );
-    assert!(!saved.selected_models_by_provider.contains_key(&provider_id));
+    assert!(!saved.selected_models_by_provider.contains_key(&list_key));
     assert!(
         !saved
             .manual_third_party_models_by_provider
-            .contains_key(&provider_id)
+            .contains_key(&list_key)
     );
-    assert_eq!(state.store.load().unwrap(), saved);
+    let mut loaded = state.store.load().unwrap();
+    loaded.current_provider_snapshot = saved.current_provider_snapshot.clone();
+    loaded.official_account_available_this_launch = saved.official_account_available_this_launch;
+    loaded.official_account_status_this_launch = saved.official_account_status_this_launch;
+    assert_eq!(loaded, saved);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -976,7 +935,7 @@ async fn provider_sync_does_not_block_config_writes_or_commit_a_stale_result() {
         sync_provider_state_with(&sync_state, move |mut config| {
             started_tx.send(()).unwrap();
             release_rx.recv().unwrap();
-            config.profiles[0].name = "stale provider".to_string();
+            config.default_model = "stale-model".to_string();
             let mut status = codex_provider::status_from_config(&config);
             status.changed = true;
             Ok((config, status))
@@ -1002,7 +961,7 @@ async fn provider_sync_does_not_block_config_writes_or_commit_a_stale_result() {
     let memory = state.config.read().await.clone();
     let disk = state.store.load().unwrap();
     assert_eq!(disk, memory);
-    assert_ne!(memory.profiles[0].name, "stale provider");
+    assert_ne!(memory.default_model, "stale-model");
     assert_eq!(memory.settings_revision, 1);
 }
 
@@ -1083,38 +1042,3 @@ async fn shutdown_signal_wakes_every_waiter_without_losing_the_reason() {
     }
 }
 
-#[test]
-fn retain_route_scoped_config_keeps_fingerprint_keys() {
-    let mut profile = ProviderProfile::new("中转");
-    profile.id = "relay".into();
-    profile.source_provider_id = Some("relay".into());
-    let mut config = CodeyConfig {
-        active_profile_id: profile.id.clone(),
-        profiles: vec![profile],
-        ..CodeyConfig::default()
-    };
-    config
-        .selected_models_by_provider
-        .insert("relay".into(), vec!["legacy".into()]);
-    config
-        .selected_models_by_provider
-        .insert("relay#889271d70d18".into(), vec!["fingerprinted".into()]);
-    config
-        .selected_models_by_provider
-        .insert("gone".into(), vec!["stale".into()]);
-
-    retain_route_scoped_config(&mut config);
-
-    assert_eq!(
-        config.selected_models_by_provider.get("relay").unwrap(),
-        &vec!["legacy".to_string()]
-    );
-    assert_eq!(
-        config
-            .selected_models_by_provider
-            .get("relay#889271d70d18")
-            .unwrap(),
-        &vec!["fingerprinted".to_string()]
-    );
-    assert!(!config.selected_models_by_provider.contains_key("gone"));
-}

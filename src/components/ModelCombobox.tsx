@@ -210,7 +210,7 @@ export function ModelCombobox({
           }}
           leftSection={<IconSearch size={14} aria-hidden="true" />}
           onChange={(event) => setSearch(event.currentTarget.value)}
-          placeholder={showLaneIdentity ? "搜索模型或线路" : "搜索模型"}
+          placeholder="搜索模型"
           value={search}
         />
         <Combobox.Options
@@ -273,9 +273,7 @@ export function ModelCombobox({
             <Combobox.Empty className="py-6 text-xs text-[#8e8e93]">
               {options.length === 0
                 ? "还没有可用于子代理的模型"
-                : showLaneIdentity
-                  ? "没有匹配的模型或线路"
-                  : "没有匹配的模型"}
+                : "没有匹配的模型"}
             </Combobox.Empty>
           )}
         </Combobox.Options>

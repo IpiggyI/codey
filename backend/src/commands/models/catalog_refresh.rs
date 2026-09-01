@@ -73,11 +73,10 @@ pub(crate) async fn reconcile_current_subagent_defaults(
 ) -> Result<(CodeyConfig, bool), String> {
     let _config_write_guard = state.config_write_lock.lock().await;
     let current = state.config.read().await.clone();
-    let (catalog_refresh, model_state) = if current.local_router_enabled {
-        refreshed_model_state_async(&current, false).await?
-    } else {
-        (None, current_model_state_async(&current).await?)
-    };
+    let (catalog_refresh, model_state) = (
+        None,
+        current_model_state_async(&current).await?,
+    );
     let mut next = current.clone();
     reconcile_subagent_models_for_mode(&mut next, &model_state);
     next = next.normalize();
