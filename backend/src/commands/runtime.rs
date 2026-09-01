@@ -570,6 +570,151 @@ pub async fn begin_shutdown(state: &Arc<AppState>) {
     state.restart_in_progress.store(false, Ordering::Release);
 }
 
+pub async fn codey_router_session_diagnosis(state: &Arc<AppState>) -> Result<Value, String> {
+    let home = codex_home().to_path_buf();
+    let diagnosis =
+        tokio::task::spawn_blocking(move || crate::codey_router_session_migrate::diagnose(&home))
+            .await
+            .map_err(|error| format!("诊断历史会话的任务异常退出：{error}"))?
+            .map_err(|error| format!("诊断历史会话失败：{error:#}"))?;
+    let last_migration = state.codey_router_migrate_report.write().await.take();
+    Ok(json!({
+        "affectedSessionCount": diagnosis.affected_session_count,
+        "sessionIds": diagnosis.session_ids,
+        "targetProviders": diagnosis.target_providers,
+        "lastMigration": last_migration,
+    }))
+}
+
+pub async fn schedule_migrate_codey_router_sessions(
+    state: &Arc<AppState>,
+    target_provider: String,
+) -> Result<Value, String> {
+    let home = codex_home().to_path_buf();
+    let target_for_check = target_provider.clone();
+    if let Some(report) = tokio::task::spawn_blocking(move || {
+        crate::codey_router_session_migrate::refuse_invalid_target(&home, &target_for_check)
+    })
+    .await
+    .map_err(|error| format!("校验迁移目标的任务异常退出：{error}"))?
+    {
+        return Err(report.message);
+    }
+
+    let mut restart_task = state.restart_task.lock().await;
+    ensure_runtime_can_start(state)?;
+    if state.restart_in_progress.swap(true, Ordering::AcqRel) {
+        return Ok(json!({"status":"already_restarting"}));
+    }
+
+    let (cancel, cancel_rx) = oneshot::channel();
+    let restart_state = Arc::clone(state);
+    let task = tokio::spawn(async move {
+        let _restart_guard = RestartInProgressGuard {
+            state: Arc::clone(&restart_state),
+        };
+        run_scheduled_migrate(restart_state, target_provider, cancel_rx).await;
+    });
+    *restart_task = Some(ScheduledRestart { cancel, task });
+    Ok(json!({"status":"migrating"}))
+}
+
+async fn run_scheduled_migrate(
+    restart_state: Arc<AppState>,
+    target_provider: String,
+    mut cancel: oneshot::Receiver<()>,
+) {
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_millis(250)) => {}
+        _ = &mut cancel => return,
+    }
+    if restart_state.is_shutting_down() {
+        return;
+    }
+
+    #[cfg(test)]
+    restart_state.restart_operation_pending.notify_one();
+    let _operation = tokio::select! {
+        operation = restart_state.runtime_operation.lock() => operation,
+        _ = &mut cancel => return,
+    };
+    if restart_state.is_shutting_down() {
+        return;
+    }
+
+    if let Err(error) = stop_codey_runtime_locked(&restart_state).await {
+        error_log::record_failure(
+            "codey_router_session_migrate_failed",
+            "stop_runtime_for_migrate",
+            error.clone(),
+            json!({}),
+        );
+        *restart_state.startup_error.write().await = Some(error.clone());
+        *restart_state.codey_router_migrate_report.write().await =
+            Some(crate::codey_router_session_migrate::MigrateReport {
+                status: crate::codey_router_session_migrate::MigrateStatus::Refused,
+                message: format!("无法停止 Codex，已拒绝迁移：{error}"),
+                target_provider,
+                backup_dir: None,
+                migrated_session_count: 0,
+                unprocessed: Vec::new(),
+            });
+        return;
+    }
+
+    let home = codex_home().to_path_buf();
+    let migrate_target = target_provider.clone();
+    let report = match tokio::task::spawn_blocking(move || {
+        crate::codey_router_session_migrate::migrate(&home, &migrate_target, false)
+    })
+    .await
+    {
+        Ok(Ok(report)) => report,
+        Ok(Err(error)) => crate::codey_router_session_migrate::MigrateReport {
+            status: crate::codey_router_session_migrate::MigrateStatus::Failed,
+            message: format!("迁移失败：{error:#}"),
+            target_provider: target_provider.clone(),
+            backup_dir: None,
+            migrated_session_count: 0,
+            unprocessed: Vec::new(),
+        },
+        Err(error) => crate::codey_router_session_migrate::MigrateReport {
+            status: crate::codey_router_session_migrate::MigrateStatus::Failed,
+            message: format!("迁移任务异常退出：{error}"),
+            target_provider: target_provider.clone(),
+            backup_dir: None,
+            migrated_session_count: 0,
+            unprocessed: Vec::new(),
+        },
+    };
+    *restart_state.codey_router_migrate_report.write().await = Some(report);
+
+    restart_state
+        .runtime_generation
+        .fetch_add(1, Ordering::AcqRel);
+    if restart_state.is_shutting_down() {
+        return;
+    }
+
+    let launch = launch_codey_inner_locked(&restart_state).await;
+    *restart_state.startup_error.write().await = launch.as_ref().err().cloned();
+    let Err(error) = launch else {
+        return;
+    };
+    error_log::record_failure_with_metadata(
+        "runtime_restart_failed",
+        "launch_runtime_after_migrate",
+        error.clone(),
+        error_log::FailureMetadata {
+            stage: Some("startup.runtime".to_string()),
+            recoverable: Some(false),
+        },
+        runtime_start_failure_context(&restart_state, true, &error).await,
+    );
+    eprintln!("Codey 迁移后重新拉起 Codex 失败：{error}");
+    restart_state.request_shutdown();
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, atomic::Ordering};

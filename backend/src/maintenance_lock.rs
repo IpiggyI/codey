@@ -5,9 +5,10 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-const LOCK_DIRS: [&str; 2] = [
+const LOCK_DIRS: [&str; 3] = [
     "tmp/provider-sync.lock",
     "tmp/codey-session-index-cleanup.lock",
+    "tmp/codey-router-session-migrate.lock",
 ];
 const UNKNOWN_OWNER_STALE_AFTER: Duration = Duration::from_secs(60 * 60);
 
@@ -18,8 +19,8 @@ struct LockOwner {
 
 /// Removes maintenance locks whose recorded owner no longer exists.
 ///
-/// Both maintenance jobs use directory locks so a hard-killed Codey process
-/// can leave a lock behind forever. Valid locks owned by a running process are
+/// Maintenance jobs use directory locks so a hard-killed Codey process can
+/// leave a lock behind forever. Valid locks owned by a running process are
 /// preserved. A lock with unreadable ownership metadata is only removed after
 /// a conservative grace period, avoiding the create-dir/write-owner race.
 pub fn recover_stale_locks(home: &Path) -> Result<Vec<PathBuf>> {

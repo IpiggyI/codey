@@ -15,6 +15,8 @@ export const CODEY_API_COMMANDS = [
   "query_route_request_log_stats",
   "clear_route_request_logs",
   "restart_codey",
+  "codey_router_session_diagnosis",
+  "migrate_codey_router_sessions",
   "clear_diagnostic_storage",
   "test_notification_channel",
   "start_wechat_claw_login",

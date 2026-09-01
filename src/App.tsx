@@ -48,6 +48,7 @@ import type {
   ModelState,
   PluginMarketplaceStatus,
   Profile,
+  RouterSessionDiagnosis,
   TraceLogCleanup,
 } from "./App.types";
 import { Badge, Button } from "./components/mantine";
@@ -145,6 +146,8 @@ export function App({
   );
   const [currentProviderSnapshot, setCurrentProviderSnapshot] =
     useState<CurrentProviderSnapshot | null>(null);
+  const [routerSessionDiagnosis, setRouterSessionDiagnosis] =
+    useState<RouterSessionDiagnosis | null>(null);
   const [fastContextToolsStatus, setFastContextToolsStatus] =
     useState<FastContextToolsStatus>(UNKNOWN_FAST_CONTEXT_TOOLS_STATUS);
   const [dirty, setDirty] = useState(false);
@@ -284,13 +287,20 @@ export function App({
         result.fastContextToolsStatus ?? UNKNOWN_FAST_CONTEXT_TOOLS_STATUS,
       );
       if (result.modelState) setModelState(result.modelState);
-      const [next] = await Promise.all([
+      const [next, , diagnosis] = await Promise.all([
         refreshStatusForLoad(),
         refreshPluginMarketplaceStatus(),
+        refreshRouterSessionDiagnosis(),
       ]);
+      const lastMigration = diagnosis?.lastMigration;
       const startupError = next.startupError || result.startupError;
       if (startupError) {
         setNotice({ tone: "error", text: `自动启动失败：${startupError}` });
+      } else if (lastMigration?.message) {
+        setNotice({
+          tone: lastMigration.status === "migrated" ? "success" : "error",
+          text: lastMigration.message,
+        });
       } else if (next.restartRequired) {
         setNotice({ tone: "info", text: "已保存的配置需重启 Codex 后生效" });
       } else {
@@ -303,6 +313,27 @@ export function App({
       }
     } catch (error) {
       setNotice({ tone: "error", text: errorText(error) });
+    }
+  }
+
+  async function refreshRouterSessionDiagnosis() {
+    try {
+      const next = await invoke<RouterSessionDiagnosis>(
+        "codey_router_session_diagnosis",
+      );
+      setRouterSessionDiagnosis(next);
+      return next;
+    } catch (error) {
+      const next: RouterSessionDiagnosis = {
+        affectedSessionCount: 0,
+        targetProviders: [],
+        lastMigration: {
+          status: "failed",
+          message: `诊断历史会话失败：${errorText(error)}`,
+        },
+      };
+      setRouterSessionDiagnosis(next);
+      return next;
     }
   }
 
@@ -718,6 +749,33 @@ export function App({
     });
   }
 
+  function askMigrateRouterSessions(targetProvider: string) {
+    const count = routerSessionDiagnosis?.affectedSessionCount ?? 0;
+    setConfirmation({
+      action: "migrate-codey-router-sessions",
+      title: "改写历史会话归属？",
+      description: `将把 ${count} 个仍标记为内置路由的历史会话改写为「${targetProvider}」。改写前会备份；进行中会暂时关闭并重新打开 Codex，正在执行的本地任务会被中断。`,
+      confirmLabel: "确认迁移",
+      run: () => void migrateRouterSessions(targetProvider),
+    });
+  }
+
+  async function migrateRouterSessions(targetProvider: string) {
+    await runOperation("migrate-router-sessions", async () => {
+      const result = await invoke<{ status?: string }>(
+        "migrate_codey_router_sessions",
+        { targetProvider },
+      );
+      setNotice({
+        tone: "info",
+        text:
+          result.status === "already_restarting"
+            ? "已有重启或迁移正在进行，请稍后再试。"
+            : "正在改写历史会话归属，Codex 会暂时关闭并重新打开。",
+      });
+    });
+  }
+
   function askRemoveNotificationChannel(channel: NotificationChannel) {
     const channelName = getNotificationChannelDefinition(channel.kind).addLabel;
     setConfirmation({
@@ -1110,6 +1168,8 @@ export function App({
               onToggleAccountUsage={handleToggleAccountUsage}
               onSaveOfficialRouteSettings={handleSaveOfficialRouteSettings}
               onSetDefaultModel={handleSetRouteDefaultModel}
+              routerSessionDiagnosis={routerSessionDiagnosis}
+              onMigrateRouterSessions={askMigrateRouterSessions}
             />
           </div>
 

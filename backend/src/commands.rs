@@ -57,7 +57,8 @@ use runtime::runtime_status_with_options;
 #[cfg(test)]
 use runtime::{begin_shutdown, launch_codey_inner};
 pub use runtime::{
-    launch_codey_runtime, runtime_status, schedule_restart_codey_runtime, stop_codey_runtime,
+    codey_router_session_diagnosis, launch_codey_runtime, runtime_status,
+    schedule_migrate_codey_router_sessions, schedule_restart_codey_runtime, stop_codey_runtime,
 };
 use webhooks::{
     WaitingLedgerState, WebhookNotificationState, initial_waiting_notifications,
@@ -146,6 +147,7 @@ pub struct AppState {
     waiting_watcher_sync: Mutex<()>,
     session_scan_wake: Notify,
     restart_settled: Notify,
+    codey_router_migrate_report: RwLock<Option<crate::codey_router_session_migrate::MigrateReport>>,
     #[cfg(test)]
     restart_operation_pending: Notify,
     shutdown_reason: watch::Sender<Option<AppShutdownReason>>,
@@ -242,6 +244,7 @@ impl Default for AppState {
             waiting_watcher_sync: Mutex::new(()),
             session_scan_wake: Notify::new(),
             restart_settled: Notify::new(),
+            codey_router_migrate_report: RwLock::new(None),
             #[cfg(test)]
             restart_operation_pending: Notify::new(),
             shutdown_reason,
@@ -1082,6 +1085,13 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         }
         "clear_route_request_logs" => clear_route_request_logs(state).await,
         "restart_codey" => schedule_restart_codey_runtime(state).await,
+        "codey_router_session_diagnosis" => codey_router_session_diagnosis(state).await,
+        "migrate_codey_router_sessions" => match string_argument(&args, "targetProvider") {
+            Ok(target_provider) => {
+                schedule_migrate_codey_router_sessions(state, target_provider).await
+            }
+            Err(error) => Err(error),
+        },
         "clear_diagnostic_storage" => clear_diagnostic_storage(state).await,
         "test_notification_channel" => {
             match argument::<NotificationChannelConfig>(&args, "channel") {

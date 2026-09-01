@@ -7,7 +7,13 @@ import {
   IconShieldCheck,
 } from "@tabler/icons-react";
 
-import type { Config, CurrentProviderSnapshot, ModelState, Profile } from "./App.types";
+import type {
+  Config,
+  CurrentProviderSnapshot,
+  ModelState,
+  Profile,
+  RouterSessionDiagnosis,
+} from "./App.types";
 import {
   Badge,
   Button,
@@ -50,6 +56,8 @@ type ModelSectionProps = {
     showAccountUsageInHeader: boolean,
   ) => Promise<boolean>;
   onSetDefaultModel: (routeId: string, model: string) => void;
+  routerSessionDiagnosis: RouterSessionDiagnosis | null;
+  onMigrateRouterSessions: (targetProvider: string) => void;
 };
 
 type RouteModelGroup = {
@@ -75,11 +83,18 @@ function ModelSectionComponent({
   onToggleAccountUsage,
   onSaveOfficialRouteSettings,
   onSetDefaultModel,
+  routerSessionDiagnosis,
+  onMigrateRouterSessions,
 }: ModelSectionProps) {
   const [officialEditorProfile, setOfficialEditorProfile] = useState<Profile | null>(
     null,
   );
   const [officialModelDraft, setOfficialModelDraft] = useState<string[]>([]);
+  const [migrateTargetProvider, setMigrateTargetProvider] = useState<string>("");
+  const migrateTargets = routerSessionDiagnosis?.targetProviders ?? [];
+  const selectedMigrateTarget = migrateTargets.includes(migrateTargetProvider)
+    ? migrateTargetProvider
+    : (migrateTargets[0] ?? "");
 
   const visibleProfiles = useMemo(
     () =>
@@ -274,6 +289,55 @@ function ModelSectionComponent({
               <dd>{currentProviderSnapshot.usesOfficialAccountAuth ? "是" : "否"}</dd>
             </div>
           </dl>
+        </aside>
+      ) : null}
+
+      {routerSessionDiagnosis &&
+      routerSessionDiagnosis.affectedSessionCount > 0 ? (
+        <aside
+          className="current-provider-snapshot router-session-migrate"
+          aria-label="历史会话归属迁移"
+        >
+          <div className="current-provider-snapshot-heading">
+            <strong>历史会话归属</strong>
+            <small>
+              有 {routerSessionDiagnosis.affectedSessionCount}{" "}
+              个历史会话仍标记为内置路由。确认后会先备份，再改写到你指定的
+              provider；进行中会暂时关闭并重新打开 Codex。
+            </small>
+          </div>
+          <div className="router-session-migrate-actions">
+            <div
+              className="router-session-migrate-targets"
+              aria-label="迁移目标 provider"
+            >
+              {migrateTargets.map((id) => (
+                <label key={id} className="router-session-migrate-target">
+                  <input
+                    type="radio"
+                    name="router-session-migrate-target"
+                    value={id}
+                    checked={selectedMigrateTarget === id}
+                    disabled={isBusy}
+                    onChange={() => setMigrateTargetProvider(id)}
+                  />
+                  <span>{id}</span>
+                </label>
+              ))}
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={isBusy || !selectedMigrateTarget}
+              onClick={() => {
+                if (selectedMigrateTarget) {
+                  onMigrateRouterSessions(selectedMigrateTarget);
+                }
+              }}
+            >
+              迁移这些会话
+            </Button>
+          </div>
         </aside>
       ) : null}
 

@@ -786,3 +786,42 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.router-session-migrate-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.router-session-migrate-actions > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.router-session-migrate-targets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.router-session-migrate-target {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 8px;
+  border: 1px solid var(--mac-border);
+  border-radius: 8px;
+  color: var(--mac-text-primary);
+  font-size: 12px;
+}
+
+.router-session-migrate-target input {
+  margin: 0;
+}
+
+.router-session-migrate-target span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

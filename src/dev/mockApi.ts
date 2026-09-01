@@ -929,6 +929,16 @@ if (import.meta.env.DEV) {
       if (command === "restart_codey") {
         return { status: "restarting" };
       }
+      if (command === "codey_router_session_diagnosis") {
+        return {
+          affectedSessionCount: 0,
+          targetProviders: ["openai"],
+          lastMigration: null,
+        };
+      }
+      if (command === "migrate_codey_router_sessions") {
+        return { status: "migrating" };
+      }
       if (command === "test_notification_channel") {
         const channel = args.channel as {
           kind?: string;

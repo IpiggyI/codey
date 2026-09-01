@@ -4,6 +4,7 @@ mod codex_config;
 mod codex_config_guidance;
 mod codex_provider;
 mod codex_startup_patch;
+mod codey_router_session_migrate;
 mod commands;
 mod config;
 mod crashpad_pending_guard;

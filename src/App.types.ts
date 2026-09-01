@@ -232,11 +232,23 @@ export type InlineResult = {
   text: string;
 };
 
+export type RouterSessionDiagnosis = {
+  affectedSessionCount: number;
+  targetProviders: string[];
+  lastMigration?: {
+    status: "migrated" | "refused" | "failed" | string;
+    message: string;
+    migratedSessionCount?: number;
+    unprocessed?: Array<{ sessionId: string; reason: string }>;
+  } | null;
+};
+
 export type Confirmation = {
   action:
     | "clear"
     | "restart"
-    | "delete-notification-channel";
+    | "delete-notification-channel"
+    | "migrate-codey-router-sessions";
   title: string;
   description: string;
   confirmLabel: string;
