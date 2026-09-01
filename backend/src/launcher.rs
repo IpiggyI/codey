@@ -242,10 +242,10 @@ async fn run_startup_session_maintenance(
     let (stale_lock_recovery, message_delete_replay, index_cleanup) = match maintenance_result {
         Ok(result) => result,
         Err(error) => {
-            let error = anyhow::Error::new(error).context("启动前会话修复任务异常退出");
+            let error = anyhow::Error::new(error).context("启动前会话维护任务异常退出");
             error_log::record_failure(
                 "patch_failed",
-                "run_startup_session_repairs",
+                "run_startup_session_maintenance",
                 format!("{error:#}"),
                 serde_json::json!({
                     "codexHome": home,
@@ -1169,8 +1169,9 @@ async fn prepare_startup_storage(
         // before any permanent maintenance is applied.
         prepare_codex_for_launch(&app_dir).await?;
 
-        // Keep each task's saved provider. The catalog touches separate files,
-        // so prepare it alongside session maintenance after Codex has stopped.
+        // Keep each task's saved provider. Historical session ownership is left
+        // unchanged. The catalog touches separate files, so prepare it alongside
+        // session maintenance after Codex has stopped.
         let (session_maintenance, startup_catalog) =
             tokio::join!(run_startup_session_maintenance(home), async {
                 match current_profile {

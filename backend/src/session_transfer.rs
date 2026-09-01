@@ -1582,6 +1582,52 @@ mod tests {
     }
 
     #[test]
+    fn imports_stamp_the_current_model_provider() {
+        let source = tempdir().unwrap();
+        let source_project = tempdir().unwrap();
+        let source_id = "01900000-0000-7000-8000-000000000011";
+        create_thread_db(source.path(), source_id, source_project.path(), "来源会话");
+        let (_, data) = export_via_chunks(source.path(), source_id);
+
+        let target = tempdir().unwrap();
+        let seed_project = tempdir().unwrap();
+        create_thread_db(
+            target.path(),
+            "01900000-0000-7000-8000-000000000012",
+            seed_project.path(),
+            "已有会话",
+        );
+        fs::write(
+            target.path().join("config.toml"),
+            "model_provider = \"gs\"\n",
+        )
+        .unwrap();
+        let imported_project = tempdir().unwrap();
+        let imported = import_via_chunks(
+            target.path(),
+            imported_project.path().to_str().unwrap(),
+            &data,
+        );
+        assert_eq!(imported.session_id, source_id);
+
+        let db = Connection::open(target.path().join("state_5.sqlite")).unwrap();
+        let (provider, rollout_path): (String, String) = db
+            .query_row(
+                "SELECT model_provider, rollout_path FROM threads WHERE id=?1",
+                params![source_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(provider, "gs");
+        let rollout = fs::read_to_string(rollout_path).unwrap();
+        let session_meta: Value = serde_json::from_str(rollout.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            session_meta["payload"]["model_provider"].as_str(),
+            Some("gs")
+        );
+    }
+
+    #[test]
     fn imports_a_duplicate_as_a_new_session() {
         let home = tempdir().unwrap();
         let project = tempdir().unwrap();

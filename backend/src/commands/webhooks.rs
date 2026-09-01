@@ -12,13 +12,13 @@ use tokio::sync::{Mutex, oneshot};
 
 use super::AppState;
 use crate::codex_config::codex_home;
-use crate::config::{CodeyConfig, ConfigStore, OFFICIAL_ROUTE_SHORT_NAME};
+use crate::config::{CodeyConfig, ConfigStore};
+use crate::local_router;
 use crate::notifications::{
     NotificationChannelConfig, NotificationChannelKind, NotificationDispatcher, NotificationEvent,
 };
 use crate::pending_approval;
 use crate::pending_approval::{CompletedTurn, RecentSessionEvents, SessionLifecycleStatus};
-use crate::{local_router, model_id};
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -766,7 +766,6 @@ fn webhook_display_model(config: &CodeyConfig, requested_model: &str) -> String 
         return "Codex".to_string();
     }
 
-    let mut matching_raw_profile = None;
     for profile in &config.profiles {
         let provider_id = profile.provider_id().trim();
         if provider_id.is_empty() {
@@ -779,45 +778,11 @@ fn webhook_display_model(config: &CodeyConfig, requested_model: &str) -> String 
             .map(str::trim)
             .filter(|model| !model.is_empty())
         {
-            return format_webhook_model_name(profile, model);
-        }
-
-        let list_key = config.model_list_key_for_profile(profile);
-        let enabled_models = if profile.official_account {
-            config.enabled_official_route_models(&list_key)
-        } else {
-            config.enabled_route_models(&list_key)
-        };
-        if enabled_models
-            .iter()
-            .any(|model| model_id::equal(model, requested_model))
-        {
-            if matching_raw_profile.is_some() {
-                // A raw model shared by multiple routes has no reliable route
-                // identity, so retain it instead of showing a misleading prefix.
-                matching_raw_profile = None;
-                break;
-            }
-            matching_raw_profile = Some(profile);
+            return model.to_string();
         }
     }
 
-    matching_raw_profile
-        .map(|profile| format_webhook_model_name(profile, requested_model))
-        .unwrap_or_else(|| requested_model.to_string())
-}
-
-fn format_webhook_model_name(profile: &crate::config::ProviderProfile, model: &str) -> String {
-    let prefix = if profile.official_account {
-        OFFICIAL_ROUTE_SHORT_NAME
-    } else {
-        profile.short_name.trim()
-    };
-    if prefix.is_empty() {
-        model.to_string()
-    } else {
-        format!("[{prefix}] {model}")
-    }
+    requested_model.to_string()
 }
 
 fn webhook_turn_configuration(
@@ -1831,7 +1796,7 @@ mod tests {
     }
 
     #[test]
-    fn webhook_models_use_the_same_route_prefix_as_the_model_picker() {
+    fn webhook_models_use_raw_model_ids_without_short_name_prefixes() {
         let mut official = crate::config::ProviderProfile::new("官方线路");
         official.id = "official".into();
         official.official_account = true;
@@ -1861,18 +1826,18 @@ mod tests {
                 &config,
                 &local_router::model_alias("relay", "claude-opus-4-8"),
             ),
-            "[中转] claude-opus-4-8"
+            "claude-opus-4-8"
         );
         assert_eq!(
             webhook_display_model(
                 &config,
                 &local_router::model_alias("official", "gpt-5.6-sol"),
             ),
-            "[官] gpt-5.6-sol"
+            "gpt-5.6-sol"
         );
         assert_eq!(
             webhook_display_model(&config, "claude-opus-4-8"),
-            "[中转] claude-opus-4-8"
+            "claude-opus-4-8"
         );
         assert_eq!(
             webhook_display_model(&config, "unknown-model"),
