@@ -49,12 +49,14 @@ fn official_auth_fingerprint(path: &Path) -> Option<OfficialAuthFingerprint> {
     })
 }
 
+#[cfg(test)]
 #[derive(Debug, Default)]
 pub(crate) struct OfficialAuthCache {
     cached: Option<std::result::Result<OfficialAuth, String>>,
     expires_at: Option<Instant>,
 }
 
+#[cfg(test)]
 impl OfficialAuthCache {
     /// Returns the cached auth (or cached read failure) without touching the filesystem.
     /// Callers that miss can perform the blocking read outside their mutex, then [`Self::store`]

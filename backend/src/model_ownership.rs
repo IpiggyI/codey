@@ -25,6 +25,7 @@ pub fn ownership_key(provider_id: &str, normalized_base_url: &str) -> String {
     )
 }
 
+#[cfg(test)]
 pub fn is_ownership_key(key: &str) -> bool {
     key.rsplit_once(OWNERSHIP_KEY_SEPARATOR)
         .is_some_and(|(_, fingerprint)| {
