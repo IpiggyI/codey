@@ -174,7 +174,7 @@ pub(crate) fn renderer_model_catalog_value(
     let context_metadata = if !config.uses_builtin_official_model_catalog()
         || !config.runtime_model_contexts().is_empty()
     {
-        model_catalog::runtime_context_metadata(codex_home())
+        model_catalog::runtime_context_metadata(&crate::codex_config::codey_model_catalog_dir())
     } else {
         BTreeMap::new()
     };

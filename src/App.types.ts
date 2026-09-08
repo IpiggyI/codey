@@ -50,6 +50,12 @@ export type SubagentRoleConfig = {
   reasoningEffort: string;
 };
 
+export type ModelContextConfig = {
+  contextWindowTokens: number;
+  autoCompactTokenLimit?: number | null;
+  reserveOutputTokens?: number | null;
+};
+
 export type Config = {
   settingsRevision: number;
   webhook: { channels: NotificationChannel[] };
@@ -160,6 +166,7 @@ export type PluginMarketplaceStatus = {
   initializedRemote?: boolean;
   configuredRemote?: boolean;
   configChanged?: boolean;
+  managedConfigCompatible?: boolean;
   message?: string;
 };
 

@@ -23,8 +23,8 @@ import {
   uniqueModelIds,
   withoutModelId,
 } from "./modelIds";
-import { buildCurrentProviderSubagentModelOptions, buildSubagentModelOptions } from "./subagentModels";
-import { routeProviderId } from "./modelRoutes";import { modelSelectionNotice, type ModelRuntimeUpdate } from "./modelSelectionNotice";
+import { buildCurrentProviderSubagentModelOptions } from "./subagentModels";
+import { modelSelectionNotice, type ModelRuntimeUpdate } from "./modelSelectionNotice";
 
 const MAX_MODEL_ID_BYTES = 512;
 const MAX_MODEL_COUNT = 10_000;
@@ -169,8 +169,11 @@ export function useModelSelection({
     autoReviewSupported = false,
   ) => {
     setDraftModels(pickerSelection(state));
-    const profile = config?.profiles.find((candidate) => candidate.id === (routeId ?? config.activeProfileId));
-    const providerId = routeId && profile ? routeProviderId(profile) : currentProvider?.id || (profile ? routeProviderId(profile) : "");
+    const providerId =
+      currentProviderSnapshot?.ownershipKey ||
+      routeId ||
+      currentProviderSnapshot?.id ||
+      "";
     setDraft1MModels(config?.supports1MContextByProvider?.[providerId] || []);
     setDraftModelContexts(config?.modelContextByProvider?.[providerId] || {});
     setDraftManualThirdPartyModels(state.manualThirdPartyModels);
@@ -182,7 +185,7 @@ export function useModelSelection({
     setModelPickerState(state);
     setDraftAutoReviewSupported(autoReviewSupported);
     setModelPickerVisible(true);
-  }, [config, currentProvider]);
+  }, [config, currentProviderSnapshot]);
 
   const toggleDraftModel = useCallback((model: string, checked: boolean) => {
     if (checked) {

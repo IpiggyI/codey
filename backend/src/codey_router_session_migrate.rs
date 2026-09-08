@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use codey_runtime_core::codex_sqlite::{
-    codex_session_db_paths_from_home, codex_sqlite_sidecar_paths, relative_to_codex_home,
+    codex_session_db_paths_from_home, codex_sqlite_sidecar_paths,
 };
 use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
@@ -540,6 +540,10 @@ fn backup_candidates(planned: &[PlannedFile], sqlite_paths: &[PathBuf]) -> Vec<P
     files.sort();
     files.dedup();
     files
+}
+
+fn relative_to_codex_home(home: &Path, path: &Path) -> PathBuf {
+    path.strip_prefix(home).unwrap_or(path).to_path_buf()
 }
 
 fn create_backup(

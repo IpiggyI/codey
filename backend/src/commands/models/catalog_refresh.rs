@@ -26,9 +26,11 @@ pub(crate) fn refresh_model_catalog_or_fallback(
     );
     match result {
         Ok(fallback) => {
-            if model_catalog::is_available(home)
-                && let Err(error) =
-                    model_catalog::apply_catalog_contexts(home, &config.runtime_model_contexts())
+            if model_catalog::is_available(&catalog_dir)
+                && let Err(error) = model_catalog::apply_catalog_contexts(
+                    &catalog_dir,
+                    &config.runtime_model_contexts(),
+                )
             {
                 return Err(rollback_model_catalog_snapshot(snapshot, error.to_string()));
             }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::ProviderProfile;
 
 #[tokio::test]
 async fn model_save_routes_accept_missing_or_null_ids_without_weakening_required_routes() {

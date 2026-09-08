@@ -21,7 +21,7 @@ import {
   IconX,
 } from "@tabler/icons-react";
 
-import type { Config, Profile } from "./App.types";
+import type { Config } from "./App.types";
 import { invoke } from "./api";
 import { formatTimestamp } from "./formatters";
 import {
@@ -154,7 +154,7 @@ type ActionNotice = {
 };
 
 export type RequestLogCatalog = {
-  profiles: Array<Pick<Profile, "id" | "name" | "sourceProviderId">>;
+  profiles: Array<{ id: string; name: string; sourceProviderId?: string }>;
   selectedModelsByProvider: Config["selectedModelsByProvider"];
   declaredOfficialModelsByProvider: Config["declaredOfficialModelsByProvider"];
   upstreamModelsByProvider: Config["upstreamModelsByProvider"];

@@ -10,6 +10,7 @@ import {
 import type {
   Config,
   CurrentProviderSnapshot,
+  ModelContextConfig,
   ModelState,
   RouterSessionDiagnosis,
 } from "./App.types";
@@ -24,12 +25,42 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  Input,
   Switch,
 } from "./components/mantine";
 import { modelIdsEqual, modelKey, uniqueModelIds } from "./modelIds";
 import { globalDefaultForProvider } from "./modelRoutes";
 import { SETTINGS_OVERLAY_Z_INDEX } from "./overlay.constants";
 import { flushCardClass } from "./uiClasses";
+
+export function ModelContextFields({ model, policy, disabled, onChange }: {
+  model: string;
+  policy?: ModelContextConfig;
+  disabled: boolean;
+  onChange: (policy: ModelContextConfig | undefined) => void;
+}) {
+  return <details className="w-full text-xs">
+    <summary className="cursor-pointer">上下文预算{policy ? ` · ${policy.contextWindowTokens} Token` : " · 默认"}</summary>
+    <p className="my-2 text-xs text-[#6e6e73]">自定义值优先于 1M；清空窗口恢复默认。未知模型默认使用 32768 Token 保守预算，不代表服务端容量。修改后重启 Codex 生效。</p>
+    <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+      {([
+        ["contextWindowTokens", "窗口", 1024, "默认"],
+        ["autoCompactTokenLimit", "压缩阈值", 1, "自动"],
+        ["reserveOutputTokens", "输出预留", 1, "不单独预留"],
+      ] as const).map(([field, label, min, placeholder]) => <label key={field}>
+        <span>{label}（Token）</span>
+        <Input type="number" min={min} max={10_000_000} step={1} disabled={disabled}
+          aria-label={`${model} ${label} Token`} placeholder={placeholder} value={policy?.[field] ?? ""}
+          onChange={(event) => {
+            const raw = event.target.value;
+            if (field === "contextWindowTokens" && raw === "") { onChange(undefined); return; }
+            onChange({ contextWindowTokens: 32768, ...policy, [field]: raw === "" ? undefined : Number(raw) });
+          }} />
+      </label>)}
+    </div>
+    <p className="my-2 text-xs text-[#6e6e73]">阈值不能超过窗口的 90% 和预留后的有效空间；预留按整百分比向下取整，不是输出长度上限。</p>
+  </details>;
+}
 
 type ModelSectionProps = {
   config: Config;

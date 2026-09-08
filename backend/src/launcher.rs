@@ -308,10 +308,11 @@ fn should_inject_runtime_model_catalog(
     leftover_codey_catalog: bool,
     official_only: bool,
     catalog_available: bool,
+    custom_context: bool,
 ) -> bool {
     user_catalog_configured
         || (leftover_codey_catalog && catalog_available)
-        || should_install_codey_model_catalog(official_only, catalog_available)
+        || should_install_codey_model_catalog(official_only, catalog_available, custom_context)
 }
 
 fn runtime_default_model(
@@ -369,15 +370,10 @@ async fn prepare_startup_model_catalog(
     } else {
         config.enabled_route_models(&list_key)
     };
-    let manual_models = current_profile
-        .enabled
-        .then(|| {
-            config
-                .manual_third_party_models_by_provider
-                .get(&list_key)
-                .cloned()
-        })
-        .flatten()
+    let manual_models = config
+        .manual_third_party_models_by_provider
+        .get(&list_key)
+        .cloned()
         .unwrap_or_default();
     let requested_default_model = config.default_model().map(str::to_string);
     let catalog_dir_for_refresh = catalog_dir.clone();
@@ -482,6 +478,7 @@ async fn prepare_startup_model_catalog(
         leftover_codey_catalog,
         !current_provider_is_third_party,
         catalog_available_for_runtime,
+        !config.runtime_model_contexts().is_empty(),
     );
     let model_catalog_path = install_codey_catalog
         .then(|| crate::model_catalog_store::derived_catalog_path(&catalog_dir));

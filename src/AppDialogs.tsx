@@ -210,8 +210,8 @@ function ModelPickerDialogComponent({
                     label="1M"
                     aria-label={`${model.slug} 支持 1M 上下文`}
                   />
-                  {!routeConfigReadOnly && <ModelContextFields model={model.slug} policy={draftModelContexts[model.slug]} disabled={isBusy}
-                    onChange={(policy) => onUpdateDraftModelContext(model.slug, policy)} />}
+                  <ModelContextFields model={model.slug} policy={draftModelContexts[model.slug]} disabled={isBusy}
+                    onChange={(policy) => onUpdateDraftModelContext(model.slug, policy)} />
                 </div>
               ))}
             </>
@@ -277,8 +277,8 @@ function ModelPickerDialogComponent({
                     删除
                   </Button>
                 )}
-                {!routeConfigReadOnly && <ModelContextFields model={model} policy={draftModelContexts[model]} disabled={isBusy}
-                  onChange={(policy) => onUpdateDraftModelContext(model, policy)} />}
+                <ModelContextFields model={model} policy={draftModelContexts[model]} disabled={isBusy}
+                  onChange={(policy) => onUpdateDraftModelContext(model, policy)} />
               </div>
             );
           })}

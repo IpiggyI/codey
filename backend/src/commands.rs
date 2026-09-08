@@ -1115,11 +1115,7 @@ async fn query_route_request_log_stats(
     .map_err(|error| format!("查询请求日志统计失败：{error:#}"))?;
     let mut value =
         serde_json::to_value(stats).map_err(|error| format!("请求日志统计序列化失败：{error}"))?;
-    let runtime = state.runtime.lock().await.clone();
-    if let Some(runtime) = runtime {
-        value["recordingHealth"] = serde_json::to_value(runtime.request_log_health().await)
-            .map_err(|error| format!("请求日志状态序列化失败：{error}"))?;
-    }
+    value["recordingHealth"] = serde_json::Value::Null;
     Ok(value)
 }
 

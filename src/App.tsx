@@ -90,34 +90,8 @@ function currentProviderModelState(
       ...(config.upstreamModelsByProvider[providerId] || []),
       ...selectedModels,
     ]),
-    defaultModel: globalDefaultForProvider(config, snapshot.id, selectedModels),
+    defaultModel: globalDefaultForProvider(config, selectedModels),
   };
-}
-
-function thirdPartyRouteModelState(
-  config: Config,
-  route: Profile,
-  catalog: ModelState,
-  snapshot?: CurrentProviderSnapshot | null,
-): ModelState {
-  const providerId = modelListKey(route, snapshot);
-  const selectedModels = uniqueModelIds([
-    ...(config.selectedModelsByProvider[providerId] || []),
-    ...(config.declaredOfficialModelsByProvider[providerId] || []),
-  ]);
-  return {
-    officialModels: [],
-    officialModelIds: catalog.officialModelIds,
-    thirdPartyModels: selectedModels,
-    thirdPartyModelMetadata: catalog.thirdPartyModelMetadata,
-    manualThirdPartyModels:
-      config.manualThirdPartyModelsByProvider[providerId] || [],
-    upstreamModels: uniqueModelIds([
-      ...(config.upstreamModelsByProvider[providerId] || []),
-      ...selectedModels,
-    ]),
-    defaultModel:
-      globalDefaultForRoute(config, route, selectedModels) || selectedModels[0] || "",  };
 }
 
 export function App({
@@ -594,6 +568,10 @@ export function App({
       }>("save_official_route_models", {
         routeId: currentProviderSnapshot.id,
         models,
+        supports1MContextModels,
+        enabled,
+        showAccountUsageInHeader,
+        modelContexts,
       });
       applyRouteResult(modelResult);
       saved = true;

@@ -504,6 +504,79 @@ pub fn is_available(catalog_dir: &Path) -> bool {
     })
 }
 
+pub(crate) fn apply_catalog_contexts(
+    catalog_dir: &Path,
+    contexts: &std::collections::BTreeMap<String, crate::config::ModelContextConfig>,
+) -> Result<()> {
+    let Some(mut catalog) = read_derived_catalog(catalog_dir) else {
+        return Ok(());
+    };
+    {
+        let Some(models) = catalog.get_mut("models").and_then(Value::as_array_mut) else {
+            return Ok(());
+        };
+        for model in models {
+            let policy = model.get("slug").and_then(Value::as_str).and_then(|slug| {
+                contexts
+                    .iter()
+                    .find(|(key, _)| model_id::equal(key, slug))
+                    .map(|(_, policy)| policy)
+            });
+            apply_model_context(model, policy)?;
+        }
+    }
+    write_derived_catalog(catalog_dir, &catalog)?;
+    Ok(())
+}
+
+pub(crate) fn runtime_context_metadata(
+    catalog_dir: &Path,
+) -> std::collections::BTreeMap<String, serde_json::Map<String, Value>> {
+    read_runtime_catalog_models(catalog_dir)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|model| {
+            let slug = model["slug"].as_str()?.to_string();
+            let fields = [
+                "context_window",
+                "max_context_window",
+                "effective_context_window_percent",
+                "auto_compact_token_limit",
+                "codey_context_source",
+            ];
+            Some((
+                slug,
+                fields
+                    .into_iter()
+                    .map(|field| (field.to_string(), model[field].clone()))
+                    .collect(),
+            ))
+        })
+        .collect()
+}
+
+pub(crate) fn apply_model_context(
+    model: &mut Value,
+    policy: Option<&crate::config::ModelContextConfig>,
+) -> Result<()> {
+    let Some(policy) = policy else {
+        return Ok(());
+    };
+    policy.validate().map_err(anyhow::Error::msg)?;
+    let window = policy.context_window_tokens;
+    let percent = (window - policy.reserve_output_tokens.unwrap_or(0)) * 100 / window;
+    model["context_window"] = json!(window);
+    model["max_context_window"] = json!(window);
+    model["effective_context_window_percent"] = json!(percent);
+    model["auto_compact_token_limit"] = json!(
+        policy
+            .auto_compact_token_limit
+            .unwrap_or((window * 9 / 10).min(window * percent / 100))
+    );
+    model["codey_context_source"] = json!("user_declared");
+    Ok(())
+}
+
 /// Repairs catalogs written by older Codey versions that copied model-cache
 /// entries without Codex's now-required `description` fields on models and
 /// their reasoning levels.
