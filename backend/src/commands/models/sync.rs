@@ -124,7 +124,6 @@ where
         + 'static,
 {
     let previous = state.config.read().await.clone();
-    ensure_local_route_config_writable(&previous)?;
     let sync_input = previous.clone();
     let sync_result = tokio::task::spawn_blocking(move || sync(sync_input)).await;
     match sync_result {
@@ -470,6 +469,9 @@ pub(crate) async fn commit_startup_model_sync(
     next: CodeyConfig,
     synced: bool,
 ) -> CodeyConfig {
+    if !latest.local_router_enabled {
+        return latest;
+    }
     if synced && let Err(error) = save_config_to_store(state, &next).await {
         eprintln!("保存启动时模型同步结果失败，本次启动沿用已持久化模型：{error:#}");
         return latest;

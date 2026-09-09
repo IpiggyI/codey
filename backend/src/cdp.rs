@@ -36,6 +36,7 @@ pub(crate) const SETTINGS_OVERLAY_SCRIPT: &str =
 const PLUGIN_MARKETPLACE_FIX_SCRIPT: &str =
     include_str!("../../dist-overlay/inject/plugin-marketplace-fix.js");
 const PROMPT_OPTIMIZE_SCRIPT: &str = include_str!("../../dist-overlay/inject/prompt-optimize.js");
+const COMPOSER_USAGE_SCRIPT: &str = include_str!("../../dist-overlay/inject/composer-usage.js");
 const MAX_INJECTION_ERROR_CHARS: usize = 500;
 static SETTINGS_OVERLAY_LOAD_SCRIPT: OnceLock<Arc<str>> = OnceLock::new();
 static SESSION_TOOLS_LOAD_SCRIPT: OnceLock<Arc<str>> = OnceLock::new();
@@ -294,6 +295,22 @@ pub fn prepare_injection_scripts(
                 .to_string(),
             Feature,
         ),
+        (
+            "composer-usage",
+            "输入栏用量与额度",
+            COMPOSER_USAGE_SCRIPT,
+            r#"(() => {
+              const usage = window.__codeyComposerUsage;
+              if (!usage || typeof usage.snapshot !== "function") return "";
+              const snapshot = usage.snapshot();
+              if (snapshot.ready !== true) return "";
+              return snapshot.usageVisible === true || snapshot.creditsVisible === true
+                ? "输入栏用量与额度芯片已就绪"
+                : { effective: false, inactive: true, detail: "等待输入栏" };
+            })()"#
+                .to_string(),
+            Feature,
+        ),
     ];
     let mut core_bundle = String::with_capacity(
         CODEY_BRIDGE_SCRIPT.len()
@@ -303,6 +320,7 @@ pub fn prepare_injection_scripts(
             + SECURITY_WARNING_SHIELD_SCRIPT.len()
             + PLUGIN_MARKETPLACE_FIX_SCRIPT.len()
             + PROMPT_OPTIMIZE_SCRIPT.len()
+            + COMPOSER_USAGE_SCRIPT.len()
             + 4096,
     );
     let mut descriptors = Vec::with_capacity(builtin_scripts.len() + user_scripts.len());
@@ -1489,9 +1507,9 @@ assert.equal(nextPage.window.attempts, 1);
         assert!(prepared.scripts[1].contains("window.userScriptRan = true;"));
         assert!(prepared.scripts[1].contains(r#"status = "executed""#));
         assert!(prepared.scripts[1].contains("用户脚本 1 injection failed"));
-        assert_eq!(prepared.descriptors.len(), 9);
-        assert_eq!(prepared.descriptors[8].id, "user-script-1");
-        assert_eq!(prepared.descriptors[8].source, "user");
+        assert_eq!(prepared.descriptors.len(), 10);
+        assert_eq!(prepared.descriptors[9].id, "user-script-1");
+        assert_eq!(prepared.descriptors[9].source, "user");
         assert_eq!(
             prepared.descriptors[0].visibility,
             InjectionScriptVisibility::Internal
@@ -1502,7 +1520,7 @@ assert.equal(nextPage.window.attempts, 1);
             InjectionScriptVisibility::Internal
         );
         assert_eq!(
-            prepared.descriptors[8].visibility,
+            prepared.descriptors[9].visibility,
             InjectionScriptVisibility::Feature
         );
         let snapshot_script = injection_status_snapshot_script(&prepared.descriptors);

@@ -187,13 +187,14 @@ fn renderer_model_catalog_keeps_supported_models_before_configured_models() {
         ])
     );
     assert_eq!(catalog["default_model"], "gpt-5.6-sol");
-    assert_eq!(catalog["model_provider"], "source-provider");
+    assert_eq!(catalog["native_selection_only"], true);
+    assert!(catalog.get("model_provider").is_none());
     assert_eq!(catalog["model_metadata"][0]["model"], "gpt-5.6-sol");
-    assert_eq!(catalog["model_metadata"][0]["display_name"], "gpt-5.6-sol");
-    assert_eq!(catalog["model_metadata"][0]["provider_id"], "source-provider");
+    assert_eq!(catalog["model_metadata"][0]["display_name"], "GPT-5.6-Sol");
+    assert!(catalog["model_metadata"][0].get("provider_id").is_none());
     assert!(catalog["model_metadata"][0].get("route_prefix").is_none());
     assert_eq!(catalog["model_metadata"][5]["model"], "provider-fast-coder");
-    assert_eq!(catalog["model_metadata"][5]["provider_id"], "source-provider");
+    assert!(catalog["model_metadata"][5].get("provider_id").is_none());
     assert_eq!(catalog["model_metadata"].as_array().unwrap().len(), 6);
 }
 
@@ -288,11 +289,12 @@ fn renderer_model_catalog_uses_official_snapshot_bare_ids() {
 
     assert_eq!(catalog["models"], json!(["gpt-5.6-sol"]));
     assert_eq!(catalog["default_model"], "gpt-5.6-sol");
-    assert_eq!(catalog["model_provider"], "openai");
+    assert_eq!(catalog["native_selection_only"], true);
+    assert!(catalog.get("model_provider").is_none());
     assert_eq!(catalog["model_metadata"][0]["model"], "gpt-5.6-sol");
-    assert_eq!(catalog["model_metadata"][0]["display_name"], "gpt-5.6-sol");
-    assert_eq!(catalog["model_metadata"][0]["provider_id"], "openai");
-    assert_eq!(catalog["model_metadata"][0]["official_account"], true);
+    assert_eq!(catalog["model_metadata"][0]["display_name"], "GPT-5.6-Sol");
+    assert!(catalog["model_metadata"][0].get("provider_id").is_none());
+    assert!(catalog["model_metadata"][0].get("official_account").is_none());
     assert!(catalog["model_metadata"][0].get("route_prefix").is_none());
 }
 
@@ -362,10 +364,17 @@ fn model_hot_reload_keeps_startup_capabilities_pending_without_blocking_other_ro
         current
             .selected_models_by_provider
             .insert("other".into(), vec!["other-b".into()]);
-        assert!(std::ptr::eq(
-            model_catalog_config_for_runtime(&current, Some(&applied)),
-            &current,
-        ));
+        assert!(
+            std::ptr::eq(
+                model_catalog_config_for_runtime(&current, Some(&applied)),
+                if websockets || web_search {
+                    &applied
+                } else {
+                    &current
+                },
+            ),
+            "websockets={websockets} web_search={web_search}",
+        );
         // Publishing the picker updates only the model baseline. The app-server
         // capability baseline must still be compared with the launch config.
         assert_eq!(
@@ -380,10 +389,10 @@ fn model_hot_reload_keeps_startup_capabilities_pending_without_blocking_other_ro
         );
         let mut capability_change = applied.clone();
         capability_change.profiles[0].supports_native_web_search = !web_search;
-        assert!(!runtime_supports_current_routes_for_hot_reload(
-            &applied,
-            &capability_change
-        ));
+        assert_eq!(
+            runtime_supports_current_routes_for_hot_reload(&applied, &capability_change),
+            !applied.local_router_enabled,
+        );
         assert!(provider_route_restart_required_for_runtime(
             &applied,
             &capability_change

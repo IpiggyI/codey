@@ -310,15 +310,6 @@ pub(crate) fn set_model_contexts(
     available: &[String],
 ) -> Result<(), String> {
     if let Some(requested) = requested {
-        if !config.local_router_enabled {
-            let current = config.model_context_by_provider.get(provider_id);
-            if current != Some(requested) && !(current.is_none() && requested.is_empty()) {
-                return Err(
-                    "自定义上下文预算需要启用本地路由，当前模式使用 Codex 内置上下文设置".into(),
-                );
-            }
-            return Ok(());
-        }
         validate_requested_model_list_bounds(
             "上下文配置模型",
             &requested.keys().cloned().collect::<Vec<_>>(),

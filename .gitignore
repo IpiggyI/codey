@@ -12,6 +12,7 @@
 
 # Local runtime state and environment files
 /.codey/
+/.memory/
 .env
 .env.*
 !.env.example

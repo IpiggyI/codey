@@ -33,6 +33,7 @@ const OFFICIAL_AUTH_REVALIDATE_TTL: Duration = Duration::from_secs(1);
 pub(crate) struct OfficialAuth {
     pub(crate) access_token: String,
     pub(crate) account_id: Option<String>,
+    pub(crate) account_label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +100,8 @@ pub struct AccountUsageSnapshot {
     pub secondary: Option<AccountUsageWindow>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credits: Option<AccountCredits>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_label: Option<String>,
     pub fetched_at: u64,
 }
 
@@ -270,7 +273,9 @@ pub async fn fetch_official_account_usage(
         let payload =
             serde_json::from_slice::<Value>(&response).with_context(|| "官方额度响应格式无效")?;
         LAST_GOOD_USAGE_ENDPOINT.store(index, std::sync::atomic::Ordering::Relaxed);
-        return parse_account_usage(&payload, unix_timestamp());
+        let mut snapshot = parse_account_usage(&payload, unix_timestamp())?;
+        snapshot.account_label = auth.account_label;
+        return Ok(snapshot);
     }
 
     bail!(
@@ -345,10 +350,16 @@ pub(crate) fn read_official_auth(path: &Path) -> Result<OfficialAuth> {
     Ok(OfficialAuth {
         access_token,
         account_id,
+        account_label: ["id_token", "access_token"].iter().find_map(|key| {
+            tokens
+                .get(*key)
+                .and_then(Value::as_str)
+                .and_then(account_label_from_jwt)
+        }),
     })
 }
 
-fn account_id_from_jwt(token: &str) -> Option<String> {
+fn jwt_claims(token: &str) -> Option<Value> {
     let mut parts = token.split('.');
     let _header = parts.next()?;
     let payload = parts.next()?;
@@ -363,8 +374,22 @@ fn account_id_from_jwt(token: &str) -> Option<String> {
     if decoded.len() > MAX_JWT_PAYLOAD_BYTES {
         return None;
     }
-    let claims = serde_json::from_slice::<Value>(&decoded).ok()?;
-    account_id_from_claims(&claims)
+    serde_json::from_slice::<Value>(&decoded).ok()
+}
+
+fn account_id_from_jwt(token: &str) -> Option<String> {
+    account_id_from_claims(&jwt_claims(token)?)
+}
+
+fn account_label_from_jwt(token: &str) -> Option<String> {
+    let claims = jwt_claims(token)?;
+    string_field(&claims, &["email", "preferred_username", "name"])
+        .or_else(|| {
+            claims
+                .get("https://api.openai.com/profile")
+                .and_then(|profile| string_field(profile, &["email", "name"]))
+        })
+        .filter(|label| !label.is_empty() && label.len() <= 256)
 }
 
 fn account_id_from_claims(claims: &Value) -> Option<String> {
@@ -425,6 +450,7 @@ fn parse_account_usage(value: &Value, fetched_at: u64) -> Result<AccountUsageSna
         primary,
         secondary,
         credits,
+        account_label: None,
         fetched_at,
     })
 }
@@ -634,6 +660,7 @@ mod tests {
                 unlimited: false,
                 balance: Some("10".to_string()),
             }),
+            account_label: None,
             fetched_at: 1_700_000_000,
         }
     }
@@ -699,6 +726,7 @@ mod tests {
             OfficialAuth {
                 access_token: "token-value".into(),
                 account_id: Some("account-value".into()),
+                account_label: None,
             }
         );
     }
@@ -744,6 +772,32 @@ mod tests {
             read_official_auth(&path).unwrap().account_id.as_deref(),
             Some("explicit-account")
         );
+    }
+
+    #[test]
+    fn derives_account_label_from_id_token_email() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("auth.json");
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "auth_mode": "chatgpt",
+                "tokens": {
+                    "access_token": "access-token",
+                    "id_token": unsigned_jwt(serde_json::json!({
+                        "email": "user@example.com",
+                        "https://api.openai.com/auth": {
+                            "chatgpt_account_id": "account-from-jwt"
+                        }
+                    }))
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let auth = read_official_auth(&path).unwrap();
+        assert_eq!(auth.account_label.as_deref(), Some("user@example.com"));
+        assert_eq!(auth.account_id.as_deref(), Some("account-from-jwt"));
     }
 
     #[test]

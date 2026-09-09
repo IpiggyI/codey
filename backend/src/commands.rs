@@ -6,7 +6,6 @@ use std::sync::{
     Arc, Mutex as BlockingMutex,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use std::process::Command;
 use std::time::Duration;
 
 mod diagnostics;
@@ -36,10 +35,10 @@ use models::{
     validate_deleted_third_party_models, validate_manual_model_selection,
 };
 use models::{
-    current_model_state_async, current_provider_status_async, current_renderer_model_catalog_async,
+    current_model_state_async, current_renderer_model_catalog_async,
     hot_reload_runtime_models, native_web_search_capability_requires_restart,
     official_route_snapshots, provider_route_requires_restart,
-    reconcile_subagent_models_for_mode, remote_compaction_transport_requires_restart,
+    remote_compaction_transport_requires_restart,
     runtime_supports_current_routes_for_hot_reload, sync_current_third_party_provider_state,
     sync_provider_models_for_launch, websocket_transport_requires_restart,};
 pub use models::{
@@ -640,9 +639,11 @@ async fn save_config_to_store(state: &AppState, config: &CodeyConfig) -> Result<
         .map_err(|error| error.to_string())
 }
 
+#[allow(dead_code)]
 const LOCAL_ROUTE_CONFIG_READ_ONLY_ERROR: &str =
     "本地路由已关闭，本地线路配置当前为只读；请先启用本地路由";
 
+#[allow(dead_code)]
 pub(super) fn ensure_local_route_config_writable(config: &CodeyConfig) -> Result<(), String> {
     if config.local_router_enabled {
         Ok(())
@@ -651,6 +652,7 @@ pub(super) fn ensure_local_route_config_writable(config: &CodeyConfig) -> Result
     }
 }
 
+#[allow(dead_code)]
 fn local_route_config_changed(previous: &CodeyConfig, next: &CodeyConfig) -> bool {
     previous.active_profile_id != next.active_profile_id
         || previous.profiles != next.profiles
@@ -666,6 +668,7 @@ fn local_route_config_changed(previous: &CodeyConfig, next: &CodeyConfig) -> boo
         || previous.initial_route_import_completed != next.initial_route_import_completed
 }
 
+#[allow(dead_code)]
 fn ensure_local_route_config_change_allowed(
     previous: &CodeyConfig,
     next: &CodeyConfig,
@@ -1067,25 +1070,6 @@ pub async fn open_route_request_logs(_state: &Arc<AppState>) -> Result<Value, St
     Err("当前版本不再提供进程内请求日志".to_string())
 }
 
-fn open_system_browser(url: &str) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    let mut command = Command::new("open");
-    #[cfg(windows)]
-    let mut command = {
-        let mut command = Command::new("rundll32.exe");
-        command.arg("url.dll,FileProtocolHandler");
-        command
-    };
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut command = Command::new("xdg-open");
-
-    command
-        .arg(url)
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| format!("无法使用系统默认浏览器打开请求日志：{error}"))
-}
-
 pub async fn query_route_request_logs(
     state: &Arc<AppState>,
     query: RouteRequestLogQuery,
@@ -1208,7 +1192,10 @@ pub async fn load_codey_config(state: &Arc<AppState>) -> Result<Value, String> {
 
 pub(super) async fn ensure_default_route_imported(state: &Arc<AppState>) -> bool {
     let config = state.config.read().await.clone();
-    if !config.needs_initial_model_sync() || config.official_account_available_this_launch {
+    if !config.local_router_enabled
+        || !config.needs_initial_model_sync()
+        || config.official_account_available_this_launch
+    {
         return false;
     }
     let current_provider = match current_codex_provider_for_initial_import().await {
@@ -1334,7 +1321,6 @@ struct CodeyConfigSaveInput {
     config: CodeyConfig,
     supports_1m_context_present: bool,
     model_context_present: bool,
-    local_router_enabled_present: bool,
     route_request_log_present: bool,
     subagent_roles_present: bool,
     subagent_model_present: bool,
@@ -1348,7 +1334,6 @@ impl CodeyConfigSaveInput {
             config,
             supports_1m_context_present: true,
             model_context_present: true,
-            local_router_enabled_present: true,
             route_request_log_present: true,
             subagent_roles_present: true,
             subagent_model_present: true,
@@ -1365,7 +1350,6 @@ fn codey_config_save_input(args: &Value) -> Result<CodeyConfigSaveInput, String>
     let fields = config_value
         .as_object()
         .ok_or_else(|| "参数 config 无效：必须是 object".to_string())?;
-    let local_router_enabled_present = fields.contains_key("localRouterEnabled");
     let supports_1m_context_present = fields.contains_key("supports1MContextByProvider");
     let model_context_present = fields.contains_key("modelContextByProvider");
     let route_request_log_present = fields.contains_key("routeRequestLog");
@@ -1378,7 +1362,6 @@ fn codey_config_save_input(args: &Value) -> Result<CodeyConfigSaveInput, String>
         config,
         supports_1m_context_present,
         model_context_present,
-        local_router_enabled_present,
         route_request_log_present,
         subagent_roles_present,
         subagent_model_present,
@@ -1411,7 +1394,6 @@ async fn save_codey_config_locked(
         config: mut config_input,
         supports_1m_context_present,
         model_context_present,
-        local_router_enabled_present,
         route_request_log_present,
         subagent_roles_present,
         subagent_model_present,
@@ -1422,6 +1404,7 @@ async fn save_codey_config_locked(
         return Err("Codey 设置已被其他操作更新，请关闭后重新打开设置页面再保存".to_string());
     }
     let mut config = previous.clone();
+    config.local_router_enabled = false;
     config_input
         .webhook
         .merge_redacted_secrets(&previous.webhook);

@@ -1,0 +1,1087 @@
+// Composer chips for thread usage and ChatGPT account credits.
+// Token counts come from Codex `thread/tokenUsage/updated`. Account credits
+// stay on `/account/usage` with `account/rateLimits/read` as fallback.
+(() => {
+  const moduleLoaded = window.__codeyComposerUsageModuleLoaded === true;
+  window.__codeyComposerUsageModuleLoaded = true;
+  if (moduleLoaded && window.__codeyComposerUsage) return;
+
+  const settingsPath = "/settings/get";
+  const accountUsagePath = "/account/usage";
+  const styleId = "codey-composer-usage-style";
+  const usageRootId = "codey-thread-usage";
+  const creditsRootId = "codey-account-credits";
+  const usagePopoverId = "codey-thread-usage-popover";
+  const creditsPopoverId = "codey-account-credits-popover";
+  const configChangedEvent = "codey:config-changed";
+  const injectionStatusId = "composer-usage";
+  const injectionStatusChangedEvent = "codey-injection-status-changed";
+  const accountUsageRefreshIntervalMs = 60_000;
+  const accountUsageTimeoutMs = 8_000;
+  const composerAnchorSelector = "[data-above-composer-conversation-id]";
+  const composerCandidateSelector =
+    "textarea, [contenteditable='true'], [role='textbox']";
+  const composerFallbackSelector =
+    "main textarea, main [contenteditable='true'], main [role='textbox'], textarea, [contenteditable='true'][role='textbox']";
+  const composerControlSelector = "button, [role='button']";
+  const ignoredComposerContainerSelector =
+    "dialog, [role='dialog'], [aria-modal='true']";
+  const ignoredControlContainerSelector =
+    `${ignoredComposerContainerSelector}, [role='menu'], [role='listbox'], ` +
+    "[cmdk-list], [data-radix-popper-content-wrapper]";
+
+  let ready = false;
+  let providerId = "";
+  let accountLabel = "";
+  let creditsResult = null;
+  let creditsPollingEnabled = true;
+  let creditsCheckInFlight = false;
+  let creditsTimer = 0;
+  let usageByThread = new Map();
+  let inputElement = null;
+  let usageRoot = null;
+  let creditsRoot = null;
+  let usagePopover = null;
+  let creditsPopover = null;
+  let usageOpen = false;
+  let creditsOpen = false;
+  let usageCloseTimer = 0;
+  let creditsCloseTimer = 0;
+  let scanTimer = 0;
+  let observer = null;
+  let unsubscribeMutations = null;
+  let unsubscribeNotifications = null;
+  let notificationSubscribePromise = null;
+
+  const publishInjectionStatus = (detail) => {
+    const entry = window.__codeyInjectionStatus?.[injectionStatusId];
+    if (!entry || entry.status === "pending") return;
+    const status = ready ? "effective" : "inactive";
+    if (entry.status === status && entry.detail === detail && !entry.error) return;
+    entry.status = status;
+    entry.detail = detail;
+    entry.error = null;
+    if (
+      typeof window.dispatchEvent === "function"
+      && typeof window.CustomEvent === "function"
+    ) {
+      window.dispatchEvent(new window.CustomEvent(injectionStatusChangedEvent, {
+        detail: { id: injectionStatusId, status },
+      }));
+    }
+  };
+
+  const callBridge = (path, payload = {}, options = {}) => {
+    if (typeof window.__codexSessionDeleteBridge === "function") {
+      return window.__codexSessionDeleteBridge(path, payload, options);
+    }
+    return Promise.reject(new Error("Codey bridge 尚未就绪"));
+  };
+
+  const withTimeout = (promise, ms, message) => {
+    let timer = 0;
+    const timeout = new Promise((_, reject) => {
+      timer = window.setTimeout(() => reject(new Error(message)), ms);
+    });
+    return Promise.race([promise, timeout]).finally(() => window.clearTimeout(timer));
+  };
+
+  const isRecord = (value) =>
+    Boolean(value) && typeof value === "object" && !Array.isArray(value);
+
+  const nonNegativeNumber = (value) =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+
+  const escapeText = (value) => String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+
+  const decimal = (value, fractionDigits) =>
+    value.toFixed(fractionDigits).replace(/\.?0+$/u, "");
+
+  const formatTokenCount = (value) => {
+    const sign = value < 0 ? "-" : "";
+    const absolute = Math.abs(value);
+    if (absolute < 1_000) return `${sign}${Math.round(absolute)}`;
+    if (absolute < 1_000_000) return `${sign}${decimal(absolute / 1_000, 1)}k`;
+    if (absolute < 1_000_000_000) return `${sign}${decimal(absolute / 1_000_000, 1)}M`;
+    return `${sign}${decimal(absolute / 1_000_000_000, 1)}B`;
+  };
+
+  const formatCacheHit = (value) => `CH ${decimal(value, 1)}%`;
+
+  const remainingPercent = (usedPercent) =>
+    Math.min(100, Math.max(0, 100 - Number(usedPercent)));
+
+  const creditsTone = (usedPercent) => {
+    if (usedPercent >= 90) return "hot";
+    if (usedPercent >= 70) return "warn";
+    return "ok";
+  };
+
+  const toneColor = (tone) => {
+    if (tone === "hot") return "#c45c4a";
+    if (tone === "warn") return "#c9a227";
+    return "#3d9a64";
+  };
+
+  const windowKind = (window) => {
+    const minutes = Number(window?.windowMinutes);
+    if (!Number.isFinite(minutes) || !Number.isFinite(Number(window?.usedPercent))) {
+      return null;
+    }
+    if (minutes >= 6 * 24 * 60 && minutes <= 8 * 24 * 60) return "seven-day";
+    if (minutes >= 270 && minutes <= 330) return "five-hour";
+    return null;
+  };
+
+  const windowLabel = (kind) => {
+    if (kind === "five-hour") return "5 小时额度";
+    if (kind === "seven-day") return "7 天额度";
+    return "账号额度";
+  };
+
+  const planLabel = (planType) => {
+    const raw = String(planType || "").trim();
+    if (!raw) return "";
+    const compact = raw.toLowerCase().replace(/[\s_$-]+/g, "");
+    if (compact === "5x" || compact.includes("pro5x") || compact.includes("pro100")) {
+      return "Pro 5x";
+    }
+    if (compact === "pro" || compact.includes("pro20x") || compact.includes("pro200")) {
+      return "Pro 20x";
+    }
+    if (compact.includes("plus")) return "Plus";
+    if (compact.includes("free")) return "Free";
+    return raw.replace(/[_-]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
+  };
+
+  const resetTimeLabel = (resetsAt) => {
+    const timestamp = Number(resetsAt);
+    if (!Number.isFinite(timestamp) || timestamp <= 0) return "";
+    const resetAt = new Date(timestamp * 1000);
+    if (Number.isNaN(resetAt.getTime())) return "";
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const startOfResetDay = new Date(
+      resetAt.getFullYear(),
+      resetAt.getMonth(),
+      resetAt.getDate(),
+    ).getTime();
+    const dayOffset = Math.round((startOfResetDay - startOfToday) / (24 * 60 * 60 * 1000));
+    const time = resetAt.toLocaleTimeString("zh-CN", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    });
+    if (dayOffset === 0) return `今天 ${time} 重置`;
+    if (dayOffset === 1) return `明天 ${time} 重置`;
+    return `${resetAt.getMonth() + 1}月${resetAt.getDate()}日 ${time} 重置`;
+  };
+
+  const creditsBalanceLabel = (credits) => {
+    if (!credits) return "";
+    if (credits.unlimited) return "不限";
+    if (credits.balance !== undefined && credits.balance !== null) return String(credits.balance);
+    return credits.hasCredits ? "可用" : "0";
+  };
+
+  const addBreakdown = (target, source) => {
+    if (!isRecord(source)) return;
+    for (const field of [
+      "totalTokens",
+      "inputTokens",
+      "cachedInputTokens",
+      "cacheWriteInputTokens",
+      "outputTokens",
+      "reasoningOutputTokens",
+      "totalCostUsd",
+      "totalCredits",
+      "outputTokensPerSecond",
+    ]) {
+      const value = nonNegativeNumber(source[field]);
+      if (value !== undefined) target[field] = value;
+    }
+  };
+
+  const observeTokenUsage = (value) => {
+    if (!isRecord(value) || value.method !== "thread/tokenUsage/updated") return null;
+    const params = value.params;
+    if (!isRecord(params)) return null;
+    const threadId = typeof params.threadId === "string" ? params.threadId.trim() : "";
+    if (!threadId) return null;
+    const tokenUsage = params.tokenUsage;
+    if (!isRecord(tokenUsage)) return null;
+    const usage = {};
+    addBreakdown(usage, isRecord(tokenUsage.total) ? tokenUsage.total : undefined);
+    const last = isRecord(tokenUsage.last) ? tokenUsage.last : undefined;
+    const contextUsedTokens = nonNegativeNumber(last?.totalTokens);
+    const contextWindowTokens = nonNegativeNumber(tokenUsage.modelContextWindow);
+    if (
+      contextUsedTokens !== undefined
+      && contextWindowTokens !== undefined
+      && contextWindowTokens > 0
+    ) {
+      usage.contextUsedTokens = contextUsedTokens;
+      usage.contextWindowTokens = contextWindowTokens;
+    }
+    const inputTokens = nonNegativeNumber(last?.inputTokens);
+    const cachedInputTokens = nonNegativeNumber(last?.cachedInputTokens);
+    if (inputTokens !== undefined && cachedInputTokens !== undefined && inputTokens > 0) {
+      usage.cacheHitRatePercent = Math.min(100, (cachedInputTokens / inputTokens) * 100);
+    }
+    addBreakdown(usage, last);
+    if (Object.keys(usage).length === 0) return null;
+    return { threadId, usage };
+  };
+
+  const usageHasDisplayData = (usage) => {
+    if (!usage) return false;
+    return [
+      usage.cacheHitRatePercent,
+      usage.contextUsedTokens,
+      usage.contextWindowTokens,
+      usage.totalTokens,
+      usage.inputTokens,
+      usage.outputTokens,
+      usage.cachedInputTokens,
+      usage.cacheWriteInputTokens,
+      usage.reasoningOutputTokens,
+    ].some((value) => value !== undefined);
+  };
+
+  const usageChipLabel = (usage) => {
+    if (usage?.cacheHitRatePercent !== undefined) {
+      return formatCacheHit(usage.cacheHitRatePercent);
+    }
+    if (
+      usage?.contextUsedTokens !== undefined
+      && usage.contextWindowTokens
+      && usage.contextWindowTokens > 0
+    ) {
+      return `${decimal((usage.contextUsedTokens / usage.contextWindowTokens) * 100, 1)}%`;
+    }
+    return "用量";
+  };
+
+  const accountIdentity = () => accountLabel || providerId || "未登录";
+
+  const addStyle = () => {
+    if (document.getElementById(styleId)) return;
+    const style = document.createElement("style");
+    style.id = styleId;
+    style.textContent = `
+      #${usageRootId}, #${creditsRootId} {
+        -webkit-app-region: no-drag !important;
+        pointer-events: auto !important;
+        display: none;
+        flex: 0 0 auto;
+        align-items: center;
+        gap: 5px;
+        box-sizing: border-box;
+        min-height: 26px;
+        height: 26px;
+        margin: 0 6px 0 0;
+        padding: 0 8px;
+        border: 0;
+        border-radius: 999px;
+        background: color-mix(in srgb, CanvasText 8%, Canvas);
+        color: CanvasText;
+        font: 12px/1 system-ui, -apple-system, "PingFang SC", "Segoe UI", sans-serif;
+        cursor: pointer;
+        user-select: none;
+      }
+      #${usageRootId}:hover, #${creditsRootId}:hover { background: color-mix(in srgb, CanvasText 14%, Canvas); }
+      #${usageRootId}[aria-expanded="true"], #${creditsRootId}[aria-expanded="true"] {
+        background: color-mix(in srgb, CanvasText 16%, Canvas);
+      }
+      #${creditsRootId} [data-codey-credits-ring] {
+        display: block;
+        width: 12px;
+        height: 12px;
+        border-radius: 999px;
+        background: conic-gradient(var(--codey-credits-tone) calc(var(--codey-credits-remaining) * 1%), color-mix(in srgb, CanvasText 16%, transparent) 0);
+      }
+      #${usagePopoverId}, #${creditsPopoverId} {
+        position: fixed;
+        z-index: 2147483646;
+        box-sizing: border-box;
+        min-width: 220px;
+        max-width: 280px;
+        padding: 12px 14px 11px;
+        border: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
+        border-radius: 12px;
+        background: Canvas;
+        color: CanvasText;
+        box-shadow: 0 10px 32px color-mix(in srgb, CanvasText 18%, transparent);
+        font: 12px/1.35 system-ui, -apple-system, "PingFang SC", "Segoe UI", sans-serif;
+      }
+      #${usagePopoverId}[hidden], #${creditsPopoverId}[hidden] { display: none !important; }
+      #${usagePopoverId} [data-codey-usage-title],
+      #${creditsPopoverId} [data-codey-credits-title] { font-size: 12.5px; font-weight: 600; }
+      #${usagePopoverId} [data-codey-usage-row],
+      #${creditsPopoverId} [data-codey-credits-meta] {
+        display: flex;
+        gap: 12px;
+        align-items: baseline;
+        justify-content: space-between;
+        margin-top: 7px;
+      }
+      #${usagePopoverId} [data-codey-usage-row] span:first-child,
+      #${creditsPopoverId} [data-codey-credits-reset] {
+        color: color-mix(in srgb, CanvasText 62%, transparent);
+      }
+      #${usagePopoverId} [data-codey-usage-row] span:last-child {
+        font-variant-numeric: tabular-nums;
+        font-weight: 600;
+        white-space: nowrap;
+      }
+      #${creditsPopoverId} [data-codey-credits-remaining] {
+        font-size: 26px;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        color: var(--codey-credits-tone);
+      }
+      #${creditsPopoverId} [data-codey-credits-remaining] small {
+        font-size: 11px;
+        font-weight: 600;
+        opacity: .8;
+        margin-right: 4px;
+      }
+      #${creditsPopoverId} [data-codey-credits-bar] {
+        height: 6px;
+        margin-top: 8px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: color-mix(in srgb, CanvasText 16%, transparent);
+      }
+      #${creditsPopoverId} [data-codey-credits-bar] > span {
+        display: block;
+        height: 100%;
+        width: calc(var(--codey-credits-remaining) * 1%);
+        border-radius: inherit;
+        background: var(--codey-credits-tone);
+      }
+      #${creditsPopoverId} [data-codey-credits-tile] { margin-top: 11px; }
+      #${creditsPopoverId} [data-codey-credits-plan] {
+        display: inline-block;
+        margin-left: 6px;
+        border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
+        border-radius: 4px;
+        padding: 0 4px;
+        font-size: 10px;
+        font-weight: 700;
+      }
+    `;
+    document.documentElement.appendChild(style);
+  };
+
+  const isComposerInput = (element) => {
+    if (!element) return false;
+    if (element.tagName === "TEXTAREA") return true;
+    if (element.isContentEditable === true) return true;
+    if (element.getAttribute?.("contenteditable") === "true") return true;
+    return element.getAttribute?.("role") === "textbox";
+  };
+
+  const isVisible = (element) => {
+    if (!isComposerInput(element)) return false;
+    if (element.closest?.(ignoredComposerContainerSelector)) return false;
+    if (element.closest?.("[hidden], [aria-hidden='true']")) return false;
+    if (element.disabled || element.readOnly) return false;
+    const style = window.getComputedStyle(element);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+
+  const isVisibleControl = (element) => {
+    if (!element) return false;
+    if (element === usageRoot || element === creditsRoot) return false;
+    if (element.id === "codey-prompt-optimize-button") return false;
+    if (element.closest?.(ignoredControlContainerSelector)) return false;
+    if (element.closest?.("[hidden], [aria-hidden='true']")) return false;
+    if (element.disabled) return false;
+    const style = window.getComputedStyle(element);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+    const rect = element.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  };
+
+  const controlDescriptor = (element) =>
+    [
+      element?.getAttribute?.("aria-label"),
+      element?.getAttribute?.("title"),
+      element?.getAttribute?.("data-testid"),
+      element?.textContent,
+      element?.innerText,
+    ]
+      .filter((value) => typeof value === "string" && value.trim())
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const controlIsNearInput = (control, inputRect) => {
+    const rect = control.getBoundingClientRect();
+    if (rect.bottom <= inputRect.top) return false;
+    const controlMiddle = rect.top + rect.height / 2;
+    const inputMiddle = inputRect.top + inputRect.height / 2;
+    return Math.abs(controlMiddle - inputMiddle) <= Math.max(96, inputRect.height);
+  };
+
+  const controlLooksLikeComposerAction = (control) =>
+    /(^|[^a-z])(model|send|submit|attach|upload|microphone|mic|voice|full access)([^a-z]|$)|模型|发送|提交|附件|上传|语音|麦克风|完全访问/i.test(
+      controlDescriptor(control),
+    );
+
+  const hasComposerActionContext = (element) => {
+    if (!element?.parentElement) return false;
+    const inputRect = element.getBoundingClientRect();
+    let scope = element.parentElement;
+    let depth = 0;
+    while (scope && depth < 6) {
+      const controls = [...(scope.querySelectorAll?.(composerControlSelector) || [])];
+      if (controls.some((control) =>
+        isVisibleControl(control)
+        && controlIsNearInput(control, inputRect)
+        && controlLooksLikeComposerAction(control)
+      )) return true;
+      scope = scope.parentElement;
+      depth += 1;
+    }
+    return false;
+  };
+
+  const findComposerInput = () => {
+    const seen = new Set();
+    for (const anchor of document.querySelectorAll(composerAnchorSelector)) {
+      if (seen.has(anchor)) continue;
+      seen.add(anchor);
+      const scope = anchor.parentElement || anchor;
+      for (const candidate of scope.querySelectorAll(composerCandidateSelector)) {
+        if (isVisible(candidate)) return candidate;
+      }
+    }
+    let best = null;
+    let bestScore = -1;
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+    for (const candidate of document.querySelectorAll(composerFallbackSelector)) {
+      if (!isVisible(candidate) || !hasComposerActionContext(candidate)) continue;
+      const rect = candidate.getBoundingClientRect();
+      if (viewportHeight > 0 && (rect.bottom <= 0 || rect.top >= viewportHeight)) continue;
+      const score = Math.max(0, rect.bottom) * 10_000 + Math.min(rect.width * rect.height, 9_999_999);
+      if (score > bestScore) {
+        best = candidate;
+        bestScore = score;
+      }
+    }
+    return best;
+  };
+
+  const findComposerConversationId = (element) => {
+    if (!element) return null;
+    for (const anchor of document.querySelectorAll(composerAnchorSelector)) {
+      const scope = anchor.parentElement || anchor;
+      if (scope === element || scope.contains?.(element)) {
+        const conversationId = anchor.getAttribute?.("data-above-composer-conversation-id");
+        return typeof conversationId === "string" && conversationId ? conversationId : null;
+      }
+    }
+    return null;
+  };
+
+  const unwrapSingleton = (control) => {
+    let anchor = control;
+    let host = control.parentElement;
+    while (host?.parentElement && host.children?.length === 1) {
+      anchor = host;
+      host = host.parentElement;
+    }
+    if (!host?.insertBefore) return null;
+    return { anchor, host };
+  };
+
+  const modelControlScore = (control, inputRect) => {
+    const rect = control.getBoundingClientRect();
+    if (!controlIsNearInput(control, inputRect)) return Number.NEGATIVE_INFINITY;
+    const descriptor = controlDescriptor(control);
+    const hasModelHint = /(^|[^a-z])model([^a-z]|$)|模型/i.test(descriptor);
+    if (!hasModelHint && /完全访问|full access|附件|attach|上传|upload|优化/i.test(descriptor)) {
+      return Number.NEGATIVE_INFINITY;
+    }
+    if (!hasModelHint) return Number.NEGATIVE_INFINITY;
+    return 1_000_000 + Math.max(0, rect.right);
+  };
+
+  const findModelInsertionTarget = () => {
+    if (!inputElement?.parentElement) return null;
+    const inputRect = inputElement.getBoundingClientRect();
+    const seen = new Set();
+    let bestControl = null;
+    let bestScore = Number.NEGATIVE_INFINITY;
+    let scope = inputElement.parentElement;
+    let depth = 0;
+    while (scope && depth < 8) {
+      for (const control of scope.querySelectorAll?.(composerControlSelector) || []) {
+        if (inputElement.contains?.(control) || seen.has(control) || !isVisibleControl(control)) {
+          continue;
+        }
+        seen.add(control);
+        const score = modelControlScore(control, inputRect);
+        if (score > bestScore) {
+          bestControl = control;
+          bestScore = score;
+        }
+      }
+      if (bestScore >= 1_000_000) break;
+      scope = scope.parentElement;
+      depth += 1;
+    }
+    return bestControl ? unwrapSingleton(bestControl) : null;
+  };
+
+  const findContextInsertionTarget = () => {
+    if (!inputElement?.parentElement) return null;
+    const inputRect = inputElement.getBoundingClientRect();
+    let scope = inputElement.parentElement;
+    let depth = 0;
+    while (scope && depth < 8) {
+      for (const node of scope.querySelectorAll?.("span[role='img'], span[role=img]") || []) {
+        const label = String(node.getAttribute?.("aria-label") || "");
+        if (!/context|上下文|%/i.test(label)) continue;
+        const wrapper = node.parentElement;
+        if (!wrapper || !controlIsNearInput(wrapper, inputRect)) continue;
+        return unwrapSingleton(wrapper);
+      }
+      scope = scope.parentElement;
+      depth += 1;
+    }
+    return null;
+  };
+
+  const findPermissionInsertionTarget = () => {
+    if (!inputElement?.parentElement) return null;
+    const inputRect = inputElement.getBoundingClientRect();
+    const seen = new Set();
+    let scope = inputElement.parentElement;
+    let depth = 0;
+    while (scope && depth < 8) {
+      for (const control of scope.querySelectorAll?.(composerControlSelector) || []) {
+        if (seen.has(control) || !isVisibleControl(control)) continue;
+        seen.add(control);
+        if (!controlIsNearInput(control, inputRect)) continue;
+        if (!/完全访问|full access/i.test(controlDescriptor(control))) continue;
+        return unwrapSingleton(control);
+      }
+      scope = scope.parentElement;
+      depth += 1;
+    }
+    return null;
+  };
+
+  const isMountedBefore = (element, anchor, host) => {
+    if (element?.parentElement !== host) return false;
+    const children = [...(host.children || [])];
+    return children.indexOf(element) + 1 === children.indexOf(anchor);
+  };
+
+  const placeBefore = (element, target) => {
+    if (!element || !target) return false;
+    if (isMountedBefore(element, target.anchor, target.host)) return true;
+    target.host.insertBefore(element, target.anchor);
+    return true;
+  };
+
+  const createChip = (id, ariaLabel) => {
+    const button = document.createElement("button");
+    button.id = id;
+    button.type = "button";
+    button.setAttribute("aria-label", ariaLabel);
+    button.setAttribute("aria-expanded", "false");
+    button.setAttribute("aria-haspopup", "dialog");
+    return button;
+  };
+
+  const createPopover = (id, label) => {
+    const popover = document.createElement("div");
+    popover.id = id;
+    popover.setAttribute("role", "dialog");
+    popover.setAttribute("aria-label", label);
+    popover.hidden = true;
+    document.body.appendChild(popover);
+    return popover;
+  };
+
+  const positionPopover = (trigger, popover) => {
+    const rect = trigger.getBoundingClientRect();
+    const width = Math.min(280, Math.max(220, (window.innerWidth || 800) - 24));
+    const left = Math.max(12, Math.min(rect.left, (window.innerWidth || 800) - width - 12));
+    popover.style.width = `${width}px`;
+    popover.style.left = `${left}px`;
+    popover.style.right = "auto";
+    popover.style.top = "auto";
+    popover.style.bottom = `${Math.max(12, (window.innerHeight || 800) - rect.top + 8)}px`;
+  };
+
+  const setPopoverOpen = (kind, open) => {
+    const trigger = kind === "usage" ? usageRoot : creditsRoot;
+    const popover = kind === "usage" ? usagePopover : creditsPopover;
+    if (!trigger || !popover) return;
+    if (kind === "usage") usageOpen = open;
+    else creditsOpen = open;
+    popover.hidden = !open;
+    trigger.setAttribute("aria-expanded", String(open));
+    if (open) positionPopover(trigger, popover);
+  };
+
+  const bindChipPopover = (kind, trigger, popover) => {
+    const cancelClose = () => {
+      if (kind === "usage") {
+        window.clearTimeout(usageCloseTimer);
+        usageCloseTimer = 0;
+      } else {
+        window.clearTimeout(creditsCloseTimer);
+        creditsCloseTimer = 0;
+      }
+    };
+    const scheduleClose = () => {
+      cancelClose();
+      const timer = window.setTimeout(() => setPopoverOpen(kind, false), 140);
+      if (kind === "usage") usageCloseTimer = timer;
+      else creditsCloseTimer = timer;
+    };
+    trigger.addEventListener("click", () => {
+      cancelClose();
+      const open = kind === "usage" ? !usageOpen : !creditsOpen;
+      setPopoverOpen(kind, open);
+      if (open && kind === "credits") void checkAccountUsage();
+    });
+    trigger.addEventListener("pointerenter", () => {
+      cancelClose();
+      setPopoverOpen(kind, true);
+      if (kind === "credits") void checkAccountUsage();
+    });
+    trigger.addEventListener("pointerleave", scheduleClose);
+    trigger.addEventListener("focus", () => {
+      cancelClose();
+      setPopoverOpen(kind, true);
+    });
+    trigger.addEventListener("blur", scheduleClose);
+    popover.addEventListener("pointerenter", cancelClose);
+    popover.addEventListener("pointerleave", scheduleClose);
+  };
+
+  const ensureChips = () => {
+    addStyle();
+    if (!usageRoot) {
+      usageRoot = createChip(usageRootId, "对话用量详情");
+      usagePopover = createPopover(usagePopoverId, "对话用量详情");
+      bindChipPopover("usage", usageRoot, usagePopover);
+    }
+    if (!creditsRoot) {
+      creditsRoot = createChip(creditsRootId, "账号额度详情");
+      const ring = document.createElement("span");
+      ring.setAttribute("data-codey-credits-ring", "");
+      ring.setAttribute("aria-hidden", "true");
+      const label = document.createElement("span");
+      label.setAttribute("data-codey-credits-label", "");
+      creditsRoot.appendChild(ring);
+      creditsRoot.appendChild(label);
+      creditsPopover = createPopover(creditsPopoverId, "账号额度详情");
+      bindChipPopover("credits", creditsRoot, creditsPopover);
+    }
+  };
+
+  const currentUsage = () => {
+    const threadId = findComposerConversationId(inputElement);
+    return threadId ? usageByThread.get(threadId) || null : null;
+  };
+
+  const renderUsage = () => {
+    if (!usageRoot || !usagePopover) return;
+    const usage = currentUsage();
+    if (!usageHasDisplayData(usage) || !inputElement) {
+      usageRoot.style.display = "none";
+      setPopoverOpen("usage", false);
+      return;
+    }
+    const label = usageChipLabel(usage);
+    usageRoot.textContent = label;
+    usageRoot.setAttribute("aria-label", `对话用量：${label}`);
+    usageRoot.style.display = "inline-flex";
+    const rows = [
+      ["账号", accountIdentity()],
+    ];
+    if (usage.contextUsedTokens !== undefined && usage.contextWindowTokens) {
+      rows.push([
+        "上下文",
+        `${decimal((usage.contextUsedTokens / usage.contextWindowTokens) * 100, 1)}% / ${formatTokenCount(usage.contextWindowTokens)}`,
+      ]);
+    }
+    if (usage.cacheHitRatePercent !== undefined) {
+      rows.push(["最近缓存命中率", formatCacheHit(usage.cacheHitRatePercent)]);
+    }
+    if (usage.cachedInputTokens !== undefined) {
+      rows.push(["缓存读取", formatTokenCount(usage.cachedInputTokens)]);
+    }
+    if (usage.cacheWriteInputTokens !== undefined) {
+      rows.push(["缓存写入", formatTokenCount(usage.cacheWriteInputTokens)]);
+    }
+    if (usage.reasoningOutputTokens !== undefined) {
+      rows.push(["推理", formatTokenCount(usage.reasoningOutputTokens)]);
+    }
+    if (usage.totalTokens !== undefined) {
+      rows.push(["Token 总数", formatTokenCount(usage.totalTokens)]);
+    }
+    if (usage.inputTokens !== undefined || usage.outputTokens !== undefined) {
+      rows.push([
+        "输入 / 输出",
+        `${formatTokenCount(usage.inputTokens || 0)} / ${formatTokenCount(usage.outputTokens || 0)}`,
+      ]);
+    }
+    if (usage.outputTokensPerSecond !== undefined) {
+      rows.push(["输出速度", `${decimal(usage.outputTokensPerSecond, 1)} Token/秒`]);
+    }
+    if (usage.totalCostUsd !== undefined) {
+      rows.push(["会话费用估算", `$${usage.totalCostUsd.toFixed(3)}`]);
+    }
+    if (usage.totalCredits !== undefined) {
+      rows.push(["已记录消耗", `${decimal(usage.totalCredits, 3)} credits`]);
+    }
+    usagePopover.innerHTML =
+      `<div data-codey-usage-title>用量</div>` +
+      rows.map(([name, value]) =>
+        `<div data-codey-usage-row><span>${escapeText(name)}</span><span>${escapeText(value)}</span></div>`
+      ).join("");
+  };
+
+  const creditsWindows = (result) => {
+    const windows = [];
+    for (const window of [result?.primary, result?.secondary]) {
+      const kind = windowKind(window);
+      if (!kind || windows.some((entry) => entry.kind === kind)) continue;
+      windows.push({ kind, window });
+    }
+    windows.sort((left, right) => {
+      if (left.kind === right.kind) return 0;
+      return left.kind === "five-hour" ? -1 : 1;
+    });
+    return windows;
+  };
+
+  const hideCredits = () => {
+    if (!creditsRoot) return;
+    creditsRoot.style.display = "none";
+    setPopoverOpen("credits", false);
+  };
+
+  const renderCredits = () => {
+    if (!creditsRoot || !creditsPopover) return;
+    if (!inputElement || creditsResult?.status !== "ok") {
+      hideCredits();
+      return;
+    }
+    const windows = creditsWindows(creditsResult);
+    if (!windows.length) {
+      hideCredits();
+      return;
+    }
+    const primary = windows[0];
+    const remaining = remainingPercent(primary.window.usedPercent);
+    const tone = creditsTone(primary.window.usedPercent);
+    const color = toneColor(tone);
+    creditsRoot.style.setProperty("--codey-credits-remaining", String(remaining));
+    creditsRoot.style.setProperty("--codey-credits-tone", color);
+    const label = creditsRoot.querySelector?.("[data-codey-credits-label]");
+    if (label) label.textContent = `${Math.round(remaining)}%`;
+    else creditsRoot.textContent = `${Math.round(remaining)}%`;
+    creditsRoot.setAttribute(
+      "aria-label",
+      `${windowLabel(primary.kind)}剩余 ${Math.round(remaining)}%`,
+    );
+    creditsRoot.style.display = "inline-flex";
+    const plan = planLabel(creditsResult.planType);
+    const secondary = windows.slice(1);
+    const balance = creditsBalanceLabel(creditsResult.credits);
+    creditsPopover.style.setProperty("--codey-credits-remaining", String(remaining));
+    creditsPopover.style.setProperty("--codey-credits-tone", color);
+    creditsPopover.innerHTML = `
+      <div data-codey-credits-header>
+        <div data-codey-credits-meta>
+          <div>
+            <div data-codey-credits-title>${escapeText(windowLabel(primary.kind))}${
+              plan ? `<span data-codey-credits-plan>${escapeText(plan)}</span>` : ""
+            }</div>
+            ${primary.window.resetsAt
+              ? `<div data-codey-credits-reset>${escapeText(resetTimeLabel(primary.window.resetsAt))}</div>`
+              : ""}
+          </div>
+          <div data-codey-credits-remaining><small>剩余</small>${Math.round(remaining)}%</div>
+        </div>
+        <div data-codey-credits-bar aria-hidden="true"><span></span></div>
+      </div>
+      ${secondary.map((entry) => {
+        const secondaryRemaining = remainingPercent(entry.window.usedPercent);
+        return `
+          <div data-codey-credits-tile data-window="${entry.kind}">
+            <div data-codey-credits-meta>
+              <div>
+                <div>${escapeText(windowLabel(entry.kind))}</div>
+                ${entry.window.resetsAt
+                  ? `<div data-codey-credits-reset>${escapeText(resetTimeLabel(entry.window.resetsAt))}</div>`
+                  : ""}
+              </div>
+              <div>剩余 ${Math.round(secondaryRemaining)}%</div>
+            </div>
+            <div data-codey-credits-bar aria-hidden="true" style="--codey-credits-remaining:${secondaryRemaining};--codey-credits-tone:${toneColor(creditsTone(entry.window.usedPercent))}"><span></span></div>
+          </div>
+        `;
+      }).join("")}
+      ${balance ? `<div data-codey-credits-meta><span>Credits 余额</span><span>${escapeText(balance)}</span></div>` : ""}
+    `;
+  };
+
+  const normalizeAppServerAccountUsage = (payload) => {
+    const buckets = [];
+    if (isRecord(payload?.rateLimits)) buckets.push(payload.rateLimits);
+    const windowsByKind = new Map();
+    for (const bucket of buckets) {
+      for (const window of [bucket.primary, bucket.secondary]) {
+        const usedPercent = Number(window?.usedPercent);
+        const windowMinutes = Number(window?.windowDurationMins);
+        if (!Number.isFinite(usedPercent) || !Number.isFinite(windowMinutes) || windowMinutes <= 0) {
+          continue;
+        }
+        const normalized = {
+          usedPercent,
+          windowMinutes,
+          resetsAt: Number(window?.resetsAt) || undefined,
+        };
+        const kind = windowKind(normalized);
+        if (kind && !windowsByKind.has(kind)) windowsByKind.set(kind, normalized);
+      }
+    }
+    const fiveHour = windowsByKind.get("five-hour") || null;
+    const sevenDay = windowsByKind.get("seven-day") || null;
+    const credits = buckets.find((bucket) => bucket.credits)?.credits || payload.credits || null;
+    if (!fiveHour && !sevenDay && !credits) {
+      throw new Error("Codex 官方额度响应中没有可展示的信息");
+    }
+    const nextPlan = buckets
+      .map((bucket) => bucket.planType)
+      .find((value) => typeof value === "string" && value.trim())
+      || (typeof payload.planType === "string" ? payload.planType : undefined);
+    return {
+      status: "ok",
+      planType: nextPlan,
+      primary: fiveHour || sevenDay,
+      secondary: fiveHour && sevenDay ? sevenDay : null,
+      credits,
+      fetchedAt: Math.floor(Date.now() / 1000),
+    };
+  };
+
+  const readAccountUsageFromAppServer = async () => {
+    const loaded = typeof window.__codeyLoadSessionTools === "function"
+      ? await window.__codeyLoadSessionTools()
+      : window.__codeySessionToolsInjectLoaded === true;
+    if (!loaded || typeof window.__codeyReadAccountRateLimits !== "function") {
+      throw new Error("Codex 官方额度读取接口不可用");
+    }
+    const response = await window.__codeyReadAccountRateLimits();
+    return normalizeAppServerAccountUsage(response);
+  };
+
+  const scheduleAccountUsageCheck = (delayMs = accountUsageRefreshIntervalMs) => {
+    window.clearTimeout(creditsTimer);
+    creditsTimer = 0;
+    if (!creditsPollingEnabled || document.visibilityState === "hidden") return;
+    creditsTimer = window.setTimeout(() => {
+      creditsTimer = 0;
+      void checkAccountUsage();
+    }, delayMs);
+  };
+
+  const checkAccountUsage = async () => {
+    if (creditsCheckInFlight || document.visibilityState === "hidden") return creditsResult;
+    creditsCheckInFlight = true;
+    try {
+      let result = await withTimeout(
+        callBridge(accountUsagePath, {}, { timeoutMs: accountUsageTimeoutMs }),
+        accountUsageTimeoutMs,
+        "读取官方账号额度超时",
+      );
+      if (result?.status === "error") {
+        try {
+          result = await withTimeout(
+            readAccountUsageFromAppServer(),
+            accountUsageTimeoutMs,
+            "读取 Codex 官方额度超时",
+          );
+        } catch {
+          // Keep the backend error when AppServerManager is unavailable.
+        }
+      }
+      if (result?.status === "ok" && result.accountLabel) {
+        accountLabel = String(result.accountLabel);
+      }
+      if (result?.status === "disabled" || result?.status === "unavailable") {
+        creditsPollingEnabled = false;
+        creditsResult = result;
+        hideCredits();
+        return result;
+      }
+      creditsPollingEnabled = true;
+      if (result?.status === "error" && creditsResult?.status === "ok") {
+        return creditsResult;
+      }
+      creditsResult = result;
+      renderCredits();
+      return result;
+    } catch (error) {
+      if (creditsResult?.status === "ok") return creditsResult;
+      creditsResult = {
+        status: "error",
+        message: error instanceof Error ? error.message : String(error),
+      };
+      hideCredits();
+      return creditsResult;
+    } finally {
+      creditsCheckInFlight = false;
+      if (creditsPollingEnabled) scheduleAccountUsageCheck();
+    }
+  };
+
+  const loadSettings = async () => {
+    try {
+      const settings = await callBridge(settingsPath);
+      const nextId = settings?.currentProviderSnapshot?.id;
+      if (typeof nextId === "string" && nextId.trim()) providerId = nextId.trim();
+    } catch {
+      // Provider id is only the no-login fallback for the usage account row.
+    }
+  };
+
+  const applyTokenUsage = (message) => {
+    const observed = observeTokenUsage(message);
+    if (!observed) return false;
+    usageByThread.set(observed.threadId, observed.usage);
+    renderUsage();
+    return true;
+  };
+
+  const subscribeNotifications = async () => {
+    if (unsubscribeNotifications || notificationSubscribePromise) {
+      return notificationSubscribePromise;
+    }
+    notificationSubscribePromise = (async () => {
+      if (typeof window.__codeyLoadSessionTools === "function") {
+        await window.__codeyLoadSessionTools();
+      }
+      if (typeof window.__codeyLoadCodexSessionController !== "function") return;
+      const controller = await window.__codeyLoadCodexSessionController();
+      if (controller?.kind !== "manager") return;
+      const notifications = typeof controller.manager?.addNotificationCallback === "function"
+        ? controller.manager
+        : controller.manager?.requestClient;
+      if (typeof notifications?.addNotificationCallback !== "function") return;
+      unsubscribeNotifications = notifications.addNotificationCallback((message) => {
+        applyTokenUsage(message);
+      });
+    })().catch(() => {
+      notificationSubscribePromise = null;
+    });
+    return notificationSubscribePromise;
+  };
+
+  const updateChipPlacement = () => {
+    ensureChips();
+    inputElement = findComposerInput();
+    if (!inputElement) {
+      if (usageRoot) usageRoot.style.display = "none";
+      hideCredits();
+      return false;
+    }
+    const usageTarget = findContextInsertionTarget() || findModelInsertionTarget();
+    if (usageTarget) placeBefore(usageRoot, usageTarget);
+    const creditsTarget = findPermissionInsertionTarget();
+    if (creditsTarget) placeBefore(creditsRoot, creditsTarget);
+    renderUsage();
+    renderCredits();
+    void subscribeNotifications();
+    return true;
+  };
+
+  const scan = () => {
+    ready = true;
+    const mounted = updateChipPlacement();
+    publishInjectionStatus(mounted ? "输入栏用量与额度芯片已就绪" : "等待输入栏");
+  };
+
+  const scheduleScan = () => {
+    window.clearTimeout(scanTimer);
+    scanTimer = window.setTimeout(() => {
+      scanTimer = 0;
+      scan();
+    }, 120);
+  };
+
+  const startObserver = () => {
+    if (observer) return;
+    const handle = () => scheduleScan();
+    const options = { childList: true, subtree: true };
+    if (typeof window.__codeyMutationDispatcher?.subscribe === "function") {
+      unsubscribeMutations = window.__codeyMutationDispatcher.subscribe(handle, options);
+      observer = { disconnect: unsubscribeMutations };
+      return;
+    }
+    observer = new MutationObserver(handle);
+    observer.observe(document.documentElement, options);
+  };
+
+  const boot = async () => {
+    addStyle();
+    ensureChips();
+    startObserver();
+    await loadSettings();
+    scan();
+    creditsPollingEnabled = true;
+    await checkAccountUsage();
+    renderUsage();
+    window.addEventListener?.(configChangedEvent, () => {
+      creditsPollingEnabled = true;
+      void loadSettings();
+      scheduleAccountUsageCheck(0);
+    });
+    window.addEventListener?.("focus", () => {
+      scan();
+      scheduleAccountUsageCheck(0);
+    });
+    document.addEventListener?.("visibilitychange", () => {
+      if (document.visibilityState !== "hidden") scheduleAccountUsageCheck(0);
+    });
+  };
+
+  window.__codeyComposerUsage = {
+    snapshot: () => ({
+      ready,
+      providerId,
+      accountLabel,
+      usageVisible: usageRoot?.style.display === "inline-flex",
+      creditsVisible: creditsRoot?.style.display === "inline-flex",
+      usageLabel: usageRoot?.textContent || "",
+      creditsLabel: creditsRoot?.querySelector?.("[data-codey-credits-label]")?.textContent
+        || creditsRoot?.textContent
+        || "",
+      threadCount: usageByThread.size,
+    }),
+    scan,
+    refreshCredits: checkAccountUsage,
+    applyNotification: applyTokenUsage,
+  };
+
+  void boot();
+})();

@@ -42,7 +42,7 @@ test("settings modal keeps dismissal and stacking inside the overlay", async () 
   );
   assert.match(appSource, /onCancel=\{handleCloseSettings\}/);
   assert.doesNotMatch(overlaySource, /codey-overlay-(?:backdrop|dialog)/);
-  assert.match(overlaySource, /try \{\s*hashToken = decodeURIComponent/);
+  assert.doesNotMatch(overlaySource, /REQUEST_LOG_TOKEN_KEY|hashToken/);
   assert.match(overlaySource, /toggle: \(\) => \(visible \? close\(\) : open\(\)\)/);
   assert.equal(constants.SETTINGS_OVERLAY_Z_INDEX, 2_147_483_647);
   assert.equal(constants.SETTINGS_OVERLAY_Z_INDEX_CSS, "2147483647");

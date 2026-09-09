@@ -9,3 +9,17 @@
 - 内部开发、构建、发布、配置路径、运行机制、性能策略和已知实现限制统一维护在 `INTERNAL_DEVELOPMENT.md`。
 - 新增或调整功能时，如果用户能感知到行为变化，可以用非技术语言同步更新 `README.md`；涉及实现、测试、发布或维护细节时，只更新 `INTERNAL_DEVELOPMENT.md`。
 - 修改文档前先判断目标读者：普通使用者读 `README.md`，维护者读 `INTERNAL_DEVELOPMENT.md`。
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in this repo's GitHub Issues via `gh`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles map 1:1 onto tracker labels of the same name. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+single-context. See `docs/agents/domain.md`.

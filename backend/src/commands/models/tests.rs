@@ -55,7 +55,8 @@ fn model_context_policy_validates_budgets_membership_and_restart() {
     config.retain_1m_context_models("route", &[]);
     assert!(config.model_context_by_provider["route"].is_empty());
     config.local_router_enabled = false;
-    assert!(set_model_contexts(&mut config, "route", Some(&requested), &["Model".into()]).is_err());
+    set_model_contexts(&mut config, "route", Some(&requested), &["Model".into()]).unwrap();
+    assert_eq!(config.model_context("route", "MODEL"), Some(&policy));
     assert!(set_model_contexts(&mut config, "route", Some(&BTreeMap::new()), &[]).is_ok());
 }
 
@@ -91,12 +92,19 @@ fn disabled_route_is_absent_from_renderer_catalog() {
     let mut route = configured_route("route", Some("model"));
     route.enabled = false;
     let config = CodeyConfig {
+        local_router_enabled: true,
         profiles: vec![route],
         selected_models_by_provider: BTreeMap::from([("route".into(), vec!["model".into()])]),
         ..CodeyConfig::default()
     };
     assert!(renderer_route_model_catalog(&config, &Default::default()).is_empty());
-    assert_eq!(current_model_state(&config).unwrap(), Default::default());
+    let state = current_model_state(&config).unwrap();
+    assert!(state.third_party_models.is_empty());
+    assert_eq!(state.default_model, "");
+    assert!(!state
+        .official_model_ids
+        .iter()
+        .any(|model| crate::model_id::equal(model, "model")));
 }
 
 #[test]
@@ -105,6 +113,7 @@ fn model_state_fallback_reads_the_enabled_routes_models() {
     disabled.enabled = false;
     let enabled = configured_route("enabled", Some("live-model"));
     let config = CodeyConfig {
+        local_router_enabled: true,
         active_profile_id: disabled.id.clone(),
         profiles: vec![disabled, enabled],
         selected_models_by_provider: BTreeMap::from([
@@ -142,7 +151,7 @@ fn native_model_state_and_subagent_defaults_follow_only_the_current_provider() {
     let home = tempfile::tempdir().unwrap();
     let route_a = configured_route("route-a", Some("model-a"));
     let route_b = configured_route("route-b", Some("model-b"));
-    let mut config = CodeyConfig {
+    let config = CodeyConfig {
         local_router_enabled: false,
         active_profile_id: route_b.id.clone(),
         profiles: vec![route_a, route_b],
@@ -176,15 +185,6 @@ fn native_model_state_and_subagent_defaults_follow_only_the_current_provider() {
             .third_party_models
             .iter()
             .any(|model| model == "model-b")
-    );
-
-    reconcile_subagent_models_for_mode(&mut config, &state);
-    assert_eq!(config.subagent_model, "model-a");
-    assert!(
-        config
-            .subagent_roles
-            .values()
-            .all(|selection| selection.model == "model-a")
     );
 }
 
@@ -251,7 +251,6 @@ fn native_model_selection_updates_current_provider_models_without_route_edits() 
         config_with_native_selected_models(&config, &provider, &[], &["model-b".into()], &[], &[])
             .unwrap();
     let state = native_model_state_for_provider(&selected, &provider, home.path()).unwrap();
-    reconcile_subagent_models_for_mode(&mut selected, &state);
     selected = selected.normalize();
 
     assert_eq!(selected.profiles, config.profiles);
@@ -261,7 +260,6 @@ fn native_model_selection_updates_current_provider_models_without_route_edits() 
     );
     assert_eq!(selected.selected_models_by_provider["route-a"], ["model-b"]);
     assert_eq!(state.third_party_models, ["model-b"]);
-    assert_eq!(selected.subagent_model, "model-b");
 }
 
 #[test]
@@ -346,6 +344,21 @@ fn native_renderer_catalog_and_hot_reload_do_not_require_local_routes() {
     assert!(!runtime_supports_current_routes_for_hot_reload(
         &config, &enabled
     ));
+}
+
+#[test]
+fn default_config_exposes_a_native_renderer_catalog() {
+    let catalog = renderer_model_catalog_value(
+        &CodeyConfig::default(),
+        &model_catalog::ModelSelectionState {
+            third_party_models: vec!["org/model-a".into()],
+            default_model: "org/model-a".into(),
+            ..Default::default()
+        },
+    );
+    assert_eq!(catalog["native_selection_only"], json!(true));
+    assert_eq!(catalog["models"], json!(["org/model-a"]));
+    assert!(catalog["model_metadata"][0].get("provider_id").is_none());
 }
 
 #[test]
@@ -898,10 +911,6 @@ experimental_bearer_token = "fresh-key"
 
     assert_eq!(synced.settings_revision, 8);
     assert_eq!(synced.upstream_models_by_provider[&list_key], ["new-model"]);
-    assert!(
-        matching_current_provider_profile(&synced).is_some(),
-        "sync should upsert a compatibility profile for the current provider"
-    );
     assert_eq!(synced.default_model, "relay/old-model");
 }
 
@@ -1139,6 +1148,7 @@ fn renderer_catalog_routes_every_model_through_the_codey_router_carrier() {
     relay.normalize();
 
     let mut config = CodeyConfig {
+        local_router_enabled: true,
         active_profile_id: official.id.clone(),
         profiles: vec![official, relay],
         official_account_available_this_launch: true,
@@ -1228,6 +1238,7 @@ fn renderer_catalog_keeps_multi_segment_models_from_a_non_current_route() {
     tokenrouter.short_name = "tokenrouter".into();
 
     let config = CodeyConfig {
+        local_router_enabled: true,
         active_profile_id: active.id.clone(),
         profiles: vec![active, tokenrouter],
         selected_models_by_provider: BTreeMap::from([
@@ -1361,6 +1372,7 @@ fn websocket_model_changes_hot_reload_with_capabilities_pending_restart() {
     route.supports_websockets = true;
     route.normalize();
     let mut applied = CodeyConfig {
+        local_router_enabled: true,
         active_profile_id: route.id.clone(),
         profiles: vec![route],
         ..CodeyConfig::default()
@@ -1403,6 +1415,7 @@ fn websocket_switch_changes_require_restart_and_stop_hot_reload() {
     route.api_key = "route-a-secret".into();
     route.normalize();
     let mut applied = CodeyConfig {
+        local_router_enabled: true,
         active_profile_id: route.id.clone(),
         profiles: vec![route],
         ..CodeyConfig::default()
@@ -1446,6 +1459,7 @@ fn native_web_search_models_hot_reload_but_capability_switch_requires_restart() 
     route.api_key = "route-search-secret".into();
     route.normalize();
     let mut applied = CodeyConfig {
+        local_router_enabled: true,
         active_profile_id: route.id.clone(),
         profiles: vec![route],
         ..CodeyConfig::default()
@@ -1494,6 +1508,7 @@ fn remote_compaction_identity_changes_require_restart_and_stop_hot_reload() {
     route.api_key = "route-a-secret".into();
     route.normalize();
     let applied = CodeyConfig {
+        local_router_enabled: true,
         active_profile_id: route.id.clone(),
         profiles: vec![route],
         ..CodeyConfig::default()
@@ -1522,6 +1537,7 @@ fn official_websocket_transport_is_automatic_and_login_scoped() {
     official.normalize();
 
     let mut available = CodeyConfig {
+        local_router_enabled: true,
         active_profile_id: official.id.clone(),
         profiles: vec![official],
         official_account_available_this_launch: true,

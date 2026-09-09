@@ -83,7 +83,6 @@ pub async fn save_official_route_models(
     validate_requested_model_list_bounds("官方模型", &requested_models)?;
     let _config_write_guard = state.config_write_lock.lock().await;
     let mut config = state.config.read().await.clone();
-    ensure_local_route_config_writable(&config)?;
     let route_id = route_id.trim();
     let profile_index = config
         .profiles

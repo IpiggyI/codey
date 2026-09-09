@@ -14,19 +14,27 @@ async fn model_save_routes_accept_missing_or_null_ids_without_weakening_required
         }),
         ..AppState::default()
     });
-    for (command, payload, expected_message) in [
+    for (command, payload, omitted_route_message, null_route_message, missing_route_message) in [
         (
             "save_selected_models",
             json!({ "officialModels": [], "thirdPartyModels": ["model-a"] }),
+            "当前没有可用的 provider 模型清单",
+            "当前没有可用的 provider 模型清单",
             "找不到要配置模型的线路",
         ),
         (
             "save_default_model",
             json!({ "model": "model-a" }),
-            "找不到要设置默认模型的线路",
+            "模型 model-a 当前不可用，无法设为默认",
+            "参数 routeId 无效：invalid type: null, expected a string",
+            "模型 model-a 当前不可用，无法设为默认",
         ),
     ] {
-        for route_id in [None, Some(Value::Null), Some(json!("missing-route"))] {
+        for (route_id, expected_message) in [
+            (None, omitted_route_message),
+            (Some(Value::Null), null_route_message),
+            (Some(json!("missing-route")), missing_route_message),
+        ] {
             let mut args = payload.clone();
             if let Some(route_id) = route_id {
                 args["routeId"] = route_id;
@@ -56,7 +64,7 @@ async fn model_save_routes_accept_missing_or_null_ids_without_weakening_required
         json!({ "routeId": null, "expectedRevision": 0 }),
     )
     .await;
-    assert_eq!(result["message"], "缺少参数：routeId");
+    assert_eq!(result["message"], "未知 Codey API 命令：delete_route");
 }
 
 #[tokio::test]
@@ -567,22 +575,21 @@ async fn disabled_local_router_keeps_route_config_read_only_without_blocking_oth
 
     let mut route_edit = saved.clone();
     route_edit.active_profile_id = "must-not-persist".to_string();
-    let error =
-        match save_codey_config_locked(&state, CodeyConfigSaveInput::complete(route_edit)).await {
-            Ok(_) => panic!("read-only route edit unexpectedly succeeded"),
-            Err(error) => error,
-        };
-    assert!(error.contains("只读"));
-    assert_eq!(*state.config.read().await, saved);
-    assert_eq!(state.store.load().unwrap(), saved);
+    save_codey_config_locked(&state, CodeyConfigSaveInput::complete(route_edit))
+        .await
+        .unwrap();
+    let after_route_edit = state.config.read().await.clone();
+    assert_eq!(after_route_edit.active_profile_id, saved.active_profile_id);
+    assert!(!after_route_edit.local_router_enabled);
+    assert_eq!(state.store.load().unwrap(), after_route_edit);
 
-    let mut reenabled = saved.clone();
+    let mut reenabled = after_route_edit.clone();
     reenabled.local_router_enabled = true;
     save_codey_config_locked(&state, CodeyConfigSaveInput::complete(reenabled))
         .await
         .unwrap();
     let reenabled = state.config.read().await.clone();
-    assert!(reenabled.local_router_enabled);
+    assert!(!reenabled.local_router_enabled);
     assert_eq!(reenabled.profiles[0].name, saved.profiles[0].name);
     assert_eq!(state.store.load().unwrap(), reenabled);
 }
@@ -649,7 +656,7 @@ async fn native_model_cache_without_saved_route_does_not_block_settings_or_reena
             .await
             .unwrap();
         let reenabled = state.config.read().await.clone();
-        assert!(reenabled.local_router_enabled);
+        assert!(!reenabled.local_router_enabled);
         assert_eq!(reenabled.profiles, initial.profiles);
         assert_eq!(state.store.load().unwrap(), reenabled);
     }
@@ -844,17 +851,11 @@ async fn custom_role_matrix_persists_official_models_for_the_current_provider() 
     let saved = state.config.read().await.clone();
     assert_eq!(
         saved.subagent_roles["codey_quick_scan"],
-        SubagentRoleConfig::new(
-            crate::model_id::model_alias("relay", "gpt-5.6-luna"),
-            "low",
-        )
+        SubagentRoleConfig::new("gpt-5.6-luna", "low")
     );
     assert_eq!(
         saved.subagent_roles["codey_worker"],
-        SubagentRoleConfig::new(
-            crate::model_id::model_alias("relay", "gpt-5.6-terra"),
-            "max",
-        )
+        SubagentRoleConfig::new("gpt-5.6-terra", "max")
     );
     assert_eq!(
         saved.declared_official_models_by_provider[&list_key],

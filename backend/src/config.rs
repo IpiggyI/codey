@@ -571,10 +571,9 @@ impl RouteRequestLogConfig {
 pub struct CodeyConfig {
     #[serde(default)]
     pub settings_revision: u64,
-    /// Controls whether Codey installs and uses its process-local multi-route
-    /// gateway. Missing values default to enabled so existing installations
-    /// keep their current behavior after upgrading.
-    #[serde(default = "default_true")]
+    /// Retained from upstream as a catalog/API branch flag. This fork deleted
+    /// the in-process gateway; missing values and loaded configs stay disabled.
+    #[serde(default)]
     pub local_router_enabled: bool,
     /// Structured, best-effort request observations for the built-in router.
     /// Disabled by default so existing installations pay no producer cost.
@@ -665,8 +664,8 @@ pub struct CodeyConfig {
     /// renderer. Opt-in so the native warning remains visible by default.
     #[serde(default)]
     pub hide_full_access_warning: bool,
-    /// Shows the current ChatGPT account rate-limit windows in the Codex
-    /// header when auth.json has a usable ChatGPT login.
+    /// Shows the current ChatGPT account rate-limit windows beside the Codex
+    /// composer when auth.json has a usable ChatGPT login.
     #[serde(default = "default_true")]
     pub show_account_usage_in_header: bool,
     /// Launch-scoped authentication capability captured from Codex before
@@ -728,7 +727,7 @@ impl Default for CodeyConfig {
         let profile = ProviderProfile::new("默认配置");
         Self {
             settings_revision: 0,
-            local_router_enabled: true,
+            local_router_enabled: false,
             route_request_log: RouteRequestLogConfig::default(),
             active_profile_id: profile.id.clone(),
             profiles: vec![profile],
@@ -972,6 +971,11 @@ impl CodeyConfig {
     }
 
     pub fn current_provider_id(&self) -> Option<&str> {
+        if !self.local_router_enabled {
+            if let Some(snapshot) = &self.current_provider_snapshot {
+                return Some(snapshot.id.as_str());
+            }
+        }
         self.profiles
             .iter()
             .find(|profile| profile.id == self.active_profile_id)
@@ -2039,7 +2043,8 @@ impl ConfigStore {
     }
 
     pub fn save(&self, config: &CodeyConfig) -> Result<()> {
-        let config = config.clone().normalize();
+        let mut config = config.clone().normalize();
+        config.local_router_enabled = false;
         let bytes = serde_json::to_vec_pretty(&config)?;
         self.rotate_backups_best_effort(&bytes);
         crate::fs_util::atomic_write_private_with_parent(&self.path, &bytes)
@@ -2105,9 +2110,11 @@ fn read_config_file(path: &Path) -> Result<CodeyConfig> {
 fn parse_config_contents(contents: &str, path: &Path) -> Result<CodeyConfig> {
     // `normalize` marks non-empty legacy configs as imported, so the previous
     // explicit marker probe (a second full JSON parse) was redundant.
-    let config = serde_json::from_str::<CodeyConfig>(contents)
-        .with_context(|| format!("解析 Codey 配置失败：{}", path.display()))?;
-    Ok(config.normalize())
+    let mut config = serde_json::from_str::<CodeyConfig>(contents)
+        .with_context(|| format!("解析 Codey 配置失败：{}", path.display()))?
+        .normalize();
+    config.local_router_enabled = false;
+    Ok(config)
 }
 
 #[cfg(test)]
@@ -3252,22 +3259,50 @@ mod tests {
     }
 
     #[test]
-    fn local_router_defaults_to_enabled_for_existing_configs() {
+    fn local_router_defaults_to_disabled_for_existing_configs() {
         let legacy = serde_json::from_str::<CodeyConfig>(r#"{"activeProfileId":"","profiles":[]}"#)
             .unwrap()
             .normalize();
+        let stored_enabled = serde_json::from_str::<CodeyConfig>(
+            r#"{"activeProfileId":"","profiles":[],"localRouterEnabled":true}"#,
+        )
+        .unwrap()
+        .normalize();
         let disabled = serde_json::from_str::<CodeyConfig>(
             r#"{"activeProfileId":"","profiles":[],"localRouterEnabled":false}"#,
         )
         .unwrap()
         .normalize();
 
-        assert!(legacy.local_router_enabled);
+        assert!(!legacy.local_router_enabled);
+        assert!(stored_enabled.local_router_enabled);
         assert!(!disabled.local_router_enabled);
         assert_eq!(
             serde_json::to_value(disabled).unwrap()["localRouterEnabled"],
             serde_json::json!(false)
         );
+    }
+
+    #[test]
+    fn loading_and_saving_config_clears_a_persisted_local_router_flag() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path().join("config.json"));
+        let mut enabled = CodeyConfig::default();
+        enabled.local_router_enabled = true;
+        fs::write(
+            store.path(),
+            serde_json::to_vec(&enabled).unwrap(),
+        )
+        .unwrap();
+
+        let loaded = store.load().unwrap();
+        assert!(!loaded.local_router_enabled);
+
+        store.save(&enabled).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(saved["localRouterEnabled"], serde_json::json!(false));
+        assert!(!store.load().unwrap().local_router_enabled);
     }
 
     #[test]

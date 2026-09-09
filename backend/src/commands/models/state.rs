@@ -5,6 +5,7 @@ pub(crate) fn provider_route_requires_restart(
     current: &CodeyConfig,
 ) -> bool {
     applied.local_router_enabled != current.local_router_enabled
+        || applied.current_provider_snapshot != current.current_provider_snapshot
         || provider_route_snapshots(applied) != provider_route_snapshots(current)
         || websocket_transport_requires_restart(applied, current)
         || native_web_search_capability_requires_restart(applied, current)
