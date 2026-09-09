@@ -40,6 +40,20 @@ pub(super) struct CodexAppVersionCache {
     checked_at: Instant,
 }
 
+#[cfg(test)]
+impl CodexAppVersionCache {
+    pub(super) fn primed(configured_app_path: String) -> Self {
+        let now = Instant::now();
+        Self {
+            runtime_app_path: None,
+            configured_app_path,
+            version: String::new(),
+            lookup_started_at: now,
+            checked_at: now,
+        }
+    }
+}
+
 fn runtime_feature_status_value(
     fast_context_tools_active: bool,
     subagent_optimization_active: bool,
