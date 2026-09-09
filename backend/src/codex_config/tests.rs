@@ -62,7 +62,10 @@ impl Drop for RestoreConfigWritable<'_> {
             #[cfg(unix)]
             permissions.set_mode(permissions.mode() | 0o200);
             #[cfg(not(unix))]
-            permissions.set_readonly(false);
+            {
+                #[allow(clippy::permissions_set_readonly_false)]
+                permissions.set_readonly(false);
+            }
             let _ = fs::set_permissions(self.0, permissions);
         }
     }
