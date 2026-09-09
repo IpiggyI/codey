@@ -89,20 +89,21 @@ const createEnvironment = (options = {}) => {
   accessButton.textContent = "完全访问";
   accessButton.setAttribute("aria-label", "完全访问");
   const modelButton = new FakeElement("button", {
-    rect: { bottom: 300, height: 28, left: 210, right: 320, top: 272, width: 110 },
+    rect: { bottom: 300, height: 28, left: 760, right: 880, top: 272, width: 120 },
   });
-  modelButton.textContent = "6 Astra 高";
-  modelButton.setAttribute("aria-label", "model");
+  const modelLabel = options.modelLabel ?? "6 Astra 高";
+  modelButton.textContent = modelLabel;
+  modelButton.setAttribute("aria-label", options.modelAriaLabel ?? "model");
   const contextWrap = new FakeElement("span");
   const contextRing = new FakeElement("span", {
-    rect: { bottom: 296, height: 18, left: 330, right: 348, top: 278, width: 18 },
+    rect: { bottom: 296, height: 18, left: 890, right: 908, top: 278, width: 18 },
   });
   contextRing.setAttribute("role", "img");
   contextRing.setAttribute("aria-label", "上下文 10%");
   contextWrap.appendChild(contextRing);
   toolbar.appendChild(accessButton);
   toolbar.appendChild(modelButton);
-  toolbar.appendChild(contextWrap);
+  if (!options.omitContext) toolbar.appendChild(contextWrap);
   scope.appendChild(anchor);
   scope.appendChild(textarea);
   scope.appendChild(toolbar);
@@ -172,6 +173,7 @@ const createEnvironment = (options = {}) => {
     documentElement,
     visibilityState: "visible",
     createElement: (tagName) => new FakeElement(tagName),
+    createElementNS: (_ns, tagName) => new FakeElement(tagName),
     getElementById: (id) => findById(documentElement, id) || findById(body, id),
     querySelector: (selector) => queryAll(selector)[0] || null,
     querySelectorAll: queryAll,
@@ -193,15 +195,25 @@ const createEnvironment = (options = {}) => {
     __codeySessionToolsInjectLoaded: true,
     __codeyLoadSessionTools: async () => true,
     __codeyReadAccountRateLimits: async () => appServerUsageResult,
-    __codeyLoadCodexSessionController: async () => ({
-      kind: "manager",
-      manager: {
-        addNotificationCallback: (callback) => {
-          notificationCallbacks.push(callback);
-          return () => {};
-        },
-      },
-    }),
+    __codeyLoadCodexSessionController: async () => (
+      options.loadSessionController
+        ? options.loadSessionController()
+        : {
+          kind: "manager",
+          manager: {
+            addNotificationCallback: (methodOrCallback, maybeCallback) => {
+              const callback = typeof methodOrCallback === "function"
+                ? methodOrCallback
+                : maybeCallback;
+              notificationCallbacks.push({
+                methods: typeof methodOrCallback === "function" ? null : methodOrCallback,
+                callback,
+              });
+              return () => {};
+            },
+          },
+        }
+    ),
     addEventListener(type, handler) {
       const handlers = windowListeners.get(type) || [];
       handlers.push(handler);
@@ -239,6 +251,15 @@ const createEnvironment = (options = {}) => {
     if (path === "/account/usage") return accountUsageResult;
     return {};
   };
+  if (options.fiberRequestClient) {
+    textarea["__reactFiber$test"] = {
+      memoizedState: {
+        memoizedState: { requestClient: options.fiberRequestClient },
+        next: null,
+      },
+      return: null,
+    };
+  }
   vm.runInContext(source, vm.createContext(sandbox));
 
   return {
@@ -250,6 +271,7 @@ const createEnvironment = (options = {}) => {
     contextWrap,
     modelButton,
     notificationCallbacks,
+    textarea,
     toolbar,
     getElementById: (id) => findById(documentElement, id) || findById(body, id),
     setAccountUsage: (next) => {
@@ -341,7 +363,7 @@ test("credits chip prefers the 5-hour window and keeps the 7-day tile", async ()
   const credits = env.getElementById("codey-account-credits");
   const popover = env.getElementById("codey-account-credits-popover");
   assert.equal(credits.style.display, "inline-flex");
-  assert.match(credits.getAttribute("aria-label"), /5 小时额度剩余 85%/);
+  assert.match(credits.getAttribute("aria-label"), /5 小时额度 85%/);
   assert.match(popover.innerHTML, /5 小时额度/);
   assert.match(popover.innerHTML, /7 天额度/);
   assert.doesNotMatch(popover.innerHTML, /周额度/);
@@ -391,4 +413,262 @@ test("hover opens the credits popover", async () => {
   credits.dispatchEvent({ type: "pointerenter" });
   assert.equal(popover.hidden, false);
   assert.equal(credits.getAttribute("aria-expanded"), "true");
+});
+
+test("credits chip stays transparent until hover and uses an svg ring", async () => {
+  const env = createEnvironment();
+  await flush();
+  await env.refreshCredits();
+  const style = env.getElementById("codey-composer-usage-style");
+  assert.match(style.textContent, /background:\s*transparent/);
+  assert.match(style.textContent, /rgba\(127, 127, 127, 0\.08\)/);
+  assert.doesNotMatch(style.textContent, /conic-gradient/);
+  const credits = env.getElementById("codey-account-credits");
+  const ring = credits.querySelector("[data-codey-credits-ring]");
+  assert.equal(ring?.children[0]?.tagName, "SVG");
+  assert.equal(ring?.children[0]?.children.length, 2);
+  const popover = env.getElementById("codey-account-credits-popover");
+  assert.match(String(popover.style.backgroundImage), /radial-gradient/);
+  assert.equal(popover.style.borderRadius, "14px");
+});
+
+test("does not register the usage listener as a method after a filtered subscribe succeeds", async () => {
+  const methodKinds = [];
+  const requestClientCallbacks = [];
+  const env = createEnvironment({
+    loadSessionController: async () => ({
+      kind: "manager",
+      manager: {
+        addNotificationCallback: () => () => {},
+        requestClient: {
+          addNotificationCallback: (methodOrCallback, maybeCallback) => {
+            methodKinds.push(typeof methodOrCallback);
+            if (typeof methodOrCallback === "function") return () => {};
+            requestClientCallbacks.push({
+              methods: methodOrCallback,
+              callback: maybeCallback,
+            });
+            return () => {};
+          },
+        },
+      },
+    }),
+  });
+  await flush();
+  assert.ok(!methodKinds.includes("function"));
+  assert.ok(requestClientCallbacks.length >= 1);
+  requestClientCallbacks[0].callback(tokenUsageMessage());
+  const usage = env.getElementById("codey-thread-usage");
+  assert.equal(usage.style.display, "inline-flex");
+  assert.equal(usage.textContent, "CH 99.6%");
+});
+
+test("shows CH from the composer requestClient when the session manager stays silent", async () => {
+  const requestClientCallbacks = [];
+  const env = createEnvironment({
+    loadSessionController: async () => ({
+      kind: "manager",
+      manager: {
+        addNotificationCallback: () => () => {},
+        requestClient: {
+          addNotificationCallback: (methodOrCallback, maybeCallback) => {
+            const callback = typeof methodOrCallback === "function"
+              ? methodOrCallback
+              : maybeCallback;
+            requestClientCallbacks.push({
+              methods: typeof methodOrCallback === "function" ? null : methodOrCallback,
+              callback,
+            });
+            return () => {};
+          },
+        },
+      },
+    }),
+  });
+  await flush();
+  assert.ok(requestClientCallbacks.length >= 1);
+  requestClientCallbacks[0].callback(tokenUsageMessage());
+  const usage = env.getElementById("codey-thread-usage");
+  assert.equal(usage.style.display, "inline-flex");
+  assert.equal(usage.textContent, "CH 99.6%");
+});
+
+test("shows CH from a composer fiber requestClient when the session manager stays silent", async () => {
+  const fiberCallbacks = [];
+  const env = createEnvironment({
+    loadSessionController: async () => ({
+      kind: "manager",
+      manager: {
+        addNotificationCallback: () => () => {},
+      },
+    }),
+    fiberRequestClient: {
+      addNotificationCallback: (methodOrCallback, maybeCallback) => {
+        const callback = typeof methodOrCallback === "function"
+          ? methodOrCallback
+          : maybeCallback;
+        fiberCallbacks.push({
+          methods: typeof methodOrCallback === "function" ? null : methodOrCallback,
+          callback,
+        });
+        return () => {};
+      },
+    },
+  });
+  await flush();
+  assert.ok(fiberCallbacks.length >= 1);
+  fiberCallbacks[0].callback(tokenUsageMessage());
+  const usage = env.getElementById("codey-thread-usage");
+  assert.equal(usage.style.display, "inline-flex");
+  assert.equal(usage.textContent, "CH 99.6%");
+});
+
+test("binds a composer fiber requestClient that appears after the session manager subscription", async () => {
+  const fiberCallbacks = [];
+  const env = createEnvironment({
+    loadSessionController: async () => ({
+      kind: "manager",
+      manager: {
+        addNotificationCallback: () => () => {},
+      },
+    }),
+  });
+  await flush();
+  assert.equal(env.getElementById("codey-thread-usage").style.display, "none");
+  env.textarea["__reactFiber$test"] = {
+    memoizedState: {
+      memoizedState: {
+        requestClient: {
+          addNotificationCallback: (methodOrCallback, maybeCallback) => {
+            const callback = typeof methodOrCallback === "function"
+              ? methodOrCallback
+              : maybeCallback;
+            fiberCallbacks.push({
+              methods: typeof methodOrCallback === "function" ? null : methodOrCallback,
+              callback,
+            });
+            return () => {};
+          },
+        },
+      },
+      next: null,
+    },
+    return: null,
+  };
+  env.window.__codeyComposerUsage.scan();
+  await flush();
+  assert.ok(fiberCallbacks.length >= 1);
+  fiberCallbacks[0].callback(tokenUsageMessage());
+  const usage = env.getElementById("codey-thread-usage");
+  assert.equal(usage.style.display, "inline-flex");
+  assert.equal(usage.textContent, "CH 99.6%");
+});
+
+test("subscribes to thread/tokenUsage/updated on the session manager", async () => {
+  const env = createEnvironment();
+  await flush();
+  assert.ok(env.notificationCallbacks.length >= 1);
+  assert.ok(env.notificationCallbacks.some((entry) => (
+    entry.methods === "thread/tokenUsage/updated"
+    || JSON.stringify(entry.methods) === JSON.stringify(["thread/tokenUsage/updated"])
+  )));
+  env.notificationCallbacks[0].callback(tokenUsageMessage());
+  const usage = env.getElementById("codey-thread-usage");
+  assert.equal(usage.style.display, "inline-flex");
+  assert.equal(usage.textContent, "CH 99.6%");
+});
+
+test("matches a local: composer conversation id to the native thread id", async () => {
+  const env = createEnvironment({ conversationId: "local:thread-1" });
+  await flush();
+  env.emitNotification(tokenUsageMessage("thread-1"));
+  const usage = env.getElementById("codey-thread-usage");
+  assert.equal(usage.style.display, "inline-flex");
+  assert.equal(usage.textContent, "CH 99.6%");
+});
+
+test("parses snake_case token usage fields into the CH chip", async () => {
+  const env = createEnvironment();
+  await flush();
+  env.emitNotification({
+    method: "thread/tokenUsage/updated",
+    params: {
+      thread_id: "thread-1",
+      token_usage: {
+        model_context_window: 353_400,
+        last: {
+          input_tokens: 1_000,
+          cached_input_tokens: 996,
+          total_tokens: 2_000,
+        },
+      },
+    },
+  });
+  const usage = env.getElementById("codey-thread-usage");
+  assert.equal(usage.style.display, "inline-flex");
+  assert.equal(usage.textContent, "CH 99.6%");
+});
+
+test("retries usage subscription after the session manager is late", async () => {
+  let managerReady = false;
+  const env = createEnvironment({
+    loadSessionController: async () => {
+      if (!managerReady) return { kind: "signals" };
+      return {
+        kind: "manager",
+        manager: {
+          addNotificationCallback: (methodOrCallback, maybeCallback) => {
+            const callback = typeof methodOrCallback === "function"
+              ? methodOrCallback
+              : maybeCallback;
+            env.notificationCallbacks.push({
+              methods: typeof methodOrCallback === "function" ? null : methodOrCallback,
+              callback,
+            });
+            return () => {};
+          },
+        },
+      };
+    },
+  });
+  await flush();
+  assert.equal(env.notificationCallbacks.length, 0);
+  assert.equal(env.snapshot().subscribed, false);
+  managerReady = true;
+  env.window.__codeyComposerUsage.scan();
+  await flush();
+  assert.ok(env.notificationCallbacks.length >= 1);
+  assert.equal(env.snapshot().subscribed, true);
+  env.notificationCallbacks[0].callback(tokenUsageMessage());
+  const usage = env.getElementById("codey-thread-usage");
+  assert.equal(usage.style.display, "inline-flex");
+  assert.equal(usage.textContent, "CH 99.6%");
+});
+
+test("places the usage chip before a model picker that only shows the model name", async () => {
+  const env = createEnvironment({
+    omitContext: true,
+    modelLabel: "Grok 4.6 高",
+    modelAriaLabel: "Grok 4.6 高",
+  });
+  await flush();
+  env.emitNotification(tokenUsageMessage());
+  const usage = env.getElementById("codey-thread-usage");
+  assert.equal(usage.style.display, "inline-flex");
+  assert.equal(usage.parentElement, env.toolbar);
+  assert.equal(usage.nextElementSibling, env.modelButton);
+});
+
+test("places the usage chip before a Luna light model picker", async () => {
+  const env = createEnvironment({
+    omitContext: true,
+    modelLabel: "5.6 Luna 轻度",
+    modelAriaLabel: "5.6 Luna 轻度",
+  });
+  await flush();
+  env.emitNotification(tokenUsageMessage());
+  const usage = env.getElementById("codey-thread-usage");
+  assert.equal(usage.style.display, "inline-flex");
+  assert.equal(usage.parentElement, env.toolbar);
+  assert.equal(usage.nextElementSibling, env.modelButton);
 });

@@ -23,3 +23,7 @@ The five canonical triage roles map 1:1 onto tracker labels of the same name. Se
 ### Domain docs
 
 single-context. See `docs/agents/domain.md`.
+
+### Windows pack
+
+To build a Windows installer for local testing, run only `scripts/build-windows.sh` (same as `pnpm run build:windows`). Do not compile from `\\wsl.localhost`, do not push a tag or dispatch Actions to package uncommitted work, and do not install the package. See `docs/agents/windows-pack.md`.

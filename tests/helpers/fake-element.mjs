@@ -31,6 +31,12 @@ export class FakeElementCore {
     return index >= 0 ? this.parentElement.children[index + 1] || null : null;
   }
 
+  get previousElementSibling() {
+    if (!this.parentElement) return null;
+    const index = this.parentElement.children.indexOf(this);
+    return index > 0 ? this.parentElement.children[index - 1] : null;
+  }
+
   addEventListener(type, handler) {
     if (typeof handler !== "function") return;
     const handlers = this.listeners.get(type) || [];
@@ -59,6 +65,16 @@ export class FakeElementCore {
     child.isConnected = true;
     this.children.push(child);
     return child;
+  }
+
+  append(...nodes) {
+    for (const node of nodes) this.appendChild(node);
+    return this;
+  }
+
+  replaceChildren(...nodes) {
+    for (const child of [...this.children]) child.remove();
+    for (const node of nodes) this.appendChild(node);
   }
 
   insertBefore(child, reference) {

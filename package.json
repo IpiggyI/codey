@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "build": "node scripts/build.mjs",
+    "build:windows": "bash scripts/build-windows.sh",
     "check": "node --check backend/src/codex_startup_patch.js && tsc --noEmit",
     "release": "node scripts/release.mjs",
     "test:js": "node --test tests/*.test.mjs",

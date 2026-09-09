@@ -1,6 +1,10 @@
 // Composer chips for thread usage and ChatGPT account credits.
 // Token counts come from Codex `thread/tokenUsage/updated`. Account credits
 // stay on `/account/usage` with `account/rateLimits/read` as fallback.
+// Subscribe on AppServerManager, its requestClient, and the composer fiber
+// requestClient. Copy host chip chrome and the SVG ring only. Keep Codey's
+// product contract: 5h/7d labels, plan + Credits balance, CH → context% → 用量,
+// hide usage until token data, and never invent unit prices.
 (() => {
   const moduleLoaded = window.__codeyComposerUsageModuleLoaded === true;
   window.__codeyComposerUsageModuleLoaded = true;
@@ -52,6 +56,9 @@
   let unsubscribeMutations = null;
   let unsubscribeNotifications = null;
   let notificationSubscribePromise = null;
+  let sessionManagerBound = false;
+  const boundNotificationTargets = new Set();
+  const notificationUnsubscribers = [];
 
   const publishInjectionStatus = (detail) => {
     const entry = window.__codeyInjectionStatus?.[injectionStatusId];
@@ -92,6 +99,20 @@
   const nonNegativeNumber = (value) =>
     typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 
+  const normalizeThreadId = (value) => {
+    const id = typeof value === "string" ? value.trim() : "";
+    return id ? id.replace(/^local:/, "") : "";
+  };
+
+  const pickNumber = (source, ...keys) => {
+    if (!isRecord(source)) return undefined;
+    for (const key of keys) {
+      const value = nonNegativeNumber(source[key]);
+      if (value !== undefined) return value;
+    }
+    return undefined;
+  };
+
   const escapeText = (value) => String(value ?? "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
@@ -126,6 +147,195 @@
     if (tone === "hot") return "#c45c4a";
     if (tone === "warn") return "#c9a227";
     return "#3d9a64";
+  };
+
+  const formatCreditsPercent = (value) => `${decimal(value, 1)}%`;
+
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const tokenUsageNotificationMethod = "thread/tokenUsage/updated";
+  const tokenUsageNotificationMethods = [tokenUsageNotificationMethod];
+  const tokenUsageFields = [
+    ["totalTokens", "total_tokens"],
+    ["inputTokens", "input_tokens"],
+    ["cachedInputTokens", "cached_input_tokens"],
+    ["cacheWriteInputTokens", "cache_write_input_tokens"],
+    ["outputTokens", "output_tokens"],
+    ["reasoningOutputTokens", "reasoning_output_tokens"],
+    ["totalCostUsd", "total_cost_usd"],
+    ["totalCredits", "total_credits"],
+    ["outputTokensPerSecond", "output_tokens_per_second"],
+  ];
+
+  const createUsageRing = (percent, options) => {
+    const size = options.size;
+    const strokeWidth = options.strokeWidth;
+    const color = options.color;
+    const trackColor = options.trackColor
+      ?? "color-mix(in srgb, currentColor 18%, transparent)";
+    const radius = (size - strokeWidth) / 2;
+    const circumference = 2 * Math.PI * radius;
+    const clamped = Math.min(100, Math.max(0, percent));
+    const offset = circumference * (1 - clamped / 100);
+    const center = size / 2;
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("width", String(size));
+    svg.setAttribute("height", String(size));
+    svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
+    svg.setAttribute("aria-hidden", "true");
+    svg.style.display = "block";
+    svg.style.flex = "0 0 auto";
+    svg.style.transform = "rotate(-90deg)";
+    const track = document.createElementNS(SVG_NS, "circle");
+    track.setAttribute("cx", String(center));
+    track.setAttribute("cy", String(center));
+    track.setAttribute("r", String(radius));
+    track.setAttribute("fill", "none");
+    track.setAttribute("stroke", trackColor);
+    track.setAttribute("stroke-width", String(strokeWidth));
+    const fill = document.createElementNS(SVG_NS, "circle");
+    fill.setAttribute("cx", String(center));
+    fill.setAttribute("cy", String(center));
+    fill.setAttribute("r", String(radius));
+    fill.setAttribute("fill", "none");
+    fill.setAttribute("stroke", color);
+    fill.setAttribute("stroke-width", String(strokeWidth));
+    fill.setAttribute("stroke-linecap", "round");
+    fill.setAttribute("stroke-dasharray", String(circumference));
+    fill.setAttribute("stroke-dashoffset", String(offset));
+    svg.append(track, fill);
+    return svg;
+  };
+
+  const applyPopoverChrome = (popover) => {
+    popover.style.border =
+      "1px solid light-dark(rgba(15, 23, 42, 0.10), color-mix(in srgb, CanvasText 16%, transparent))";
+    popover.style.borderRadius = "14px";
+    popover.style.backgroundColor =
+      "light-dark(Canvas, color-mix(in srgb, Canvas 88%, white 12%))";
+    popover.style.color = "CanvasText";
+    popover.style.boxShadow =
+      "light-dark(0 10px 24px rgba(15, 23, 42, 0.12), 0 20px 45px rgba(0, 0, 0, 0.42)), 0 2px 8px light-dark(rgba(15, 23, 42, 0.06), rgba(0, 0, 0, 0.28))";
+  };
+
+  const notificationRecord = (value) => {
+    if (!isRecord(value)) return null;
+    if (isRecord(value.notification)) return notificationRecord(value.notification);
+    if (typeof value.method === "string") return value;
+    if (
+      isRecord(value.params)
+      && (
+        isRecord(value.params.tokenUsage)
+        || isRecord(value.params.token_usage)
+        || value.params.threadId
+        || value.params.thread_id
+        || value.params.conversationId
+        || value.params.conversation_id
+      )
+    ) {
+      return { method: tokenUsageNotificationMethod, params: value.params };
+    }
+    if (
+      isRecord(value.tokenUsage)
+      || isRecord(value.token_usage)
+      || typeof value.threadId === "string"
+      || typeof value.thread_id === "string"
+      || typeof value.conversationId === "string"
+      || typeof value.conversation_id === "string"
+    ) {
+      return { method: tokenUsageNotificationMethod, params: value };
+    }
+    return null;
+  };
+
+  const bindNotificationCallback = (target, callback) => {
+    const add = target.addNotificationCallback.bind(target);
+    const unsubscribers = [];
+    const tryAdd = (...args) => {
+      try {
+        const unsubscribe = add(...args);
+        if (typeof unsubscribe === "function") unsubscribers.push(unsubscribe);
+        return typeof unsubscribe === "function";
+      } catch {
+        return false;
+      }
+    };
+    if (!tryAdd(tokenUsageNotificationMethod, callback)) {
+      tryAdd(tokenUsageNotificationMethods, callback);
+    }
+    if (!unsubscribers.length) tryAdd(callback);
+    if (!unsubscribers.length) return null;
+    return () => {
+      for (const unsubscribe of unsubscribers) unsubscribe();
+    };
+  };
+
+  const notificationTargetFromValue = (value) => {
+    if (isRecord(value) && typeof value.addNotificationCallback === "function") return value;
+    return isRecord(value?.requestClient)
+      && typeof value.requestClient.addNotificationCallback === "function"
+      ? value.requestClient
+      : null;
+  };
+
+  const collectManagerNotificationTargets = (controller) => {
+    if (controller?.kind !== "manager" || !isRecord(controller.manager)) return [];
+    const manager = controller.manager;
+    const targets = [];
+    const add = (candidate) => {
+      const target = notificationTargetFromValue(candidate);
+      if (target && !targets.includes(target)) targets.push(target);
+    };
+    add(manager);
+    add(manager.requestClient);
+    return targets;
+  };
+
+  const reactFiberName = (node) => {
+    if (!node) return "";
+    return Object.getOwnPropertyNames(node).find((key) => (
+      key.startsWith("__reactFiber$") || key.startsWith("__reactInternalInstance$")
+    )) || "";
+  };
+
+  const reactFiberFromNode = (node) => {
+    const name = reactFiberName(node);
+    if (!name) return null;
+    const fiber = Object.getOwnPropertyDescriptor(node, name)?.value;
+    return fiber && (typeof fiber === "object" || typeof fiber === "function") ? fiber : null;
+  };
+
+  const findComposerFiber = (element) => {
+    if (!element) return null;
+    const descendants = typeof element.querySelectorAll === "function"
+      ? [element, ...element.querySelectorAll("*")]
+      : [element];
+    for (const node of descendants) {
+      const fiber = reactFiberFromNode(node);
+      if (fiber) return fiber;
+    }
+    for (let ancestor = element.parentElement; ancestor; ancestor = ancestor.parentElement) {
+      const fiber = reactFiberFromNode(ancestor);
+      if (fiber) return fiber;
+    }
+    return null;
+  };
+
+  const collectFiberNotificationTargets = (element) => {
+    const targets = [];
+    let fiber = findComposerFiber(element);
+    for (let depth = 0; fiber && depth < 200; depth += 1) {
+      let hook = fiber.memoizedState;
+      for (let hookIndex = 0; hook && hookIndex < 100; hookIndex += 1) {
+        const target = notificationTargetFromValue(isRecord(hook) ? hook.memoizedState : null);
+        if (target && !targets.includes(target)) targets.push(target);
+        hook = isRecord(hook) && isRecord(hook.next) ? hook.next : null;
+      }
+      const parent = fiber.return;
+      fiber = parent && (typeof parent === "object" || typeof parent === "function")
+        ? parent
+        : null;
+    }
+    return targets;
   };
 
   const windowKind = (window) => {
@@ -191,35 +401,35 @@
 
   const addBreakdown = (target, source) => {
     if (!isRecord(source)) return;
-    for (const field of [
-      "totalTokens",
-      "inputTokens",
-      "cachedInputTokens",
-      "cacheWriteInputTokens",
-      "outputTokens",
-      "reasoningOutputTokens",
-      "totalCostUsd",
-      "totalCredits",
-      "outputTokensPerSecond",
-    ]) {
-      const value = nonNegativeNumber(source[field]);
-      if (value !== undefined) target[field] = value;
+    for (const [camel, snake] of tokenUsageFields) {
+      const value = pickNumber(source, camel, snake);
+      if (value !== undefined) target[camel] = value;
     }
   };
 
   const observeTokenUsage = (value) => {
-    if (!isRecord(value) || value.method !== "thread/tokenUsage/updated") return null;
-    const params = value.params;
+    const record = notificationRecord(value);
+    if (!record || record.method !== tokenUsageNotificationMethod) return null;
+    const params = record.params;
     if (!isRecord(params)) return null;
-    const threadId = typeof params.threadId === "string" ? params.threadId.trim() : "";
+    const threadId = normalizeThreadId(
+      [params.threadId, params.thread_id, params.conversationId, params.conversation_id]
+        .find((id) => typeof id === "string" && id.trim()),
+    );
     if (!threadId) return null;
-    const tokenUsage = params.tokenUsage;
+    const tokenUsage = isRecord(params.tokenUsage) ? params.tokenUsage : params.token_usage;
     if (!isRecord(tokenUsage)) return null;
     const usage = {};
     addBreakdown(usage, isRecord(tokenUsage.total) ? tokenUsage.total : undefined);
-    const last = isRecord(tokenUsage.last) ? tokenUsage.last : undefined;
-    const contextUsedTokens = nonNegativeNumber(last?.totalTokens);
-    const contextWindowTokens = nonNegativeNumber(tokenUsage.modelContextWindow);
+    const last = isRecord(tokenUsage.last)
+      ? tokenUsage.last
+      : isRecord(tokenUsage.last_turn) ? tokenUsage.last_turn : undefined;
+    const contextUsedTokens = pickNumber(last, "totalTokens", "total_tokens");
+    const contextWindowTokens = pickNumber(
+      tokenUsage,
+      "modelContextWindow",
+      "model_context_window",
+    );
     if (
       contextUsedTokens !== undefined
       && contextWindowTokens !== undefined
@@ -228,8 +438,8 @@
       usage.contextUsedTokens = contextUsedTokens;
       usage.contextWindowTokens = contextWindowTokens;
     }
-    const inputTokens = nonNegativeNumber(last?.inputTokens);
-    const cachedInputTokens = nonNegativeNumber(last?.cachedInputTokens);
+    const inputTokens = pickNumber(last, "inputTokens", "input_tokens");
+    const cachedInputTokens = pickNumber(last, "cachedInputTokens", "cached_input_tokens");
     if (inputTokens !== undefined && cachedInputTokens !== undefined && inputTokens > 0) {
       usage.cacheHitRatePercent = Math.min(100, (cachedInputTokens / inputTokens) * 100);
     }
@@ -274,72 +484,89 @@
     const style = document.createElement("style");
     style.id = styleId;
     style.textContent = `
-      #${usageRootId}, #${creditsRootId} {
+      .codey-trigger-chip {
         -webkit-app-region: no-drag !important;
         pointer-events: auto !important;
         display: none;
         flex: 0 0 auto;
         align-items: center;
-        gap: 5px;
+        align-self: center;
+        justify-content: center;
         box-sizing: border-box;
-        min-height: 26px;
-        height: 26px;
-        margin: 0 6px 0 0;
+        height: 28px;
+        margin: 0;
         padding: 0 8px;
         border: 0;
-        border-radius: 999px;
-        background: color-mix(in srgb, CanvasText 8%, Canvas);
-        color: CanvasText;
-        font: 12px/1 system-ui, -apple-system, "PingFang SC", "Segoe UI", sans-serif;
+        border-radius: 9999px;
+        background: transparent;
+        color: inherit;
+        white-space: nowrap;
+        font: 12px/16px system-ui, -apple-system, "PingFang SC", "Segoe UI", sans-serif;
+        font-variant-numeric: tabular-nums;
+        letter-spacing: 0;
         cursor: pointer;
         user-select: none;
+        vertical-align: middle;
       }
-      #${usageRootId}:hover, #${creditsRootId}:hover { background: color-mix(in srgb, CanvasText 14%, Canvas); }
-      #${usageRootId}[aria-expanded="true"], #${creditsRootId}[aria-expanded="true"] {
-        background: color-mix(in srgb, CanvasText 16%, Canvas);
+      .codey-trigger-chip:hover:not(:disabled) {
+        background: rgba(127, 127, 127, 0.08);
+      }
+      .codey-trigger-chip:active:not(:disabled) {
+        background: rgba(127, 127, 127, 0.16);
+      }
+      .codey-trigger-chip[data-state="open"] {
+        background: rgba(127, 127, 127, 0.08);
+      }
+      #${usageRootId} {
+        gap: 4px;
+        width: fit-content;
+        max-width: min(180px, 30vw);
+        color: var(--color-text-tertiary, #8f8f8f);
+      }
+      #${creditsRootId} {
+        gap: 5px;
+        width: fit-content;
+        max-width: min(72px, 18vw);
       }
       #${creditsRootId} [data-codey-credits-ring] {
-        display: block;
-        width: 12px;
-        height: 12px;
-        border-radius: 999px;
-        background: conic-gradient(var(--codey-credits-tone) calc(var(--codey-credits-remaining) * 1%), color-mix(in srgb, CanvasText 16%, transparent) 0);
-      }
-      #${usagePopoverId}, #${creditsPopoverId} {
-        position: fixed;
-        z-index: 2147483646;
-        box-sizing: border-box;
-        min-width: 220px;
-        max-width: 280px;
-        padding: 12px 14px 11px;
-        border: 1px solid color-mix(in srgb, CanvasText 12%, transparent);
-        border-radius: 12px;
-        background: Canvas;
-        color: CanvasText;
-        box-shadow: 0 10px 32px color-mix(in srgb, CanvasText 18%, transparent);
-        font: 12px/1.35 system-ui, -apple-system, "PingFang SC", "Segoe UI", sans-serif;
+        display: inline-flex;
+        flex: 0 0 auto;
       }
       #${usagePopoverId}[hidden], #${creditsPopoverId}[hidden] { display: none !important; }
       #${usagePopoverId} [data-codey-usage-title],
       #${creditsPopoverId} [data-codey-credits-title] { font-size: 12.5px; font-weight: 600; }
-      #${usagePopoverId} [data-codey-usage-row],
+      #${usagePopoverId} [data-codey-usage-title] { margin-bottom: 6px; }
+      #${creditsPopoverId} [data-codey-credits-header] { margin-bottom: 11px; }
+      #${usagePopoverId} [data-codey-usage-row] {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 20px;
+        padding: 4px 0;
+      }
       #${creditsPopoverId} [data-codey-credits-meta] {
         display: flex;
         gap: 12px;
-        align-items: baseline;
+        align-items: flex-start;
         justify-content: space-between;
-        margin-top: 7px;
+        margin-bottom: 5px;
       }
       #${usagePopoverId} [data-codey-usage-row] span:first-child,
       #${creditsPopoverId} [data-codey-credits-reset] {
-        color: color-mix(in srgb, CanvasText 62%, transparent);
+        color: color-mix(in srgb, currentColor 62%, transparent);
+      }
+      #${usagePopoverId} [data-codey-usage-row] span:first-child {
+        color: color-mix(in srgb, currentColor 68%, transparent);
       }
       #${usagePopoverId} [data-codey-usage-row] span:last-child {
         font-variant-numeric: tabular-nums;
-        font-weight: 600;
+        text-align: right;
         white-space: nowrap;
       }
       #${creditsPopoverId} [data-codey-credits-remaining] {
+        display: inline-flex;
+        align-items: baseline;
+        gap: 4px;
+        white-space: nowrap;
         font-size: 26px;
         font-weight: 700;
         font-variant-numeric: tabular-nums;
@@ -349,14 +576,12 @@
         font-size: 11px;
         font-weight: 600;
         opacity: .8;
-        margin-right: 4px;
       }
       #${creditsPopoverId} [data-codey-credits-bar] {
         height: 6px;
-        margin-top: 8px;
         overflow: hidden;
-        border-radius: 999px;
-        background: color-mix(in srgb, CanvasText 16%, transparent);
+        border-radius: 9999px;
+        background: color-mix(in srgb, currentColor 16%, transparent);
       }
       #${creditsPopoverId} [data-codey-credits-bar] > span {
         display: block;
@@ -365,7 +590,8 @@
         border-radius: inherit;
         background: var(--codey-credits-tone);
       }
-      #${creditsPopoverId} [data-codey-credits-tile] { margin-top: 11px; }
+      #${creditsPopoverId} [data-codey-credits-tile] { margin-bottom: 11px; }
+      #${creditsPopoverId} [data-codey-credits-tile]:last-of-type { margin-bottom: 0; }
       #${creditsPopoverId} [data-codey-credits-plan] {
         display: inline-block;
         margin-left: 6px;
@@ -481,16 +707,37 @@
     return best;
   };
 
+  const conversationIdFromNode = (node) => {
+    if (!node?.getAttribute) return "";
+    for (const name of [
+      "data-above-composer-conversation-id",
+      "data-conversation-id",
+      "data-thread-id",
+      "data-session-id",
+    ]) {
+      const id = normalizeThreadId(node.getAttribute(name));
+      if (id) return id;
+    }
+    return "";
+  };
+
   const findComposerConversationId = (element) => {
     if (!element) return null;
     for (const anchor of document.querySelectorAll(composerAnchorSelector)) {
       const scope = anchor.parentElement || anchor;
       if (scope === element || scope.contains?.(element)) {
-        const conversationId = anchor.getAttribute?.("data-above-composer-conversation-id");
-        return typeof conversationId === "string" && conversationId ? conversationId : null;
+        const conversationId = conversationIdFromNode(anchor);
+        if (conversationId) return conversationId;
       }
     }
-    return null;
+    for (let node = element; node; node = node.parentElement) {
+      const conversationId = conversationIdFromNode(node);
+      if (conversationId) return conversationId;
+    }
+    return normalizeThreadId(
+      document.querySelector?.('[data-app-action-sidebar-thread-active="true"]')
+        ?.getAttribute?.("data-app-action-sidebar-thread-id"),
+    ) || null;
   };
 
   const unwrapSingleton = (control) => {
@@ -506,14 +753,36 @@
 
   const modelControlScore = (control, inputRect) => {
     const rect = control.getBoundingClientRect();
+    if (rect.bottom <= inputRect.top) return Number.NEGATIVE_INFINITY;
     if (!controlIsNearInput(control, inputRect)) return Number.NEGATIVE_INFINITY;
     const descriptor = controlDescriptor(control);
+    const visibleText = [control.textContent, control.innerText]
+      .filter((value) => typeof value === "string" && value.trim())
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
     const hasModelHint = /(^|[^a-z])model([^a-z]|$)|模型/i.test(descriptor);
+    const hasModelValueHint =
+      /(^|[^a-z])(gpt|codex|claude|gemini|grok|llama|luna|qwen|deepseek|mistral|sonnet|opus|haiku|mini|sol|low|medium|high|xhigh|auto)([^a-z]|$)|\bo\d+\b|\d+(?:\.\d+)?|低|中|高|极高|轻|自动/i.test(
+        visibleText,
+      );
+    if (!hasModelHint && !hasModelValueHint) return Number.NEGATIVE_INFINITY;
     if (!hasModelHint && /完全访问|full access|附件|attach|上传|upload|优化/i.test(descriptor)) {
       return Number.NEGATIVE_INFINITY;
     }
-    if (!hasModelHint) return Number.NEGATIVE_INFINITY;
-    return 1_000_000 + Math.max(0, rect.right);
+    if (
+      !hasModelHint
+      && inputRect.width > 0
+      && rect.right < inputRect.left + inputRect.width * 0.45
+    ) {
+      return Number.NEGATIVE_INFINITY;
+    }
+    return (
+      (hasModelHint ? 1_000_000 : 0)
+      + (control.getAttribute?.("aria-haspopup") ? 100_000 : 0)
+      + Math.max(0, rect.right) * 10
+      + Math.min(rect.width, 500)
+    );
   };
 
   const findModelInsertionTarget = () => {
@@ -599,6 +868,7 @@
     const button = document.createElement("button");
     button.id = id;
     button.type = "button";
+    button.className = "codey-trigger-chip";
     button.setAttribute("aria-label", ariaLabel);
     button.setAttribute("aria-expanded", "false");
     button.setAttribute("aria-haspopup", "dialog");
@@ -611,6 +881,22 @@
     popover.setAttribute("role", "dialog");
     popover.setAttribute("aria-label", label);
     popover.hidden = true;
+    popover.style.position = "fixed";
+    popover.style.inset = "auto";
+    popover.style.boxSizing = "border-box";
+    popover.style.margin = "0";
+    popover.style.padding = "10px 12px";
+    popover.style.font = "13px/1.35 system-ui, -apple-system, \"PingFang SC\", \"Segoe UI\", sans-serif";
+    popover.style.letterSpacing = "0";
+    popover.style.zIndex = "2147483647";
+    if (id === usagePopoverId) {
+      popover.style.width = "260px";
+      popover.style.maxWidth = "min(320px, calc(100vw - 24px))";
+    } else {
+      popover.style.width = "240px";
+      popover.style.maxWidth = "min(280px, calc(100vw - 24px))";
+    }
+    applyPopoverChrome(popover);
     document.body.appendChild(popover);
     return popover;
   };
@@ -686,8 +972,15 @@
       const ring = document.createElement("span");
       ring.setAttribute("data-codey-credits-ring", "");
       ring.setAttribute("aria-hidden", "true");
+      ring.style.display = "inline-flex";
+      ring.style.flex = "0 0 auto";
       const label = document.createElement("span");
       label.setAttribute("data-codey-credits-label", "");
+      label.style.display = "inline-block";
+      label.style.maxWidth = "100%";
+      label.style.overflow = "hidden";
+      label.style.textOverflow = "ellipsis";
+      label.style.whiteSpace = "nowrap";
       creditsRoot.appendChild(ring);
       creditsRoot.appendChild(label);
       creditsPopover = createPopover(creditsPopoverId, "账号额度详情");
@@ -697,6 +990,10 @@
 
   const currentUsage = () => {
     const threadId = findComposerConversationId(inputElement);
+    if (threadId && usageByThread.has(threadId)) return usageByThread.get(threadId);
+    if (!threadId && usageByThread.size === 1) {
+      return usageByThread.values().next().value;
+    }
     return threadId ? usageByThread.get(threadId) || null : null;
   };
 
@@ -791,23 +1088,34 @@
     }
     const primary = windows[0];
     const remaining = remainingPercent(primary.window.usedPercent);
+    const percent = formatCreditsPercent(remaining);
     const tone = creditsTone(primary.window.usedPercent);
     const color = toneColor(tone);
     creditsRoot.style.setProperty("--codey-credits-remaining", String(remaining));
     creditsRoot.style.setProperty("--codey-credits-tone", color);
+    const ring = creditsRoot.querySelector?.("[data-codey-credits-ring]");
+    if (ring) {
+      ring.replaceChildren(createUsageRing(remaining, {
+        size: 14,
+        strokeWidth: 2.4,
+        color,
+      }));
+    }
     const label = creditsRoot.querySelector?.("[data-codey-credits-label]");
-    if (label) label.textContent = `${Math.round(remaining)}%`;
-    else creditsRoot.textContent = `${Math.round(remaining)}%`;
+    if (label) label.textContent = percent;
     creditsRoot.setAttribute(
       "aria-label",
-      `${windowLabel(primary.kind)}剩余 ${Math.round(remaining)}%`,
+      `${windowLabel(primary.kind)} ${percent}`,
     );
+    creditsRoot.title = `${windowLabel(primary.kind)} ${percent}`;
     creditsRoot.style.display = "inline-flex";
     const plan = planLabel(creditsResult.planType);
     const secondary = windows.slice(1);
     const balance = creditsBalanceLabel(creditsResult.credits);
     creditsPopover.style.setProperty("--codey-credits-remaining", String(remaining));
     creditsPopover.style.setProperty("--codey-credits-tone", color);
+    creditsPopover.style.backgroundImage =
+      `radial-gradient(160px 100px at 18% -10%, color-mix(in srgb, ${color} 20%, transparent), transparent 70%)`;
     creditsPopover.innerHTML = `
       <div data-codey-credits-header>
         <div data-codey-credits-meta>
@@ -819,12 +1127,14 @@
               ? `<div data-codey-credits-reset>${escapeText(resetTimeLabel(primary.window.resetsAt))}</div>`
               : ""}
           </div>
-          <div data-codey-credits-remaining><small>剩余</small>${Math.round(remaining)}%</div>
+          <div data-codey-credits-remaining><small>剩余</small>${escapeText(percent)}</div>
         </div>
         <div data-codey-credits-bar aria-hidden="true"><span></span></div>
       </div>
       ${secondary.map((entry) => {
         const secondaryRemaining = remainingPercent(entry.window.usedPercent);
+        const secondaryPercent = formatCreditsPercent(secondaryRemaining);
+        const secondaryColor = toneColor(creditsTone(entry.window.usedPercent));
         return `
           <div data-codey-credits-tile data-window="${entry.kind}">
             <div data-codey-credits-meta>
@@ -834,9 +1144,9 @@
                   ? `<div data-codey-credits-reset>${escapeText(resetTimeLabel(entry.window.resetsAt))}</div>`
                   : ""}
               </div>
-              <div>剩余 ${Math.round(secondaryRemaining)}%</div>
+              <div style="color:${secondaryColor};font-variant-numeric:tabular-nums">剩余 ${escapeText(secondaryPercent)}</div>
             </div>
-            <div data-codey-credits-bar aria-hidden="true" style="--codey-credits-remaining:${secondaryRemaining};--codey-credits-tone:${toneColor(creditsTone(entry.window.usedPercent))}"><span></span></div>
+            <div data-codey-credits-bar aria-hidden="true" style="--codey-credits-remaining:${secondaryRemaining};--codey-credits-tone:${secondaryColor}"><span></span></div>
           </div>
         `;
       }).join("")}
@@ -973,24 +1283,61 @@
     return true;
   };
 
-  const subscribeNotifications = async () => {
-    if (unsubscribeNotifications || notificationSubscribePromise) {
-      return notificationSubscribePromise;
+  const bindNotificationTargets = (targets) => {
+    for (const target of targets) {
+      if (boundNotificationTargets.has(target)) continue;
+      const unsubscribe = bindNotificationCallback(target, applyTokenUsage);
+      if (!unsubscribe) continue;
+      boundNotificationTargets.add(target);
+      notificationUnsubscribers.push(unsubscribe);
     }
+    if (!notificationUnsubscribers.length) return;
+    unsubscribeNotifications = () => {
+      for (const unsubscribe of notificationUnsubscribers.splice(0)) unsubscribe();
+      boundNotificationTargets.clear();
+      sessionManagerBound = false;
+    };
+  };
+
+  const collectPendingNotificationTargets = (controller) => {
+    const seen = new Set(boundNotificationTargets);
+    const targets = [];
+    const addTarget = (target) => {
+      if (!target || seen.has(target)) return;
+      seen.add(target);
+      targets.push(target);
+    };
+    const managerTargets = sessionManagerBound
+      ? []
+      : collectManagerNotificationTargets(controller);
+    for (const target of managerTargets) addTarget(target);
+    for (const target of collectFiberNotificationTargets(inputElement)) addTarget(target);
+    return { managerTargets, targets };
+  };
+
+  const subscribeNotifications = async () => {
+    if (notificationSubscribePromise) return notificationSubscribePromise;
     notificationSubscribePromise = (async () => {
-      if (typeof window.__codeyLoadSessionTools === "function") {
-        await window.__codeyLoadSessionTools();
+      try {
+        if (typeof window.__codeyLoadSessionTools === "function") {
+          await window.__codeyLoadSessionTools();
+        }
+        let controller = null;
+        if (typeof window.__codeyLoadCodexSessionController === "function") {
+          try {
+            controller = await window.__codeyLoadCodexSessionController();
+          } catch {
+            controller = null;
+          }
+        }
+        const { managerTargets, targets } = collectPendingNotificationTargets(controller);
+        bindNotificationTargets(targets);
+        if (managerTargets.some((target) => boundNotificationTargets.has(target))) {
+          sessionManagerBound = true;
+        }
+      } finally {
+        notificationSubscribePromise = null;
       }
-      if (typeof window.__codeyLoadCodexSessionController !== "function") return;
-      const controller = await window.__codeyLoadCodexSessionController();
-      if (controller?.kind !== "manager") return;
-      const notifications = typeof controller.manager?.addNotificationCallback === "function"
-        ? controller.manager
-        : controller.manager?.requestClient;
-      if (typeof notifications?.addNotificationCallback !== "function") return;
-      unsubscribeNotifications = notifications.addNotificationCallback((message) => {
-        applyTokenUsage(message);
-      });
     })().catch(() => {
       notificationSubscribePromise = null;
     });
@@ -1072,6 +1419,7 @@
       accountLabel,
       usageVisible: usageRoot?.style.display === "inline-flex",
       creditsVisible: creditsRoot?.style.display === "inline-flex",
+      subscribed: Boolean(unsubscribeNotifications),
       usageLabel: usageRoot?.textContent || "",
       creditsLabel: creditsRoot?.querySelector?.("[data-codey-credits-label]")?.textContent
         || creditsRoot?.textContent

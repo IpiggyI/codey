@@ -11,7 +11,7 @@
 - Codey 配置与 Codex 配置分开保存。用户 Codex 配置原则上只读，异常退出后只恢复 Codey 自有临时状态。
 - 无法确认线路、模型归属或兼容能力时应停止请求并给出错误，不猜测、不跨线路自动切换，也不重放可能已经送达的请求。
 - 账号额度摘要在 `/account/usage` 返回错误时回退到 `account/rateLimits/read`，仅使用顶层 `rateLimits`，不合并 `rateLimitsByLimitId` 中的模型专属额度。5 小时窗口是否显示取决于账号通用额度实际返回的窗口，不按套餐名称隐藏。输入栏额度芯片优先展示 5 小时窗剩余，否则展示 7 天窗；浮层同时列出两窗。
-- 对话用量订 Codex 页面里的 `thread/tokenUsage/updated`，按当前输入栏 conversation id 过滤。CH 用最近一轮 `cachedInputTokens / inputTokens`。费用和输出速度只在通知里带了对应字段时显示，不本地编造单价。
+- 对话用量订 Codex 页面里的 `thread/tokenUsage/updated`，按当前输入栏 conversation id 过滤；两侧都去掉 `local:` 前缀再比。订阅同时挂 AppServerManager、其 `requestClient`，以及输入栏 React fiber 上的 `requestClient`；不因管理器先挂上就跳过后续扫描里新出现的 fiber 客户端。优先传入方法名；只有方法名和数组两种过滤形式都没挂上时，才退回无过滤回调。CH 用最近一轮 `cachedInputTokens / inputTokens`，也认 snake_case 字段。费用和输出速度只在通知里带了对应字段时显示，不本地编造单价。芯片默认底、悬停加深和额度圆环几何照抄原项目；双窗文案、套餐名、Credits 余额、芯片文案 CH→上下文%→「用量」、无消耗时隐藏用量芯片等已拍板行为不跟原项目对齐。
 
 ## 目录
 
@@ -60,6 +60,8 @@ pnpm run dev 会先构建完整 Cargo 工作区，再启动 Codey，确保主程
     pnpm run build
 
 该命令先重建前端与注入脚本，再进行 Rust release 构建；随后的 cargo 调用带 `CODEY_SKIP_OVERLAY_BUILD=1`，backend/build.rs 据此跳过再跑一次 Vite，只校验 dist-overlay/codey-overlay.js 已存在。直接运行 cargo 时不设该变量，build.rs 仍会自动构建前端产物。macOS 会额外生成 target/release/bundle/macos/Codey.app；Windows 安装包由 .github/workflows/build-desktop.yml 使用 NSIS 生成。CI 的实际门禁以 .github/workflows/ci.yml 为准。
+
+本机 Windows 验证包（不推送）只走 `scripts/build-windows.sh`，流程见 `docs/agents/windows-pack.md`。GitHub 的 `v*` 标签仍由 `.github/workflows/build-desktop.yml` 打发布安装包。
 
 Windows x64 发布任务通过 CARGO_PROFILE_RELEASE_LTO=thin 和 CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16 覆盖默认的 fat LTO 与单代码生成单元，以减少 release 优化和链接耗时；macOS 及本地构建沿用 Cargo.toml 默认配置。Windows 的 Rust 测试、Clippy 和格式检查继续保留。此调整可能影响二进制体积和运行性能，实际提速幅度需由下一次 Windows Actions 构建确认。v0.9.18 的参考耗时为 Windows 任务 12 分 43 秒，其中可执行文件构建 10 分 17 秒、NSIS 打包 36 秒。
 

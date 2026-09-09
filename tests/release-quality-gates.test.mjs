@@ -105,6 +105,31 @@ test("desktop packages include FastCtx license and notice files", () => {
   assert.match(windowsInstallerScript, /licenses\\FastCtx\\NOTICE/);
 });
 
+test("WSL can package a Windows installer without pushing a tag", () => {
+  const packageJson = JSON.parse(
+    fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+  );
+  assert.equal(packageJson.scripts["build:windows"], "bash scripts/build-windows.sh");
+  const localWindowsBuild = fs.readFileSync(
+    new URL("../scripts/build-windows.sh", import.meta.url),
+    "utf8",
+  );
+  const windowsHost = fs.readFileSync(
+    new URL("../scripts/build-windows.ps1", import.meta.url),
+    "utf8",
+  );
+  assert.match(localWindowsBuild, /wslpath -w .*build-windows\.ps1/);
+  assert.match(localWindowsBuild, /powershell\.exe -NoProfile -ExecutionPolicy Bypass -File/);
+  assert.match(windowsHost, /Remove-WslPathEntries/);
+  assert.match(windowsHost, /codey-windows-pack/);
+  assert.match(windowsHost, /Downloads\\Codey-windows-x64-setup\.exe/);
+  assert.match(windowsHost, /NSIS_OK:/);
+  assert.doesNotMatch(windowsHost, /wsl\.localhost.*cargo/i);
+  const agents = fs.readFileSync(new URL("../AGENTS.md", import.meta.url), "utf8");
+  assert.match(agents, /scripts\/build-windows\.sh/);
+  assert.match(agents, /docs\/agents\/windows-pack\.md/);
+});
+
 test("Windows release publishes the installer without a portable zip", () => {
   const nsisInstallStep = workflowStep(
     "- name: Install NSIS",
