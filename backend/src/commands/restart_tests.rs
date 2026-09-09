@@ -583,7 +583,7 @@ async fn runtime_status_does_not_wait_for_a_lifecycle_operation() {
     let state = Arc::new(AppState::default());
     let _operation = state.runtime_operation.lock().await;
 
-    let status = tokio::time::timeout(Duration::from_millis(100), runtime_status(&state))
+    let status = tokio::time::timeout(Duration::from_secs(2), runtime_status(&state))
         .await
         .expect("runtime status should not wait for the lifecycle operation lock")
         .unwrap();

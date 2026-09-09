@@ -430,6 +430,10 @@ fn relative_model_catalog_path() -> Option<&'static Path> {
     ))
 }
 
+fn toml_path_literal(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 #[test]
 fn configured_model_catalog_treats_legacy_codey_paths_as_owned() {
     let temp = tempfile::tempdir().unwrap();
@@ -439,7 +443,7 @@ fn configured_model_catalog_treats_legacy_codey_paths_as_owned() {
     let legacy = home.join("model-catalogs/codey-official.json");
     fs::write(
         home.join("config.toml"),
-        format!("model_catalog_json = \"{}\"\n", legacy.display()),
+        format!("model_catalog_json = \"{}\"\n", toml_path_literal(&legacy)),
     )
     .unwrap();
 
@@ -469,15 +473,23 @@ fn configured_model_catalog_keeps_user_files_as_user_owned() {
     let home = temp.path().join("codex-home");
     let catalog_dir = temp.path().join("codey/model-catalogs");
     fs::create_dir_all(&home).unwrap();
+    let user_catalog = if cfg!(windows) {
+        PathBuf::from(r"C:\user\catalog.json")
+    } else {
+        PathBuf::from("/user/catalog.json")
+    };
     fs::write(
         home.join("config.toml"),
-        "model_catalog_json = \"/user/catalog.json\"\n",
+        format!(
+            "model_catalog_json = \"{}\"\n",
+            toml_path_literal(&user_catalog)
+        ),
     )
     .unwrap();
 
     assert_eq!(
         configured_model_catalog(&home, &catalog_dir).unwrap(),
-        ConfiguredModelCatalog::User(PathBuf::from("/user/catalog.json"))
+        ConfiguredModelCatalog::User(user_catalog)
     );
 }
 
