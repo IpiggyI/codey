@@ -121,28 +121,8 @@ async fn official_current_provider_keeps_codex_builtin_catalog() {
 }
 
 #[tokio::test]
-async fn startup_fallback_removes_search_from_a_stale_chat_route_catalog() {
+async fn startup_fallback_does_not_inject_a_catalog_for_an_isolated_chat_route() {
     let home = tempfile::tempdir().unwrap();
-    let path = home
-        .path()
-        .join(crate::model_catalog_store::DERIVED_CATALOG_FILE_NAME);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "models": [{
-                "slug": "route-chat/gpt-5.6-sol",
-                "display_name": "Chat / GPT-5.6-Sol",
-                "description": "Third-party API model",
-                "base_instructions": "test instructions",
-                "codey_source": "third_party",
-                "supports_search_tool": true,
-                "web_search_tool_type": "text_and_image"
-            }]
-        }))
-        .unwrap(),
-    )
-    .unwrap();
 
     let mut route = ProviderProfile::new("Chat route");
     route.id = "route-chat".into();
@@ -169,11 +149,7 @@ async fn startup_fallback_removes_search_from_a_stale_chat_route_catalog() {
         .await
         .unwrap();
 
-    assert!(startup.model_catalog_path.is_some());
-    let catalog: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert!(catalog["models"][0].get("supports_search_tool").is_none());
-    assert!(catalog["models"][0].get("web_search_tool_type").is_none());
+    assert!(startup.model_catalog_path.is_none());
 }
 
 #[test]

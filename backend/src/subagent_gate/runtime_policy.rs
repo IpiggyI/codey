@@ -93,6 +93,7 @@ pub(crate) fn commit_runtime_subagent_policy(
     remove_optional_runtime_policy_file(&pending_path)
 }
 
+#[allow(dead_code)]
 pub(crate) fn write_runtime_subagent_policy(
     home: &Path,
     roles: &BTreeMap<String, crate::config::SubagentRoleConfig>,

@@ -27,6 +27,7 @@ const MAX_JWT_PAYLOAD_BYTES: usize = 64 * 1024;
 const MAX_JWT_PAYLOAD_ENCODED_BYTES: usize = 96 * 1024;
 // Local-router requests only need eventual auth-file invalidation. Rechecking once per
 // second avoids filesystem work on every request while keeping account switches prompt.
+#[cfg(test)]
 const OFFICIAL_AUTH_REVALIDATE_TTL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq)]

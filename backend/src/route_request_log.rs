@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};

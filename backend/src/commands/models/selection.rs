@@ -203,6 +203,7 @@ pub async fn save_selected_models(
     ))
 }
 
+#[allow(dead_code)]
 pub(crate) fn config_with_native_selected_models(
     config: &CodeyConfig,
     provider: &codex_provider::CurrentProvider,

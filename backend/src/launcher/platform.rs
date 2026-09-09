@@ -264,6 +264,7 @@ fn disable_windows_packaged_environment(package_full_name: &str) -> Result<()> {
 }
 
 #[cfg(any(windows, test))]
+#[allow(dead_code)]
 pub(super) fn normalized_windows_path(path: &std::path::Path) -> String {
     path.to_string_lossy()
         .replace('/', "\\")
@@ -701,6 +702,7 @@ pub(super) async fn macos_codex_is_running(app_dir: &std::path::Path) -> Result<
 }
 
 #[cfg(any(windows, test))]
+#[allow(dead_code)]
 fn windows_path_is_within(path: &Path, directory: &Path) -> bool {
     let path = normalized_windows_path(path);
     let directory = normalized_windows_path(directory);
@@ -711,6 +713,7 @@ fn windows_path_is_within(path: &Path, directory: &Path) -> bool {
 }
 
 #[cfg(any(windows, test))]
+#[allow(dead_code)]
 pub(super) fn windows_owned_process_ids_from_snapshot<'a>(
     app_dir: &Path,
     process_id: Option<u32>,
@@ -730,6 +733,7 @@ pub(super) fn windows_owned_process_ids_from_snapshot<'a>(
 }
 
 #[cfg(any(windows, test))]
+#[allow(dead_code)]
 pub(super) fn windows_extend_tracked_descendants_from_snapshot<'a>(
     process_ids: &mut HashSet<u32>,
     processes: impl IntoIterator<Item = (u32, u32, Option<&'a Path>)>,

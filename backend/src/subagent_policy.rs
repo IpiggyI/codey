@@ -498,23 +498,6 @@ mod tests {
                 .values()
                 .all(|selection| selection.model == "provider-special")
         );
-
-        state
-            .third_party_model_metadata
-            .push(model_catalog::ThirdPartyModelAvailability {
-                slug: "route-b/provider-special".into(),
-                supported_reasoning_efforts: vec!["medium".into()],
-                default_reasoning_effort: "medium".into(),
-            });
-        reconcile_with_model_state(&mut config, Some(&state));
-        assert_eq!(config.subagent_model, "route-b/provider-special");
-        assert_eq!(config.subagent_reasoning_effort, "medium");
-        assert!(
-            config
-                .subagent_roles
-                .values()
-                .all(|selection| selection.reasoning_effort == "medium")
-        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use super::*;
 
+#[allow(dead_code)]
 pub async fn delete_route(
     state: &Arc<AppState>,
     route_id: String,
@@ -30,6 +31,7 @@ pub async fn delete_route(
     ))
 }
 
+#[allow(dead_code)]
 pub(crate) fn config_after_route_deletion(
     previous: &CodeyConfig,
     route_id: &str,

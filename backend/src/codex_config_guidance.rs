@@ -175,6 +175,7 @@ developer_instructions = """
 image_generation = false
 "#####;
 
+#[allow(dead_code)]
 pub(crate) const READ_ONLY_AGENT_WRITE_GUARD: &str = "\
 当前任务类型是只读子代理，只能检查、搜索、分析和回报。不要调用 `replace`、`apply_patch`、\
 文件写入命令或任何会创建、修改、删除、移动文件及改变外部状态的工具。即使任务正文要求写入，\

@@ -24,9 +24,7 @@ use crate::fs_util::timestamp_millis;
 use anyhow::{Context, Result, bail};
 use codey_runtime_core::config_manager::ConfigManager;
 use serde::{Deserialize, Serialize};
-use toml_edit::{
-    Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, TableLike, Value, value,
-};
+use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value, value};
 
 mod fastctx;
 mod fs_io;
@@ -56,6 +54,7 @@ const CODEY_FASTCTX_GLOB_TOKEN_BUDGET: usize = 5_400;
 const CODEY_FASTCTX_STARTUP_TIMEOUT_SECONDS: i64 = 120;
 const CODEY_FASTCTX_TOOL_TIMEOUT_SECONDS: i64 = 300;
 const DEFAULT_SUBAGENT_MAX_CONCURRENCY: i64 = 3;
+const PREVIOUS_DEFAULT_SUBAGENT_MAX_CONCURRENCY: i64 = 2;
 const APPLIED_HOOKS_JSON_FILE: &str = "applied-hooks.json";
 const CODEY_CONSTRAINTS_DIR: &str = "codex-constraints";
 const CODEY_ROOT_INSTRUCTIONS_FILE: &str = "root-instructions.md";
@@ -123,21 +122,6 @@ fn read_codex_config_document(path: &Path) -> Result<DocumentMut> {
     } else {
         DocumentMut::new()
     })
-}
-
-fn read_or_create_codex_config(path: &Path) -> Result<Vec<u8>> {
-    let manager = ConfigManager::new(path);
-    let snapshot = manager.load()?;
-    if snapshot.exists() {
-        return Ok(snapshot.raw().to_vec());
-    }
-    let created = manager.replace_text(
-        Some(snapshot.revision()),
-        "",
-        "create empty Codex config.toml for desktop compatibility",
-        "codex_config.read_or_create_codex_config",
-    )?;
-    Ok(created.raw().to_vec())
 }
 
 fn codex_config_matches(path: &Path, expected: Option<&[u8]>) -> Result<bool> {
@@ -1389,14 +1373,43 @@ fn enable_subagent_optimization(
         .and_then(Item::as_str)
         .unwrap_or_default()
         .to_string();
+    let migrate_previous_owned_concurrency = doc
+        .get("agents")
+        .and_then(Item::as_table)
+        .is_some_and(|agents| {
+            agents
+                .get("max_concurrent_threads_per_session")
+                .and_then(Item::as_integer)
+                == Some(PREVIOUS_DEFAULT_SUBAGENT_MAX_CONCURRENCY)
+                && agents.get("codey_quick_scan").is_some()
+                && agents.get("codey_worker").is_some()
+        })
+        && doc
+            .get("features")
+            .and_then(Item::as_table)
+            .and_then(|features| features.get("multi_agent_v2"))
+            .and_then(Item::as_table)
+            .and_then(|multi_agent| multi_agent.get("tool_namespace"))
+            .and_then(Item::as_str)
+            == Some("agents");
     let agents = ensure_root_table(doc, "agents")?;
+    let legacy_max_threads = agents.remove("max_threads");
+    agents.remove("max_depth");
     agents["enabled"] = value(true);
     let has_valid_concurrency = agents
         .get("max_concurrent_threads_per_session")
         .and_then(Item::as_integer)
         .is_some_and(|concurrency| concurrency > 0);
-    if !has_valid_concurrency {
+    if migrate_previous_owned_concurrency {
         agents["max_concurrent_threads_per_session"] = value(DEFAULT_SUBAGENT_MAX_CONCURRENCY);
+    } else if !has_valid_concurrency {
+        agents["max_concurrent_threads_per_session"] = legacy_max_threads
+            .filter(|legacy| {
+                legacy
+                    .as_integer()
+                    .is_some_and(|concurrency| concurrency > 0)
+            })
+            .unwrap_or_else(|| value(DEFAULT_SUBAGENT_MAX_CONCURRENCY));
     }
     agents["default_subagent_model"] = value(subagent_model);
     agents["default_subagent_reasoning_effort"] = value(subagent_reasoning_effort);
@@ -1414,6 +1427,13 @@ fn enable_subagent_optimization(
     multi_agent["hide_spawn_agent_metadata"] = value(true);
     multi_agent["expose_spawn_agent_model_overrides"] = value(false);
     multi_agent["tool_namespace"] = value("agents");
+    for migrated_key in [
+        "max_concurrent_threads_per_session",
+        "default_subagent_model",
+        "default_subagent_reasoning_effort",
+    ] {
+        multi_agent.remove(migrated_key);
+    }
     multi_agent["min_wait_timeout_ms"] = value(10_000);
     multi_agent["default_wait_timeout_ms"] = value(30_000);
     multi_agent["max_wait_timeout_ms"] = value(120_000);
@@ -1957,6 +1977,7 @@ fn hook_command_is_codey_owned(command: &str) -> bool {
         || command.contains(crate::fastctx_route_gate::HOOK_ARGUMENT)
 }
 
+#[allow(dead_code)]
 fn remap_hook_state_entries(
     state: &mut Table,
     config_path: &Path,
@@ -1992,6 +2013,7 @@ fn remap_hook_state_entries(
     }
 }
 
+#[allow(dead_code)]
 fn enable_codey_hooks(
     doc: &mut DocumentMut,
     config_path: &Path,
@@ -2029,6 +2051,7 @@ fn enable_codey_hooks(
     Ok(())
 }
 
+#[allow(dead_code)]
 fn append_codey_hook(
     hooks: &mut Table,
     spec: CodeyHookSpec,
@@ -2081,6 +2104,7 @@ fn append_codey_hook(
     }
 }
 
+#[allow(dead_code)]
 fn table_has_hook_definition(
     group: &Table,
     spec: CodeyHookSpec,
@@ -2101,6 +2125,7 @@ fn table_has_hook_definition(
             })
 }
 
+#[allow(dead_code)]
 fn value_has_hook_definition(
     group: &Value,
     spec: CodeyHookSpec,
@@ -2127,6 +2152,7 @@ fn value_has_hook_definition(
             })
 }
 
+#[allow(dead_code)]
 fn codey_hook_table(spec: CodeyHookSpec, commands: &crate::subagent_gate::HookCommands) -> Table {
     let mut handler = Table::new();
     handler["type"] = value("command");
@@ -2136,6 +2162,7 @@ fn codey_hook_table(spec: CodeyHookSpec, commands: &crate::subagent_gate::HookCo
     handler
 }
 
+#[allow(dead_code)]
 fn codey_hook_inline_table(
     spec: CodeyHookSpec,
     commands: &crate::subagent_gate::HookCommands,

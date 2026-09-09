@@ -1433,12 +1433,14 @@ command = "echo preserve-user-hook"
     let agents = document["agents"].as_table().unwrap();
     let multi_agent = document["features"]["multi_agent_v2"].as_table().unwrap();
 
+    assert!(agents.get("max_threads").is_none());
+    assert!(agents.get("max_depth").is_none());
     assert_eq!(agents["interrupt_message"].as_bool(), Some(true));
     assert_eq!(agents["custom_setting"].as_str(), Some("preserved"));
     assert_eq!(agents["enabled"].as_bool(), Some(true));
     assert_eq!(
         agents["max_concurrent_threads_per_session"].as_integer(),
-        Some(DEFAULT_SUBAGENT_MAX_CONCURRENCY)
+        Some(6)
     );
     assert_eq!(
         agents["default_subagent_model"].as_str(),
@@ -2133,14 +2135,6 @@ wire_api = "responses"
         "mcp_servers.codey_fastctx.env.FASTCTX_TOKEN_BUDGET",
         "mcp_servers.codey_fastctx.env.FASTCTX_GREP_TOKEN_BUDGET",
         "mcp_servers.codey_fastctx.env.FASTCTX_GLOB_TOKEN_BUDGET",
-        "mcp_servers.codey_subagent_control.command",
-        "mcp_servers.codey_subagent_control.args",
-        "mcp_servers.codey_subagent_control.startup_timeout_sec",
-        "mcp_servers.codey_subagent_control.tool_timeout_sec",
-        "mcp_servers.codey_subagent_control.enabled_tools",
-        "mcp_servers.codey_subagent_control.disabled_tools",
-        "mcp_servers.codey_subagent_control.tools.resolve_batch.approval_mode",
-        "mcp_servers.codey_subagent_control.tools.prepare_delegation.approval_mode",
         "tool_output_token_limit",
         "agents.enabled",
         "agents.max_concurrent_threads_per_session",

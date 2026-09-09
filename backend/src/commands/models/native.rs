@@ -125,6 +125,7 @@ pub(crate) fn native_model_state_for_provider(
     .map_err(|error| error.to_string())
 }
 
+#[allow(dead_code)]
 pub(crate) fn native_subagent_model_state(
     config: &CodeyConfig,
     home: &std::path::Path,
@@ -157,6 +158,7 @@ pub(crate) fn reconcile_subagent_models_for_mode(
     subagent_policy::reconcile_with_model_state(config, Some(model_state));
 }
 
+#[allow(dead_code)]
 pub(crate) async fn current_provider_status_async(
     _config: &CodeyConfig,
 ) -> Result<codex_provider::ProviderStatus, String> {

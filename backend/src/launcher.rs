@@ -1084,6 +1084,7 @@ async fn prepare_startup_storage(
     Ok(prepared)
 }
 
+#[allow(dead_code)]
 fn native_subagent_model(
     config: &CodeyConfig,
     targets: &[RuntimeModelTarget],
@@ -1098,6 +1099,7 @@ fn native_subagent_model(
         .unwrap_or_else(|| model.to_string())
 }
 
+#[allow(dead_code)]
 fn native_provider_prefixed_subagent_model(config: &CodeyConfig, model: &str) -> Option<String> {
     for profile in &config.profiles {
         let provider_id = profile.provider_id();
@@ -1138,6 +1140,7 @@ fn native_provider_prefixed_subagent_model(config: &CodeyConfig, model: &str) ->
     None
 }
 
+#[allow(dead_code)]
 fn strip_model_provider_prefix<'a>(model: &'a str, prefix: &str) -> Option<&'a str> {
     let prefix = prefix.trim();
     model
@@ -1148,6 +1151,7 @@ fn strip_model_provider_prefix<'a>(model: &'a str, prefix: &str) -> Option<&'a s
         .filter(|suffix| !suffix.is_empty())
 }
 
+#[allow(dead_code)]
 fn native_subagent_runtime_config(config: &CodeyConfig) -> CodeyConfig {
     let mut runtime_config = config.clone();
     let targets = config.runtime_model_targets();
@@ -1158,6 +1162,7 @@ fn native_subagent_runtime_config(config: &CodeyConfig) -> CodeyConfig {
     runtime_config
 }
 
+#[allow(dead_code)]
 fn reconciled_native_subagent_runtime_config(
     config: &CodeyConfig,
     home: &std::path::Path,
@@ -1181,6 +1186,7 @@ async fn prepare_runtime_provider_state(
     })
 }
 
+#[allow(dead_code)]
 async fn prepare_native_runtime_state(
     home: &std::path::Path,
     config: &CodeyConfig,
@@ -1390,6 +1396,7 @@ impl CodeyRuntime {
             && snapshot_identity(&self.applied_config) == snapshot_identity(config)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn subagent_reconcile_config(&self, config: &CodeyConfig) -> CodeyConfig {
         native_subagent_runtime_config(config)
     }

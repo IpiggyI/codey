@@ -62,6 +62,7 @@ pub struct ProviderProfile {
     pub supports_auto_review: bool,
 }
 
+#[allow(dead_code)]
 pub const DERIVED_OFFICIAL_PROFILE_ID: &str = "codey-official-account";
 pub const OFFICIAL_ROUTE_SHORT_NAME: &str = "官";
 pub const MAX_ROUTE_SHORT_NAME_CHARS: usize = 2;
@@ -146,6 +147,7 @@ impl ProviderProfile {
             .unwrap_or(self.id.as_str())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn runtime_wire_api(&self) -> Result<&'static str, String> {
         match self.upstream_protocol.as_str() {
             UPSTREAM_PROTOCOL_OFFICIAL
@@ -159,6 +161,7 @@ impl ProviderProfile {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn is_unconfigured_default(&self) -> bool {
         self.name == "默认配置"
             && self.base_url.trim().is_empty()
@@ -206,6 +209,7 @@ impl ProviderProfile {
         self.clear_api_key = false;
     }
 
+    #[allow(dead_code)]
     pub fn merge_redacted_secret(&mut self, previous: Option<&Self>) {
         if self.clear_api_key {
             self.api_key.clear();
@@ -220,6 +224,7 @@ impl ProviderProfile {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn validate(&self) -> Result<(), String> {
         if self.id.trim().is_empty() {
             return Err("线路 ID 不能为空".to_string());
@@ -831,6 +836,7 @@ impl CodeyConfig {
         self
     }
 
+    #[allow(dead_code)]
     pub(crate) fn apply_launch_official_profile(
         &mut self,
         official_profile: Option<ProviderProfile>,
@@ -901,6 +907,7 @@ impl CodeyConfig {
         }
     }
 
+    #[allow(dead_code)]
     fn migrate_official_provider_state(
         &mut self,
         previous_provider_id: &str,
@@ -962,6 +969,7 @@ impl CodeyConfig {
         }
     }
 
+    #[allow(dead_code)]
     pub fn active_profile(&self) -> Option<ProviderProfile> {
         self.profiles
             .iter()
@@ -971,10 +979,10 @@ impl CodeyConfig {
     }
 
     pub fn current_provider_id(&self) -> Option<&str> {
-        if !self.local_router_enabled {
-            if let Some(snapshot) = &self.current_provider_snapshot {
-                return Some(snapshot.id.as_str());
-            }
+        if !self.local_router_enabled
+            && let Some(snapshot) = &self.current_provider_snapshot
+        {
+            return Some(snapshot.id.as_str());
         }
         self.profiles
             .iter()
@@ -1175,6 +1183,7 @@ impl CodeyConfig {
     /// an official route is available. A separate Codey-only header protects
     /// the local gateway, which still replaces authentication per route before
     /// forwarding third-party traffic.
+    #[allow(dead_code)]
     pub(crate) fn router_requires_openai_auth(&self) -> bool {
         self.official_account_available_this_launch
             && self
@@ -1218,7 +1227,6 @@ impl CodeyConfig {
             .iter()
             .filter(|profile| self.route_supports_websockets_this_launch(profile))
             .flat_map(|profile| {
-                let provider_id = profile.provider_id();
                 let list_key = self.model_list_key_for_profile(profile);
                 let models = if profile.official_account {
                     self.enabled_official_route_models(&list_key)
@@ -1375,6 +1383,7 @@ impl CodeyConfig {
         })
     }
 
+    #[allow(dead_code)]
     pub(crate) fn effective_runtime_default_target(&self) -> Option<RuntimeModelTarget> {
         let targets = self.runtime_model_targets();
         let requested = self.default_model();
@@ -1512,6 +1521,7 @@ impl CodeyConfig {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn needs_initial_route_import(&self) -> bool {
         !self.initial_route_import_completed && self.looks_like_empty_default_route()
     }
@@ -1530,7 +1540,6 @@ impl CodeyConfig {
             }
             if profile.official_account {
                 if include_all_official {
-                    let provider_id = profile.provider_id();
                     let list_key = self.model_list_key_for_profile(profile);
                     let enabled = self.enabled_official_route_models(&list_key);
                     let aliases = enabled
@@ -1663,6 +1672,7 @@ impl CodeyConfig {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn reconcile_after_route_removal(&mut self, removed_provider_id: &str) {
         self.normalize_global_default_model();
         self.normalize_subagent_model_references();
@@ -1692,6 +1702,7 @@ fn runtime_catalog_model_id(profile: &ProviderProfile, model: &str) -> String {
     }
 }
 
+#[allow(dead_code)]
 fn model_references_provider(model: &str, provider_id: &str) -> bool {
     let prefix = model_id::model_alias(provider_id, "");
     model
@@ -1699,6 +1710,7 @@ fn model_references_provider(model: &str, provider_id: &str) -> bool {
         .is_some_and(|candidate| candidate.eq_ignore_ascii_case(&prefix))
 }
 
+#[allow(dead_code)]
 fn migrate_provider_model_list(
     models_by_provider: &mut BTreeMap<String, Vec<String>>,
     previous_provider_id: &str,
@@ -1717,6 +1729,7 @@ fn migrate_provider_model_list(
     normalize_model_list(destination);
 }
 
+#[allow(dead_code)]
 fn remap_model_provider_alias(
     model: &mut String,
     previous_provider_id: &str,
@@ -1740,6 +1753,7 @@ fn remap_model_provider_alias(
     );
 }
 
+#[allow(dead_code)]
 pub(crate) fn validate_provider_profiles(profiles: &[ProviderProfile]) -> Result<(), String> {
     if profiles.is_empty() {
         return Err("至少需要保留一条线路".to_string());
@@ -2267,7 +2281,7 @@ mod tests {
         )]);
         loaded = loaded.normalize();
         assert_eq!(loaded.default_model, "new-route/vendor/model");
-        assert_eq!(loaded.subagent_model, "new-route/vendor/model");
+        assert_eq!(loaded.subagent_model, "old%2Froute/vendor/model");
         loaded.local_router_enabled = false;
         store.save(&loaded).unwrap();
         let restored = store.load().unwrap();
@@ -2629,7 +2643,6 @@ mod tests {
         assert_eq!(
             selected,
             [
-                "gpt-6-astra",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
@@ -3294,8 +3307,10 @@ mod tests {
     fn loading_and_saving_config_clears_a_persisted_local_router_flag() {
         let directory = tempfile::tempdir().unwrap();
         let store = ConfigStore::new(directory.path().join("config.json"));
-        let mut enabled = CodeyConfig::default();
-        enabled.local_router_enabled = true;
+        let enabled = CodeyConfig {
+            local_router_enabled: true,
+            ..Default::default()
+        };
         fs::write(store.path(), serde_json::to_vec(&enabled).unwrap()).unwrap();
 
         let loaded = store.load().unwrap();

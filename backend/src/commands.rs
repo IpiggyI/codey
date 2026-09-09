@@ -89,6 +89,8 @@ use crate::error_log;
 use crate::launcher::{CODEX_APP_NOT_FOUND_ERROR, CODEX_APP_PATH_INVALID_ERROR};
 use crate::launcher::{CodeyRuntime, RuntimeModelConfig, RuntimeSubagentConfig};
 use crate::message_delete::delete_messages_persistently;
+#[cfg(test)]
+use crate::model_catalog;
 use crate::model_id;
 use crate::notifications::NotificationChannelConfig;
 use crate::pending_approval;
@@ -559,7 +561,7 @@ async fn with_completion_probe_cache(
             .completion_probe_cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let events = cache.refresh(&codex_home());
+        let events = cache.refresh(codex_home());
         completion_state_response(&events, &session_id, &turn_id)
     })
     .await
@@ -1317,8 +1319,11 @@ pub async fn save_codey_config(
 
 struct CodeyConfigSaveInput {
     config: CodeyConfig,
+    #[allow(dead_code)]
     supports_1m_context_present: bool,
+    #[allow(dead_code)]
     model_context_present: bool,
+    #[allow(dead_code)]
     route_request_log_present: bool,
     subagent_roles_present: bool,
     subagent_model_present: bool,
@@ -1390,9 +1395,9 @@ async fn save_codey_config_locked(
 ) -> Result<SavedCodeyConfig, String> {
     let CodeyConfigSaveInput {
         config: mut config_input,
-        supports_1m_context_present,
-        model_context_present,
-        route_request_log_present,
+        supports_1m_context_present: _,
+        model_context_present: _,
+        route_request_log_present: _,
         subagent_roles_present,
         subagent_model_present,
         subagent_reasoning_effort_present,
