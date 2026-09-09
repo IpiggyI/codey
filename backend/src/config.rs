@@ -7,8 +7,8 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub use crate::notifications::WebhookConfig;
 use crate::codey_router_session_migrate::ROUTER_PROVIDER_ID;
+pub use crate::notifications::WebhookConfig;
 use crate::{model_catalog, model_id};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1191,10 +1191,7 @@ impl CodeyConfig {
     /// Official ChatGPT-account routes enable it automatically once login is
     /// available; third-party routes must explicitly declare Responses WS.
     pub(crate) fn route_supports_websockets_this_launch(&self, profile: &ProviderProfile) -> bool {
-        self.route_supports_websockets_this_launch_with_proxy(
-            profile,
-            false,
-        )
+        self.route_supports_websockets_this_launch_with_proxy(profile, false)
     }
 
     fn route_supports_websockets_this_launch_with_proxy(
@@ -1666,7 +1663,6 @@ impl CodeyConfig {
         }
     }
 
-
     pub(crate) fn reconcile_after_route_removal(&mut self, removed_provider_id: &str) {
         self.normalize_global_default_model();
         self.normalize_subagent_model_references();
@@ -1686,7 +1682,6 @@ impl CodeyConfig {
                 .clone_from(&default_role.reasoning_effort);
         }
     }
-
 }
 
 fn runtime_catalog_model_id(profile: &ProviderProfile, model: &str) -> String {
@@ -3126,12 +3121,20 @@ mod tests {
             "responses",
             false,
         );
-        assert!(config.migrate_current_provider_model_lists(&snapshot).changed());
+        assert!(
+            config
+                .migrate_current_provider_model_lists(&snapshot)
+                .changed()
+        );
         config.attach_current_provider_snapshot(snapshot);
         assert_eq!(config.selected_models(), ["gpt-relay"]);
         assert_eq!(
             config.model_list_key_for_profile(&config.profiles[0]),
-            config.current_provider_snapshot.as_ref().unwrap().ownership_key
+            config
+                .current_provider_snapshot
+                .as_ref()
+                .unwrap()
+                .ownership_key
         );
         config
             .selected_models_by_provider
@@ -3156,7 +3159,11 @@ mod tests {
             "responses",
             false,
         );
-        assert!(!config.migrate_current_provider_model_lists(&snapshot).changed());
+        assert!(
+            !config
+                .migrate_current_provider_model_lists(&snapshot)
+                .changed()
+        );
         config.attach_current_provider_snapshot(snapshot);
         assert!(config.selected_models().is_empty());
         assert_eq!(
@@ -3289,11 +3296,7 @@ mod tests {
         let store = ConfigStore::new(directory.path().join("config.json"));
         let mut enabled = CodeyConfig::default();
         enabled.local_router_enabled = true;
-        fs::write(
-            store.path(),
-            serde_json::to_vec(&enabled).unwrap(),
-        )
-        .unwrap();
+        fs::write(store.path(), serde_json::to_vec(&enabled).unwrap()).unwrap();
 
         let loaded = store.load().unwrap();
         assert!(!loaded.local_router_enabled);

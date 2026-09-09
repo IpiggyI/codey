@@ -665,7 +665,10 @@ mod tests {
             catalog.canonical_model("route-a/gpt-5.6-terra"),
             Some("gpt-5.6-terra")
         );
-        assert_eq!(catalog.canonical_model("route-b/provider-special"), Some("provider-special"));
+        assert_eq!(
+            catalog.canonical_model("route-b/provider-special"),
+            Some("provider-special")
+        );
         assert_eq!(catalog.canonical_model("missing-model"), None);
     }
 

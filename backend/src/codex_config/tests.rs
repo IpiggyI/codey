@@ -242,9 +242,12 @@ default_subagent_reasoning_effort = "max"
 "#;
     fs::write(home.join("config.toml"), original).unwrap();
 
-    assert!(!restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap());
+    assert!(
+        !restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap()
+    );
     assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
-    assert!(!home.join("config.toml.bak").exists());}
+    assert!(!home.join("config.toml.bak").exists());
+}
 
 #[test]
 fn restore_without_a_lease_leaves_dangling_codey_router_selection_untouched() {
@@ -261,9 +264,12 @@ base_url = "https://relay.example/v1"
 "#;
     fs::write(home.join("config.toml"), original).unwrap();
 
-    assert!(!restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap());
+    assert!(
+        !restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap()
+    );
     assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
-    assert!(!home.join("config.toml.bak").exists());}
+    assert!(!home.join("config.toml.bak").exists());
+}
 
 #[test]
 fn restore_without_a_lease_keeps_a_user_owned_codey_router_provider() {
@@ -280,7 +286,9 @@ wire_api = "responses"
 "#;
     fs::write(home.join("config.toml"), original).unwrap();
 
-    assert!(!restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap());
+    assert!(
+        !restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap()
+    );
     assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
 }
 
@@ -295,7 +303,9 @@ model_providers = { codey_router = { name = "User-Owned Router", base_url = "htt
 "#;
     fs::write(home.join("config.toml"), original).unwrap();
 
-    assert!(!restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap());
+    assert!(
+        !restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap()
+    );
     assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
 }
 
@@ -319,7 +329,9 @@ tool_namespace = "agents"
 "#;
     fs::write(home.join("config.toml"), original).unwrap();
 
-    assert!(!restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap());
+    assert!(
+        !restore_runtime_config_at(&home, &temp.path().join("missing-lease.json"), true).unwrap()
+    );
     assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
     assert!(!home.join("config.toml.bak").exists());
 }
@@ -508,9 +520,11 @@ fn isolated_runtime_preserves_computer_use_without_adding_an_mcp() {
             fs::read_to_string(home.join("config.toml")).unwrap(),
             original
         );
-        assert!(applied.runtime_config_overrides.iter().all(|entry| {
-            !entry.starts_with("mcp_servers.") && !entry.starts_with("plugins.")
-        }));
+        assert!(
+            applied.runtime_config_overrides.iter().all(|entry| {
+                !entry.starts_with("mcp_servers.") && !entry.starts_with("plugins.")
+            })
+        );
         assert!(restore_runtime_config_at(&home, &marker, false).unwrap());
         assert_eq!(
             fs::read_to_string(home.join("config.toml")).unwrap(),
@@ -559,7 +573,8 @@ wire_api = "responses"
 }
 
 #[test]
-fn router_patch_installs_only_the_loopback_provider_and_preserves_user_catalog() {    let result = patch_config(
+fn router_patch_installs_only_the_loopback_provider_and_preserves_user_catalog() {
+    let result = patch_config(
         r#"model_provider = "relay"
 model_catalog_json = "/user/catalog.json"
 
@@ -1584,7 +1599,8 @@ tool_namespace = "agents"
     assert_eq!(
         document["agents"]["max_concurrent_threads_per_session"].as_integer(),
         Some(DEFAULT_SUBAGENT_MAX_CONCURRENCY)
-    );}
+    );
+}
 
 #[test]
 fn subagent_optimization_keeps_a_standalone_explicit_lower_concurrency() {

@@ -2277,10 +2277,9 @@ mod tests {
             user_catalog: None,
         })
         .unwrap();
-        let catalog: Value = serde_json::from_slice(
-            &fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap(),
-        )
-        .unwrap();
+        let catalog: Value =
+            serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
+                .unwrap();
         let models = catalog["models"].as_array().unwrap();
         let search = models
             .iter()

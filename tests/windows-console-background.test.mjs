@@ -21,7 +21,8 @@ test("Windows source contract: Codey uses the GUI subsystem", async () => {
     /^#!\[cfg_attr\(target_os = "windows", windows_subsystem = "windows"\)\]/,
   );
   assert.doesNotMatch(library, /hide_exclusive_windows_console|ShowWindow|GetConsoleWindow/);
-  assert.doesNotMatch(manifest, /Win32_System_Console|Win32_UI_WindowsAndMessaging/);
+  assert.doesNotMatch(manifest, /Win32_System_Console/);
+  assert.match(manifest, /Win32_UI_WindowsAndMessaging/);
 });
 
 test("Windows source contract: fatal startup failures remain visible", async () => {

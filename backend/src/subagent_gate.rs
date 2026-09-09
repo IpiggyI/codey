@@ -12,21 +12,22 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::subagent::protocol::{self, AgentState as ObservedAgentState};
-use crate::subagent_policy::SubagentCatalogSnapshot;
 use crate::subagent::rules::{RuleActor, RuleContext, RuleEffect, ToolClass};
 use crate::subagent::{
     api::TraceContext,
     telemetry::{ExecutionStatus, SubagentTraceEvent, TraceEventKind, TraceRecorder},
 };
+use crate::subagent_policy::SubagentCatalogSnapshot;
 
 mod runtime_policy;
 mod state;
 
+#[cfg(test)]
+pub(crate) use runtime_policy::write_runtime_subagent_policy;
 use runtime_policy::{RuntimeSubagentPolicy, read_optional_runtime_policy_file};
 pub(crate) use runtime_policy::{
     begin_runtime_subagent_policy_update, clear_runtime_subagent_policy,
     commit_runtime_subagent_policy, runtime_subagent_policy_matches, runtime_subagent_policy_paths,
-    write_runtime_subagent_policy,
 };
 use state::*;
 
@@ -1139,7 +1140,6 @@ fn runtime_role_admission_denial(state_root: &Path, role: &str) -> Result<Option
         )))
     }
 }
-
 
 fn runtime_policy_missing_reason() -> &'static str {
     "CODEY_SUBAGENT_RUNTIME_POLICY_MISSING: 子代理运行时策略缺失，无法验证角色和运行配置；请在 Codey 中重新保存子代理设置，或通过 Codey 重启 Codex 后重试。"
@@ -2628,7 +2628,8 @@ mod tests {
         fs::create_dir_all(&sessions).unwrap();
         let roles = crate::config::default_subagent_roles();
         let hashes = BTreeMap::new();
-        commit_runtime_subagent_policy(home, &roles, &hashes, &test_policy_catalog(&roles)).unwrap();
+        commit_runtime_subagent_policy(home, &roles, &hashes, &test_policy_catalog(&roles))
+            .unwrap();
         let role = crate::config::SUBAGENT_ROLE_QUICK_SCAN;
         let expected = roles.get(role).unwrap();
         let session_id = "attestation-parent";
@@ -2679,7 +2680,8 @@ mod tests {
             None
         );
 
-        begin_runtime_subagent_policy_update(home, &roles, &hashes, &test_policy_catalog(&roles)).unwrap();
+        begin_runtime_subagent_policy_update(home, &roles, &hashes, &test_policy_catalog(&roles))
+            .unwrap();
         // Already-attested children may finish their existing turn while new
         // children are fenced until the pending generation is committed.
         assert_eq!(
@@ -2700,7 +2702,8 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(pending.contains("CODEY_SUBAGENT_RUNTIME_UPDATE_IN_PROGRESS"));
-        commit_runtime_subagent_policy(home, &roles, &hashes, &test_policy_catalog(&roles)).unwrap();
+        commit_runtime_subagent_policy(home, &roles, &hashes, &test_policy_catalog(&roles))
+            .unwrap();
 
         let wrong_agent = "01a01f94-0000-7000-8000-000000000003";
         let wrong_transcript = write_transcript(
@@ -2847,7 +2850,13 @@ mod tests {
         let state_root = home.join(STATE_DIRECTORY);
         let mut roles = crate::config::default_subagent_roles();
         roles.remove(crate::config::SUBAGENT_ROLE_WORKER);
-        commit_runtime_subagent_policy(home, &roles, &BTreeMap::new(), &test_policy_catalog(&roles)).unwrap();
+        commit_runtime_subagent_policy(
+            home,
+            &roles,
+            &BTreeMap::new(),
+            &test_policy_catalog(&roles),
+        )
+        .unwrap();
 
         let mut spawn = input("PreToolUse", "disabled-role-session");
         spawn.turn_id = Some("root-turn-a".to_string());

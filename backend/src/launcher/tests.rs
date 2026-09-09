@@ -123,7 +123,9 @@ async fn official_current_provider_keeps_codex_builtin_catalog() {
 #[tokio::test]
 async fn startup_fallback_removes_search_from_a_stale_chat_route_catalog() {
     let home = tempfile::tempdir().unwrap();
-    let path = home.path().join(crate::model_catalog_store::DERIVED_CATALOG_FILE_NAME);
+    let path = home
+        .path()
+        .join(crate::model_catalog_store::DERIVED_CATALOG_FILE_NAME);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(
         &path,
@@ -201,7 +203,10 @@ fn subagent_runtime_models_keep_bare_ids() {
         "relay",
         vec!["shared-model".into(), "gpt-5.6-sol".into()],
     );
-    assert_eq!(runtime_subagent_model("shared-model", &catalog), "shared-model");
+    assert_eq!(
+        runtime_subagent_model("shared-model", &catalog),
+        "shared-model"
+    );
     assert_eq!(
         runtime_subagent_model("gpt-5.6-sol", &catalog),
         "gpt-5.6-sol"

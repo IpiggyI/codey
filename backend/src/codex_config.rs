@@ -8,15 +8,10 @@ use std::time::{Duration, Instant};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
-use anyhow::{Context, Result, bail};
-use codey_runtime_core::config_manager::ConfigManager;
-use serde::{Deserialize, Serialize};
-use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, TableLike, Value, value};
 use crate::codex_config_guidance::{
-    CODEY_FASTCTX_GUIDANCE, NO_WRITABLE_SUBAGENT_GUIDANCE, READ_ONLY_AGENT_WRITE_GUARD,
-    ROOT_AGENT_COLLABORATION_USAGE_HINT, ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS,
-    ROOT_AGENT_MULTI_AGENT_MODE_HINT, SUBAGENT_GUIDANCE,
-    append_root_agent_collaboration_usage_hint, remove_codey_fastctx_guidance,
+    CODEY_FASTCTX_GUIDANCE, NO_WRITABLE_SUBAGENT_GUIDANCE, ROOT_AGENT_COLLABORATION_USAGE_HINT,
+    ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS, ROOT_AGENT_MULTI_AGENT_MODE_HINT,
+    SUBAGENT_GUIDANCE, append_root_agent_collaboration_usage_hint, remove_codey_fastctx_guidance,
     remove_subagent_guidance, subagent_source_config,
 };
 use crate::config::{
@@ -26,6 +21,12 @@ use crate::config::{
 #[cfg(test)]
 use crate::config::{DEFAULT_SUBAGENT_MODEL, DEFAULT_SUBAGENT_REASONING_EFFORT};
 use crate::fs_util::timestamp_millis;
+use anyhow::{Context, Result, bail};
+use codey_runtime_core::config_manager::ConfigManager;
+use serde::{Deserialize, Serialize};
+use toml_edit::{
+    Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, TableLike, Value, value,
+};
 
 mod fastctx;
 mod fs_io;
@@ -2147,7 +2148,8 @@ fn codey_hook_inline_table(
         Value::from(commands.command_windows.as_str()),
     );
     handler.insert("timeout", Value::from(spec.timeout_seconds as i64));
-    handler}
+    handler
+}
 
 fn update_model_catalog_reference(
     document: &mut DocumentMut,

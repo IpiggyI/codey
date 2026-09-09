@@ -280,10 +280,7 @@ pub(crate) fn model_target_for_current_provider(
         .into_iter()
         .find(|model| {
             model_id::equal(model, requested_model)
-                || model_id::equal(
-                    &model_id::model_alias(&snapshot.id, model),
-                    requested_model,
-                )
+                || model_id::equal(&model_id::model_alias(&snapshot.id, model), requested_model)
         })?;
     let alias = model_id::model_alias(&snapshot.id, &upstream);
     Some(crate::config::RuntimeModelTarget {

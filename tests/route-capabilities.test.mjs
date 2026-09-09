@@ -12,18 +12,36 @@ async function moduleUrl(name) {
   return `data:text/javascript;base64,${Buffer.from(code).toString("base64")}`;
 }
 
-test("disabled routes do not contribute subagent options while legacy routes stay enabled", async () => {
-  const { buildSubagentModelOptions } = await import(await moduleUrl("subagentModels"));
-  const config = { localRouterEnabled: true, profiles: [{ id: "enabled", name: "Enabled", authMode: "apiKey" }, { id: "disabled", name: "Disabled", authMode: "apiKey", enabled: false }], selectedModelsByProvider: { enabled: ["model"], disabled: ["model"] }, declaredOfficialModelsByProvider: {} };
-  const options = buildSubagentModelOptions(config, { officialModels: [], officialModelIds: [] }, true);
-  assert.deepEqual(options.map((option) => option.value), ["enabled/model"]);
+test("current-provider subagent options come from the snapshot ownership key", async () => {
+  const { buildCurrentProviderSubagentModelOptions } = await import(await moduleUrl("subagentModels"));
+  const config = {
+    selectedModelsByProvider: { "provider-a": ["model"], "provider-b": ["other"] },
+    declaredOfficialModelsByProvider: {},
+  };
+  const options = buildCurrentProviderSubagentModelOptions(
+    config,
+    { officialModels: [], officialModelIds: [] },
+    true,
+    {
+      id: "provider-a",
+      ownershipKey: "provider-a",
+      usesOfficialAccountAuth: false,
+    },
+  );
+  assert.deepEqual(options.map((option) => option.value), ["model"]);
 });
 
 test("preview configuration persists and prunes model context declarations", async () => {
-  const source = await readFile(new URL("../src/dev/mockApi.ts", import.meta.url), "utf8");
-  assert.match(source, /supports1MContextByProvider: \{\}/);
-  assert.match(source, /id: "primary",\s+enabled: true/);
-  assert.match(source, /args.supports1MContextModels/);
-  assert.match(source, /available1MModels/);
-  assert.match(source, /线路已禁用，不能同步模型/);
+  const [mockSource, selectionSource, appSource] = await Promise.all([
+    readFile(new URL("../src/dev/mockApi.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/useModelSelection.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
+  ]);
+  assert.match(mockSource, /supports1MContextByProvider: \{\}/);
+  assert.match(mockSource, /modelContextByProvider: \{\}/);
+  assert.match(appSource, /supports1MContextModels/);
+  assert.match(
+    selectionSource,
+    /modelContexts: Object\.fromEntries\(Object\.entries\(draftModelContexts\)\.filter/,
+  );
 });

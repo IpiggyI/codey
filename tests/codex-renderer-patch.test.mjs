@@ -162,6 +162,7 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
     syncLogSpawns.push({ command, args, options });
     return { status: 0, stderr: "" };
   };
+  Module.syncBuiltinESMExports?.();
   const patchErrors = [];
   console.error = (...args) => {
     patchErrors.push(args);
@@ -560,6 +561,7 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       "createRequest(e,t,n,r=null){return{request:{id:`req-1`,method:e,params:t},promise:Promise.resolve({ok:!0})}}",
       "startRequest(){} onError(){} pumpQueue(){let e=this.queuedRequests.shift();e?.dispatch()}",
       "enqueueRequest(e,t,n,r=t=>{this.dispatchMessage?.(`mcp-request`,{request:t,hostId:this.hostId,...t.trace==null?{}:{dispatchedAtMs:Date.now()},priority:Mjt(e,n),source:Ejt(e,n?.source),timeoutMs:n?.timeoutMs,expiresAtMs:n?.timeoutMs!=null&&n.timeoutMs>0?Date.now()+n.timeoutMs:void 0,widget:n?.widget})},i=null){let a=Mjt(e,n),o=Ejt(e,n?.source);let{request:s,promise:c}=this.createRequest(e,t,n,i);return this.queuedRequests.push({dispatch:()=>{this.startRequest(s);try{r(s)}catch(e){this.onError(s.id,e)}},priority:a}),this.pumpQueue(),c}",
+      "completeRequest(s,c){s.resolve(c),this.emitRequestLifecycleEvent({type:`completed`,hostId:this.hostId,method:s.method})}",
       "async sendRequest(e,t,n){return this.enqueueRequest(e,t,n)}",
       "}",
       "function Mjt(){return `critical`}function Ejt(){return `source`}",
@@ -996,6 +998,7 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
     console.error = nativeConsoleError;
     childProcess.spawn = nativeSpawn;
     childProcess.spawnSync = nativeSpawnSync;
+    Module.syncBuiltinESMExports?.();
     Module._load = nativeLoad;
     Module._extensions[".js"] = nativeJsExtension;
   }

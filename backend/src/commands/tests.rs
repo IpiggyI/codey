@@ -1039,4 +1039,3 @@ async fn shutdown_signal_wakes_every_waiter_without_losing_the_reason() {
         );
     }
 }
-

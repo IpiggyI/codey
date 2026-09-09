@@ -7,16 +7,8 @@ const [modelSectionSource, typeSource] = await Promise.all([
   readFile(new URL("../src/App.types.ts", import.meta.url), "utf8"),
 ]);
 
-test("third-party native Web Search is an explicit Responses-only capability", () => {
-  assert.match(typeSource, /supportsNativeWebSearch\?: boolean/);
-  assert.match(modelSectionSource, /supportsNativeWebSearch: false/);
-  assert.match(
-    modelSectionSource,
-    /upstreamProtocol === "openaiResponses"[\s\S]*?supportsNativeWebSearch:[\s\S]*?: false/,
-  );
-  assert.match(
-    modelSectionSource,
-    /checked=\{Boolean\(routeDraft\.supportsNativeWebSearch\)\}/,
-  );
-  assert.match(modelSectionSource, /aria-label="原生网页搜索"/);
+test("settings no longer expose a per-route native Web Search switch", () => {
+  assert.doesNotMatch(typeSource, /supportsNativeWebSearch/);
+  assert.doesNotMatch(modelSectionSource, /supportsNativeWebSearch/);
+  assert.doesNotMatch(modelSectionSource, /原生网页搜索/);
 });

@@ -294,7 +294,11 @@ fn renderer_model_catalog_uses_official_snapshot_bare_ids() {
     assert_eq!(catalog["model_metadata"][0]["model"], "gpt-5.6-sol");
     assert_eq!(catalog["model_metadata"][0]["display_name"], "GPT-5.6-Sol");
     assert!(catalog["model_metadata"][0].get("provider_id").is_none());
-    assert!(catalog["model_metadata"][0].get("official_account").is_none());
+    assert!(
+        catalog["model_metadata"][0]
+            .get("official_account")
+            .is_none()
+    );
     assert!(catalog["model_metadata"][0].get("route_prefix").is_none());
 }
 
@@ -506,7 +510,8 @@ fn restart_sensitive_config_changes_are_detected() {
             false,
         ),
     );
-    assert!(config_requires_restart(        &applied,
+    assert!(config_requires_restart(
+        &applied,
         &applied_models,
         &applied_subagent,
         &provider_change

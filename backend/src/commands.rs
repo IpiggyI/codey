@@ -27,6 +27,7 @@ use tokio::sync::{Mutex, Notify, RwLock, oneshot, watch};
 use diagnostics::{
     clear_diagnostic_storage, refresh_diagnostic_storage_stats, refresh_trace_log_stats,
 };
+pub(crate) use models::native_subagent_model_state;
 #[cfg(test)]
 use models::{
     config_with_current_provider_models, preserve_selected_third_party_models,
@@ -35,17 +36,16 @@ use models::{
     validate_deleted_third_party_models, validate_manual_model_selection,
 };
 use models::{
-    current_model_state_async, current_renderer_model_catalog_async,
-    hot_reload_runtime_models, native_web_search_capability_requires_restart,
-    official_route_snapshots, provider_route_requires_restart,
-    remote_compaction_transport_requires_restart,
+    current_model_state_async, current_renderer_model_catalog_async, hot_reload_runtime_models,
+    native_web_search_capability_requires_restart, official_route_snapshots,
+    provider_route_requires_restart, remote_compaction_transport_requires_restart,
     runtime_supports_current_routes_for_hot_reload, sync_current_third_party_provider_state,
-    sync_provider_models_for_launch, websocket_transport_requires_restart,};
-pub use models::{
-    fetch_route_models, save_default_model, save_official_route_models,
-    save_selected_models, sync_current_provider_command,
+    sync_provider_models_for_launch, websocket_transport_requires_restart,
 };
-pub(crate) use models::native_subagent_model_state;
+pub use models::{
+    fetch_route_models, save_default_model, save_official_route_models, save_selected_models,
+    sync_current_provider_command,
+};
 use plugins::{plugin_marketplace_status, repair_plugin_marketplace};
 use prompt_optimization::{
     fetch_prompt_optimization_models_command, optimize_prompt_command,
@@ -89,7 +89,6 @@ use crate::error_log;
 use crate::launcher::{CODEX_APP_NOT_FOUND_ERROR, CODEX_APP_PATH_INVALID_ERROR};
 use crate::launcher::{CodeyRuntime, RuntimeModelConfig, RuntimeSubagentConfig};
 use crate::message_delete::delete_messages_persistently;
-use crate::model_catalog;
 use crate::model_id;
 use crate::notifications::NotificationChannelConfig;
 use crate::pending_approval;
@@ -1126,7 +1125,6 @@ pub async fn clear_route_request_logs(state: &Arc<AppState>) -> Result<Value, St
     serde_json::to_value(result).map_err(|error| format!("请求日志清理结果序列化失败：{error}"))
 }
 
-
 pub async fn load_codey_config(state: &Arc<AppState>) -> Result<Value, String> {
     let runtime_running = state.runtime.lock().await.is_some();
     if !runtime_running && let Err(error) = prepare_routes_for_current_launch(state).await {
@@ -2162,7 +2160,8 @@ pub(super) fn provider_route_restart_required_for_runtime(
         || official_route_snapshots(applied) != official_route_snapshots(current)
         || websocket_transport_requires_restart(applied, current)
         || native_web_search_capability_requires_restart(applied, current)
-        || remote_compaction_transport_requires_restart(applied, current)}
+        || remote_compaction_transport_requires_restart(applied, current)
+}
 
 #[cfg(test)]
 fn model_catalog_config_for_runtime<'a>(

@@ -355,7 +355,8 @@ async fn prepare_startup_model_catalog(
     let runtime_native_web_search_models = config.runtime_native_web_search_model_aliases();
     let refresh_official_provider =
         config.official_account_available_this_launch && !current_provider_is_third_party;
-    let refresh_upstream_models = current_provider_is_third_party.then_some(runtime_upstream_models);
+    let refresh_upstream_models =
+        current_provider_is_third_party.then_some(runtime_upstream_models);
     let list_key = config
         .current_model_list_key()
         .unwrap_or_default()
@@ -387,7 +388,8 @@ async fn prepare_startup_model_catalog(
                 upstream_models: refresh_upstream_models.as_deref(),
                 selected_models: &runtime_selected_models,
                 websocket_models: Some(&runtime_websocket_models),
-                native_web_search_models: Some(&runtime_native_web_search_models),                user_catalog: user_catalog_for_refresh.as_deref(),
+                native_web_search_models: Some(&runtime_native_web_search_models),
+                user_catalog: user_catalog_for_refresh.as_deref(),
             });
             let catalog_available =
                 refresh.is_err() && model_catalog::is_available(&catalog_dir_for_refresh);
@@ -1452,8 +1454,7 @@ impl CodeyRuntime {
         let PreparedProviderState {
             runtime_config,
             runtime_config_overrides,
-        } = match prepare_runtime_provider_state(home, config).await
-        {
+        } = match prepare_runtime_provider_state(home, config).await {
             Ok(state) => state,
             Err(error) => {
                 return Err(restore_runtime_config_after_error(home, error).await);

@@ -164,9 +164,9 @@ test("renderer core loads session tools after idle time or sidebar use", async (
   const modelWhitelist = await readSource("public/model-whitelist-inject.js");
   assert.match(modelWhitelist, /const maxTrackedModelListRequests = 256/);
   assert.match(modelWhitelist, /requestMethod === "model\/list"/);
-  assert.doesNotMatch(modelWhitelist, /maxKnownModelQueryClients/);
-  assert.doesNotMatch(modelWhitelist, /groupedMenuObserver/);
-  assert.doesNotMatch(modelWhitelist, /characterData:\s*true/);
+  assert.match(modelWhitelist, /const maxKnownModelQueryClients = 8/);
+  assert.match(modelWhitelist, /let groupedMenuObserver = null/);
+  assert.match(modelWhitelist, /characterData:\s*true/);
   assert.doesNotMatch(inject, /__codeyBlockNativePetControls/);
   assert.match(petShield, /const block = \(root = document\)/);
   assert.match(petShield, /if \(!enabled\) \{/);

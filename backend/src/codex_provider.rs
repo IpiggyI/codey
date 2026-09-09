@@ -59,12 +59,8 @@ enum NativeLoginStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OfficialAccountProfileStatus {
     Available,
-    Unavailable {
-        reason: String,
-    },
-    Unknown {
-        reason: String,
-    },
+    Unavailable { reason: String },
+    Unknown { reason: String },
 }
 
 pub fn current_official_account_profile_status_for_launch(
@@ -335,7 +331,8 @@ pub fn sync_current_provider(
             changed: false,
             provider: snapshot.provider,
         },
-    ))}
+    ))
+}
 
 pub fn status_from_config(config: &CodeyConfig) -> ProviderStatus {
     let provider = config

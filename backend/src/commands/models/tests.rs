@@ -101,10 +101,12 @@ fn disabled_route_is_absent_from_renderer_catalog() {
     let state = current_model_state(&config).unwrap();
     assert!(state.third_party_models.is_empty());
     assert_eq!(state.default_model, "");
-    assert!(!state
-        .official_model_ids
-        .iter()
-        .any(|model| crate::model_id::equal(model, "model")));
+    assert!(
+        !state
+            .official_model_ids
+            .iter()
+            .any(|model| crate::model_id::equal(model, "model"))
+    );
 }
 
 #[test]
@@ -993,11 +995,9 @@ fn failed_provider_sync_preserves_auto_review_capability() {
 
 #[test]
 fn auto_review_cannot_be_saved_as_a_regular_model() {
-    let error = validate_regular_route_model_list(
-        "其他模型",
-        &[model_id::CODEX_AUTO_REVIEW_MODEL.into()],
-    )
-    .unwrap_err();
+    let error =
+        validate_regular_route_model_list("其他模型", &[model_id::CODEX_AUTO_REVIEW_MODEL.into()])
+            .unwrap_err();
 
     assert!(error.contains("Auto Review 线路能力开关"));
 }
