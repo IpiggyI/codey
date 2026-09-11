@@ -60,13 +60,8 @@ function NotificationChannelDialogComponent({
     : null;
 
   useLayoutEffect(() => {
-    if (!open) {
-      setDraft(null);
-      setIsTesting(false);
-      setIsSaving(false);
-      setTestResult({ tone: "idle", text: "" });
-      return;
-    }
+    // Keep the form through the close animation; reinitialize on the next open.
+    if (!open) return;
     setDraft(
       editingChannel
         ? { ...editingChannel }
