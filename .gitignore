@@ -13,6 +13,7 @@
 # Local runtime state and environment files
 /.codey/
 /.memory/
+/.fable-advisor/
 .env
 .env.*
 !.env.example
