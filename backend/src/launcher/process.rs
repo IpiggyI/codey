@@ -1775,10 +1775,7 @@ mod cli_wrapper_tests {
             merge_loopback_no_proxy(Some("corp.internal,127.0.0.1")),
             "corp.internal,127.0.0.1,localhost,::1"
         );
-        assert_eq!(
-            merge_loopback_no_proxy(None),
-            "127.0.0.1,localhost,::1"
-        );
+        assert_eq!(merge_loopback_no_proxy(None), "127.0.0.1,localhost,::1");
     }
 
     #[test]
