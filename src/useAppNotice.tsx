@@ -15,7 +15,7 @@ import {
 } from "@tabler/icons-react";
 
 import type { Notice } from "./App.types";
-import { Button } from "./components/mantine";
+import { Button } from "./components/ui";
 
 const NOTICE_AUTO_DISMISS_MS = 5_000;
 const INITIAL_NOTICE: Notice = {
@@ -140,7 +140,7 @@ export const NoticeToast = memo(function NoticeToast({
         variant="ghost"
         size="icon-sm"
         aria-label="关闭提示"
-        onClick={() => {
+        onPress={() => {
           setAutoDismissPaused(false);
           controller.setNotice({ tone: "info", text: "" });
         }}

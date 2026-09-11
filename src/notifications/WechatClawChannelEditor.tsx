@@ -7,7 +7,7 @@ import {
 
 import { invoke } from "../api";
 import { errorText } from "../appUtils";
-import { Button, Input } from "../components/mantine";
+import { Button, Input } from "../components/ui";
 import { inputShellClass, insetInputClass } from "../uiClasses";
 import type { NotificationChannelEditorProps } from "./types";
 
@@ -215,7 +215,7 @@ function WechatClawChannelEditorComponent({
             variant="secondary"
             size="xs"
             disabled={disabled || isStarting}
-            onClick={() => void startLogin()}
+            onPress={() => void startLogin()}
           >
             {isStarting ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : <IconBrandWechat aria-hidden="true" />}
             {isStarting ? "正在生成" : sessionExpired || hasBinding ? "重新扫码" : "扫码绑定"}
@@ -263,7 +263,7 @@ function WechatClawChannelEditorComponent({
             variant="ghost"
             size="xs"
             disabled={disabled}
-            onClick={() => {
+            onPress={() => {
               setLogin(null);
               onChange({
                 url: "",

@@ -7,7 +7,8 @@ import {
 } from "@tabler/icons-react";
 
 import type { Config } from "../App.types";
-import { Badge, Button, Card } from "../components/mantine";
+import { Card } from "@heroui/react";
+import { Badge, Button } from "../components/ui";
 import { surfaceCardPaddingClass } from "../uiClasses";
 import { getNotificationChannelDefinition } from "./channelRegistry";
 import { NotificationChannelDialog } from "./NotificationChannelDialog";
@@ -99,7 +100,7 @@ function NotificationChannelsCardComponent({
                   ? `最多可添加 ${MAX_NOTIFICATION_CHANNELS} 个通知渠道`
                   : undefined
               }
-              onClick={openAddDialog}
+              onPress={openAddDialog}
             >
               <IconPlus aria-hidden="true" />
               添加渠道
@@ -146,7 +147,7 @@ function NotificationChannelsCardComponent({
                           variant="outline"
                           size="xs"
                           disabled={isBusy}
-                          onClick={() => openEditDialog(channel.id)}
+                          onPress={() => openEditDialog(channel.id)}
                         >
                           <IconPencil aria-hidden="true" />
                           编辑
@@ -156,7 +157,7 @@ function NotificationChannelsCardComponent({
                           variant="ghost"
                           size="icon-sm"
                           disabled={isBusy}
-                          onClick={() => onRequestRemoveChannel(channel)}
+                          onPress={() => onRequestRemoveChannel(channel)}
                           aria-label={`删除${definition.addLabel}通知渠道`}
                         >
                           <IconTrash size={15} aria-hidden="true" />

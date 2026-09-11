@@ -17,8 +17,7 @@ import {
   DialogTitle,
   Select,
   Switch,
-} from "../components/mantine";
-import { SETTINGS_OVERLAY_Z_INDEX } from "../overlay.constants";
+} from "../components/ui";
 import {
   createNotificationChannel,
   getNotificationChannelDefinition,
@@ -155,7 +154,7 @@ function NotificationChannelDialogComponent({
     }}>
       <DialogContent
         className="notification-channel-dialog"
-        container={container}
+        container={container ?? popupContainer}
         onEscapeKeyDown={(event) => {
           if (isBusy || isTesting || isSaving) event.preventDefault();
         }}
@@ -185,43 +184,26 @@ function NotificationChannelDialogComponent({
               <div className="relative w-[min(100%,260px)]">
                 <Select
                   className="w-full"
-                  inputClassName="h-10! rounded-lg! border-black/15! bg-white! text-xs font-semibold hover:border-blue-500/40! focus:border-blue-500/40! focus:ring-3 focus:ring-blue-500/8"
-                  sectionClassName="text-[#8e8e93] data-[position=right]:mr-2.5"
                   value={draft.kind}
                   disabled={isEditing || formBusy}
                   aria-labelledby="notification-channel-select-label"
                   optionList={notificationChannelOptions}
-                  dropdownClassName="rounded-[10px]"
-                  showClear={false}
                   filter={false}
-                  leftSectionPointerEvents="none"
-                  leftSectionWidth={38}
                   prefix={
                     <span className="grid size-[22px] shrink-0 place-items-center">
                       <SelectedChannelIcon size={20} aria-hidden="true" />
                     </span>
                   }
-                  getPopupContainer={() => popupContainer ?? document.body}
-                  zIndex={SETTINGS_OVERLAY_Z_INDEX}
                   renderOptionItem={(option) => {
                     const optionDefinition = notificationChannelDefinitions.find(
                       (item) => item.kind === option.value,
                     );
                     const OptionIcon = optionDefinition?.Icon;
-                    const selected = option.selected === true;
-                    const focused = option.focused === true;
                     const label =
                       optionDefinition?.displayName ?? option.label;
                     if (!OptionIcon) return label;
                     return (
-                      <div
-                        className={`flex min-h-[34px] w-full items-center gap-2 rounded-md px-2.5 text-left text-xs font-semibold text-[#1d1d1f] ${option.className ?? ""} ${(selected || focused) ? "bg-blue-500/8" : ""}`}
-                        role="option"
-                        aria-selected={selected}
-                        style={option.style}
-                        onMouseEnter={option.onMouseEnter}
-                        onClick={option.onClick}
-                      >
+                      <div className="flex items-center gap-2">
                         <span className="grid size-[22px] shrink-0 place-items-center">
                           <OptionIcon size={20} aria-hidden="true" />
                         </span>
@@ -229,9 +211,10 @@ function NotificationChannelDialogComponent({
                       </div>
                     );
                   }}
-                  onChange={(value) =>
-                    selectChannel(String(value) as NotificationChannelKind)
-                  }
+                  onChange={(value) => {
+                    if (value == null) return;
+                    selectChannel(String(value) as NotificationChannelKind);
+                  }}
                 />
               </div>
             </div>
@@ -275,7 +258,7 @@ function NotificationChannelDialogComponent({
                   variant="secondary"
                   size="sm"
                   disabled={formBusy || !canTest}
-                  onClick={() => void testChannel()}
+                  onPress={() => void testChannel()}
                 >
                   {isTesting ? (
                     <LoaderCircle className="animate-spin" aria-hidden="true" />
@@ -292,12 +275,12 @@ function NotificationChannelDialogComponent({
               </p>
             ) : null}
             <DialogFooter>
-              <Button variant="outline" disabled={formBusy} onClick={closeDialog}>
+              <Button variant="outline" disabled={formBusy} onPress={closeDialog}>
                 取消
               </Button>
               <Button
                 disabled={formBusy || !canSave}
-                onClick={() => void saveChannel()}
+                onPress={() => void saveChannel()}
               >
                 {isSaving ? (
                   <LoaderCircle className="animate-spin" aria-hidden="true" />

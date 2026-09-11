@@ -87,6 +87,35 @@ test("console cards and settings shell use HeroUI without Mantine imports", asyn
   assert.match(sources[5], /<PasswordInput[\s\S]*onVisibilityChange=/);
 });
 
+test("notification channels, notices and trace log use HeroUI without Mantine imports", async () => {
+  const files = [
+    "src/notifications/NotificationChannelDialog.tsx",
+    "src/notifications/NotificationChannelsCard.tsx",
+    "src/notifications/TelegramChannelEditor.tsx",
+    "src/notifications/WebhookChannelEditor.tsx",
+    "src/notifications/WechatClawChannelEditor.tsx",
+    "src/useAppNotice.tsx",
+    "src/TraceLogModule.tsx",
+  ];
+  const sources = await Promise.all(
+    files.map((file) => readFile(new URL(file, root), "utf8")),
+  );
+  for (const [file, source] of files.map((file, index) => [file, sources[index]])) {
+    assert.doesNotMatch(source, /from "\.\.\/components\/mantine"/, file);
+    assert.doesNotMatch(source, /from "\.\/components\/mantine"/, file);
+    assert.doesNotMatch(source, /from "\.\/mantine"/, file);
+    assert.doesNotMatch(source, /@mantine\/core/, file);
+  }
+  assert.match(sources[0], /from "\.\.\/components\/ui"/);
+  assert.match(sources[0], /<DialogContent[\s\S]*container=\{container \?\? popupContainer/);
+  assert.match(sources[1], /import \{ Card \} from "@heroui\/react"/);
+  assert.match(sources[1], /from "\.\.\/components\/ui"/);
+  assert.match(sources[5], /from "\.\/components\/ui"/);
+  assert.match(sources[5], /autoDismissEnabled/);
+  assert.match(sources[6], /import \{ Card \} from "@heroui\/react"/);
+  assert.match(sources[6], /from "\.\/components\/ui"/);
+});
+
 test("subagent model picker uses HeroUI ComboBox primitives", async () => {
   const [wrapper, picker] = await Promise.all([
     readFile(new URL("src/components/mantine/index.tsx", root), "utf8"),
@@ -220,8 +249,10 @@ test("notification channel select and input fields preserve proper icon gap and 
     readFile(new URL("src/components/mantine/index.tsx", root), "utf8"),
   ]);
 
-  assert.match(dialogSource, /leftSectionWidth=\{38\}/);
-  assert.match(dialogSource, /leftSectionPointerEvents="none"/);
+  assert.match(dialogSource, /prefix=\{/);
+  assert.match(dialogSource, /SelectedChannelIcon size=\{20\}/);
+  assert.doesNotMatch(dialogSource, /leftSectionWidth/);
+  assert.doesNotMatch(dialogSource, /leftSectionPointerEvents/);
   assert.doesNotMatch(
     dialogSource,
     /data-\[position=left\]:ml-/,

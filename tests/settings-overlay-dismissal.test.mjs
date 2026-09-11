@@ -77,7 +77,13 @@ test("settings controls and popups share the modal busy and portal boundaries", 
     channelCardSource,
     /<NotificationChannelDialog[\s\S]*popupContainer=\{popupContainer\}/,
   );
-  for (const source of [featurePolicySource, promptSource, channelDialogSource]) {
+  for (const source of [featurePolicySource, promptSource]) {
     assert.match(source, /getPopupContainer=\{\(\) => popupContainer \?\? document\.body\}/);
   }
+  assert.match(
+    channelDialogSource,
+    /<DialogContent[\s\S]*container=\{container \?\? popupContainer/,
+  );
+  assert.doesNotMatch(channelDialogSource, /from "\.\.\/components\/mantine"/);
+  assert.doesNotMatch(channelDialogSource, /getPopupContainer/);
 });

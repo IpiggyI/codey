@@ -11,7 +11,8 @@ import {
   IconTrash as Trash2,
 } from "@tabler/icons-react";
 
-import { Badge, Button, Card } from "./components/mantine";
+import { Card } from "@heroui/react";
+import { Badge, Button } from "./components/ui";
 import { formatBytes } from "./formatters";
 import type { CrashpadPendingStats, TraceLogStats } from "./traceLogTypes";
 import { surfaceCardPaddingClass } from "./uiClasses";
@@ -136,7 +137,7 @@ function TraceLogModuleComponent({
             variant="outline"
             size="sm"
             disabled={disabled}
-            onClick={onRefresh}
+            onPress={onRefresh}
           >
             <RefreshCw className={loading ? "animate-spin" : ""} aria-hidden="true" />
             刷新统计
@@ -145,7 +146,7 @@ function TraceLogModuleComponent({
             variant="destructive-light"
             size="sm"
             disabled={disabled}
-            onClick={onClear}
+            onPress={onClear}
           >
             {clearBusy
               ? <LoaderCircle className="animate-spin" aria-hidden="true" />
@@ -190,7 +191,7 @@ function TraceLogModuleComponent({
                   variant="default"
                   size="default"
                   disabled={disabled}
-                  onClick={onRefresh}
+                  onPress={onRefresh}
                 >
                   {loading ? (
                     <>

@@ -1,7 +1,7 @@
 import { memo } from "react";
 import { IconSend } from "@tabler/icons-react";
 
-import { Button, Input } from "../components/mantine";
+import { Button, Input } from "../components/ui";
 import { inputShellClass, insetInputClass } from "../uiClasses";
 import type { NotificationChannelEditorProps } from "./types";
 
@@ -45,7 +45,7 @@ export function createWebhookChannelEditor(emptyPlaceholder: string) {
               variant="ghost"
               size="xs"
               disabled={disabled}
-              onClick={() =>
+              onPress={() =>
                 onChange({
                   url: "",
                   urlConfigured: false,
