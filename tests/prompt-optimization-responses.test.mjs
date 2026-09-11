@@ -43,18 +43,11 @@ test("prompt optimization renders the searchable manual model combobox without r
     cardSource,
     /<ManualModelCombobox[\s\S]*?options=\{cloudModels\}/,
   );
-  assert.match(
-    manualComboboxSource,
-    /useCombobox\(/,
-  );
-  assert.match(
-    manualComboboxSource,
-    /Combobox\.EventsTarget/,
-  );
-  assert.match(
-    manualComboboxSource,
-    /使用自定义模型/,
-  );
+  assert.match(manualComboboxSource, /from "@heroui\/react"/);
+  assert.match(manualComboboxSource, /<ComboBox[\s\S]*allowsCustomValue/);
+  assert.match(manualComboboxSource, /使用自定义模型/);
+  assert.doesNotMatch(manualComboboxSource, /from "\.\/mantine"/);
+  assert.doesNotMatch(manualComboboxSource, /@mantine\/core/);
   assert.doesNotMatch(cardSource, /prompt-optimization-model-create-option/);
 });
 

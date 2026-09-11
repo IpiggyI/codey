@@ -56,11 +56,6 @@ function normalizedSearchText(value: string) {
   return value.trim().toLocaleLowerCase();
 }
 
-const Combobox = {
-  Search: Input,
-  Group: ListBox.Section,
-};
-
 export function ModelCombobox({
   "aria-label": ariaLabel,
   disabled = false,
@@ -188,7 +183,7 @@ export function ModelCombobox({
             <IconAlertTriangle size={14} className="shrink-0 text-warning" aria-hidden="true" />
           </InputGroup.Prefix>
         ) : null}
-        <Combobox.Search
+        <Input
           placeholder={open ? "搜索模型" : placeholder}
           autoComplete="off"
           spellCheck={false}
@@ -217,7 +212,7 @@ export function ModelCombobox({
             )}
           >
             {(group) => (
-              <Combobox.Group id={group.id}>
+              <ListBox.Section id={group.id}>
                 <Header className="flex min-w-0 items-center justify-between gap-2 px-3 py-1 text-[10px] font-semibold text-[#8e8e93]">
                   <span className="truncate">{group.label}</span>
                   {group.providerId ? (
@@ -254,7 +249,7 @@ export function ModelCombobox({
                     );
                   }}
                 </Collection>
-              </Combobox.Group>
+              </ListBox.Section>
             )}
           </ListBox>
         </Virtualizer>

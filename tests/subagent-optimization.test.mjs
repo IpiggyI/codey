@@ -68,9 +68,11 @@ test("subagent settings expose the five supported role controls", async () => {
   assert.match(modelOptionsSource, /modelState\.thirdPartyModelMetadata/);
   assert.match(modelOptionsSource, /resolveSubagentModelOption/);
   assert.match(modelOptionsSource, /resolveCurrentProviderModelOption/);
-  assert.match(comboboxSource, /<Combobox\.Search/);
+  assert.match(comboboxSource, /from "@heroui\/react"/);
+  assert.match(comboboxSource, /<ComboBox/);
   assert.match(comboboxSource, /搜索模型/);
   assert.doesNotMatch(comboboxSource, /搜索模型或线路/);
   assert.match(comboboxSource, /待重选/);
-  assert.match(comboboxSource, /<Combobox\.Group/);
+  assert.match(comboboxSource, /<ListBox\.Section/);
+  assert.doesNotMatch(comboboxSource, /from "\.\/mantine"/);
 });

@@ -3,19 +3,6 @@ import { ComboBox, Input, InputGroup, ListBox } from "@heroui/react";
 import { UNSAFE_PortalProvider } from "react-aria";
 import { IconCirclePlus, IconRobot, IconX } from "@tabler/icons-react";
 
-function useCombobox(getPopupContainer?: () => HTMLElement) {
-  const portalTarget = getPopupContainer?.();
-  const getContainer = useCallback(
-    () => getPopupContainer?.() ?? null,
-    [getPopupContainer],
-  );
-  return { getContainer, portalTarget };
-}
-
-const Combobox = {
-  EventsTarget: Input,
-};
-
 export type ManualModelComboboxProps = {
   ariaDescribedBy?: string;
   ariaInvalid?: boolean;
@@ -64,7 +51,11 @@ export function ManualModelCombobox({
       ? [{ id: trimmed, custom: true, label: trimmed, textValue: trimmed }, ...suggestions]
       : suggestions;
   }, [options, value]);
-  const { getContainer, portalTarget } = useCombobox(getPopupContainer);
+  const portalTarget = getPopupContainer?.();
+  const getContainer = useCallback(
+    () => getPopupContainer?.() ?? null,
+    [getPopupContainer],
+  );
 
   const combobox = (
     <ComboBox
@@ -86,7 +77,7 @@ export function ManualModelCombobox({
         <InputGroup.Prefix className="px-2">
           <IconRobot size={15} aria-hidden="true" className="text-[#7d7d83]" />
         </InputGroup.Prefix>
-        <Combobox.EventsTarget
+        <Input
           id={id}
           placeholder={placeholder}
           aria-describedby={ariaDescribedBy}

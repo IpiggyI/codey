@@ -58,21 +58,20 @@ test("standard selects leave dropdown lifecycle and positioning to Mantine", asy
   assert.match(wrapper, /<MantineSelect[\s\S]*comboboxProps=\{\{/);
 });
 
-test("subagent model picker uses the shared Mantine combobox primitives", async () => {
+test("subagent model picker uses HeroUI ComboBox primitives", async () => {
   const [wrapper, picker] = await Promise.all([
     readFile(new URL("src/components/mantine/index.tsx", root), "utf8"),
     readFile(new URL("src/components/ModelCombobox.tsx", root), "utf8"),
   ]);
 
   assert.match(wrapper, /export \{ Combobox, InputBase, useCombobox \}/);
-  assert.match(
-    picker,
-    /import \{ Combobox, InputBase \} from "\.\/mantine"/,
-  );
-  assert.match(picker, /import \{ useVirtualizedCombobox \} from "@mantine\/core"/);
-  assert.match(picker, /portalProps=\{portalTarget \? \{ target: portalTarget \} : undefined\}/);
-  assert.match(picker, /withinPortal=\{Boolean\(portalTarget\)\}/);
-  assert.match(picker, /middlewares=\{\{ flip: true, shift: true \}\}/);
+  assert.match(picker, /from "@heroui\/react"/);
+  assert.match(picker, /<ComboBox[\s\S]*selectedKey=\{selectedKey\}/);
+  assert.match(picker, /<ListBox\.Section/);
+  assert.match(picker, /<Virtualizer/);
+  assert.match(picker, /UNSAFE_PortalProvider/);
+  assert.doesNotMatch(picker, /from "\.\/mantine"/);
+  assert.doesNotMatch(picker, /@mantine\/core/);
 });
 
 test("settings overlay stays inside body so Mantine can detect outside clicks", async () => {
