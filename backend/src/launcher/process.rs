@@ -152,6 +152,10 @@ pub(super) struct SpawnedCodex {
     pub(super) performance_detail: String,
 }
 
+#[allow(
+    clippy::ptr_arg,
+    reason = "Windows 会整体替换 app_dir 的 PathBuf，`&mut Path` 无法赋值；该赋值在 cfg(windows) 内，Linux 上 clippy 看不到因而误报。"
+)]
 pub(super) async fn spawn_codex(
     app_dir: &mut PathBuf,
     debug_port: u16,
