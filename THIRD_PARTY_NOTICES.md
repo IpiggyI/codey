@@ -43,7 +43,11 @@ The primary frontend dependencies are:
 
 | Package | Version | License | Copyright or project |
 | --- | --- | --- | --- |
-| `@mantine/core`, `@mantine/hooks` | 9.5.2 | MIT | Mantine contributors |
+| `@heroui/react`, `@heroui/styles` | 3.2.4 | Apache-2.0 | NextUI Inc. |
+| `react-aria` | 3.52.1 | Apache-2.0 | Adobe |
+| `react-aria-components` | 1.21.1 | Apache-2.0 | Adobe |
+| `react-stately` | 3.50.0 | Apache-2.0 | Adobe |
+| `tw-animate-css` | 1.4.0 | MIT | Wombosvideo |
 | `@tabler/icons-react` | 3.45.0 | MIT | Paweł Kuna and Tabler contributors |
 | `tailwindcss`, `@tailwindcss/vite` | 4.3.0 | MIT | Tailwind Labs, Inc. |
 | `@vitejs/plugin-react` | 4.3.4 | MIT | Vite and Babel contributors |
@@ -56,6 +60,10 @@ licenses are not MIT:
 
 | Package | Version | License | Copyright or project |
 | --- | --- | --- | --- |
+| `@heroui/react`, `@heroui/styles` | 3.2.4 | Apache-2.0 | NextUI Inc. |
+| `react-aria` | 3.52.1 | Apache-2.0 | Adobe |
+| `react-aria-components` | 1.21.1 | Apache-2.0 | Adobe |
+| `react-stately` | 3.50.0 | Apache-2.0 | Adobe |
 | `baseline-browser-mapping` | 2.10.43 | Apache-2.0 | Web Platform DX Community Group contributors |
 | `detect-libc` | 2.1.2 | Apache-2.0 | Lovell Fuller and contributors |
 | `typescript` | 5.8.2 | Apache-2.0 | Microsoft Corporation |
