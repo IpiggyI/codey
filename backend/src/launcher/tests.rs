@@ -84,6 +84,23 @@ fn third_party_provider_installs_the_codey_model_catalog_when_available() {
     assert!(!should_install_codey_model_catalog(false, false, false));
 }
 
+#[test]
+fn empty_generated_catalog_is_not_injected_except_for_a_user_catalog() {
+    assert!(!should_inject_runtime_model_catalog(
+        false, false, false, false, false
+    ));
+    assert!(!should_inject_runtime_model_catalog(
+        false, true, false, false, false
+    ));
+    assert!(!should_inject_runtime_model_catalog(
+        false, false, true, false, true
+    ));
+    // A user-supplied model_catalog_json still yields to the derived copy.
+    assert!(should_inject_runtime_model_catalog(
+        true, false, false, false, false
+    ));
+}
+
 #[tokio::test]
 async fn official_current_provider_keeps_codex_builtin_catalog() {
     let home = tempfile::tempdir().unwrap();
