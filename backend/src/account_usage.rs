@@ -132,6 +132,7 @@ pub struct AccountUsageCache {
     retry: Option<(Instant, String)>,
     auth_fingerprint_initialized: bool,
     auth_fingerprint: Option<OfficialAuthFingerprint>,
+    auth_generation: u64,
 }
 
 impl AccountUsageCache {
@@ -145,6 +146,7 @@ impl AccountUsageCache {
         force_refresh: bool,
     ) -> Result<AccountUsageSnapshot> {
         self.observe_auth_fingerprint(official_auth_fingerprint(&codex_home.join("auth.json")));
+        let generation = self.auth_generation;
         if force_refresh {
             self.expires_at = None;
         }
@@ -160,6 +162,10 @@ impl AccountUsageCache {
             Err(error) => Err(error),
         };
 
+        self.observe_auth_fingerprint(official_auth_fingerprint(&codex_home.join("auth.json")));
+        if generation != self.auth_generation {
+            bail!("官方登录状态已变化，请重新读取额度");
+        }
         match result {
             Ok(snapshot) => {
                 self.record_success(snapshot.clone(), Instant::now());
@@ -204,6 +210,7 @@ impl AccountUsageCache {
 
     fn observe_auth_fingerprint(&mut self, fingerprint: Option<OfficialAuthFingerprint>) {
         if !self.auth_fingerprint_initialized {
+            self.auth_generation += 1;
             self.auth_fingerprint_initialized = true;
             self.auth_fingerprint = fingerprint;
             return;
@@ -212,10 +219,30 @@ impl AccountUsageCache {
             return;
         }
         self.auth_fingerprint = fingerprint;
+        self.auth_generation += 1;
         self.snapshot = None;
         self.expires_at = None;
         self.consecutive_failures = 0;
         self.retry = None;
+    }
+
+    fn valid_weekly_snapshot(&self) -> Option<AccountUsageSnapshot> {
+        let snapshot = self.snapshot.as_ref()?;
+        let now = unix_timestamp();
+        [&snapshot.primary, &snapshot.secondary]
+            .into_iter()
+            .flatten()
+            .find(|window| {
+                window.window_minutes == 10080
+                    && (0.0..=100.0).contains(&window.used_percent)
+                    && window.resets_at.is_some_and(|end| {
+                        end > now
+                            && snapshot.fetched_at < end
+                            && snapshot.fetched_at > end.saturating_sub(604800)
+                            && snapshot.fetched_at <= now + 1
+                    })
+            })?;
+        Some(snapshot.clone())
     }
 }
 
@@ -236,7 +263,19 @@ pub(crate) async fn query_snapshot(
             value["status"] = Value::String("ok".into());
             value
         }
-        Err(error) => serde_json::json!({"status": "error", "message": error.to_string()}),
+        Err(error) => match cache.valid_weekly_snapshot() {
+            Some(snapshot) => {
+                let mut value =
+                    serde_json::to_value(snapshot).expect("serializable usage snapshot");
+                value["status"] = Value::String("ok".into());
+                value["stale"] = Value::Bool(true);
+                value["message"] = Value::String(
+                    "额度刷新失败，正在使用本周上次成功获取的数据，统计截止时间保持不变。".into(),
+                );
+                value
+            }
+            None => serde_json::json!({"status": "error", "message": error.to_string()}),
+        },
     }
 }
 
@@ -737,6 +776,57 @@ mod tests {
             failed
         );
         assert_eq!(cache.consecutive_failures, 1);
+    }
+
+    #[tokio::test]
+    async fn query_snapshot_falls_back_to_valid_weekly_data_when_refresh_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut cache = AccountUsageCache::default();
+        let mut snapshot = sample_snapshot();
+        snapshot.fetched_at = unix_timestamp();
+        snapshot.primary = Some(AccountUsageWindow {
+            used_percent: 40.0,
+            window_minutes: 10080,
+            resets_at: Some(snapshot.fetched_at + 86400),
+        });
+        snapshot.secondary = None;
+        cache.record_success(snapshot.clone(), Instant::now());
+        cache.record_failure("offline".into(), Instant::now());
+        let value = query_snapshot(&mut cache, directory.path(), true).await;
+        assert_eq!(value["status"], "ok", "{value}");
+        assert_eq!(value["stale"], true);
+        assert_eq!(value["fetchedAt"], snapshot.fetched_at);
+        assert_eq!(value["primary"]["usedPercent"], 40.0);
+        assert!(
+            value["message"]
+                .as_str()
+                .unwrap()
+                .contains("本周上次成功获取")
+        );
+    }
+
+    #[test]
+    fn valid_weekly_snapshot_rejects_expired_and_invalid_windows() {
+        let mut cache = AccountUsageCache::default();
+        let mut snapshot = sample_snapshot();
+        snapshot.fetched_at = unix_timestamp();
+        snapshot.primary = Some(AccountUsageWindow {
+            used_percent: 40.0,
+            window_minutes: 10080,
+            resets_at: Some(snapshot.fetched_at + 86400),
+        });
+        snapshot.secondary = None;
+        cache.record_success(snapshot.clone(), Instant::now());
+        assert!(cache.valid_weekly_snapshot().is_some());
+
+        snapshot.primary.as_mut().unwrap().used_percent = 101.0;
+        cache.record_success(snapshot.clone(), Instant::now());
+        assert!(cache.valid_weekly_snapshot().is_none());
+
+        snapshot.primary.as_mut().unwrap().used_percent = 40.0;
+        snapshot.primary.as_mut().unwrap().resets_at = Some(unix_timestamp());
+        cache.record_success(snapshot, Instant::now());
+        assert!(cache.valid_weekly_snapshot().is_none());
     }
 
     #[test]
