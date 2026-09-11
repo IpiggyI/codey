@@ -2104,20 +2104,7 @@ async fn account_usage_snapshot(state: &Arc<AppState>) -> Value {
         }),
         account_usage::AccountUsagePreflight::Ready => {
             let mut cache = state.account_usage_cache.lock().await;
-            match cache.fetch(home).await {
-                Ok(snapshot) => {
-                    let mut value = serde_json::to_value(snapshot)
-                        .expect("account usage snapshots must be JSON-serializable");
-                    if let Some(object) = value.as_object_mut() {
-                        object.insert("status".into(), Value::String("ok".into()));
-                    }
-                    value
-                }
-                Err(error) => json!({
-                    "status": "error",
-                    "message": error.to_string(),
-                }),
-            }
+            account_usage::query_snapshot(&mut cache, home, false).await
         }
     }
 }
