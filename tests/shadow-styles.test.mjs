@@ -29,14 +29,14 @@ test("shadowStyleSheet rewrites :root to :host in every stylesheet argument", as
       new URL("../src/shadowStyles.ts", import.meta.url),
     );
     const utilityCss = ":root { --tw-token: 1px; }";
-    const mantineCss = ":root { --mantine-color-body: #fff; }";
+    const themeCss = ":root { --accent: #007aff; }";
     const forkCss = ":root { --mac-blue: #007aff; }";
-    const sheet = shadowStyleSheet(utilityCss, mantineCss, forkCss);
+    const sheet = shadowStyleSheet(utilityCss, themeCss, forkCss);
     const scoped = sheet.replacedCss;
 
     assert.doesNotMatch(scoped, /:root\b/);
     assert.match(scoped, /:host\s*\{\s*--tw-token:\s*1px;/);
-    assert.match(scoped, /:host\s*\{\s*--mantine-color-body:\s*#fff;/);
+    assert.match(scoped, /:host\s*\{\s*--accent:\s*#007aff;/);
     assert.match(scoped, /:host\s*\{\s*--mac-blue:\s*#007aff;/);
   } finally {
     if (previousStyleSheet === undefined) delete globalThis.CSSStyleSheet;

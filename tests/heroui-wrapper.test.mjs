@@ -1,38 +1,78 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { access, readdir, readFile } from "node:fs/promises";
+import { constants } from "node:fs";
 import test from "node:test";
 
 import { readAppStyles } from "./helpers/read-app-styles.mjs";
 
 const root = new URL("../", import.meta.url);
 
-test("shared controls are backed by Mantine without Semi remnants", async () => {
+async function listFiles(dirUrl) {
+  const files = [];
+  for (const entry of await readdir(dirUrl, { withFileTypes: true })) {
+    const next = new URL(entry.name + (entry.isDirectory() ? "/" : ""), dirUrl);
+    if (entry.isDirectory()) files.push(...(await listFiles(next)));
+    else files.push(next);
+  }
+  return files;
+}
+
+test("shared controls are backed by HeroUI without Mantine remnants", async () => {
   const [wrapper, styles, packageSource] = await Promise.all([
-    readFile(new URL("src/components/mantine/index.tsx", root), "utf8"),
+    readFile(new URL("src/components/ui/index.tsx", root), "utf8"),
     readAppStyles(root),
     readFile(new URL("package.json", root), "utf8"),
   ]);
 
   for (const component of [
-    "MantineBadge",
-    "MantineButton",
-    "MantineCard",
-    "MantineCollapse",
-    "MantineCheckbox",
-    "MantineInput",
-    "MantineSelect",
-    "MantineSwitch",
-    "MantineTooltip",
+    "export function Badge",
+    "export function Button",
+    "export function Checkbox",
+    "export function Input",
+    "export function PasswordInput",
+    "export function Select",
+    "export function Switch",
+    "export function Tooltip",
+    "export function Dialog",
   ]) {
-    assert.match(wrapper, new RegExp(`\\b${component}\\b`));
+    assert.match(wrapper, new RegExp(component.replaceAll(" ", "\\s+")));
   }
-  assert.match(wrapper, /from "@mantine\/core"/);
-  assert.match(
-    wrapper,
-    /aria-label="关闭"[\s\S]{0,180}onClick=\{handleCancel\}/,
-  );
-  assert.match(packageSource, /"@mantine\/core": "9\.5\.2"/);
+  assert.match(wrapper, /from "@heroui\/react"/);
+  assert.doesNotMatch(wrapper, /@mantine\//);
+  assert.doesNotMatch(wrapper, /from "@mantine\/core"/);
+  assert.match(wrapper, /<Modal\.CloseTrigger aria-label="关闭" \/>/);
+  assert.match(packageSource, /"@heroui\/react": "3\.2\.4"/);
+  assert.doesNotMatch(packageSource, /@mantine\//);
   assert.doesNotMatch(`${wrapper}\n${styles}\n${packageSource}`, /@douyinfe|\.semi-|--semi-/);
+});
+
+test("src, package.json and the lockfile keep no Mantine remnants", async () => {
+  const [packageSource, lockSource, srcFiles] = await Promise.all([
+    readFile(new URL("package.json", root), "utf8"),
+    readFile(new URL("pnpm-lock.yaml", root), "utf8"),
+    listFiles(new URL("src/", root)),
+  ]);
+
+  assert.doesNotMatch(packageSource, /@mantine\//, "package.json must not reintroduce @mantine/*");
+  assert.doesNotMatch(lockSource, /@mantine\//, "pnpm-lock.yaml must not reintroduce @mantine/*");
+
+  for (const file of srcFiles) {
+    const source = await readFile(file, "utf8");
+    assert.doesNotMatch(
+      source,
+      /mantine/i,
+      `${file.pathname} must not mention Mantine after the library drop`,
+    );
+  }
+
+  await assert.rejects(
+    () => access(new URL("src/mantine.ts", root), constants.F_OK),
+    { code: "ENOENT" },
+  );
+  await assert.rejects(
+    () => access(new URL("src/components/mantine/index.tsx", root), constants.F_OK),
+    { code: "ENOENT" },
+  );
 });
 
 test("operations status details expand through HeroUI Disclosure", async () => {
@@ -50,15 +90,15 @@ test("operations status details expand through HeroUI Disclosure", async () => {
   assert.doesNotMatch(source, /@mantine\/core/);
 });
 
-test("standard selects leave dropdown lifecycle and positioning to Mantine", async () => {
+test("standard selects leave dropdown lifecycle and positioning to HeroUI", async () => {
   const wrapper = await readFile(
-    new URL("src/components/mantine/index.tsx", root),
+    new URL("src/components/ui/index.tsx", root),
     "utf8",
   );
 
   assert.doesNotMatch(wrapper, /useCloseSelectOnScroll|addEventListener\("scroll"/);
   assert.doesNotMatch(wrapper, /dropdownOpened=\{|onDropdownOpen=|onDropdownClose=/);
-  assert.match(wrapper, /<MantineSelect[\s\S]*comboboxProps=\{\{/);
+  assert.match(wrapper, /<HeroSelect[\s\S]*<HeroSelect\.Popover/);
 });
 
 test("console cards and settings shell use HeroUI without Mantine imports", async () => {
@@ -77,6 +117,7 @@ test("console cards and settings shell use HeroUI without Mantine imports", asyn
     assert.doesNotMatch(source, /from "\.\/components\/mantine"/, file);
     assert.doesNotMatch(source, /from "\.\/mantine"/, file);
     assert.doesNotMatch(source, /@mantine\/core/, file);
+    assert.doesNotMatch(source, /from "@mantine\//, file);
   }
   assert.match(sources[0], /from "\.\/components\/ui"/);
   assert.match(sources[1], /from "\.\/components\/ui"/);
@@ -118,11 +159,12 @@ test("notification channels, notices and trace log use HeroUI without Mantine im
 
 test("subagent model picker uses HeroUI ComboBox primitives", async () => {
   const [wrapper, picker] = await Promise.all([
-    readFile(new URL("src/components/mantine/index.tsx", root), "utf8"),
+    readFile(new URL("src/components/ui/index.tsx", root), "utf8"),
     readFile(new URL("src/components/ModelCombobox.tsx", root), "utf8"),
   ]);
 
-  assert.match(wrapper, /export \{ Combobox, InputBase, useCombobox \}/);
+  assert.doesNotMatch(wrapper, /from "@mantine\/core"/);
+  assert.doesNotMatch(wrapper, /export \{ Combobox, InputBase, useCombobox \}/);
   assert.match(picker, /from "@heroui\/react"/);
   assert.match(picker, /<ComboBox[\s\S]*selectedKey=\{selectedKey\}/);
   assert.match(picker, /<ListBox\.Section/);
@@ -132,7 +174,7 @@ test("subagent model picker uses HeroUI ComboBox primitives", async () => {
   assert.doesNotMatch(picker, /@mantine\/core/);
 });
 
-test("settings overlay stays inside body so Mantine can detect outside clicks", async () => {
+test("settings overlay stays inside body", async () => {
   const overlaySource = await readFile(
     new URL("src/overlay.tsx", root),
     "utf8",
@@ -185,19 +227,25 @@ test("Tailwind is compiled for both the page and Shadow DOM overlay", async () =
   assert.match(viteSource, /plugins: \[react\(\), tailwindcss\(\)\]/);
   assert.match(overlayViteSource, /plugins: \[react\(\), tailwindcss\(\)\]/);
   assert.match(mainSource, /import "\.\/tailwind\.css"/);
+  assert.match(mainSource, /<UiProvider>/);
+  assert.doesNotMatch(mainSource, /MantineProvider|@mantine\/core|codeyMantineTheme/);
   assert.match(overlaySource, /import tailwindStyles from "\.\/tailwind\.css\?inline"/);
-  assert.match(overlaySource, /cssVariablesSelector=":host"/);
-  assert.match(overlaySource, /getRootElement=\{\(\) => host\}/);
-  assert.equal(
-    overlaySource.match(/setAttribute\("data-mantine-color-scheme", "light"\)/g)?.length,
-    3,
+  assert.match(overlaySource, /<UiProvider container=\{modalContainer\}>/);
+  assert.match(
+    overlaySource,
+    /shadowStyleSheet\(\s*tailwindStyles,\s*coreStyles,/,
   );
+  assert.doesNotMatch(
+    overlaySource,
+    /MantineProvider|@mantine\/core|codeyMantineTheme|mantineStyles|data-mantine-color-scheme/,
+  );
+  assert.match(overlaySource, /dataset\.theme = "light"/);
   assert.match(tailwindSource, /@import "tailwindcss"/);
 });
 
 test("legacy component-library CSS overrides stay removed", async () => {
   const [wrapper, styles, overlaySource] = await Promise.all([
-    readFile(new URL("src/components/mantine/index.tsx", root), "utf8"),
+    readFile(new URL("src/components/ui/index.tsx", root), "utf8"),
     readAppStyles(root),
     readFile(new URL("src/overlay.tsx", root), "utf8"),
   ]);
@@ -206,16 +254,14 @@ test("legacy component-library CSS overrides stay removed", async () => {
   assert.doesNotMatch(`${wrapper}\n${overlaySource}`, /styles\.components\.css|overlay\.css|all:\s*initial/);
 });
 
-test("Mantine surfaces do not erase page spacing with inline padding", async () => {
-  const [wrapper, modalShell, appSource, styles, uiClasses] = await Promise.all([
-    readFile(new URL("src/components/mantine/index.tsx", root), "utf8"),
+test("console surfaces do not erase page spacing with inline padding", async () => {
+  const [modalShell, appSource, styles, uiClasses] = await Promise.all([
     readFile(new URL("src/SettingsModalShell.tsx", root), "utf8"),
     readFile(new URL("src/App.tsx", root), "utf8"),
     readAppStyles(root),
     readFile(new URL("src/uiClasses.ts", root), "utf8"),
   ]);
 
-  assert.doesNotMatch(wrapper, /<MantineCard[\s\S]{0,180}\bp=\{0\}/);
   assert.match(uiClasses, /surfaceCardPaddingClass = "px-5! py-\[18px\]!"/);
   assert.match(uiClasses, /flushCardClass = "p-0!"/);
   assert.match(modalShell, /Modal\.Container[\s\S]*className="p-3 max-\[760px\]:p-1\.5"/);
@@ -246,7 +292,7 @@ test("notification channel select and input fields preserve proper icon gap and 
       "utf8",
     ),
     readFile(new URL("src/uiClasses.ts", root), "utf8"),
-    readFile(new URL("src/components/mantine/index.tsx", root), "utf8"),
+    readFile(new URL("src/components/ui/index.tsx", root), "utf8"),
   ]);
 
   assert.match(dialogSource, /prefix=\{/);
@@ -260,12 +306,12 @@ test("notification channel select and input fields preserve proper icon gap and 
   );
   assert.match(
     uiClasses,
-    /\[&_\.mantine-Input-wrapper\]:flex-1/,
-    "Input wrappers inside inputShellClass must flex to fill available width",
+    /\[&_\[data-slot=input\]\]:flex-1/,
+    "HeroUI inputs inside inputShellClass must flex to fill available width",
   );
   assert.match(
     wrapper,
-    /className=\{classNames\("min-w-0 flex-1", wrapperClassName\)\}/,
-    "Mantine Input wrapper must stretch horizontally by default",
+    /<HeroInput fullWidth \{\.\.\.inputProps\} className=\{cn\("min-w-0", className\)\}/,
+    "HeroUI Input must stretch horizontally by default",
   );
 });

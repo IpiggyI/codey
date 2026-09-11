@@ -20,7 +20,7 @@ export function shadowStyles(css: string): string {
 // 数百 KB 的 CSS 只解析一遍。
 export function shadowStyleSheet(utilityCss: string, ...sheets: string[]): CSSStyleSheet {
   const sheet = new CSSStyleSheet();
-  // Mantine 默认变量和本分叉的 --mac-* 也写在 :root 上；只改写 Tailwind
+  // HeroUI 主题变量和本分叉的 --mac-* 也写在 :root 上；只改写 Tailwind
   // 那一段会让它们在 ShadowRoot 里匹配不到 :host。
   const scoped = [utilityCss, ...sheets].join("\n").replace(/:root\b/g, ":host");
   sheet.replaceSync(scoped);

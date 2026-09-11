@@ -3,7 +3,7 @@
  * 数字输入等从未渲染的组件，约 150 KB），而 overlay 把整份 CSS 内联进 JS。
  * 当前只导入已渲染的 Chip 探针与 ToastProvider 需要的表。
  * 不导入 base.css：它的 `* { border-color: var(--border) }` 会改写未显式设边框色的
- * Mantine 控件。新增 HeroUI 组件时在对应位置补一行 @import。
+ * 控件。新增 HeroUI 组件时在对应位置补一行 @import。
  */
 @layer theme, base, components, utilities;
 

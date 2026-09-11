@@ -1,9 +1,6 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { MantineProvider } from "@mantine/core";
-import "@mantine/core/styles.css";
 import { App } from "./App";
-import { codeyMantineTheme } from "./mantine";
 import { UiProvider } from "./UiProvider";
 import "./tailwind.css";
 import "./styles.css";
@@ -21,13 +18,7 @@ if (import.meta.env.DEV) {
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <UiProvider>
-      <MantineProvider
-        cssVariablesSelector="#root"
-        forceColorScheme="light"
-        theme={codeyMantineTheme}
-      >
-        <App />
-      </MantineProvider>
+      <App />
     </UiProvider>
   </React.StrictMode>,
 );

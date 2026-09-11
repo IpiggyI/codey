@@ -1,6 +1,4 @@
 import ReactDOM from "react-dom/client";
-import { MantineProvider } from "@mantine/core";
-import mantineStyles from "@mantine/core/styles.css?inline";
 // react-aria 用同一份模块实例读取该开关，必须从 react-stately 内部路径导入才能生效。
 import { enableShadowDOM } from "react-stately/private/flags/flags";
 import { App } from "./App";
@@ -13,7 +11,6 @@ import responsiveStyles from "./styles.responsive.css?inline";
 import { codeyApiPath } from "./api";
 import { SETTINGS_OVERLAY_Z_INDEX_CSS } from "./overlay.constants";
 import { SETTINGS_OPENED_EVENT } from "./useRuntimeStatus";
-import { codeyMantineTheme } from "./mantine";
 import { shadowStyleSheet } from "./shadowStyles";
 import tailwindStyles from "./tailwind.css?inline";
 import { UiProvider } from "./UiProvider";
@@ -62,13 +59,11 @@ if (!window.__codeySettingsOverlay) {
     "important",
   );
   host.style.setProperty("background", "transparent", "important");
-  host.setAttribute("data-mantine-color-scheme", "light");
   host.setAttribute("aria-hidden", "true");
   const shadow = host.attachShadow({ mode: "open" });
   shadow.adoptedStyleSheets = [
     shadowStyleSheet(
       tailwindStyles,
-      mantineStyles,
       coreStyles,
       operationsStyles,
       modelStyles,
@@ -87,14 +82,12 @@ if (!window.__codeySettingsOverlay) {
   rootElement.style.pointerEvents = "none";
   rootElement.style.position = "fixed";
   rootElement.style.width = "100%";
-  rootElement.setAttribute("data-mantine-color-scheme", "light");
   const modalContainer = document.createElement("div");
   modalContainer.id = "codey-overlay-modal-container";
   modalContainer.dataset.theme = "light";
   modalContainer.style.inset = "0";
   modalContainer.style.position = "fixed";
   modalContainer.style.width = "100%";
-  modalContainer.setAttribute("data-mantine-color-scheme", "light");
   shadow.append(rootElement, modalContainer);
   getOverlayMountTarget().appendChild(host);
 
@@ -111,20 +104,13 @@ if (!window.__codeySettingsOverlay) {
   const render = (visible: boolean) => {
     reactRoot.render(
       <UiProvider container={modalContainer}>
-        <MantineProvider
-          cssVariablesSelector=":host"
-          forceColorScheme="light"
-          getRootElement={() => host}
-          theme={codeyMantineTheme}
-        >
-          <App
-            embedded
-            modalContainer={modalContainer}
-            modalVisible={visible}
-            onAfterClose={hide}
-            onClose={close}
-          />
-        </MantineProvider>
+        <App
+          embedded
+          modalContainer={modalContainer}
+          modalVisible={visible}
+          onAfterClose={hide}
+          onClose={close}
+        />
       </UiProvider>,
     );
   };

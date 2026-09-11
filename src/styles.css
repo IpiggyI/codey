@@ -331,10 +331,3 @@ input:focus-visible,
   margin-left: 0;
 }
 
-.badge-secondary,
-.mantine-Badge-root[data-variant="light"][data-color="gray"] {
-  background: rgba(0, 0, 0, 0.07);
-  border: 1px solid rgba(0, 0, 0, 0.1);
-  color: #3a3a3c;
-  font-weight: 500;
-}
