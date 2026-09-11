@@ -609,11 +609,6 @@
   line-height: 1.4;
 }
 
-.route-editor-dialog .mantine-Select-option,
-.route-editor-dialog .mantine-Combobox-option {
-  white-space: nowrap;
-}
-
 .official-route-editor {
   display: grid;
   gap: 12px;

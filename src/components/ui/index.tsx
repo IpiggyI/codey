@@ -395,8 +395,9 @@ export interface DialogContentProps {
   container?: HTMLElement | null;
   onEscapeKeyDown?: (event: DialogDismissEvent) => void;
   onPointerDownOutside?: (event: DialogDismissEvent) => void;
+  zIndex?: number;
 }
-export function DialogContent({ children, className, container, onEscapeKeyDown, onPointerDownOutside }: DialogContentProps) {
+export function DialogContent({ children, className, container, onEscapeKeyDown, onPointerDownOutside, zIndex }: DialogContentProps) {
   const dialog = React.useContext(DialogContext);
   const [toastHostEl, setToastHostEl] = React.useState<HTMLDivElement | null>(null);
   useToastContainer(toastHostEl, dialog?.open ?? false);
@@ -418,7 +419,13 @@ export function DialogContent({ children, className, container, onEscapeKeyDown,
   // 在 ShadowRoot 内找不到标题元素。
   const hasCustomWidth = Boolean(className && /\b(sm:)?(w-|max-w-)/.test(className));
   const modal = (
-    <Modal.Backdrop isOpen={dialog.open} onOpenChange={handleOpenChange} isDismissable className="p-0">
+    <Modal.Backdrop
+      isOpen={dialog.open}
+      onOpenChange={handleOpenChange}
+      isDismissable
+      className="p-0"
+      style={zIndex == null ? undefined : { zIndex }}
+    >
       <Modal.Container placement="center" scroll="outside" className="p-4 data-[entering=true]:zoom-in-95">
         <Modal.Dialog
           className={cn("w-full max-w-[calc(100vw-32px)] text-sm relative overflow-hidden", !hasCustomWidth && "sm:w-[480px]", className)}

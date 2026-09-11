@@ -14,10 +14,10 @@ import type {
   ModelState,
   RouterSessionDiagnosis,
 } from "./App.types";
+import { Card } from "@heroui/react";
 import {
   Badge,
   Button,
-  Card,
   Checkbox,
   Dialog,
   DialogContent,
@@ -27,7 +27,7 @@ import {
   DialogTitle,
   Input,
   Switch,
-} from "./components/mantine";
+} from "./components/ui";
 import { modelIdsEqual, modelKey, uniqueModelIds } from "./modelIds";
 import { globalDefaultForProvider } from "./modelRoutes";
 import { SETTINGS_OVERLAY_Z_INDEX } from "./overlay.constants";
@@ -233,7 +233,7 @@ function ModelSectionComponent({
             variant="outline"
             size="sm"
             disabled={dirty || isBusy}
-            onClick={onSyncCurrentProvider}
+            onPress={onSyncCurrentProvider}
           >
             <RefreshCw
               className={busy === "sync-provider" ? "animate-spin" : ""}
@@ -315,7 +315,7 @@ function ModelSectionComponent({
               variant="outline"
               size="sm"
               disabled={isBusy || !selectedMigrateTarget}
-              onClick={() => {
+              onPress={() => {
                 if (selectedMigrateTarget) {
                   onMigrateRouterSessions(selectedMigrateTarget);
                 }
@@ -334,7 +334,7 @@ function ModelSectionComponent({
               <div className="catalog-aggregate-title-wrap">
                 <div className="catalog-aggregate-title">
                   <strong>统一模型目录</strong>
-                  <Badge variant="secondary" size="xs">
+                  <Badge variant="secondary">
                     {totalModelCount} 个
                   </Badge>
                 </div>
@@ -379,14 +379,14 @@ function ModelSectionComponent({
                         </div>
                       </div>
                       <div className="provider-model-group-actions">
-                        <Badge variant={group.official ? "info" : "brand"} size="xs">
+                        <Badge variant={group.official ? "info" : "brand"}>
                           {group.models.length} 模型
                         </Badge>
                         <Button
                           variant="ghost"
                           size="xs"
                           disabled={isBusy || dirty}
-                          onClick={() => syncOrConfigureGroup(group)}
+                          onPress={() => syncOrConfigureGroup(group)}
                         >
                           <RefreshCw
                             size={12}
@@ -452,7 +452,7 @@ function ModelSectionComponent({
                           variant="outline"
                           size="xs"
                           disabled={isBusy || dirty}
-                          onClick={() => syncOrConfigureGroup(group)}
+                          onPress={() => syncOrConfigureGroup(group)}
                         >
                           <RefreshCw size={12} aria-hidden="true" />
                           {group.official ? "配置官方模型" : "同步或手动添加"}
@@ -549,13 +549,13 @@ function ModelSectionComponent({
               <Button
                 variant="outline"
                 disabled={isBusy}
-                onClick={() => setOfficialEditorOpen(false)}
+                onPress={() => setOfficialEditorOpen(false)}
               >
                 取消
               </Button>
               <Button
                 disabled={isBusy || officialModelDraft.length === 0}
-                onClick={() => void saveOfficialModels()}
+                onPress={() => void saveOfficialModels()}
               >
                 <Check aria-hidden="true" />
                 保存模型
