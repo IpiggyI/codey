@@ -1,8 +1,6 @@
 import { memo, useEffect, useId, useRef, useState } from "react";
 
 import {
-  IconEye,
-  IconEyeOff,
   IconKey,
   IconPlugConnected,
   IconSparkles,
@@ -19,13 +17,10 @@ import type {
 import { invoke } from "./api";
 import { errorText, withTimeout } from "./appUtils";
 import { ManualModelCombobox } from "./components/ManualModelCombobox";
-import { Button, Card, Input, PasswordInput, Select, Switch } from "./components/mantine";
+import { Card } from "@heroui/react";
+import { Button, Input, PasswordInput, Select, Switch } from "./components/ui";
 import { SETTINGS_OVERLAY_Z_INDEX } from "./overlay.constants";
-import {
-  inputShellClass,
-  insetInputClass,
-  surfaceCardPaddingClass,
-} from "./uiClasses";
+import { surfaceCardPaddingClass } from "./uiClasses";
 import { validateOutboundApiUrl } from "./urlValidation";
 
 const TEST_TIMEOUT_MS = 65_000;
@@ -325,7 +320,7 @@ function PromptOptimizationCardComponent({
               testing ||
               !connectionDraftValid
             }
-            onClick={() => void runFetchModels()}
+            onPress={() => void runFetchModels()}
           >
             {fetchingModels ? "获取中…" : "获取列表"}
           </Button>
@@ -420,7 +415,7 @@ function PromptOptimizationCardComponent({
                   size="xs"
                   className="prompt-test-btn"
                   disabled={isBusy || testing || fetchingModels || !testDraftValid}
-                  onClick={() => void runTest()}
+                  onPress={() => void runTest()}
                 >
                   <IconPlugConnected size={13} aria-hidden="true" />
                   <span>{testButtonLabel}</span>
@@ -485,7 +480,7 @@ function PromptOptimizationCardComponent({
                       variant="light"
                       size="xs"
                       disabled={isBusy}
-                      onClick={fillManualFromCurrentProvider}
+                      onPress={fillManualFromCurrentProvider}
                     >
                       改为手工填写
                     </Button>
@@ -505,11 +500,7 @@ function PromptOptimizationCardComponent({
                         disabled={isBusy}
                         aria-label="提示词优化上游协议"
                         optionList={[...MANUAL_PROTOCOL_OPTIONS]}
-                        showClear={false}
                         filter={false}
-                        dropdownClassName="rounded-[10px]"
-                        getPopupContainer={() => popupContainer ?? document.body}
-                        zIndex={SETTINGS_OVERLAY_Z_INDEX}
                         onChange={(value) => {
                           clearModelSuggestions();
                           updateOptimization({
@@ -523,23 +514,20 @@ function PromptOptimizationCardComponent({
                   <div className="field prompt-optimization-address-field">
                     <label htmlFor={baseUrlInputId} className="field-label">API 地址</label>
                     <div className="field-control">
-                      <div className={inputShellClass}>
-                        <IconWorld size={15} aria-hidden="true" />
-                        <Input
-                          id={baseUrlInputId}
-                          className={insetInputClass}
-                          value={optimization.baseUrl}
-                          disabled={isBusy}
-                          aria-invalid={Boolean(baseUrlError)}
-                          aria-describedby={baseUrlError ? baseUrlInputId + "-error" : undefined}
-                          onChange={(event) => {
-                            clearModelSuggestions();
-                            updateOptimization({ baseUrl: event.target.value });
-                          }}
-                          placeholder="https://api.openai.com/v1"
-                          spellCheck={false}
-                        />
-                      </div>
+                      <Input
+                        id={baseUrlInputId}
+                        leftSection={<IconWorld size={15} aria-hidden="true" />}
+                        value={optimization.baseUrl}
+                        disabled={isBusy}
+                        aria-invalid={Boolean(baseUrlError)}
+                        aria-describedby={baseUrlError ? baseUrlInputId + "-error" : undefined}
+                        onChange={(event) => {
+                          clearModelSuggestions();
+                          updateOptimization({ baseUrl: event.target.value });
+                        }}
+                        placeholder="https://api.openai.com/v1"
+                        spellCheck={false}
+                      />
                       {baseUrlError ? (
                         <small id={baseUrlInputId + "-error"} className="field-error" role="alert">
                           {baseUrlError}
@@ -551,51 +539,29 @@ function PromptOptimizationCardComponent({
                   <div className="field prompt-optimization-key-field">
                     <label htmlFor={apiKeyInputId} className="field-label">API Key</label>
                     <div className="field-control">
-                      <div className={inputShellClass}>
-                        <IconKey size={15} aria-hidden="true" />
-                        <PasswordInput
-                          id={apiKeyInputId}
-                          variant="unstyled"
-                          className="min-w-0 flex-1"
-                          classNames={{
-                            input: insetInputClass + " pr-11!",
-                            visibilityToggle:
-                              "h-7! w-7! min-w-7! rounded-[7px]! text-[#6e6e73]! hover:bg-black/6! hover:text-[#1d1d1f]!",
-                          }}
-                          visible={apiKeyVisible}
-                          onVisibilityChange={() => setApiKeyVisible((visible) => !visible)}
-                          value={optimization.apiKey}
-                          disabled={isBusy}
-                          aria-invalid={Boolean(apiKeyError)}
-                          aria-describedby={apiKeyError ? apiKeyInputId + "-error" : undefined}
-                          onChange={(event) => {
-                            clearModelSuggestions();
-                            handleApiKeyChange(event.target.value);
-                          }}
-                          placeholder={
-                            optimization.apiKeyConfigured &&
-                            optimization.apiKey.trim() === ""
-                              ? "已保存（输入新 Key 可替换）"
-                              : "sk-…"
-                          }
-                          autoComplete="new-password"
-                          spellCheck={false}
-                          visibilityToggleIcon={({ reveal }) =>
-                            reveal ? (
-                              <IconEyeOff size={15} aria-hidden="true" />
-                            ) : (
-                              <IconEye size={15} aria-hidden="true" />
-                            )
-                          }
-                          visibilityToggleButtonProps={{
-                            disabled: isBusy || !optimization.apiKey.trim(),
-                            title: apiKeyVisible ? "隐藏 API Key" : "显示 API Key",
-                            "aria-label": apiKeyVisible
-                              ? "隐藏 API Key"
-                              : "显示 API Key",
-                          }}
-                        />
-                      </div>
+                      <PasswordInput
+                        id={apiKeyInputId}
+                        className="w-full"
+                        leftSection={<IconKey size={15} aria-hidden="true" />}
+                        visibility={apiKeyVisible}
+                        onVisibilityChange={() => setApiKeyVisible((visible) => !visible)}
+                        value={optimization.apiKey}
+                        disabled={isBusy}
+                        aria-invalid={Boolean(apiKeyError)}
+                        aria-describedby={apiKeyError ? apiKeyInputId + "-error" : undefined}
+                        onChange={(event) => {
+                          clearModelSuggestions();
+                          handleApiKeyChange(event.target.value);
+                        }}
+                        placeholder={
+                          optimization.apiKeyConfigured &&
+                          optimization.apiKey.trim() === ""
+                            ? "已保存（输入新 Key 可替换）"
+                            : "sk-…"
+                        }
+                        autoComplete="new-password"
+                        spellCheck={false}
+                      />
                       {apiKeyError ? (
                         <small id={apiKeyInputId + "-error"} className="field-error" role="alert">
                           {apiKeyError}

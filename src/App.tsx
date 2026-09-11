@@ -50,7 +50,7 @@ import type {
   RouterSessionDiagnosis,
   TraceLogCleanup,
 } from "./App.types";
-import { Badge, Button } from "./components/mantine";
+import { Badge, Button } from "./components/ui";
 
 const Check = IconCheck;
 const X = IconX;
@@ -975,7 +975,7 @@ export function App({
               aria-label={restartStatusError ? "重新查询状态" : status.running ? "重启 Codex" : "Codex 未运行"}
               className="max-[520px]:w-8! max-[520px]:px-0!"
               disabled={isBusy || (!restartStatusError && (status.restartInProgress || !status.running))}
-              onClick={handleRestartCodex}
+              onPress={handleRestartCodex}
               size="sm"
               variant="warning"
             >
@@ -993,7 +993,7 @@ export function App({
             aria-label={dirty ? "保存更改" : "已保存"}
             className="h-8 min-w-[88px] px-3.5 text-xs max-[520px]:min-w-8! max-[520px]:w-8! max-[520px]:px-0!"
             disabled={!dirty || isBusy}
-            onClick={handleSaveCurrent}
+            onPress={handleSaveCurrent}
             size="sm"
             variant={dirty ? "default" : "secondary"}
           >
@@ -1013,7 +1013,7 @@ export function App({
               aria-label="关闭配置"
               className="flex-none max-[520px]:h-8! max-[520px]:w-8! max-[520px]:p-0!"
               disabled={isBusy}
-              onClick={handleCloseSettings}
+              onPress={handleCloseSettings}
               size="icon-sm"
               variant="ghost"
             >

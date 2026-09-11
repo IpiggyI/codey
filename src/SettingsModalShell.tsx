@@ -1,7 +1,7 @@
-import type { ReactNode } from "react";
-import { Modal } from "@mantine/core";
-
-import { SETTINGS_OVERLAY_Z_INDEX } from "./overlay.constants";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { Modal } from "@heroui/react";
+import { UNSAFE_PortalProvider } from "react-aria";
+import { useToastContainer } from "./components/ui";
 
 type SettingsModalShellProps = {
   afterClose?: () => void;
@@ -53,6 +53,13 @@ export function CodeyBrandMark() {
   );
 }
 
+// HeroUI 的 Modal 会等退出动画结束后再卸载对话框内容，
+// 借助子节点的卸载时机通知调用方“已完全关闭”。
+function AfterClose({ onUnmount }: { onUnmount?: () => void }) {
+  useEffect(() => () => onUnmount?.(), [onUnmount]);
+  return null;
+}
+
 export function SettingsModalShell({
   afterClose,
   children,
@@ -62,36 +69,58 @@ export function SettingsModalShell({
   title,
   visible,
 }: SettingsModalShellProps) {
-  return (
-    <Modal
-      centered
-      classNames={{
-        body: "m-0 flex min-h-0 flex-1 flex-col overflow-hidden! p-0",
-        content:
-          "flex! h-[min(860px,calc(100dvh_-_24px))]! max-h-[calc(100dvh_-_24px)]! max-w-[calc(100vw_-_24px)] flex-col overflow-hidden! p-0 max-[760px]:h-[calc(100dvh_-_12px)]! max-[760px]:max-h-[calc(100dvh_-_12px)]! max-[760px]:max-w-[calc(100vw_-_12px)]",
-        header:
-          "m-0 min-h-0! flex-none border-b border-gray-200 px-5! py-2.5! max-[760px]:px-3.5! max-[760px]:py-2!",
-        inner: "p-3! max-[760px]:p-1.5!",
-        root: "[-webkit-app-region:no-drag]",
-        title: "min-w-0 flex-1",
+  const [toastHostEl, setToastHostEl] = useState<HTMLDivElement | null>(null);
+  useToastContainer(toastHostEl, visible);
+  // PortalProvider 以 getContainer 的引用作为上下文值；每次渲染新建闭包会让
+  // 所有弹层 / 提示 / 组合框在每次 App 重渲染时一起重渲染。
+  const getContainer = useCallback(() => container ?? null, [container]);
+
+  // 外壳不响应遮罩点击与 Esc；关闭只能通过头部按钮，避免误触丢失未保存的更改。
+  // 开关状态直接交给 Backdrop（无触发按钮的受控用法）。
+  const modal = (
+    <Modal.Backdrop
+      isDismissable={false}
+      isKeyboardDismissDisabled
+      isOpen={visible}
+      onOpenChange={(open) => {
+        if (!open) onCancel();
       }}
-      closeButtonProps={{ "aria-label": "关闭配置" }}
-      closeOnClickOutside={false}
-      closeOnEscape={false}
-      data-codey-settings-shell="true"
-      onClose={onCancel}
-      onExitTransitionEnd={afterClose}
-      opened={visible}
-      padding={0}
-      lockScroll={false}
-      portalProps={container ? { target: container } : undefined}
-      size={1040}
-      title={header ?? title}
-      withCloseButton={header === undefined}
-      withinPortal={Boolean(container)}
-      zIndex={SETTINGS_OVERLAY_Z_INDEX}
+      className="p-0"
     >
-      {children}
-    </Modal>
+      <Modal.Container placement="center" className="p-3 max-[760px]:p-1.5">
+        <Modal.Dialog
+          className="settings-modal-shell relative flex h-[min(860px,calc(100dvh-24px))] w-[min(1040px,calc(100vw-24px))] max-w-[calc(100vw-24px)] flex-col overflow-hidden rounded-[14px] p-0 text-sm [-webkit-app-region:no-drag] max-[760px]:h-[calc(100dvh-12px)] max-[760px]:max-h-[calc(100dvh-12px)] max-[760px]:max-w-[calc(100vw-12px)]"
+          aria-label="Codey 配置"
+          data-codey-settings-shell="true"
+        >
+          <AfterClose onUnmount={afterClose} />
+          {header !== undefined ? (
+            <div className="settings-modal-header relative z-10 flex min-h-0 flex-none items-center px-5 py-2.5 max-[760px]:px-3.5 max-[760px]:py-2">
+              {header}
+            </div>
+          ) : (
+            <>
+              <Modal.Header className="settings-modal-header relative z-10 min-h-0 flex-none px-5 py-2.5 max-[760px]:px-3.5 max-[760px]:py-2">
+                <Modal.Heading className="text-base font-semibold text-foreground">{title}</Modal.Heading>
+              </Modal.Header>
+              <Modal.CloseTrigger aria-label="关闭配置" className="end-4 top-3" />
+            </>
+          )}
+          <div className="settings-modal-body relative flex min-h-0 flex-1 flex-col overflow-hidden">
+            <div
+              ref={setToastHostEl}
+              className="toast-portal-host pointer-events-none absolute inset-x-0 top-0 z-[100] h-0"
+              aria-hidden="true"
+            />
+            {children}
+          </div>
+        </Modal.Dialog>
+      </Modal.Container>
+    </Modal.Backdrop>
+  );
+  return container ? (
+    <UNSAFE_PortalProvider getContainer={getContainer}>{modal}</UNSAFE_PortalProvider>
+  ) : (
+    modal
   );
 }

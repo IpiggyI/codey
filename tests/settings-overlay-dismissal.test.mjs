@@ -22,19 +22,21 @@ test("settings modal keeps dismissal and stacking inside the overlay", async () 
   assert.match(appSource, /function closeSettings\(\) \{\s*if \(isBusy\) return;/);
   assert.match(
     appSource,
-    /aria-label="关闭配置"[\s\S]{0,180}disabled=\{isBusy\}[\s\S]{0,100}onClick=\{handleCloseSettings\}/,
+    /aria-label="关闭配置"[\s\S]{0,180}disabled=\{isBusy\}[\s\S]{0,100}onPress=\{handleCloseSettings\}/,
   );
   assert.match(
     shellSource,
-    /<Modal[\s\S]*closeOnClickOutside=\{false\}[\s\S]*closeOnEscape=\{false\}[\s\S]*onClose=\{onCancel\}/,
+    /<Modal\.Backdrop[\s\S]*isDismissable=\{false\}[\s\S]*isKeyboardDismissDisabled[\s\S]*onOpenChange=\{/,
   );
-  assert.match(shellSource, /lockScroll=\{false\}/);
+  assert.match(shellSource, /if \(!open\) onCancel\(\)/);
   assert.match(shellSource, /data-codey-settings-shell="true"/);
   assert.doesNotMatch(
     shellSource,
     /overlay:\s*"bg-black\/25|backdrop-blur|overlayProps=/,
   );
-  assert.match(shellSource, /content:\s*\n\s*"[^"]*overflow-hidden!/);
+  assert.match(shellSource, /settings-modal-shell[\s\S]*overflow-hidden/);
+  assert.doesNotMatch(shellSource, /from "@mantine\/core"/);
+  assert.doesNotMatch(shellSource, /closeOnClickOutside|closeOnEscape|lockScroll=/);
   assert.doesNotMatch(overlaySource, /addEventListener\("wheel"/);
   assert.match(
     stylesSource,

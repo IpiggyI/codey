@@ -6,10 +6,6 @@ const cardSource = readFileSync(
   new URL("../src/PromptOptimizationCard.tsx", import.meta.url),
   "utf8",
 );
-const mantineWrapperSource = readFileSync(
-  new URL("../src/components/mantine/index.tsx", import.meta.url),
-  "utf8",
-);
 const backendSource = readFileSync(
   new URL("../backend/src/prompt_optimization.rs", import.meta.url),
   "utf8",
@@ -30,6 +26,10 @@ test("prompt optimization switches between official account, current provider, a
   assert.doesNotMatch(cardSource, /使用 Codey 路由/);
   assert.doesNotMatch(cardSource, /<ModelCombobox/);
   assert.doesNotMatch(cardSource, /所有线路均暂无模型/);
+  assert.match(cardSource, /from "\.\/components\/ui"/);
+  assert.doesNotMatch(cardSource, /from "\.\/components\/mantine"/);
+  assert.doesNotMatch(cardSource, /from "\.\/mantine"/);
+  assert.doesNotMatch(cardSource, /@mantine\/core/);
 });
 
 const manualComboboxSource = readFileSync(

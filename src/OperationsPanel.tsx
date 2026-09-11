@@ -1,4 +1,4 @@
-import { memo, useMemo, useRef, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import {
   IconActivity as Activity,
   IconCode as Code,
@@ -21,7 +21,8 @@ import type {
   PluginMarketplaceStatus,
   RuntimeStatus,
 } from "./App.types";
-import { Badge, Button, Card, Collapse } from "./components/mantine";
+import { Card, Disclosure } from "@heroui/react";
+import { Badge, Button } from "./components/ui";
 import { flushCardClass } from "./uiClasses";
 import {
   buildEnabledOptimizationFeatures,
@@ -95,7 +96,6 @@ function OperationsPanelComponent({
   showRestartAction = true,
   restartStatusUnknown = false,
 }: OperationsPanelProps) {
-  const operationsHubRef = useRef<HTMLElement>(null);
   const [activeCardTitle, setActiveCardTitle] = useState<string | null>(null);
   const [expandedCardTitle, setExpandedCardTitle] = useState<string | null>(
     null,
@@ -171,12 +171,6 @@ function OperationsPanelComponent({
   const codexVersionLabel = codexVersion
     ? `Codex v${codexVersion}`
     : "Codex 版本未知";
-
-  const handleCollapseTransitionEnd = () => {
-    if (!activeCardTitle) {
-      setExpandedCardTitle(null);
-    }
-  };
 
   type MetricItem = {
     id: string;
@@ -385,7 +379,6 @@ function OperationsPanelComponent({
 
   return (
     <section
-      ref={operationsHubRef}
       className={`operations-hub${restartPending ? " pending" : status.running ? " running" : ""}`}
       aria-labelledby="operations-title"
     >
@@ -469,7 +462,7 @@ function OperationsPanelComponent({
                 variant="warning"
                 size="sm"
                 disabled={isBusy || (!restartStatusUnknown && (status.restartInProgress || !status.running))}
-                onClick={onRestart}
+                onPress={onRestart}
               >
                 {busy === "restart" || (status.restartInProgress && !restartStatusUnknown) ? (
                   <LoaderCircle className="animate-spin" aria-hidden="true" />
@@ -482,14 +475,10 @@ function OperationsPanelComponent({
           </div>
         </div>
 
-        <Collapse
-          animateOpacity
-          className="operations-expanded-collapse"
-          expanded={Boolean(activeCardTitle)}
-          keepMounted
-          onTransitionEnd={handleCollapseTransitionEnd}
-          transitionDuration={180}
-        >
+        {/* 详情面板只做展开收起动画，没有独立触发器：标题卡片本身就是开关。 */}
+        <Disclosure isExpanded={Boolean(activeCardTitle)} className="border-0 p-0">
+          <Disclosure.Content>
+          <Disclosure.Body className="p-0">
           {expandedStatusCard && ExpandedStatusIcon && (
             <div
               className="operations-expanded-grid"
@@ -611,7 +600,7 @@ function OperationsPanelComponent({
                         variant="outline"
                         size="xs"
                         disabled={expandedStatusCard.action.disabled}
-                        onClick={expandedStatusCard.action.onClick}
+                        onPress={expandedStatusCard.action.onClick}
                       >
                         {expandedStatusCard.action.loading ? (
                           <LoaderCircle
@@ -629,7 +618,9 @@ function OperationsPanelComponent({
               </article>
             </div>
           )}
-        </Collapse>
+          </Disclosure.Body>
+          </Disclosure.Content>
+        </Disclosure>
 
       </Card>
     </section>

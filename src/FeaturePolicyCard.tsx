@@ -6,22 +6,20 @@ import type {
   FastContextToolsStatus,
   SubagentRoleId,
 } from "./App.types";
+import { Card, Table } from "@heroui/react";
 import {
-  ActionIcon,
+  Button,
   Badge,
-  Card,
   Select,
   Switch,
-  Table,
   Tooltip,
-} from "./components/mantine";
-import { Badge as HeroBadge } from "./components/ui";
+} from "./components/ui";
 import { ModelCombobox } from "./components/ModelCombobox";
 import {
   resolveCurrentProviderModelOption,
   type SubagentModelOption,
 } from "./subagentModels";
-import { compactSelectInputClass, surfaceCardPaddingClass } from "./uiClasses";
+import { surfaceCardPaddingClass } from "./uiClasses";
 import { SETTINGS_OVERLAY_Z_INDEX } from "./overlay.constants";
 
 const GPU_LAUNCH_MODES = [
@@ -96,7 +94,6 @@ export type SubagentPolicyCardProps = {
 export function SubagentPolicyCardComponent({
   config,
   popupContainer,
-  tooltipContainer,
   isBusy,
   subagentModelOptions,
   onConfigChange,
@@ -144,19 +141,16 @@ export function SubagentPolicyCardComponent({
           {config.subagentOptimization ? (
             <>
               <div className="subagent-table-container">
-                <Table
-                  withRowBorders
-                  className="subagent-table"
-                >
-                  <Table.Thead>
-                    <Table.Tr>
-                      <Table.Th style={{ width: "44px" }}>启用</Table.Th>
-                      <Table.Th style={{ width: "135px" }}>任务角色</Table.Th>
-                      <Table.Th>指定模型</Table.Th>
-                      <Table.Th style={{ width: "115px" }}>思考强度</Table.Th>
-                    </Table.Tr>
-                  </Table.Thead>
-                  <Table.Tbody>
+                <Table className="subagent-table" variant="secondary">
+                  <Table.ScrollContainer>
+                  <Table.Content aria-label="子代理角色配置">
+                  <Table.Header>
+                    <Table.Column isRowHeader style={{ width: 44 }}>启用</Table.Column>
+                    <Table.Column style={{ width: 135 }}>任务角色</Table.Column>
+                    <Table.Column>指定模型</Table.Column>
+                    <Table.Column style={{ width: 115 }}>思考强度</Table.Column>
+                  </Table.Header>
+                  <Table.Body>
                     {SUBAGENT_TASK_TYPES.map((task) => {
                       const selection = config.subagentRoles[task.id] ?? {
                         enabled: true,
@@ -187,11 +181,12 @@ export function SubagentPolicyCardComponent({
                       const roleDisabled = !selection.enabled;
 
                       return (
-                        <Table.Tr
+                        <Table.Row
                           key={task.id}
+                          id={task.id}
                           className={roleDisabled ? "subagent-role-disabled" : undefined}
                         >
-                          <Table.Td>
+                          <Table.Cell>
                             <Switch
                               checked={selection.enabled}
                               disabled={
@@ -201,38 +196,31 @@ export function SubagentPolicyCardComponent({
                               onCheckedChange={(enabled) => updateRole({ enabled })}
                               aria-label={`${selection.enabled ? "关闭" : "启用"}${task.name}角色`}
                             />
-                          </Table.Td>
-                          <Table.Td>
+                          </Table.Cell>
+                          <Table.Cell>
                             <div className="subagent-role-name">
                               <span>{task.name}</span>
                               <Badge
                                 variant={task.access === "write" ? "warning" : "secondary"}
-                                size="xs"
                               >
                                 {task.access === "write" ? "可写" : "只读"}
                               </Badge>
                               <Tooltip
                                 content={task.description}
-                                getPopupContainer={() =>
-                                  popupContainer ?? tooltipContainer ?? document.body
-                                }
                                 position="top"
-                                zIndex={SETTINGS_OVERLAY_Z_INDEX}
                               >
-                                <ActionIcon
-                                  variant="subtle"
-                                  color="gray"
+                                <Button
+                                  variant="ghost"
                                   size="xs"
-                                  radius="sm"
                                   className="subagent-role-info-btn"
                                   aria-label={`${task.name}：${task.description}`}
                                 >
                                   <IconInfoCircle size={13} aria-hidden="true" />
-                                </ActionIcon>
+                                </Button>
                               </Tooltip>
                             </div>
-                          </Table.Td>
-                          <Table.Td>
+                          </Table.Cell>
+                          <Table.Cell>
                             <ModelCombobox
                               aria-label={`${task.name}模型`}
                               value={selection.model}
@@ -267,12 +255,10 @@ export function SubagentPolicyCardComponent({
                                 });
                               }}
                             />
-                          </Table.Td>
-                          <Table.Td>
+                          </Table.Cell>
+                          <Table.Cell>
                             <Select
                               className="w-full min-w-0"
-                              inputClassName={compactSelectInputClass}
-                              sectionClassName="text-[#6e6e73]"
                               aria-label={`${task.name}思考强度`}
                               value={
                                 reasoningEfforts.includes(selection.reasoningEffort)
@@ -286,11 +272,7 @@ export function SubagentPolicyCardComponent({
                                 reasoningEfforts.length === 0
                               }
                               optionList={reasoningOptions}
-                              dropdownClassName="rounded-[10px]"
-                              showClear={false}
                               filter={false}
-                              getPopupContainer={() => popupContainer ?? document.body}
-                              zIndex={SETTINGS_OVERLAY_Z_INDEX}
                               onChange={(value) =>
                                 updateRole({
                                   model: selectedModel?.value ?? selection.model,
@@ -298,11 +280,13 @@ export function SubagentPolicyCardComponent({
                                 })
                               }
                             />
-                          </Table.Td>
-                        </Table.Tr>
+                          </Table.Cell>
+                        </Table.Row>
                       );
                     })}
-                  </Table.Tbody>
+                  </Table.Body>
+                  </Table.Content>
+                  </Table.ScrollContainer>
                 </Table>
               </div>
               <div className="subagent-policy-callout">
@@ -351,8 +335,6 @@ function FeaturePolicyCardComponent({
   fastContextToolsStatus,
   isMacClient,
   isWindowsClient,
-  popupContainer,
-  tooltipContainer,
   isBusy,
   onConfigChange,
 }: FeaturePolicyCardProps) {
@@ -486,16 +468,12 @@ function FeaturePolicyCardComponent({
             <div className="feature-card-header">
               <div className="feature-card-title">
                 <strong>FastCtx 上下文工具</strong>
-                <HeroBadge variant="secondary">v0.2.6</HeroBadge>
+                <Badge variant="secondary">v0.2.6</Badge>
               </div>
               {fastctxStatusBlocksEmbedded ? (
                 <Tooltip
                   content={fastctxBlockedReason}
-                  getPopupContainer={() =>
-                    popupContainer ?? tooltipContainer ?? document.body
-                  }
                   position="top"
-                  zIndex={SETTINGS_OVERLAY_Z_INDEX}
                 >
                   <span
                     className="fastctx-disabled-switch-tooltip"

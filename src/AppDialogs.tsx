@@ -29,7 +29,7 @@ import {
   DialogTitle,
   Input,
   Switch,
-} from "./components/mantine";
+} from "./components/ui";
 
 type ModelPickerDialogProps = {
   open: boolean;
@@ -155,7 +155,7 @@ function ModelPickerDialogComponent({
             variant="secondary"
             size="sm"
             disabled={isBusy || !customModelInput.trim()}
-            onClick={onAddCustomModel}
+            onPress={onAddCustomModel}
           >
             <Plus aria-hidden="true" />
             添加
@@ -270,7 +270,7 @@ function ModelPickerDialogComponent({
                     size="xs"
                     className="shrink-0 text-[#d70015]"
                     disabled={isBusy}
-                    onClick={() => onDeleteThirdPartyModel(model)}
+                    onPress={() => onDeleteThirdPartyModel(model)}
                     aria-label={`删除其他模型 ${model}`}
                   >
                     <Trash2 aria-hidden="true" />
@@ -288,7 +288,7 @@ function ModelPickerDialogComponent({
                 variant="ghost"
                 size="sm"
                 disabled={isBusy}
-                onClick={() =>
+                onPress={() =>
                   setVisibleThirdPartyCount((count) =>
                     nextVisibleModelCount(
                       count,
@@ -314,12 +314,12 @@ function ModelPickerDialogComponent({
           )}
         </div>
         <DialogFooter>
-          <Button variant="outline" disabled={isBusy} onClick={() => onOpenChange(false)}>
+          <Button variant="outline" disabled={isBusy} onPress={() => onOpenChange(false)}>
             取消
           </Button>
           <Button
             disabled={isBusy}
-            onClick={onSave}
+            onPress={onSave}
           >
             {busy === "save-models"
               ? <LoaderCircle className="animate-spin" aria-hidden="true" />
@@ -356,7 +356,7 @@ function ConfirmationDialogComponent({
           <DialogDescription>{confirmation?.description}</DialogDescription>
         </DialogHeader>
         <DialogFooter>
-          <Button variant="outline" onClick={onClose}>取消</Button>
+          <Button variant="outline" onPress={onClose}>取消</Button>
           <Button
             variant={
               destructive
@@ -365,7 +365,7 @@ function ConfirmationDialogComponent({
                   ? "warning"
                   : "default"
             }
-            onClick={() => {
+            onPress={() => {
               if (confirmation) onConfirm(confirmation);
             }}
           >

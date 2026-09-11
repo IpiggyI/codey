@@ -35,16 +35,19 @@ test("shared controls are backed by Mantine without Semi remnants", async () => 
   assert.doesNotMatch(`${wrapper}\n${styles}\n${packageSource}`, /@douyinfe|\.semi-|--semi-/);
 });
 
-test("operations status details expand through Mantine Collapse", async () => {
+test("operations status details expand through HeroUI Disclosure", async () => {
   const source = await readFile(
     new URL("src/OperationsPanel.tsx", root),
     "utf8",
   );
 
-  assert.match(source, /import \{ Badge, Button, Card, Collapse \} from "\.\/components\/mantine"/);
-  assert.match(source, /<Collapse[\s\S]*expanded=\{Boolean\(activeCardTitle\)\}/);
-  assert.match(source, /onTransitionEnd=\{handleCollapseTransitionEnd\}/);
+  assert.match(source, /import \{ Card, Disclosure \} from "@heroui\/react"/);
+  assert.match(source, /import \{ Badge, Button \} from "\.\/components\/ui"/);
+  assert.match(source, /<Disclosure[\s\S]*isExpanded=\{Boolean\(activeCardTitle\)\}/);
+  assert.match(source, /<Disclosure\.Content>/);
   assert.doesNotMatch(source, /\{activeCardTitle && \(\s*<div\s+className="operations-expanded-grid"/);
+  assert.doesNotMatch(source, /from "\.\/components\/mantine"/);
+  assert.doesNotMatch(source, /@mantine\/core/);
 });
 
 test("standard selects leave dropdown lifecycle and positioning to Mantine", async () => {
@@ -56,6 +59,32 @@ test("standard selects leave dropdown lifecycle and positioning to Mantine", asy
   assert.doesNotMatch(wrapper, /useCloseSelectOnScroll|addEventListener\("scroll"/);
   assert.doesNotMatch(wrapper, /dropdownOpened=\{|onDropdownOpen=|onDropdownClose=/);
   assert.match(wrapper, /<MantineSelect[\s\S]*comboboxProps=\{\{/);
+});
+
+test("console cards and settings shell use HeroUI without Mantine imports", async () => {
+  const files = [
+    "src/App.tsx",
+    "src/AppDialogs.tsx",
+    "src/SettingsModalShell.tsx",
+    "src/OperationsPanel.tsx",
+    "src/FeaturePolicyCard.tsx",
+    "src/PromptOptimizationCard.tsx",
+  ];
+  const sources = await Promise.all(
+    files.map((file) => readFile(new URL(file, root), "utf8")),
+  );
+  for (const [file, source] of files.map((file, index) => [file, sources[index]])) {
+    assert.doesNotMatch(source, /from "\.\/components\/mantine"/, file);
+    assert.doesNotMatch(source, /from "\.\/mantine"/, file);
+    assert.doesNotMatch(source, /@mantine\/core/, file);
+  }
+  assert.match(sources[0], /from "\.\/components\/ui"/);
+  assert.match(sources[1], /from "\.\/components\/ui"/);
+  assert.match(sources[2], /from "@heroui\/react"/);
+  assert.match(sources[2], /<Modal\.Backdrop/);
+  assert.match(sources[3], /<Disclosure[\s\S]*isExpanded=\{Boolean\(activeCardTitle\)\}/);
+  assert.match(sources[4], /<Table className="subagent-table"/);
+  assert.match(sources[5], /<PasswordInput[\s\S]*onVisibilityChange=/);
 });
 
 test("subagent model picker uses HeroUI ComboBox primitives", async () => {
@@ -160,8 +189,9 @@ test("Mantine surfaces do not erase page spacing with inline padding", async () 
   assert.doesNotMatch(wrapper, /<MantineCard[\s\S]{0,180}\bp=\{0\}/);
   assert.match(uiClasses, /surfaceCardPaddingClass = "px-5! py-\[18px\]!"/);
   assert.match(uiClasses, /flushCardClass = "p-0!"/);
-  assert.match(modalShell, /inner: "p-3! max-\[760px\]:p-1\.5!"/);
-  assert.match(modalShell, /min-h-0![\s\S]*px-5![\s\S]*py-2\.5!/);
+  assert.match(modalShell, /Modal\.Container[\s\S]*className="p-3 max-\[760px\]:p-1\.5"/);
+  assert.match(modalShell, /settings-modal-header[\s\S]*px-5 py-2\.5/);
+  assert.match(modalShell, /settings-modal-body relative flex min-h-0 flex-1/);
   assert.doesNotMatch(
     `${styles}\n${appSource}`,
     /\.config-header-(?:inner|right|actions)|\.config-brand(?:-|\s*\{)/,
