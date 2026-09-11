@@ -1,6 +1,8 @@
 import ReactDOM from "react-dom/client";
 import { MantineProvider } from "@mantine/core";
 import mantineStyles from "@mantine/core/styles.css?inline";
+// react-aria 用同一份模块实例读取该开关，必须从 react-stately 内部路径导入才能生效。
+import { enableShadowDOM } from "react-stately/private/flags/flags";
 import { App } from "./App";
 import coreStyles from "./styles.css?inline";
 import operationsStyles from "./styles.operations.css?inline";
@@ -12,7 +14,9 @@ import { codeyApiPath } from "./api";
 import { SETTINGS_OVERLAY_Z_INDEX_CSS } from "./overlay.constants";
 import { SETTINGS_OPENED_EVENT } from "./useRuntimeStatus";
 import { codeyMantineTheme } from "./mantine";
+import { shadowStyleSheet } from "./shadowStyles";
 import tailwindStyles from "./tailwind.css?inline";
+import { UiProvider } from "./UiProvider";
 
 type OverlayController = {
   open: () => void;
@@ -61,19 +65,24 @@ if (!window.__codeySettingsOverlay) {
   host.setAttribute("data-mantine-color-scheme", "light");
   host.setAttribute("aria-hidden", "true");
   const shadow = host.attachShadow({ mode: "open" });
-  const style = document.createElement("style");
-  style.textContent = [
-    mantineStyles,
-    tailwindStyles,
-    coreStyles,
-    operationsStyles,
-    modelStyles,
-    featureStyles,
-    diagnosticStyles,
-    responsiveStyles,
-  ].join("\n");
+  shadow.adoptedStyleSheets = [
+    shadowStyleSheet(
+      tailwindStyles,
+      mantineStyles,
+      coreStyles,
+      operationsStyles,
+      modelStyles,
+      featureStyles,
+      diagnosticStyles,
+      responsiveStyles,
+    ),
+  ];
+  // HeroUI 的主题变量声明在 :root / [data-theme] 上，ShadowRoot 内没有 :root，
+  // 因此在两个挂载容器上显式声明主题；react-aria 也需要开启 Shadow DOM 感知。
+  enableShadowDOM();
   const rootElement = document.createElement("div");
   rootElement.id = "codey-overlay-root";
+  rootElement.dataset.theme = "light";
   rootElement.style.inset = "0";
   rootElement.style.pointerEvents = "none";
   rootElement.style.position = "fixed";
@@ -81,11 +90,12 @@ if (!window.__codeySettingsOverlay) {
   rootElement.setAttribute("data-mantine-color-scheme", "light");
   const modalContainer = document.createElement("div");
   modalContainer.id = "codey-overlay-modal-container";
+  modalContainer.dataset.theme = "light";
   modalContainer.style.inset = "0";
   modalContainer.style.position = "fixed";
   modalContainer.style.width = "100%";
   modalContainer.setAttribute("data-mantine-color-scheme", "light");
-  shadow.append(style, rootElement, modalContainer);
+  shadow.append(rootElement, modalContainer);
   getOverlayMountTarget().appendChild(host);
 
   let hideTimer: number | undefined;
@@ -100,20 +110,22 @@ if (!window.__codeySettingsOverlay) {
   const reactRoot = ReactDOM.createRoot(rootElement);
   const render = (visible: boolean) => {
     reactRoot.render(
-      <MantineProvider
-        cssVariablesSelector=":host"
-        forceColorScheme="light"
-        getRootElement={() => host}
-        theme={codeyMantineTheme}
-      >
-        <App
-          embedded
-          modalContainer={modalContainer}
-          modalVisible={visible}
-          onAfterClose={hide}
-          onClose={close}
-        />
-      </MantineProvider>,
+      <UiProvider container={modalContainer}>
+        <MantineProvider
+          cssVariablesSelector=":host"
+          forceColorScheme="light"
+          getRootElement={() => host}
+          theme={codeyMantineTheme}
+        >
+          <App
+            embedded
+            modalContainer={modalContainer}
+            modalVisible={visible}
+            onAfterClose={hide}
+            onClose={close}
+          />
+        </MantineProvider>
+      </UiProvider>,
     );
   };
   const close = () => {

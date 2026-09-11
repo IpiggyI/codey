@@ -1,1 +1,53 @@
+/*
+ * HeroUI 样式按组件导入。@heroui/styles 的总入口会拉进全部组件表（含日历、取色器、
+ * 数字输入等从未渲染的组件，约 150 KB），而 overlay 把整份 CSS 内联进 JS。
+ * 当前只导入已渲染的 Chip 探针与 ToastProvider 需要的表。
+ * 不导入 base.css：它的 `* { border-color: var(--border) }` 会改写未显式设边框色的
+ * Mantine 控件。新增 HeroUI 组件时在对应位置补一行 @import。
+ */
+@layer theme, base, components, utilities;
+
 @import "tailwindcss";
+@import "tw-animate-css";
+
+/* 共享基元（Toast 关闭钮依赖） */
+@import "@heroui/styles/components/close-button.css" layer(components);
+
+/* 数据展示：FeaturePolicyCard FastCtx 版本探针 */
+@import "@heroui/styles/components/chip.css" layer(components);
+
+/* 反馈：UiProvider 始终挂载 ToastProvider */
+@import "@heroui/styles/components/toast.css" layer(components);
+
+@import "@heroui/styles/themes/default" layer(theme);
+@import "@heroui/styles/utilities";
+@import "@heroui/styles/variants";
+
+/* Tailwind 只需扫描实际导入的 HeroUI 组件源码。 */
+@source "../node_modules/@heroui/react/dist/utils";
+@source "../node_modules/@heroui/react/dist/hooks";
+@source "../node_modules/@heroui/react/dist/components/chip";
+@source "../node_modules/@heroui/react/dist/components/close-button";
+@source "../node_modules/@heroui/react/dist/components/toast";
+
+/*
+ * Codey 品牌色映射到 HeroUI 语义色。随后把 --radius 写回 Tailwind 默认值，
+ * 避免 HeroUI 主题的 0.5rem 放大本分叉里依赖 var(--radius) 的 rounded 工具类。
+ */
+@layer theme {
+  :root,
+  [data-theme="light"] {
+    --accent: #007aff;
+    --accent-foreground: #ffffff;
+    --link: #007aff;
+    --danger: #ff3b30;
+    --success: #34c759;
+    --warning: #ff9500;
+    --background: #ffffff;
+    --field-shadow: 0 0 0 0 transparent;
+    --field-border: rgba(0, 0, 0, 0.12);
+    --field-border-hover: rgba(0, 0, 0, 0.24);
+    --field-border-focus: #007aff;
+    --radius: 0.25rem;
+  }
+}

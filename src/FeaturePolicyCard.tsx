@@ -15,6 +15,7 @@ import {
   Table,
   Tooltip,
 } from "./components/mantine";
+import { Badge as HeroBadge } from "./components/ui";
 import { ModelCombobox } from "./components/ModelCombobox";
 import {
   resolveCurrentProviderModelOption,
@@ -485,7 +486,7 @@ function FeaturePolicyCardComponent({
             <div className="feature-card-header">
               <div className="feature-card-title">
                 <strong>FastCtx 上下文工具</strong>
-                <Badge variant="secondary">v0.2.6</Badge>
+                <HeroBadge variant="secondary">v0.2.6</HeroBadge>
               </div>
               {fastctxStatusBlocksEmbedded ? (
                 <Tooltip
