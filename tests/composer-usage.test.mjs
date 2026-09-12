@@ -234,6 +234,7 @@ const createEnvironment = (options = {}) => {
   };
 
   const sandbox = {
+    Symbol,
     document,
     window,
     MutationObserver: FakeMutationObserver,
@@ -272,6 +273,10 @@ const createEnvironment = (options = {}) => {
     modelButton,
     notificationCallbacks,
     textarea,
+    setConversationId: (id) => {
+      anchor.setAttribute("data-above-composer-conversation-id", id);
+      sandbox.window.__codeyComposerUsage.scan();
+    },
     toolbar,
     getElementById: (id) => findById(documentElement, id) || findById(body, id),
     setAccountUsage: (next) => {
@@ -307,6 +312,141 @@ const tokenUsageMessage = (threadId = "thread-1") => ({
       },
     },
   },
+});
+
+const rpcManager = (readUsage = () => null) => {
+  const subscriptions = [];
+  const manager = Object.assign(() => {}, {
+    getHostId: async () => "local",
+    getConversation: (id) => ({ latestTokenUsageInfo: readUsage(id) }),
+    addNotificationCallback: () => { throw new Error("Legacy RPC method must not be called"); },
+    subscribe: (options) => {
+      const entry = { ...options, released: false, requestReleased: false };
+      subscriptions.push(entry);
+      const lease = {
+        [Symbol.dispose]: () => { entry.released = true; },
+        onRpcBroken: (callback) => { entry.breakConnection = callback; },
+      };
+      return Object.assign(Promise.resolve(lease), {
+        [Symbol.dispose]: () => { entry.requestReleased = true; },
+      });
+    },
+  });
+  return { manager, subscriptions };
+};
+
+test("subscribes to the callable RPC manager and releases its lease", async () => {
+  const rpc = rpcManager();
+  const env = createEnvironment({ loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }) });
+  await flush();
+  assert.equal(rpc.subscriptions.length, 1);
+  const entry = rpc.subscriptions[0];
+  assert.equal(entry.type, "notification");
+  assert.equal(entry.key.hostId, "local");
+  assert.equal(entry.methods, "thread/tokenUsage/updated");
+  entry.listener(tokenUsageMessage());
+  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
+  assert.equal(env.snapshot().subscribed, true);
+  env.window.__codeyComposerUsage.dispose();
+  assert.equal(entry.released, true);
+  assert.equal(entry.requestReleased, true);
+  assert.equal(env.snapshot().subscribed, false);
+});
+
+test("reads history without a new notification and refreshes on thread re-entry", async () => {
+  const reads = [];
+  const rpc = rpcManager((id) => {
+    reads.push(id);
+    return id === "thread-1" ? tokenUsageMessage().params.tokenUsage : null;
+  });
+  const env = createEnvironment({ loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }) });
+  await flush();
+  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
+  env.window.__codeyComposerUsage.scan();
+  await flush();
+  assert.deepEqual(reads, ["thread-1"]);
+  env.setConversationId("thread-2");
+  await flush();
+  assert.equal(env.snapshot().usageVisible, false);
+  env.setConversationId("thread-1");
+  await flush();
+  assert.equal(env.snapshot().usageVisible, true);
+  assert.deepEqual(reads, ["thread-1", "thread-2", "thread-1"]);
+  env.setConversationId("");
+  await flush();
+  assert.equal(env.snapshot().usageVisible, false);
+});
+
+test("re-subscribes after an RPC connection breaks", async () => {
+  const rpc = rpcManager();
+  const env = createEnvironment({ loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }) });
+  await flush();
+  env.window.__codeyCodexSessionController = { kind: "manager", manager: rpc.manager };
+  rpc.subscriptions[0].breakConnection();
+  assert.equal(env.window.__codeyCodexSessionController, null);
+  assert.equal(env.snapshot().subscribed, false);
+  assert.equal(rpc.subscriptions[0].released, true);
+  env.window.__codeyComposerUsage.scan();
+  await flush();
+  assert.equal(rpc.subscriptions.length, 2);
+  rpc.subscriptions[1].listener(tokenUsageMessage());
+  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
+  assert.equal(env.snapshot().usageError, null);
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("releases an RPC lease that arrives after disposal", async () => {
+  let resolve;
+  let released = false;
+  let requestReleased = false;
+  const rpc = rpcManager();
+  rpc.manager.subscribe = () => Object.assign(new Promise((done) => { resolve = done; }), {
+    [Symbol.dispose]: () => { requestReleased = true; },
+  });
+  const env = createEnvironment({ loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }) });
+  await flush();
+  env.window.__codeyComposerUsage.dispose();
+  resolve({ [Symbol.dispose]: () => { released = true; } });
+  await flush();
+  assert.equal(released, true);
+  assert.equal(requestReleased, true);
+  assert.equal(env.snapshot().subscribed, false);
+});
+
+test("a delayed history read cannot overwrite a newer notification", async () => {
+  let resolve;
+  const rpc = rpcManager(() => new Promise((done) => { resolve = done; }));
+  const env = createEnvironment({ loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }) });
+  await flush();
+  const update = tokenUsageMessage();
+  update.params.tokenUsage.last.cachedInputTokens = 500;
+  rpc.subscriptions[0].listener(update);
+  resolve(tokenUsageMessage().params.tokenUsage);
+  await flush();
+  assert.equal(env.snapshot().usageLabel, "CH 50%");
+});
+
+test("a history read finishing after a switch cannot show the previous thread", async () => {
+  let resolve;
+  const rpc = rpcManager((id) => id === "thread-1" ? new Promise((done) => { resolve = done; }) : null);
+  const env = createEnvironment({ loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }) });
+  await flush();
+  env.setConversationId("thread-2");
+  resolve(tokenUsageMessage().params.tokenUsage);
+  await flush();
+  assert.equal(env.snapshot().usageVisible, false);
+});
+
+test("reads existing usage from a legacy manager", async () => {
+  const env = createEnvironment({ loadSessionController: async () => ({
+    kind: "manager",
+    manager: {
+      addNotificationCallback: () => () => {},
+      getConversation: () => ({ latestTokenUsageInfo: tokenUsageMessage().params.tokenUsage }),
+    },
+  }) });
+  await flush();
+  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
 });
 
 test("hides the usage chip until a matching thread token event arrives", async () => {

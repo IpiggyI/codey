@@ -1,8 +1,9 @@
 // Composer chips for thread usage and ChatGPT account credits.
 // Token counts come from Codex `thread/tokenUsage/updated`. Account credits
 // stay on `/account/usage` with `account/rateLimits/read` as fallback.
-// Subscribe on AppServerManager, its requestClient, and the composer fiber
-// requestClient. Copy host chip chrome and the SVG ring only. Keep Codey's
+// Subscribe through manager RPC or legacy requestClient callbacks, then read
+// stored usage when entering a thread. Copy host chip chrome and the SVG ring
+// only. Keep Codey's
 // product contract: 5h/7d labels, plan + Credits balance, CH → context% → 用量,
 // hide usage until token data, and never invent unit prices.
 (() => {
@@ -57,8 +58,10 @@
   let unsubscribeNotifications = null;
   let notificationSubscribePromise = null;
   let sessionManagerBound = false;
-  const boundNotificationTargets = new Set();
-  const notificationUnsubscribers = [];
+  const boundNotificationTargets = new Map();
+  let disposed = false;
+  let usageSelection = null;
+  let usageError = null;
 
   const publishInjectionStatus = (detail) => {
     const entry = window.__codeyInjectionStatus?.[injectionStatusId];
@@ -95,6 +98,9 @@
 
   const isRecord = (value) =>
     Boolean(value) && typeof value === "object" && !Array.isArray(value);
+
+  const isRpcManager = (value) =>
+    typeof value === "function" && typeof value.subscribe === "function";
 
   const nonNegativeNumber = (value) =>
     typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
@@ -270,6 +276,7 @@
   };
 
   const notificationTargetFromValue = (value) => {
+    if (isRpcManager(value)) return value;
     if (isRecord(value) && typeof value.addNotificationCallback === "function") return value;
     return isRecord(value?.requestClient)
       && typeof value.requestClient.addNotificationCallback === "function"
@@ -278,8 +285,10 @@
   };
 
   const collectManagerNotificationTargets = (controller) => {
-    if (controller?.kind !== "manager" || !isRecord(controller.manager)) return [];
+    if (controller?.kind !== "manager") return [];
     const manager = controller.manager;
+    if (isRpcManager(manager)) return [manager];
+    if (!isRecord(manager)) return [];
     const targets = [];
     const add = (candidate) => {
       const target = notificationTargetFromValue(candidate);
@@ -990,10 +999,6 @@
 
   const currentUsage = () => {
     const threadId = findComposerConversationId(inputElement);
-    if (threadId && usageByThread.has(threadId)) return usageByThread.get(threadId);
-    if (!threadId && usageByThread.size === 1) {
-      return usageByThread.values().next().value;
-    }
     return threadId ? usageByThread.get(threadId) || null : null;
   };
 
@@ -1208,7 +1213,7 @@
   const scheduleAccountUsageCheck = (delayMs = accountUsageRefreshIntervalMs) => {
     window.clearTimeout(creditsTimer);
     creditsTimer = 0;
-    if (!creditsPollingEnabled || document.visibilityState === "hidden") return;
+    if (disposed || !creditsPollingEnabled || document.visibilityState === "hidden") return;
     creditsTimer = window.setTimeout(() => {
       creditsTimer = 0;
       void checkAccountUsage();
@@ -1216,7 +1221,7 @@
   };
 
   const checkAccountUsage = async () => {
-    if (creditsCheckInFlight || document.visibilityState === "hidden") return creditsResult;
+    if (disposed || creditsCheckInFlight || document.visibilityState === "hidden") return creditsResult;
     creditsCheckInFlight = true;
     try {
       let result = await withTimeout(
@@ -1276,6 +1281,7 @@
   };
 
   const applyTokenUsage = (message) => {
+    if (disposed) return false;
     const observed = observeTokenUsage(message);
     if (!observed) return false;
     usageByThread.set(observed.threadId, observed.usage);
@@ -1283,24 +1289,112 @@
     return true;
   };
 
-  const bindNotificationTargets = (targets) => {
+  const bindRpcNotifications = async (target) => {
+    const hostRequest = target.getHostId();
+    let hostId;
+    try {
+      hostId = await withTimeout(hostRequest, 8_000, "读取用量订阅主机超时");
+    } finally {
+      hostRequest?.[Symbol.dispose]?.();
+    }
+    let stopped = disposed;
+    let lease = null;
+    let request = null;
+    const release = () => {
+      stopped = true;
+      const resources = [lease, request];
+      lease = null;
+      request = null;
+      for (const resource of resources) resource?.[Symbol.dispose]?.();
+    };
+    const onBroken = () => {
+      if (stopped) return;
+      release();
+      boundNotificationTargets.delete(target);
+      sessionManagerBound = false;
+      if (window.__codeyCodexSessionController?.manager === target) {
+        window.__codeyCodexSessionController = null;
+      }
+      usageError = "用量订阅连接已断开";
+      scheduleScan();
+    };
+    if (stopped) return null;
+    try {
+      request = target.subscribe({
+        type: "notification",
+        key: { hostId },
+        methods: tokenUsageNotificationMethod,
+        listener: (message) => { if (!stopped) applyTokenUsage(message); },
+      });
+      request.onRpcBroken?.(onBroken);
+      await withTimeout(Promise.resolve(request).then((value) => {
+        lease = value;
+        if (stopped || disposed) release();
+      }), 8_000, "订阅对话用量超时");
+      if (stopped || disposed) return null;
+      lease.onRpcBroken?.(onBroken);
+      return stopped ? null : release;
+    } catch (error) {
+      release();
+      throw error;
+    }
+  };
+
+  const readStoredUsage = async (manager, threadId) => {
+    if (!isRpcManager(manager)) {
+      return (await manager.getConversation(threadId))?.latestTokenUsageInfo;
+    }
+    // RPC property pipelining reads only usage, not the conversation transcript.
+    const conversation = manager.getConversation(threadId);
+    const usage = conversation.latestTokenUsageInfo;
+    try {
+      return await withTimeout(usage, 8_000, "读取历史对话用量超时");
+    } finally {
+      usage?.[Symbol.dispose]?.();
+      conversation?.[Symbol.dispose]?.();
+    }
+  };
+
+  const refreshStoredUsage = (manager) => {
+    const threadId = findComposerConversationId(inputElement);
+    if (!threadId || typeof manager?.getConversation !== "function") {
+      usageSelection = null;
+      return;
+    }
+    if (usageSelection?.threadId === threadId && usageSelection.manager === manager) return;
+    const selection = { manager, threadId };
+    usageSelection = selection;
+    const previous = usageByThread.get(threadId);
+    void readStoredUsage(manager, threadId).then((tokenUsage) => {
+      if (disposed || usageSelection !== selection || usageByThread.get(threadId) !== previous) return;
+      usageError = null;
+      applyTokenUsage({ method: tokenUsageNotificationMethod, params: { threadId, tokenUsage } });
+    }).catch(() => {
+      if (usageSelection === selection) usageError = "读取历史对话用量失败";
+    });
+  };
+
+  const bindNotificationTargets = async (targets) => {
     for (const target of targets) {
       if (boundNotificationTargets.has(target)) continue;
-      const unsubscribe = bindNotificationCallback(target, applyTokenUsage);
+      const unsubscribe = isRpcManager(target)
+        ? await bindRpcNotifications(target)
+        : bindNotificationCallback(target, applyTokenUsage);
       if (!unsubscribe) continue;
-      boundNotificationTargets.add(target);
-      notificationUnsubscribers.push(unsubscribe);
+      if (disposed) { unsubscribe(); continue; }
+      boundNotificationTargets.set(target, unsubscribe);
+      usageError = null;
     }
-    if (!notificationUnsubscribers.length) return;
+    if (!boundNotificationTargets.size) return;
     unsubscribeNotifications = () => {
-      for (const unsubscribe of notificationUnsubscribers.splice(0)) unsubscribe();
+      for (const unsubscribe of boundNotificationTargets.values()) unsubscribe();
       boundNotificationTargets.clear();
       sessionManagerBound = false;
     };
   };
 
   const collectPendingNotificationTargets = (controller) => {
-    const seen = new Set(boundNotificationTargets);
+    const seen = new Set(boundNotificationTargets.keys());
     const targets = [];
     const addTarget = (target) => {
       if (!target || seen.has(target)) return;
@@ -1316,6 +1410,7 @@
   };
 
   const subscribeNotifications = async () => {
+    if (disposed) return;
     if (notificationSubscribePromise) return notificationSubscribePromise;
     notificationSubscribePromise = (async () => {
       try {
@@ -1331,14 +1426,16 @@
           }
         }
         const { managerTargets, targets } = collectPendingNotificationTargets(controller);
-        bindNotificationTargets(targets);
+        await bindNotificationTargets(targets);
         if (managerTargets.some((target) => boundNotificationTargets.has(target))) {
           sessionManagerBound = true;
         }
+        if (!disposed && controller?.kind === "manager") refreshStoredUsage(controller.manager);
       } finally {
         notificationSubscribePromise = null;
       }
     })().catch(() => {
+      usageError = "订阅对话用量失败";
       notificationSubscribePromise = null;
     });
     return notificationSubscribePromise;
@@ -1363,12 +1460,14 @@
   };
 
   const scan = () => {
+    if (disposed) return;
     ready = true;
     const mounted = updateChipPlacement();
     publishInjectionStatus(mounted ? "输入栏用量与额度芯片已就绪" : "等待输入栏");
   };
 
   const scheduleScan = () => {
+    if (disposed) return;
     window.clearTimeout(scanTimer);
     scanTimer = window.setTimeout(() => {
       scanTimer = 0;
@@ -1389,27 +1488,34 @@
     observer.observe(document.documentElement, options);
   };
 
+  const onConfigChanged = () => {
+    creditsPollingEnabled = true;
+    void loadSettings();
+    scheduleAccountUsageCheck(0);
+  };
+  const onFocus = () => {
+    if (usageError) usageSelection = null;
+    scan();
+    scheduleAccountUsageCheck(0);
+  };
+  const onVisibilityChanged = () => {
+    if (document.visibilityState !== "hidden") scheduleAccountUsageCheck(0);
+  };
+
   const boot = async () => {
     addStyle();
     ensureChips();
     startObserver();
     await loadSettings();
+    if (disposed) return;
     scan();
     creditsPollingEnabled = true;
     await checkAccountUsage();
+    if (disposed) return;
     renderUsage();
-    window.addEventListener?.(configChangedEvent, () => {
-      creditsPollingEnabled = true;
-      void loadSettings();
-      scheduleAccountUsageCheck(0);
-    });
-    window.addEventListener?.("focus", () => {
-      scan();
-      scheduleAccountUsageCheck(0);
-    });
-    document.addEventListener?.("visibilitychange", () => {
-      if (document.visibilityState !== "hidden") scheduleAccountUsageCheck(0);
-    });
+    window.addEventListener?.(configChangedEvent, onConfigChanged);
+    window.addEventListener?.("focus", onFocus);
+    document.addEventListener?.("visibilitychange", onVisibilityChanged);
   };
 
   window.__codeyComposerUsage = {
@@ -1419,7 +1525,8 @@
       accountLabel,
       usageVisible: usageRoot?.style.display === "inline-flex",
       creditsVisible: creditsRoot?.style.display === "inline-flex",
-      subscribed: Boolean(unsubscribeNotifications),
+      subscribed: boundNotificationTargets.size > 0,
+      usageError,
       usageLabel: usageRoot?.textContent || "",
       creditsLabel: creditsRoot?.querySelector?.("[data-codey-credits-label]")?.textContent
         || creditsRoot?.textContent
@@ -1429,6 +1536,18 @@
     scan,
     refreshCredits: checkAccountUsage,
     applyNotification: applyTokenUsage,
+    dispose: () => {
+      disposed = true;
+      window.removeEventListener?.(configChangedEvent, onConfigChanged);
+      window.removeEventListener?.("focus", onFocus);
+      document.removeEventListener?.("visibilitychange", onVisibilityChanged);
+      observer?.disconnect();
+      unsubscribeNotifications?.();
+      for (const timer of [scanTimer, creditsTimer, usageCloseTimer, creditsCloseTimer]) {
+        window.clearTimeout(timer);
+      }
+      for (const element of [usageRoot, creditsRoot, usagePopover, creditsPopover]) element?.remove();
+    },
   };
 
   void boot();
