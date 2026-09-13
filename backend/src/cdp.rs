@@ -1181,6 +1181,7 @@ pub enum TargetHealth {
     Healthy,
     Unhealthy,
     Busy,
+    Disconnected,
 }
 
 fn target_health_from_evaluate_response(response: &serde_json::Value) -> TargetHealth {
@@ -1191,14 +1192,21 @@ fn target_health_from_evaluate_response(response: &serde_json::Value) -> TargetH
     }
 }
 
-pub async fn is_target_healthy(websocket_url: &str) -> Result<TargetHealth> {
+pub async fn is_target_healthy(target: &InjectedTarget) -> Result<TargetHealth> {
+    if target.pump.is_finished() {
+        return Ok(TargetHealth::Disconnected);
+    }
     let result = codey_runtime_core::bridge::evaluate_script_with_await_promise(
-        websocket_url,
+        target.websocket_url(),
         bridge_health_check_script(),
         true,
     )
-    .await
-    .context("检查 Codey bridge 健康状态失败")?;
+    .await;
+    // The persistent connection can close while the independent probe is running.
+    if target.pump.is_finished() {
+        return Ok(TargetHealth::Disconnected);
+    }
+    let result = result.context("检查 Codey bridge 健康状态失败")?;
     Ok(target_health_from_evaluate_response(&result))
 }
 
@@ -1223,6 +1231,10 @@ where
         Box::pin(async move { Ok(future.await) })
     })
 }
+
+#[cfg(test)]
+#[path = "cdp/health_tests.rs"]
+mod health_tests;
 
 #[cfg(test)]
 mod tests {

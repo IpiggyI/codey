@@ -2,7 +2,7 @@
 
 改了安装后用户会跑的应用，并要请人装包验收时，先打包，再把安装包路径交给人。不要推送标签来换本机验证包。
 
-本流程对齐 cc-usage：`*.sh` 经 `wslpath -w` 调用 Windows 上的 `*.ps1`；源码拷到 `%TEMP%` 的 NTFS 再编译；成功输出 `NSIS_OK:`；产物固定写到 Downloads。
+入口脚本支持 Windows Git Bash 和 WSL，分别经 `cygpath -w` 和 `wslpath -w` 调用 Windows PowerShell；源码拷到 `%TEMP%` 的 NTFS 再编译；成功输出 `NSIS_OK:`；产物写到 Downloads。
 
 ## 何时打包
 
@@ -18,13 +18,13 @@
 scripts/build-windows.sh
 ```
 
-`pnpm run build:windows` 与上面相同。脚本先在 WSL 重建 overlay，再调用 `scripts/build-windows.ps1`。
+`pnpm run build:windows` 与上面相同。脚本先在当前环境重建页面资源，再调用 `scripts/build-windows.ps1`。Windows 本机从 Git Bash 执行入口，不需要 WSL。
 
 Windows 上可直接跑该 `ps1`，但须先在源码树执行 `pnpm run vite:build`。
 
-成功时标准输出含一行 `NSIS_OK: <绝对路径>`。把该路径交给人。当前固定产物（覆盖写入）：
+成功时标准输出含一行 `NSIS_OK: <绝对路径>`。把该路径交给人。产物名称含版本及毫秒时间戳，不覆盖旧包：
 
-`C:\Users\Shy\Downloads\Codey-windows-x64-setup.exe`
+`%USERPROFILE%\Downloads\Codey-<版本>-<yyyyMMdd-HHmmssfff>-windows-x64-setup.exe`
 
 安装包内 DisplayVersion 默认为 `<package.json 版本>-local`。覆盖时设置 `CODEY_WINDOWS_PACKAGE_VERSION`。
 
@@ -39,4 +39,4 @@ Windows 上可直接跑该 `ps1`，但须先在源码树执行 `pnpm run vite:bu
 
 ## 边界
 
-打包只产出安装包。脚本把源码拷到 `%TEMP%\codey-windows-pack` 的 NTFS 副本上用本机 MSVC 编译。需要 Windows `stable-x86_64-pc-windows-msvc`、VS Build Tools，以及 `makensis.exe`（PATH、官方安装目录或 `%LOCALAPPDATA%\codey-tools\nsis\`）。
+打包只产出安装包。脚本把源码拷到 `%TEMP%\codey-windows-pack\app-<时间戳>` 的独立 NTFS 副本上用本机 MSVC 编译，保留之前的打包目录。需要 Windows `stable-x86_64-pc-windows-msvc`、VS Build Tools，以及 `makensis.exe`（PATH、官方安装目录或 `%LOCALAPPDATA%\codey-tools\nsis\`）。

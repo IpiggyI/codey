@@ -6,7 +6,7 @@
 .DESCRIPTION
     Copies the Codey sources onto NTFS under %TEMP%\codey-windows-pack,
     compiles the Windows MSVC release binaries, then runs makensis.
-    Writes the installer to %USERPROFILE%\Downloads\Codey-windows-x64-setup.exe.
+    Writes a versioned, timestamped installer to %USERPROFILE%\Downloads.
 
     Does not install, start, or stop Codey.
 #>
@@ -16,11 +16,11 @@ $ErrorActionPreference = 'Stop'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = [IO.Path]::GetFullPath((Join-Path $ScriptDir '..'))
 $WorkRoot = Join-Path $env:TEMP 'codey-windows-pack'
-$AppCopy = Join-Path $WorkRoot 'app'
+$BuildStamp = Get-Date -Format 'yyyyMMdd-HHmmssfff'
+$AppCopy = Join-Path $WorkRoot "app-$BuildStamp"
 $WindowsCargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
 $WindowsCargoHome = Join-Path $env:USERPROFILE '.cargo'
 $WindowsRustupHome = Join-Path $env:USERPROFILE '.rustup'
-$OutputPath = Join-Path $env:USERPROFILE 'Downloads\Codey-windows-x64-setup.exe'
 
 function Write-NsisLog {
     param([string]$Message)
@@ -137,10 +137,10 @@ function Resolve-Makensis {
 }
 
 try {
-    $isWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
+    $runningOnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
         [System.Runtime.InteropServices.OSPlatform]::Windows
     )
-    if (-not $isWindows) {
+    if (-not $runningOnWindows) {
         throw "This pack must run on Windows PowerShell, not WSL rustc."
     }
 
@@ -162,10 +162,7 @@ try {
     }
 
     Write-NsisLog "refresh app from $RepoRoot into $AppCopy"
-    if (Test-Path -LiteralPath $AppCopy) {
-        Remove-Item -LiteralPath $AppCopy -Recurse -Force
-    }
-    New-Item -ItemType Directory -Force -Path $AppCopy | Out-Null
+    New-Item -ItemType Directory -Path $AppCopy | Out-Null
     foreach ($name in @(
             'Cargo.toml', 'Cargo.lock', 'package.json', 'pnpm-lock.yaml',
             'pnpm-workspace.yaml', 'vite.overlay.config.ts', 'tsconfig.json',
@@ -187,6 +184,10 @@ try {
     if (-not [string]::IsNullOrWhiteSpace($env:CODEY_WINDOWS_PACKAGE_VERSION)) {
         $version = $env:CODEY_WINDOWS_PACKAGE_VERSION
     }
+    if ($version -notmatch '^[0-9A-Za-z][0-9A-Za-z.+_-]*$') {
+        throw "Invalid package version: use only letters, digits, dots, plus signs, underscores or hyphens"
+    }
+    $OutputPath = Join-Path $env:USERPROFILE "Downloads\Codey-$version-$BuildStamp-windows-x64-setup.exe"
 
     $targetDir = Join-Path $AppCopy 'target'
     $env:CODEY_SKIP_OVERLAY_BUILD = '1'
@@ -229,7 +230,7 @@ try {
 
     $downloads = Split-Path -Parent $OutputPath
     New-Item -ItemType Directory -Force -Path $downloads | Out-Null
-    Copy-Item -LiteralPath $packed -Destination $OutputPath -Force
+    [IO.File]::Copy($packed, $OutputPath, $false)
     $written = Get-Item -LiteralPath $OutputPath
     if ($written.Length -le 1MB) { throw "copied installer too small: $($written.Length) bytes" }
 

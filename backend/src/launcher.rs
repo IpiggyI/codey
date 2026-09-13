@@ -858,8 +858,9 @@ fn spawn_injection_watchdog(
             let health = tokio::select! {
                 biased;
                 _ = &mut shutdown_rx => break 'watchdog,
-                result = cdp::is_target_healthy(target.websocket_url()) => {
+                result = cdp::is_target_healthy(&target) => {
                     match result {
+                        Ok(cdp::TargetHealth::Disconnected) => InjectionHealth::TargetUnavailable,
                         Ok(cdp::TargetHealth::Healthy) => InjectionHealth::Healthy,
                         Ok(cdp::TargetHealth::Unhealthy) => InjectionHealth::Unhealthy,
                         Ok(cdp::TargetHealth::Busy) => {
@@ -1752,6 +1753,10 @@ async fn restore_runtime_config_after_error(
 
 #[cfg(test)]
 mod gpu_launch_argument_tests;
+
+#[cfg(test)]
+#[path = "launcher/watchdog_tests.rs"]
+mod watchdog_tests;
 
 #[cfg(all(test, unix))]
 mod tests;

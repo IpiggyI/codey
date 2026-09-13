@@ -105,7 +105,7 @@ test("desktop packages include FastCtx license and notice files", () => {
   assert.match(windowsInstallerScript, /licenses\\FastCtx\\NOTICE/);
 });
 
-test("WSL can package a Windows installer without pushing a tag", () => {
+test("Git Bash and WSL can package uniquely named Windows installers without pushing a tag", () => {
   const packageJson = JSON.parse(
     fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"),
   );
@@ -119,10 +119,13 @@ test("WSL can package a Windows installer without pushing a tag", () => {
     "utf8",
   );
   assert.match(localWindowsBuild, /wslpath -w .*build-windows\.ps1/);
+  assert.match(localWindowsBuild, /cygpath -w .*build-windows\.ps1/);
   assert.match(localWindowsBuild, /powershell\.exe -NoProfile -ExecutionPolicy Bypass -File/);
   assert.match(windowsHost, /Remove-WslPathEntries/);
   assert.match(windowsHost, /codey-windows-pack/);
-  assert.match(windowsHost, /Downloads\\Codey-windows-x64-setup\.exe/);
+  assert.match(windowsHost, /\$BuildStamp = Get-Date -Format 'yyyyMMdd-HHmmssfff'/);
+  assert.match(windowsHost, /Downloads\\Codey-\$version-\$BuildStamp-windows-x64-setup\.exe/);
+  assert.match(windowsHost, /\[IO\.File\]::Copy\(\$packed, \$OutputPath, \$false\)/);
   assert.match(windowsHost, /NSIS_OK:/);
   assert.doesNotMatch(windowsHost, /wsl\.localhost.*cargo/i);
   const agents = fs.readFileSync(new URL("../AGENTS.md", import.meta.url), "utf8");
