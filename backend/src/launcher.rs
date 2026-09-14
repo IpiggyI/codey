@@ -344,6 +344,17 @@ async fn prepare_startup_model_catalog(
         ConfiguredModelCatalog::Unset | ConfiguredModelCatalog::CodeyOwned => None,
     };
     let user_catalog_configured = user_catalog.is_some();
+    let available_official_models = model_catalog::available_official_models(
+        &catalog_home,
+        &catalog_dir,
+        user_catalog.as_deref(),
+    )?
+    .into_iter()
+    .map(|model| model.slug)
+    .collect::<Vec<_>>();
+    let mut effective_config = config.clone();
+    effective_config.synchronize_runtime_official_model_selections(&available_official_models);
+    let config = &effective_config;
     let official_provider = config
         .current_provider_snapshot
         .as_ref()
@@ -355,6 +366,11 @@ async fn prepare_startup_model_catalog(
     let runtime_native_web_search_models = config.runtime_native_web_search_model_aliases();
     let refresh_official_provider =
         config.official_account_available_this_launch && !current_provider_is_third_party;
+    let include_official_models = config.official_account_available_this_launch
+        && config
+            .profiles
+            .iter()
+            .any(|profile| profile.official_account);
     let refresh_upstream_models =
         current_provider_is_third_party.then_some(runtime_upstream_models);
     let list_key = config
@@ -377,6 +393,7 @@ async fn prepare_startup_model_catalog(
         .cloned()
         .unwrap_or_default();
     let requested_default_model = config.default_model().map(str::to_string);
+    let excluded_official_models = config.official_model_exclusions(&list_key);
     let catalog_dir_for_refresh = catalog_dir.clone();
     let user_catalog_for_refresh = user_catalog.clone();
     let (refresh_result, catalog_available, selection_result) =
@@ -385,22 +402,26 @@ async fn prepare_startup_model_catalog(
                 codex_home: &catalog_home,
                 catalog_dir: &catalog_dir_for_refresh,
                 official_provider: refresh_official_provider,
+                include_official_models,
                 upstream_models: refresh_upstream_models.as_deref(),
                 selected_models: &runtime_selected_models,
+                excluded_official_models: &excluded_official_models,
                 websocket_models: Some(&runtime_websocket_models),
                 native_web_search_models: Some(&runtime_native_web_search_models),
                 user_catalog: user_catalog_for_refresh.as_deref(),
             });
             let catalog_available =
                 refresh.is_err() && model_catalog::is_available(&catalog_dir_for_refresh);
-            let selection = model_catalog::selection_state_with_manual_models(
+            let selection = model_catalog::selection_state_with_catalog_options(
                 &catalog_home,
                 &catalog_dir_for_refresh,
                 official_provider,
                 upstream_models.as_deref(),
                 &selected_models,
                 &manual_models,
+                &excluded_official_models,
                 requested_default_model.as_deref(),
+                user_catalog_for_refresh.as_deref(),
             );
             (refresh, catalog_available, selection)
         })

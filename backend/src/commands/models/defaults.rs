@@ -75,6 +75,7 @@ pub async fn save_official_route_models(
     state: &Arc<AppState>,
     route_id: String,
     requested_models: Vec<String>,
+    known_official_models: Option<Vec<String>>,
     requested_supports_1m_context_models: Option<Vec<String>>,
     requested_enabled: Option<bool>,
     requested_show_account_usage: Option<bool>,
@@ -93,50 +94,45 @@ pub async fn save_official_route_models(
     if !profile.official_account || !config.official_account_available_this_launch {
         return Err("当前线路不是本次登录可用的官方账号线路".to_string());
     }
-    let provider_id = profile.provider_id().to_string();
+    let list_key = config.model_list_key_for_profile(profile);
     if let Some(enabled) = requested_enabled {
         config.profiles[profile_index].enabled = enabled;
     }
     if let Some(show_usage) = requested_show_account_usage {
         config.show_account_usage_in_header = show_usage;
     }
-    let official_models = model_catalog::default_official_model_slugs();
+    let catalog_dir = crate::codex_config::codey_model_catalog_dir();
+    let user_catalog =
+        crate::codex_config::configured_user_model_catalog_path(codex_home(), &catalog_dir)
+            .map_err(|error| error.to_string())?;
+    let official_models = model_catalog::available_official_models(
+        codex_home(),
+        &catalog_dir,
+        user_catalog.as_deref(),
+    )
+    .map_err(|error| error.to_string())?
+    .into_iter()
+    .map(|model| model.slug)
+    .collect::<Vec<_>>();
     set_supports_1m_context_models(
         &mut config,
-        &provider_id,
+        &list_key,
         requested_supports_1m_context_models.as_deref(),
         &official_models,
     )?;
     set_model_contexts(
         &mut config,
-        &provider_id,
+        &list_key,
         requested_model_contexts.as_ref(),
         &official_models,
     )?;
-    let official_by_key = official_models
-        .iter()
-        .map(|model| (model_id::key(model), model.as_str()))
-        .collect::<std::collections::HashMap<_, _>>();
-    let requested_keys = requested_models
-        .iter()
-        .map(|model| model_id::key(model))
-        .collect::<HashSet<_>>();
-    if requested_keys.is_empty() {
-        return Err("官方账号线路至少需要保留一个模型".to_string());
-    }
-    if let Some(model) = requested_keys
-        .iter()
-        .find(|model| !official_by_key.contains_key(model.as_str()))
-    {
-        return Err(format!("模型 {model} 不在官方模型列表中"));
-    }
-    let selected_models = official_models
-        .into_iter()
-        .filter(|model| requested_keys.contains(&model_id::key(model)))
-        .collect::<Vec<_>>();
-    config
-        .selected_models_by_provider
-        .insert(provider_id, selected_models);
+    apply_official_model_selection(
+        &mut config,
+        &list_key,
+        &official_models,
+        &requested_models,
+        known_official_models.as_deref(),
+    )?;
     config = config.normalize();
     let (catalog_refresh, model_state) = refreshed_model_state_async(&config, false).await?;
     subagent_policy::reconcile_with_model_state(&mut config, Some(&model_state));
@@ -160,6 +156,77 @@ pub async fn save_official_route_models(
         })),
         subagent_hot_reload,
     ))
+}
+
+pub(crate) fn apply_official_model_selection(
+    config: &mut CodeyConfig,
+    list_key: &str,
+    available_models: &[String],
+    requested_models: &[String],
+    known_official_models: Option<&[String]>,
+) -> Result<(), String> {
+    let official_by_key = available_models
+        .iter()
+        .map(|model| (model_id::key(model), model.as_str()))
+        .collect::<std::collections::HashMap<_, _>>();
+    let requested_keys = requested_models
+        .iter()
+        .map(|model| model_id::key(model))
+        .collect::<HashSet<_>>();
+    if requested_keys.is_empty() {
+        return Err("官方账号线路至少需要保留一个模型".to_string());
+    }
+    if let Some(model) = requested_keys
+        .iter()
+        .find(|model| !official_by_key.contains_key(model.as_str()))
+    {
+        return Err(format!("模型 {model} 不在官方模型列表中"));
+    }
+    let known_models = known_official_models.map_or_else(
+        || {
+            let mut known = model_catalog::legacy_selectable_official_model_slugs();
+            known.extend(requested_models.iter().cloned());
+            model_id::dedupe_preserving_first(known.iter().map(String::as_str))
+        },
+        ToOwned::to_owned,
+    );
+    validate_requested_model_list_bounds("已知官方模型", &known_models)?;
+    let known_keys = known_models
+        .iter()
+        .map(|model| model_id::key(model))
+        .collect::<HashSet<_>>();
+    if let Some(model) = requested_keys
+        .iter()
+        .find(|model| !known_keys.contains(model.as_str()))
+    {
+        return Err(format!("模型 {model} 不在本次打开的官方模型列表中"));
+    }
+
+    let mut exclusions = config.official_model_exclusions(list_key);
+    exclusions.retain(|model| !known_keys.contains(&model_id::key(model)));
+    exclusions.extend(
+        known_models
+            .iter()
+            .filter(|model| !requested_keys.contains(&model_id::key(model)))
+            .cloned(),
+    );
+    let exclusions = model_id::dedupe_preserving_first(exclusions.iter().map(String::as_str));
+    let excluded_keys = exclusions
+        .iter()
+        .map(|model| model_id::key(model))
+        .collect::<HashSet<_>>();
+    let selected_models = available_models
+        .iter()
+        .filter(|model| !excluded_keys.contains(&model_id::key(model)))
+        .cloned()
+        .collect::<Vec<_>>();
+    config
+        .excluded_official_models_by_provider
+        .insert(list_key.to_string(), exclusions);
+    config
+        .selected_models_by_provider
+        .insert(list_key.to_string(), selected_models);
+    Ok(())
 }
 
 pub(crate) async fn hot_reload_runtime_models(
@@ -263,14 +330,21 @@ pub(crate) fn model_state_for_profile(
         .get(&list_key)
         .map(Vec::as_slice)
         .unwrap_or_default();
-    model_catalog::selection_state_with_manual_models(
+    let excluded_official_models = config.official_model_exclusions(&list_key);
+    let catalog_dir = crate::codex_config::codey_model_catalog_dir();
+    let user_catalog =
+        crate::codex_config::configured_user_model_catalog_path(codex_home(), &catalog_dir)
+            .map_err(|error| error.to_string())?;
+    model_catalog::selection_state_with_catalog_options(
         codex_home(),
-        &crate::codex_config::codey_model_catalog_dir(),
+        &catalog_dir,
         official,
         upstream_models,
         &selected_models,
         manual_models,
+        &excluded_official_models,
         config.default_model_for_profile(profile).as_deref(),
+        user_catalog.as_deref(),
     )
     .map_err(|error| error.to_string())
 }

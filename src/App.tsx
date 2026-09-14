@@ -562,9 +562,7 @@ export function App({
   async function saveOfficialRouteSettings(
     models: string[],
     showAccountUsageInHeader: boolean,
-    supports1MContextModels: string[] = [],
-    enabled = true,
-    modelContexts: Record<string, import("./App.types").ModelContextConfig> = {},
+    knownOfficialModels: string[],
   ) {
     if (!config) return false;
     if (!currentProviderSnapshot?.usesOfficialAccountAuth) return false;
@@ -582,10 +580,11 @@ export function App({
       }>("save_official_route_models", {
         routeId: currentProviderSnapshot.id,
         models,
-        supports1MContextModels,
-        enabled,
+        knownOfficialModels,
+        supports1MContextModels: [],
+        enabled: true,
         showAccountUsageInHeader,
-        modelContexts,
+        modelContexts: {},
       });
       applyRouteResult(modelResult);
       saved = true;

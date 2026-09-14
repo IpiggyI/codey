@@ -89,7 +89,6 @@ use crate::error_log;
 use crate::launcher::{CODEX_APP_NOT_FOUND_ERROR, CODEX_APP_PATH_INVALID_ERROR};
 use crate::launcher::{CodeyRuntime, RuntimeModelConfig, RuntimeSubagentConfig};
 use crate::message_delete::delete_messages_persistently;
-#[cfg(test)]
 use crate::model_catalog;
 use crate::model_id;
 use crate::notifications::NotificationChannelConfig;
@@ -702,6 +701,7 @@ pub(super) const USER_CONFIG_PARSE_ERROR_PREFIX: &str = "用户 Codex 配置无�
 pub(super) async fn prepare_routes_for_current_launch(state: &Arc<AppState>) -> Result<(), String> {
     let home = codex_home().to_path_buf();
     let snapshot_home = home.clone();
+    let model_home = home.clone();
     let snapshot = tokio::task::spawn_blocking(move || {
         crate::codex_provider::current_provider_snapshot(&snapshot_home)
     })
@@ -719,11 +719,41 @@ pub(super) async fn prepare_routes_for_current_launch(state: &Arc<AppState>) -> 
     .await
     .map_err(|error| format!("检测 Codex 官方账号登录状态的任务异常退出：{error}"))?
     .map_err(|error| format!("检测 Codex 官方账号登录状态失败：{error:#}"))?;
+    let available_official_models = if snapshot.uses_official_account_auth {
+        tokio::task::spawn_blocking(move || {
+            let catalog_dir = crate::codex_config::codey_model_catalog_dir();
+            let user_catalog =
+                crate::codex_config::configured_user_model_catalog_path(&model_home, &catalog_dir)?;
+            model_catalog::available_official_models(
+                &model_home,
+                &catalog_dir,
+                user_catalog.as_deref(),
+            )
+            .map(|models| {
+                models
+                    .into_iter()
+                    .map(|model| model.slug)
+                    .collect::<Vec<_>>()
+            })
+        })
+        .await
+        .map_err(|error| format!("读取官方模型目录的任务异常退出：{error}"))?
+        .map_err(|error| format!("读取官方模型目录失败：{error:#}"))?
+    } else {
+        Vec::new()
+    };
 
     let _config_write_guard = state.config_write_lock.lock().await;
     let previous = state.config.read().await.clone();
     let mut next = route_config_for_official_probe(&previous, official_status)?;
     let migration = next.migrate_current_provider_model_lists(&snapshot);
+    if snapshot.uses_official_account_auth {
+        next.synchronize_official_model_selection(
+            &snapshot.ownership_key,
+            &available_official_models,
+        );
+        next = next.normalize();
+    }
 
     if persisted_config_changed(&previous, &next) {
         if next.settings_revision == previous.settings_revision {
@@ -974,6 +1004,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         "save_official_route_models" => match (
             string_argument(&args, "routeId"),
             argument::<Vec<String>>(&args, "models"),
+            optional_argument::<Vec<String>>(&args, "knownOfficialModels"),
             optional_argument::<Vec<String>>(&args, "supports1MContextModels"),
             optional_argument::<bool>(&args, "enabled"),
             optional_argument::<bool>(&args, "showAccountUsageInHeader"),
@@ -985,6 +1016,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
             (
                 Ok(route_id),
                 Ok(models),
+                Ok(known_official_models),
                 Ok(context_models),
                 Ok(enabled),
                 Ok(show_usage),
@@ -994,6 +1026,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
                     state,
                     route_id,
                     models,
+                    known_official_models,
                     context_models,
                     enabled,
                     show_usage,
@@ -1001,12 +1034,13 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
                 )
                 .await
             }
-            (Err(error), _, _, _, _, _)
-            | (_, Err(error), _, _, _, _)
-            | (_, _, Err(error), _, _, _)
-            | (_, _, _, Err(error), _, _)
-            | (_, _, _, _, Err(error), _)
-            | (_, _, _, _, _, Err(error)) => Err(error),
+            (Err(error), _, _, _, _, _, _)
+            | (_, Err(error), _, _, _, _, _)
+            | (_, _, Err(error), _, _, _, _)
+            | (_, _, _, Err(error), _, _, _)
+            | (_, _, _, _, Err(error), _, _)
+            | (_, _, _, _, _, Err(error), _)
+            | (_, _, _, _, _, _, Err(error)) => Err(error),
         },
         "runtime_status" => {
             let refresh_injection_status = args

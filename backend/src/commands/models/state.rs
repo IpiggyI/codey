@@ -142,14 +142,26 @@ pub(crate) fn renderer_model_catalog_value(
     if !config.local_router_enabled {
         let mut catalog = renderer_native_model_catalog_value(model_state);
         catalog["legacy_model_aliases"] = json!(config.model_alias_history);
-        let provider_id = codex_provider::current_provider(codex_home())
-            .map(|provider| provider.id)
+        let provider = codex_provider::current_provider(codex_home()).ok();
+        let provider_id = provider
+            .as_ref()
+            .map(|provider| provider.id.clone())
             .unwrap_or_default();
         catalog["native_model_provider"] = json!(provider_id.clone());
-        if config.provider_is_disabled(&provider_id) {
-            catalog["status"] = json!("ok");
-            catalog["clear_models"] = json!(true);
-        }
+        let user_catalog_configured = crate::codex_config::configured_user_model_catalog_path(
+            codex_home(),
+            &crate::codex_config::codey_model_catalog_dir(),
+        )
+        .ok()
+        .flatten()
+        .is_some();
+        apply_native_catalog_policy(
+            &mut catalog,
+            config,
+            &provider_id,
+            provider.as_ref().is_some_and(|provider| provider.official),
+            user_catalog_configured,
+        );
         if let Some(metadata) = catalog["model_metadata"].as_array_mut() {
             for entry in metadata {
                 let supported = config.model_supports_1m_context(
@@ -254,6 +266,31 @@ pub(crate) fn renderer_model_catalog_value(
             "message": ""
         }
     })
+}
+
+pub(crate) fn apply_native_catalog_policy(
+    catalog: &mut Value,
+    config: &CodeyConfig,
+    provider_id: &str,
+    official_provider: bool,
+    user_catalog_configured: bool,
+) {
+    if config.provider_is_disabled(provider_id) {
+        catalog["status"] = json!("ok");
+        catalog["clear_models"] = json!(true);
+        return;
+    }
+    if !official_provider || user_catalog_configured {
+        return;
+    }
+    let list_key = config
+        .current_provider_snapshot
+        .as_ref()
+        .filter(|snapshot| snapshot.id == provider_id)
+        .map(|snapshot| snapshot.ownership_key.as_str())
+        .unwrap_or(provider_id);
+    catalog["preserve_native_models"] = json!(true);
+    catalog["excluded_native_models"] = json!(config.official_model_exclusions(list_key));
 }
 
 pub(crate) fn renderer_native_model_catalog_value(

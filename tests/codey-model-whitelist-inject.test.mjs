@@ -451,6 +451,97 @@ test("adding GPT-6 on routed models notifies the mounted picker without mutating
   runtime.patch.dispose();
 });
 
+for (const copiesQueryResults of [false, true]) {
+test(`official native models survive an older Codey catalog and explicit deselection is reversible (query copies: ${copiesQueryResults})`, async () => {
+  const names = ["gpt-6-astra", "future-official-model", "gpt-5.6-sol"];
+  const client = statsigClient(names);
+  const queryClient = activeModelQueryClient(names);
+  if (copiesQueryResults) {
+    const setQueryData = queryClient.setQueryData.bind(queryClient);
+    queryClient.setQueryData = (key, value) => {
+      setQueryData(key, { ...value, data: [...value.data] });
+      return queryClient.result();
+    };
+  }
+  const future = queryClient.model("future-official-model");
+  future.supportedReasoningEfforts = [{ reasoningEffort: "ultra", description: "Native effort" }];
+  future.nativeCapability = "preserve-me";
+  const sol = queryClient.model("gpt-5.6-sol");
+  sol.supportedReasoningEfforts = [{ reasoningEffort: "ultra", description: "Native effort" }];
+  sol.defaultReasoningEffort = "ultra";
+  const payload = {
+    status: "ok", native_selection_only: true, preserve_native_models: true,
+    excluded_native_models: [], models: ["gpt-5.6-sol"], default_model: "gpt-5.6-sol",
+    model_metadata: [{ model: "gpt-5.6-sol", supported_reasoning_efforts: ["low"], default_reasoning_effort: "low" }],
+  };
+  const runtime = await loadPatch(payload, [client], { queryClient, nativeSelectionOnly: true });
+  assert.deepEqual(queryClient.models(), names);
+  assert.equal(queryClient.model("future-official-model"), future);
+  assert.deepEqual(client.external.value.available_models, names);
+  assert.deepEqual(queryClient.model("gpt-5.6-sol").supportedReasoningEfforts, sol.supportedReasoningEfforts);
+  assert.equal(queryClient.model("gpt-5.6-sol").defaultReasoningEffort, "ultra");
+
+  await runtime.patch.setCatalog({ ...payload, excluded_native_models: ["FUTURE-OFFICIAL-MODEL"] });
+  assert.deepEqual(queryClient.models(), ["gpt-6-astra", "gpt-5.6-sol"]);
+  assert.deepEqual(client.external.value.available_models, ["gpt-6-astra", "gpt-5.6-sol"]);
+  await runtime.patch.setCatalog(payload);
+  assert.deepEqual(queryClient.models(), names);
+  assert.equal(queryClient.model("future-official-model"), future);
+  assert.deepEqual(client.external.value.available_models, names);
+
+  runtime.patch.trackOutgoingMessage({ type: "mcp-request", request: { id: "future-list", method: "model/list", params: {} } });
+  const hidden = { ...modelDescriptor("native-hidden"), hidden: true };
+  const reply = { type: "mcp-response", message: { id: "future-list", result: {
+    data: [future, modelDescriptor("newly-announced-model"), hidden], nextCursor: null,
+    availableModels: ["future-official-model", "newly-announced-model"],
+    available_models: ["future-official-model", "newly-announced-model"],
+  } } };
+  runtime.dispatchWindowEvent("message", { data: reply });
+  const expected = ["future-official-model", "newly-announced-model", "gpt-5.6-sol"];
+  assert.deepEqual(reply.message.result.data.map(model => model.model), [...expected.slice(0, 2), "native-hidden", "gpt-5.6-sol"]);
+  assert.equal(reply.message.result.data[2], hidden);
+  assert.deepEqual(reply.message.result.availableModels, expected);
+  assert.deepEqual(reply.message.result.available_models, expected);
+  await runtime.patch.setCatalog({ ...payload, status: "not_configured", models: [] });
+  assert.deepEqual(queryClient.models(), names);
+  const request = { type: "mcp-request", request: { method: "turn/start", params: { model: "future-official-model", modelProvider: "openai" } } };
+  assert.equal(runtime.patch.rewriteOutgoingMessage(request), request);
+  await runtime.patch.setCatalog({ ...payload, status: "not_configured", models: [], clear_models: true });
+  assert.deepEqual(queryClient.models(), []);
+  runtime.patch.dispose();
+});
+}
+
+test("reselecting an official model restores the native descriptor after incoming response copies", async () => {
+  const native = { ...modelDescriptor("gpt-6-astra"),
+    supportedReasoningEfforts: [{ reasoningEffort: "ultra", description: "Native ultra" }],
+    defaultReasoningEffort: "ultra", nativeCapability: "preserve-me",
+  };
+  const queryClient = activeModelQueryClient(["gpt-5.6-sol"]);
+  const payload = { status: "ok", native_selection_only: true, preserve_native_models: true,
+    native_model_provider: "openai", models: ["gpt-5.6-sol"], excluded_native_models: ["gpt-6-astra"],
+  };
+  const runtime = await loadPatch(payload, [statsigClient()], { queryClient, nativeSelectionOnly: true });
+  const response = runtime.patch.rewriteIncomingResult("model/list", {
+    data: [native, modelDescriptor("gpt-5.6-sol")], nextCursor: null,
+  });
+  assert.deepEqual(response.data.map((model) => model.model), ["gpt-5.6-sol"]);
+  const [queryKey] = queryClient.getQueriesData({ queryKey: ["models", "list"] })[0];
+  queryClient.setQueryData(queryKey, { ...response, data: [...response.data] });
+  await runtime.patch.setCatalog({ ...payload, models: ["gpt-6-astra", "gpt-5.6-sol"], excluded_native_models: [] });
+  const restored = queryClient.model("gpt-6-astra");
+  assert.equal(restored.nativeCapability, "preserve-me");
+  assert.deepEqual(restored.supportedReasoningEfforts, native.supportedReasoningEfforts);
+  assert.equal(restored.defaultReasoningEffort, "ultra");
+  await runtime.patch.setCatalog(payload);
+  queryClient.setQueryData(queryKey, { data: [modelDescriptor("gpt-5.6-sol")], nextCursor: null });
+  await runtime.patch.setCatalog({ ...payload, native_model_provider: "other-official-provider",
+    models: ["gpt-6-astra", "gpt-5.6-sol"], excluded_native_models: [],
+  });
+  assert.equal(queryClient.model("gpt-6-astra").nativeCapability, undefined);
+  runtime.patch.dispose();
+});
+
 test("native selection filters seven models to the five checked without changing requests or native settings", async () => {
   const originalModels = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"];
   const selectedModels = originalModels.filter(model => !["gpt-5.4", "gpt-5.3-codex-spark"].includes(model));

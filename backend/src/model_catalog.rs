@@ -35,7 +35,8 @@ const REASONING_LEVEL_DESCRIPTIONS: [(&str, &str); 6] = [
 const FAST_SERVICE_TIER_ID: &str = "priority";
 const FAST_SPEED_TIER_ID: &str = "fast";
 const PERSONALITY_PLACEHOLDER: &str = "{{ personality }}";
-const OFFICIAL_MODELS: [(&str, &str); 7] = [
+const OFFICIAL_MODELS: [(&str, &str); 8] = [
+    ("gpt-6-astra", "GPT-6-Astra"),
     ("gpt-5.6-sol", "GPT-5.6-Sol"),
     ("gpt-5.6-terra", "GPT-5.6-Terra"),
     ("gpt-5.6-luna", "GPT-5.6-Luna"),
@@ -128,8 +129,10 @@ pub(crate) struct CatalogRefreshArgs<'a> {
     pub codex_home: &'a Path,
     pub catalog_dir: &'a Path,
     pub official_provider: bool,
+    pub include_official_models: bool,
     pub upstream_models: Option<&'a [String]>,
     pub selected_models: &'a [String],
+    pub excluded_official_models: &'a [String],
     pub websocket_models: Option<&'a [String]>,
     pub native_web_search_models: Option<&'a [String]>,
     pub user_catalog: Option<&'a Path>,
@@ -140,6 +143,21 @@ pub fn default_official_model_slugs() -> Vec<String> {
         .iter()
         .map(|(slug, _)| (*slug).to_string())
         .collect()
+}
+
+pub(crate) fn legacy_selectable_official_model_slugs() -> Vec<String> {
+    [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna",
+        "gpt-5.5",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.3-codex-spark",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
 }
 
 #[cfg(test)]
@@ -153,8 +171,10 @@ pub fn refresh_for_provider(
         codex_home: home,
         catalog_dir: home,
         official_provider,
+        include_official_models: official_provider,
         upstream_models,
         selected_models,
+        excluded_official_models: &[],
         websocket_models: None,
         native_web_search_models: None,
         user_catalog: None,
@@ -170,8 +190,10 @@ fn refresh_for_provider_with_transport_preferences(args: CatalogRefreshArgs<'_>)
         codex_home,
         catalog_dir,
         official_provider,
+        include_official_models,
         upstream_models,
         selected_models,
+        excluded_official_models,
         websocket_models,
         native_web_search_models,
         user_catalog,
@@ -180,8 +202,8 @@ fn refresh_for_provider_with_transport_preferences(args: CatalogRefreshArgs<'_>)
     if let Some(user_path) = user_catalog {
         load_user_catalog(user_path)?;
     }
-    let official_models = match read_official_entries(codex_home, catalog_dir) {
-        Ok(models) => models,
+    let official_catalog = match read_official_entries(codex_home, catalog_dir, user_catalog) {
+        Ok(catalog) => catalog,
         Err(_error) if user_catalog.is_some() => {
             return materialize_user_catalog_without_generated(
                 catalog_dir,
@@ -191,16 +213,17 @@ fn refresh_for_provider_with_transport_preferences(args: CatalogRefreshArgs<'_>)
         }
         Err(error) => return Err(error),
     };
-    if user_catalog.is_some() && ensure_runtime_compatible_models(&official_models).is_err() {
+    let official_models = &official_catalog.candidates;
+    if user_catalog.is_some() && ensure_runtime_compatible_models(official_models).is_err() {
         return materialize_user_catalog_without_generated(catalog_dir, codex_home, user_catalog);
     }
-    ensure_runtime_compatible_models(&official_models)?;
+    ensure_runtime_compatible_models(official_models)?;
     let official_slugs = official_models
         .iter()
         .filter_map(|model| model.get("slug").and_then(Value::as_str))
         .map(model_id::key)
         .collect::<HashSet<_>>();
-    let selected_model_keys = selected_models
+    let excluded_official_keys = excluded_official_models
         .iter()
         .map(|model| model_id::key(model))
         .collect::<HashSet<_>>();
@@ -215,10 +238,12 @@ fn refresh_for_provider_with_transport_preferences(args: CatalogRefreshArgs<'_>)
         .filter(|model| {
             let slug = model.get("slug").and_then(Value::as_str);
             if official_provider {
-                return slug.is_some_and(|slug| {
-                    selected_model_keys.is_empty()
-                        || selected_model_keys.contains(&model_id::key(slug))
-                });
+                return slug
+                    .is_some_and(|slug| !excluded_official_keys.contains(&model_id::key(slug)));
+            }
+            if include_official_models {
+                return slug
+                    .is_some_and(|slug| !excluded_official_keys.contains(&model_id::key(slug)));
             }
             !provider_models_synced
                 || slug.is_some_and(|slug| upstream.contains(&model_id::key(slug)))
@@ -256,7 +281,7 @@ fn refresh_for_provider_with_transport_preferences(args: CatalogRefreshArgs<'_>)
                 continue;
             }
             let source_template =
-                official_template_for_route_alias(official_models.as_slice(), model_id);
+                official_entry_for_route_model(&official_catalog.templates, model_id);
             let (source_template, preserve_source_runtime_metadata) = source_template
                 .map(|source_template| (source_template, true))
                 .unwrap_or((&template, false));
@@ -363,25 +388,72 @@ pub fn selection_state_with_manual_models(
     manual_third_party_models: &[String],
     requested_default_model: Option<&str>,
 ) -> Result<ModelSelectionState> {
+    selection_state_with_manual_models_and_exclusions(
+        home,
+        catalog_dir,
+        official_provider,
+        upstream_models,
+        selected_models,
+        manual_third_party_models,
+        &[],
+        requested_default_model,
+    )
+}
+
+pub fn selection_state_with_manual_models_and_exclusions(
+    home: &Path,
+    catalog_dir: &Path,
+    official_provider: bool,
+    upstream_models: Option<&[String]>,
+    selected_models: &[String],
+    manual_third_party_models: &[String],
+    excluded_official_models: &[String],
+    requested_default_model: Option<&str>,
+) -> Result<ModelSelectionState> {
+    selection_state_with_catalog_options(
+        home,
+        catalog_dir,
+        official_provider,
+        upstream_models,
+        selected_models,
+        manual_third_party_models,
+        excluded_official_models,
+        requested_default_model,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn selection_state_with_catalog_options(
+    home: &Path,
+    catalog_dir: &Path,
+    official_provider: bool,
+    upstream_models: Option<&[String]>,
+    selected_models: &[String],
+    manual_third_party_models: &[String],
+    excluded_official_models: &[String],
+    requested_default_model: Option<&str>,
+    user_catalog: Option<&Path>,
+) -> Result<ModelSelectionState> {
     // Model provenance comes from the current provider snapshot, not from a
     // slug prefix. An API-key provider may legitimately expose a model whose
     // id also appears in the official catalog; it must stay a third-party
     // catalog entry instead of acquiring official-account semantics.
-    let official_entries = match read_official_entries(home, catalog_dir) {
-        Ok(entries) => entries,
+    let official_catalog = match read_official_entries(home, catalog_dir, user_catalog) {
+        Ok(catalog) => catalog,
         Err(error) if official_provider => return Err(error),
-        Err(_) => Arc::new(Vec::new()),
+        Err(_) => Arc::new(OfficialCatalogEntries::default()),
     };
+    let official_entries = &official_catalog.candidates;
     let official_model_ids = official_entries
         .iter()
         .filter_map(|model| model.get("slug").and_then(Value::as_str))
         .map(ToString::to_string)
         .collect::<Vec<_>>();
-    let selected_official_keys = selected_models
+    let excluded_official_keys = excluded_official_models
         .iter()
         .map(|model| model_id::key(model))
         .collect::<HashSet<_>>();
-    let filter_official_selection = official_provider && !selected_official_keys.is_empty();
     let provider_models_synced = official_provider || upstream_models.is_some();
     let upstream_models = upstream_models.unwrap_or_default();
     let upstream = upstream_models
@@ -396,8 +468,7 @@ pub fn selection_state_with_manual_models(
                 let default_reasoning_effort =
                     default_reasoning_effort_from_value(model, &supported_reasoning_efforts);
                 let model = official_model_from_value(model)?;
-                let supported = !filter_official_selection
-                    || selected_official_keys.contains(&model_id::key(&model.slug));
+                let supported = !excluded_official_keys.contains(&model_id::key(&model.slug));
                 Some(OfficialModelAvailability {
                     slug: model.slug,
                     display_name: model.display_name,
@@ -450,7 +521,11 @@ pub fn selection_state_with_manual_models(
     let third_party_model_metadata = if official_provider {
         Vec::new()
     } else {
-        third_party_model_metadata_from_entries(&official_entries, &third_party_models)
+        third_party_model_metadata_from_entries(
+            official_entries,
+            &official_catalog.templates,
+            &third_party_models,
+        )
     };
     Ok(ModelSelectionState {
         official_models,
@@ -691,8 +766,14 @@ pub fn is_runtime_model_cache_unavailable(error: &anyhow::Error) -> bool {
 /// launch and across repeated config-page lookups. The paths are part of the
 /// key so entries can never leak between Codex homes.
 type CatalogSignature = Vec<(PathBuf, u64, Option<std::time::SystemTime>)>;
+#[derive(Default)]
+struct OfficialCatalogEntries {
+    candidates: Vec<Value>,
+    templates: Vec<Value>,
+}
+
 type OfficialEntriesCache =
-    std::sync::Mutex<Option<(CatalogSignature, std::sync::Arc<Vec<Value>>)>>;
+    std::sync::Mutex<Option<(CatalogSignature, std::sync::Arc<OfficialCatalogEntries>)>>;
 
 static OFFICIAL_ENTRIES_CACHE: std::sync::OnceLock<OfficialEntriesCache> =
     std::sync::OnceLock::new();
@@ -710,11 +791,16 @@ fn catalog_signature(paths: &[PathBuf]) -> CatalogSignature {
 fn read_official_entries(
     codex_home: &Path,
     catalog_dir: &Path,
-) -> Result<std::sync::Arc<Vec<Value>>> {
-    let paths = vec![
+    user_catalog: Option<&Path>,
+) -> Result<std::sync::Arc<OfficialCatalogEntries>> {
+    let mut paths = user_catalog
+        .into_iter()
+        .map(Path::to_path_buf)
+        .collect::<Vec<_>>();
+    paths.extend([
         codex_home.join("models_cache.json"),
         derived_catalog_path(catalog_dir),
-    ];
+    ]);
     let signature = catalog_signature(&paths);
     let cache = OFFICIAL_ENTRIES_CACHE.get_or_init(|| std::sync::Mutex::new(None));
     if let Ok(guard) = cache.lock()
@@ -725,18 +811,25 @@ fn read_official_entries(
         // 工作副本，无需整目录深拷贝。
         return Ok(std::sync::Arc::clone(entries));
     }
-    let entries = std::sync::Arc::new(read_official_entries_uncached(&paths)?);
+    let entries = std::sync::Arc::new(read_official_entries_uncached(
+        &paths,
+        user_catalog.is_some(),
+    )?);
     if let Ok(mut guard) = cache.lock() {
         *guard = Some((signature, std::sync::Arc::clone(&entries)));
     }
     Ok(entries)
 }
 
-fn read_official_entries_uncached(paths: &[PathBuf]) -> Result<Vec<Value>> {
+fn read_official_entries_uncached(
+    paths: &[PathBuf],
+    complete_candidate_from_fallbacks: bool,
+) -> Result<OfficialCatalogEntries> {
     let mut catalogs = Vec::new();
+    let mut native_models = None;
     let mut bundled_fast_model_slugs = HashSet::new();
     let mut last_error = None;
-    for path in paths {
+    for (index, path) in paths.iter().enumerate() {
         let bytes = match fs::read(path) {
             Ok(bytes) => bytes,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -753,7 +846,9 @@ fn read_official_entries_uncached(paths: &[PathBuf]) -> Result<Vec<Value>> {
             }
         };
         let models = official_models_from_value(&value);
-        if !models.is_empty() {
+        if index == 0 {
+            native_models = Some(models);
+        } else if !models.is_empty() {
             catalogs.push(models);
         }
     }
@@ -764,11 +859,67 @@ fn read_official_entries_uncached(paths: &[PathBuf]) -> Result<Vec<Value>> {
                 declares_fast_speed_support(model)
                     .then(|| model.get("slug").and_then(Value::as_str))
                     .flatten()
-                    .map(ToString::to_string)
+                    .map(model_id::key)
             }));
             catalogs.push(models);
         }
     }
+
+    if let Some(native_models) = native_models {
+        let templates = native_models
+            .into_iter()
+            .map(|mut model| {
+                let slug = model
+                    .get("slug")
+                    .and_then(Value::as_str)
+                    .expect("catalog normalization keeps a non-empty slug")
+                    .to_string();
+                let fallbacks = catalogs
+                    .iter()
+                    .flat_map(|models| models.iter())
+                    .filter(|fallback| {
+                        fallback
+                            .get("slug")
+                            .and_then(Value::as_str)
+                            .is_some_and(|candidate| model_id::equal(candidate, &slug))
+                    })
+                    .collect::<Vec<_>>();
+                if complete_candidate_from_fallbacks {
+                    for fallback in &fallbacks {
+                        fill_missing_model_fields(&mut model, fallback);
+                    }
+                }
+                complete_reasoning_metadata(&mut model, &fallbacks);
+                if !declares_fast_speed_support(&model)
+                    && bundled_fast_model_slugs.contains(&model_id::key(&slug))
+                {
+                    add_fast_speed_controls(&mut model);
+                }
+                if !model_has_runtime_description(&model) {
+                    let description = model
+                        .get("display_name")
+                        .and_then(Value::as_str)
+                        .unwrap_or(&slug)
+                        .to_string();
+                    model["description"] = json!(description);
+                }
+                Ok(model)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let candidates = templates
+            .iter()
+            .filter(|model| {
+                complete_candidate_from_fallbacks
+                    || model.get("visibility").and_then(Value::as_str) == Some("list")
+            })
+            .cloned()
+            .collect();
+        return Ok(OfficialCatalogEntries {
+            candidates,
+            templates,
+        });
+    }
+
     if catalogs.is_empty() {
         bail!(
             "{}",
@@ -776,7 +927,7 @@ fn read_official_entries_uncached(paths: &[PathBuf]) -> Result<Vec<Value>> {
         );
     }
 
-    OFFICIAL_MODELS
+    let templates = OFFICIAL_MODELS
         .iter()
         .enumerate()
         .map(|(priority, (slug, display_name))| {
@@ -792,12 +943,47 @@ fn read_official_entries_uncached(paths: &[PathBuf]) -> Result<Vec<Value>> {
             complete_reasoning_metadata(&mut model, &fallbacks);
             normalize_official_model(&mut model, slug, display_name, priority);
             remove_fast_speed_controls(&mut model);
-            if bundled_fast_model_slugs.contains(*slug) {
+            if bundled_fast_model_slugs.contains(&model_id::key(slug)) {
                 add_fast_speed_controls(&mut model);
             }
             Ok(model)
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    Ok(OfficialCatalogEntries {
+        candidates: templates.clone(),
+        templates,
+    })
+}
+
+fn fill_missing_model_fields(target: &mut Value, source: &Value) {
+    let (Some(target), Some(source)) = (target.as_object_mut(), source.as_object()) else {
+        return;
+    };
+    for (key, source_value) in source {
+        match target.get_mut(key) {
+            None => {
+                target.insert(key.clone(), source_value.clone());
+            }
+            Some(target_value) if target_value.is_object() && source_value.is_object() => {
+                fill_missing_model_fields(target_value, source_value);
+            }
+            Some(_) => {}
+        }
+    }
+}
+
+pub(crate) fn available_official_models(
+    codex_home: &Path,
+    catalog_dir: &Path,
+    user_catalog: Option<&Path>,
+) -> Result<Vec<OfficialModel>> {
+    read_official_entries(codex_home, catalog_dir, user_catalog).map(|catalog| {
+        catalog
+            .candidates
+            .iter()
+            .filter_map(official_model_from_value)
+            .collect()
+    })
 }
 
 fn complete_reasoning_metadata(model: &mut Value, fallbacks: &[&Value]) {
@@ -928,7 +1114,7 @@ fn reasoning_efforts_from_value(model: &Value) -> Vec<String> {
 
 fn third_party_reasoning_efforts_from_value(model: &Value) -> Vec<String> {
     let mut efforts = fallback_third_party_reasoning_efforts();
-    let allow_ultra = third_party_gpt_5_6_template_supports_ultra(model);
+    let allow_ultra = third_party_template_supports_ultra(model);
     for effort in reasoning_efforts_from_value(model) {
         let allowed = effort == "max" || (effort == "ultra" && allow_ultra);
         if allowed && !efforts.iter().any(|existing| existing == &effort) {
@@ -938,27 +1124,24 @@ fn third_party_reasoning_efforts_from_value(model: &Value) -> Vec<String> {
     efforts
 }
 
-fn third_party_gpt_5_6_template_supports_ultra(model: &Value) -> bool {
-    let is_gpt_5_6 = model
+fn third_party_template_supports_ultra(model: &Value) -> bool {
+    let is_supported_model = model
         .get("slug")
         .and_then(Value::as_str)
         .is_some_and(|slug| {
-            ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
-                .iter()
-                .any(|candidate| model_id::equal(slug, candidate))
+            [
+                "gpt-6-astra",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+            ]
+            .iter()
+            .any(|candidate| model_id::equal(slug, candidate))
         });
-    is_gpt_5_6
+    is_supported_model
         && reasoning_efforts_from_value(model)
             .iter()
             .any(|effort| effort == "ultra")
-}
-
-fn third_party_gpt_5_6_template_supports_coordination(model: &Value) -> bool {
-    third_party_gpt_5_6_template_supports_ultra(model)
-        && model
-            .get("multi_agent_version")
-            .and_then(Value::as_str)
-            .is_some_and(|version| matches!(version, "v1" | "v2"))
 }
 
 fn default_reasoning_effort_from_value(model: &Value, supported: &[String]) -> String {
@@ -1008,6 +1191,7 @@ fn official_entry_for_route_model<'a>(
 
 fn third_party_model_metadata_from_entries(
     official_entries: &[Value],
+    official_templates: &[Value],
     third_party_models: &[String],
 ) -> Vec<ThirdPartyModelAvailability> {
     let availability = |slug: String, entry: Option<&Value>| {
@@ -1039,7 +1223,7 @@ fn third_party_model_metadata_from_entries(
         }
         metadata.push(availability(
             model.clone(),
-            official_entry_for_route_model(official_entries, model),
+            official_entry_for_route_model(official_templates, model),
         ));
     }
     metadata
@@ -1289,16 +1473,6 @@ fn remove_fast_speed_controls(model: &mut Value) {
     }
 }
 
-fn official_template_for_route_alias<'a>(
-    official_models: &'a [Value],
-    route_model_id: &str,
-) -> Option<&'a Value> {
-    if !route_model_id.contains('/') {
-        return None;
-    }
-    official_entry_for_route_model(official_models, route_model_id)
-}
-
 fn third_party_reasoning_levels(template: &Value, use_template_metadata: bool) -> Value {
     let efforts = if use_template_metadata {
         third_party_reasoning_efforts_from_value(template)
@@ -1319,8 +1493,6 @@ fn synthetic_model(
     index: usize,
     preserve_source_runtime_metadata: bool,
 ) -> Value {
-    let preserve_multi_agent_version = preserve_source_runtime_metadata
-        && third_party_gpt_5_6_template_supports_coordination(template);
     let mut model = template.clone();
     if !preserve_source_runtime_metadata {
         codey_runtime_core::model_suffix::sanitize_generic_model_metadata(&mut model);
@@ -1338,11 +1510,13 @@ fn synthetic_model(
     if let Some(object) = model.as_object_mut() {
         object.remove("availability_nux");
         object.remove("upgrade");
-        // Only route aliases that exactly reuse a GPT-5.6 template with native
-        // Ultra support may coordinate delegated work. Generic provider models
-        // remain leaf candidates and must not inherit that capability.
-        if !preserve_multi_agent_version {
+        // A model id that names an official template, with or without a route
+        // prefix, retains that template's trusted declaration, including an
+        // explicit disabled marker. Ids with no official template remain leaf
+        // candidates and must not inherit multi-agent capability.
+        if !preserve_source_runtime_metadata {
             object.remove("multi_agent_version");
+            object.remove("multi_agent_reasoning_effort");
         }
     }
     model["service_tiers"] = json!([]);
@@ -1499,7 +1673,7 @@ mod tests {
         for model in cache["models"].as_array_mut().unwrap() {
             let slug = model["slug"].as_str().unwrap_or("test-model").to_string();
             match slug.as_str() {
-                "gpt-5.6-sol" | "gpt-5.6-terra" => {
+                "gpt-6-astra" | "gpt-5.6-sol" | "gpt-5.6-terra" => {
                     model["multi_agent_version"] = json!("v2");
                 }
                 "gpt-5.6-luna" => {
@@ -1639,6 +1813,122 @@ mod tests {
         .unwrap();
     }
 
+    #[test]
+    fn native_visible_models_remain_available_beyond_bundled_catalog() {
+        let home = tempfile::tempdir().unwrap();
+        let mut cache = official_cache();
+        let mut model = cache["models"][0].clone();
+        model["slug"] = json!("future-official-model");
+        model["display_name"] = json!("Future official model");
+        model["visibility"] = json!("list");
+        cache["models"].as_array_mut().unwrap().push(model.clone());
+        fs::write(
+            home.path().join("models_cache.json"),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+        let state = selection_state(home.path(), true, None, &[], None).unwrap();
+        assert!(
+            state
+                .official_models
+                .iter()
+                .any(|entry| entry.slug == "future-official-model" && entry.supported)
+        );
+        refresh_for_provider(home.path(), true, None, &[]).unwrap();
+        let catalog: Value =
+            serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
+                .unwrap();
+        assert!(
+            catalog["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["slug"] == model["slug"])
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(
+                &fs::read(home.path().join("models_cache.json")).unwrap()
+            )
+            .unwrap(),
+            cache
+        );
+    }
+
+    #[test]
+    fn explicit_official_exclusions_hide_only_the_named_native_model() {
+        let home = tempfile::tempdir().unwrap();
+        let mut cache = official_cache();
+        let mut future = cache["models"][0].clone();
+        future["slug"] = json!("future-official-model");
+        future["display_name"] = json!("Future official model");
+        cache["models"].as_array_mut().unwrap().push(future);
+        fs::write(
+            home.path().join("models_cache.json"),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+
+        let state = selection_state_with_manual_models_and_exclusions(
+            home.path(),
+            home.path(),
+            true,
+            None,
+            &[],
+            &[],
+            &["gpt-6-astra".into()],
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            !state
+                .official_models
+                .iter()
+                .find(|model| model.slug == "gpt-6-astra")
+                .unwrap()
+                .supported
+        );
+        assert!(
+            state
+                .official_models
+                .iter()
+                .find(|model| model.slug == "future-official-model")
+                .unwrap()
+                .supported
+        );
+    }
+
+    #[test]
+    fn user_catalog_limits_official_selection_candidates() {
+        let home = tempfile::tempdir().unwrap();
+        write_cache(home.path());
+        let user_catalog = home.path().join("user-catalog.json");
+        fs::write(
+            &user_catalog,
+            serde_json::to_vec(&json!({
+                "models": [{"slug": "gpt-5.6-sol", "display_name": "Custom Sol"}]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let state = selection_state_with_catalog_options(
+            home.path(),
+            home.path(),
+            true,
+            None,
+            &[],
+            &[],
+            &[],
+            None,
+            Some(&user_catalog),
+        )
+        .unwrap();
+
+        assert_eq!(state.official_model_ids, ["gpt-5.6-sol"]);
+        assert_eq!(state.official_models[0].display_name, "Custom Sol");
+    }
+
     fn assert_native_fast(model: &Value) {
         assert!(
             model["service_tiers"]
@@ -1657,13 +1947,13 @@ mod tests {
     }
 
     #[test]
-    fn official_catalog_keeps_the_fixed_order_and_native_fast_metadata() {
+    fn official_catalog_keeps_native_visible_order_and_completed_fast_metadata() {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
 
         assert_eq!(
             refresh_for_provider(home.path(), true, None, &[]).unwrap(),
-            OFFICIAL_MODELS.len()
+            7
         );
         let catalog: Value =
             serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
@@ -1674,10 +1964,15 @@ mod tests {
                 .iter()
                 .map(|model| model["slug"].as_str().unwrap())
                 .collect::<Vec<_>>(),
-            OFFICIAL_MODELS
-                .iter()
-                .map(|(slug, _)| *slug)
-                .collect::<Vec<_>>()
+            [
+                "gpt-5.6-sol",
+                "gpt-5.5",
+                "gpt-5.3-codex-spark",
+                "gpt-6-astra",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+                "gpt-5.4-mini",
+            ]
         );
         assert!(models.iter().all(|model| model["visibility"] == "list"));
         let sol = models
@@ -1705,11 +2000,7 @@ mod tests {
             .find(|model| model["slug"] == "gpt-5.6-luna")
             .unwrap();
         assert_eq!(luna["multi_agent_version"], "v1");
-        let gpt_54 = models
-            .iter()
-            .find(|model| model["slug"] == "gpt-5.4")
-            .unwrap();
-        assert_eq!(gpt_54["multi_agent_version"], "disabled");
+        assert!(models.iter().all(|model| model["slug"] != "gpt-5.4"));
         let spark = models
             .iter()
             .find(|model| model["slug"] == "gpt-5.3-codex-spark")
@@ -1730,10 +2021,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "gpt-5.6-sol",
+                "gpt-5.5",
+                "gpt-6-astra",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
-                "gpt-5.5",
-                "gpt-5.4",
             ]
         );
     }
@@ -1757,10 +2048,11 @@ mod tests {
                 .and_then(Value::as_str)
         };
 
+        assert_eq!(marker("gpt-6-astra"), Some("v2"));
         assert_eq!(marker("gpt-5.6-sol"), Some("v2"));
         assert_eq!(marker("gpt-5.6-terra"), Some("v2"));
         assert_eq!(marker("gpt-5.6-luna"), Some("v1"));
-        assert_eq!(marker("gpt-5.4"), Some("disabled"));
+        assert_eq!(marker("gpt-5.4"), None);
         assert_eq!(marker("gpt-5.5"), None);
     }
 
@@ -1790,6 +2082,10 @@ mod tests {
             .find(|model| model["slug"] == "gpt-5.4")
             .unwrap();
         assert_eq!(gpt_54["multi_agent_version"], "disabled");
+        assert_eq!(
+            reasoning_efforts_from_value(gpt_54),
+            ["low", "medium", "high", "xhigh", "max"]
+        );
         let custom = models
             .iter()
             .find(|model| model["slug"] == "provider-custom-model")
@@ -1821,6 +2117,42 @@ mod tests {
             "runtime-cache-only nested variable"
         );
         assert!(is_available(home.path()));
+    }
+
+    #[test]
+    fn fallback_catalog_does_not_invent_astra_multi_agent_metadata() {
+        let home = tempfile::tempdir().unwrap();
+        let mut catalog = official_cache();
+        let astra = catalog["models"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|model| model["slug"] == "gpt-6-astra")
+            .unwrap();
+        astra.as_object_mut().unwrap().remove("multi_agent_version");
+        astra
+            .as_object_mut()
+            .unwrap()
+            .remove("multi_agent_reasoning_effort");
+        fs::write(
+            home.path().join(DERIVED_CATALOG_FILE_NAME),
+            serde_json::to_vec(&catalog).unwrap(),
+        )
+        .unwrap();
+
+        refresh_for_provider(home.path(), true, None, &[]).unwrap();
+
+        let generated: Value =
+            serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
+                .unwrap();
+        let astra = generated["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["slug"] == "gpt-6-astra")
+            .unwrap();
+        assert!(astra.get("multi_agent_version").is_none());
+        assert!(astra.get("multi_agent_reasoning_effort").is_none());
     }
 
     #[test]
@@ -1865,7 +2197,7 @@ mod tests {
             .remove("description");
         models
             .iter_mut()
-            .find(|model| model["slug"] == "gpt-5.4")
+            .find(|model| model["slug"] == "gpt-5.6-terra")
             .unwrap()["description"] = json!("   ");
         fs::write(
             home.path().join("models_cache.json"),
@@ -1891,7 +2223,7 @@ mod tests {
             .find(|model| model["slug"] == "gpt-5.6-sol")
             .unwrap();
         assert_eq!(sol["description"], "Local Sol description");
-        for slug in ["gpt-5.5", "gpt-5.4"] {
+        for slug in ["gpt-5.5", "gpt-5.6-terra"] {
             let model = models.iter().find(|model| model["slug"] == slug).unwrap();
             assert_eq!(model["description"], model["display_name"]);
         }
@@ -2015,10 +2347,10 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "gpt-5.6-sol",
+                "gpt-5.5",
+                "gpt-6-astra",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
-                "gpt-5.5",
-                "gpt-5.4",
             ]
         );
         for slug in ["gpt-5.4-mini", "gpt-5.3-codex-spark"] {
@@ -2054,8 +2386,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "gpt-5.6-sol",
-                "gpt-5.4",
                 "gpt-5.3-codex-spark",
+                "gpt-5.4",
                 "claude-sonnet",
             ]
         );
@@ -2125,6 +2457,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
         let selected = vec![
+            "openai/gpt-6-astra".into(),
             "openai/gpt-5.6-sol".into(),
             "openai/gpt-5.5".into(),
             "provider/custom-model".into(),
@@ -2132,12 +2465,23 @@ mod tests {
 
         assert_eq!(
             refresh_for_provider(home.path(), false, Some(&selected), &selected).unwrap(),
-            3
+            4
         );
         let catalog: Value =
             serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
                 .unwrap();
         let models = catalog["models"].as_array().unwrap();
+
+        let astra = models
+            .iter()
+            .find(|model| model["slug"] == "openai/gpt-6-astra")
+            .unwrap();
+        assert_eq!(astra["multi_agent_version"], "v2");
+        assert_eq!(astra["multi_agent_reasoning_effort"], "xhigh");
+        assert_eq!(
+            reasoning_efforts_from_value(astra),
+            ["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
 
         let gpt_56 = models
             .iter()
@@ -2190,6 +2534,7 @@ mod tests {
         for field in [
             "tool_mode",
             "multi_agent_version",
+            "multi_agent_reasoning_effort",
             "comp_hash",
             "default_service_tier",
             "prefer_websockets",
@@ -2228,8 +2573,10 @@ mod tests {
             codex_home: home.path(),
             catalog_dir: home.path(),
             official_provider: false,
+            include_official_models: false,
             upstream_models: Some(&selected),
             selected_models: &selected,
+            excluded_official_models: &[],
             websocket_models: Some(&websocket_models),
             native_web_search_models: None,
             user_catalog: None,
@@ -2270,8 +2617,10 @@ mod tests {
             codex_home: home.path(),
             catalog_dir: home.path(),
             official_provider: false,
+            include_official_models: false,
             upstream_models: Some(&selected),
             selected_models: &selected,
+            excluded_official_models: &[],
             websocket_models: None,
             native_web_search_models: Some(&native_web_search_models),
             user_catalog: None,
@@ -2312,8 +2661,10 @@ mod tests {
             codex_home: home.path(),
             catalog_dir: home.path(),
             official_provider: false,
+            include_official_models: false,
             upstream_models: Some(&selected),
             selected_models: &selected,
+            excluded_official_models: &[],
             websocket_models: None,
             native_web_search_models: Some(&selected),
             user_catalog: None,
@@ -2386,7 +2737,11 @@ mod tests {
 
         assert_eq!(
             refresh_for_provider(home.path(), false, None, &selected,).unwrap(),
-            OFFICIAL_MODELS.len() + 1
+            selection_state(home.path(), true, None, &[], None)
+                .unwrap()
+                .official_model_ids
+                .len()
+                + 1
         );
         let catalog: Value =
             serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
@@ -2584,20 +2939,23 @@ mod tests {
     fn synced_third_party_provider_keeps_official_looking_ids_route_scoped() {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
-        let upstream = vec!["gpt-5.6-sol".into(), "third-model".into()];
+        let upstream = vec!["gpt-5.6-sol".into(), "gpt-5.4".into(), "third-model".into()];
         let state = selection_state_with_manual_models(
             home.path(),
             home.path(),
             false,
             Some(&upstream),
-            &["gpt-5.6-sol".into(), "third-model".into()],
+            &["gpt-5.6-sol".into(), "gpt-5.4".into(), "third-model".into()],
             &["third-model".into()],
             None,
         )
         .unwrap();
 
         assert!(state.official_models.is_empty());
-        assert_eq!(state.third_party_models, ["gpt-5.6-sol", "third-model"]);
+        assert_eq!(
+            state.third_party_models,
+            ["gpt-5.6-sol", "gpt-5.4", "third-model"]
+        );
         let sol_metadata = state
             .third_party_model_metadata
             .iter()
@@ -2606,6 +2964,15 @@ mod tests {
         assert_eq!(
             sol_metadata.supported_reasoning_efforts,
             ["low", "medium", "high", "xhigh", "max", "ultra"]
+        );
+        let gpt_54_metadata = state
+            .third_party_model_metadata
+            .iter()
+            .find(|model| model.slug == "gpt-5.4")
+            .unwrap();
+        assert_eq!(
+            gpt_54_metadata.supported_reasoning_efforts,
+            ["low", "medium", "high", "xhigh", "max"]
         );
         let custom_metadata = state
             .third_party_model_metadata
@@ -2743,13 +3110,25 @@ mod tests {
     }
 
     #[test]
-    fn official_selection_marks_only_enabled_models_as_supported() {
+    fn official_exclusions_mark_only_the_remaining_model_as_supported() {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
-        let selected = vec!["gpt-5.6-sol".into()];
+        let excluded = default_official_model_slugs()
+            .into_iter()
+            .filter(|model| model != "gpt-5.6-sol")
+            .collect::<Vec<_>>();
 
-        let state =
-            selection_state(home.path(), true, None, &selected, Some("gpt-5.6-luna")).unwrap();
+        let state = selection_state_with_manual_models_and_exclusions(
+            home.path(),
+            home.path(),
+            true,
+            None,
+            &[],
+            &[],
+            &excluded,
+            Some("gpt-5.6-luna"),
+        )
+        .unwrap();
 
         assert_eq!(state.default_model, "gpt-5.6-sol");
         assert!(
@@ -2954,8 +3333,10 @@ mod tests {
             codex_home: &codex_home,
             catalog_dir: &catalog_dir,
             official_provider: true,
+            include_official_models: true,
             upstream_models: None,
             selected_models: &[],
+            excluded_official_models: &[],
             websocket_models: None,
             native_web_search_models: None,
             user_catalog: None,
@@ -2987,8 +3368,10 @@ mod tests {
             codex_home: &codex_home,
             catalog_dir: &catalog_dir,
             official_provider: true,
+            include_official_models: true,
             upstream_models: None,
             selected_models: &[],
+            excluded_official_models: &[],
             websocket_models: None,
             native_web_search_models: None,
             user_catalog: Some(&user_path),

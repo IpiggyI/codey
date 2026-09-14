@@ -81,17 +81,21 @@ pub(crate) fn native_model_state_for_provider(
     if config.provider_is_disabled(&provider.id) {
         return Ok(model_catalog::ModelSelectionState::default());
     }
+    let list_key = config
+        .current_provider_snapshot
+        .as_ref()
+        .filter(|snapshot| snapshot.id == provider.id)
+        .map(|snapshot| snapshot.ownership_key.as_str())
+        .unwrap_or(provider.id.as_str());
     let upstream_models = config
         .upstream_models_by_provider
-        .get(provider.id.as_str())
+        .get(list_key)
         .map(Vec::as_slice);
     let configured_models = config
         .selected_models_by_provider
-        .get(provider.id.as_str())
+        .get(list_key)
         .map(Vec::as_slice);
-    let declared_models = config
-        .declared_official_models_by_provider
-        .get(provider.id.as_str());
+    let declared_models = config.declared_official_models_by_provider.get(list_key);
     let selected_models = if configured_models.is_some() || declared_models.is_some() {
         let mut models = configured_models.unwrap_or_default().to_vec();
         if let Some(declared_models) = declared_models {
@@ -108,19 +112,25 @@ pub(crate) fn native_model_state_for_provider(
     } else {
         config
             .manual_third_party_models_by_provider
-            .get(provider.id.as_str())
+            .get(list_key)
             .map(Vec::as_slice)
             .unwrap_or_default()
     };
     let requested_default = native_upstream_model(config, &config.subagent_model);
-    model_catalog::selection_state_with_manual_models(
+    let catalog_dir = crate::codex_config::codey_model_catalog_dir();
+    let user_catalog = crate::codex_config::configured_user_model_catalog_path(home, &catalog_dir)
+        .map_err(|error| error.to_string())?;
+    let excluded_official_models = config.official_model_exclusions(list_key);
+    model_catalog::selection_state_with_catalog_options(
         home,
-        &crate::codex_config::codey_model_catalog_dir(),
+        &catalog_dir,
         provider.official,
         upstream_models,
         &selected_models,
         manual_third_party_models,
+        &excluded_official_models,
         Some(&requested_default),
+        user_catalog.as_deref(),
     )
     .map_err(|error| error.to_string())
 }

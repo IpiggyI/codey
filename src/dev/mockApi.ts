@@ -747,7 +747,17 @@ if (import.meta.env.DEV) {
       }
       if (command === "save_official_route_models") {
         const routeId = String(args.routeId || "");
-        const models = uniqueModelIds((args.models as string[]) || []);
+        const requestedModels = uniqueModelIds((args.models as string[]) || []);
+        const knownModels = new Set(
+          ((args.knownOfficialModels as string[]) || previewOfficialModels.map((model) => model.slug)).map(modelKey),
+        );
+        const models = uniqueModelIds([
+          ...requestedModels,
+          ...previewOfficialModels.filter((model) =>
+            !knownModels.has(modelKey(model.slug))
+            && previewModelState.officialModels.find((entry) => modelIdsEqual(entry.slug, model.slug))?.supported !== false,
+          ).map((model) => model.slug),
+        ]);
         const targetProfile = previewRoutes.find(
           (profile) => profile.id === routeId,
         );

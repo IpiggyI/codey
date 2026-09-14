@@ -207,6 +207,7 @@ pub async fn save_selected_models(
 pub(crate) fn config_with_native_selected_models(
     config: &CodeyConfig,
     provider: &codex_provider::CurrentProvider,
+    available_official_models: &[String],
     requested_official_models: &[String],
     requested_third_party_models: &[String],
     requested_manual_third_party_models: &[String],
@@ -221,17 +222,13 @@ pub(crate) fn config_with_native_selected_models(
         {
             return Err("官方线路不支持添加第三方模型".to_string());
         }
-        let official_models = model_catalog::default_official_model_slugs();
-        let (selected_models, third_party_models) =
-            validate_manual_model_selection(&official_models, requested_official_models, &[])?;
-        if selected_models.is_empty() {
-            return Err("官方账号线路至少需要保留一个模型".to_string());
-        }
-        if !third_party_models.is_empty() {
-            return Err("官方线路不支持添加第三方模型".to_string());
-        }
-        next.selected_models_by_provider
-            .insert(provider_id.clone(), selected_models);
+        apply_official_model_selection(
+            &mut next,
+            &provider_id,
+            available_official_models,
+            requested_official_models,
+            None,
+        )?;
         next.manual_third_party_models_by_provider
             .remove(&provider_id);
         next.declared_official_models_by_provider

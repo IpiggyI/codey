@@ -249,9 +249,16 @@ fn native_model_selection_updates_current_provider_models_without_route_edits() 
     }
     .normalize();
 
-    let mut selected =
-        config_with_native_selected_models(&config, &provider, &[], &["model-b".into()], &[], &[])
-            .unwrap();
+    let mut selected = config_with_native_selected_models(
+        &config,
+        &provider,
+        &[],
+        &[],
+        &["model-b".into()],
+        &[],
+        &[],
+    )
+    .unwrap();
     let state = native_model_state_for_provider(&selected, &provider, home.path()).unwrap();
     selected = selected.normalize();
 
@@ -282,6 +289,7 @@ fn native_official_model_selection_keeps_selection_official_only() {
     let selected = config_with_native_selected_models(
         &config,
         &provider,
+        &["gpt-6-astra".into(), "gpt-5.6-sol".into()],
         &["gpt-5.6-sol".into()],
         &[],
         &[],
@@ -291,13 +299,13 @@ fn native_official_model_selection_keeps_selection_official_only() {
 
     assert_eq!(
         selected.selected_models_by_provider["openai"],
-        ["gpt-5.6-sol"]
+        ["gpt-6-astra", "gpt-5.6-sol"]
     );
     let home = tempfile::tempdir().unwrap();
     let model_state = native_model_state_for_provider(&selected, &provider, home.path()).unwrap();
     let catalog = renderer_model_catalog_value(&selected, &model_state);
     assert_eq!(catalog["native_selection_only"], true);
-    assert_eq!(catalog["models"], json!(["gpt-5.6-sol"]));
+    assert_eq!(catalog["models"], json!(["gpt-6-astra", "gpt-5.6-sol"]));
     assert!(catalog.get("model_provider").is_none());
     assert!(
         catalog["model_metadata"][0]
@@ -308,6 +316,7 @@ fn native_official_model_selection_keeps_selection_official_only() {
         config_with_native_selected_models(
             &config,
             &provider,
+            &["gpt-6-astra".into(), "gpt-5.6-sol".into()],
             &["gpt-5.6-sol".into()],
             &["custom-model".into()],
             &[],
@@ -316,6 +325,118 @@ fn native_official_model_selection_keeps_selection_official_only() {
         .unwrap_err()
         .contains("官方线路不支持添加第三方模型")
     );
+}
+
+#[test]
+fn official_selection_updates_exclusions_without_hiding_models_newer_than_the_ui_snapshot() {
+    let mut config = CodeyConfig::default();
+    let available = vec![
+        "gpt-6-astra".into(),
+        "gpt-5.6-sol".into(),
+        "future-official-model".into(),
+    ];
+    let known = vec!["gpt-6-astra".into(), "gpt-5.6-sol".into()];
+
+    apply_official_model_selection(
+        &mut config,
+        "openai",
+        &available,
+        &["gpt-5.6-sol".into()],
+        Some(&known),
+    )
+    .unwrap();
+
+    assert_eq!(
+        config.excluded_official_models_by_provider["openai"],
+        ["gpt-6-astra"]
+    );
+    assert_eq!(
+        config.selected_models_by_provider["openai"],
+        ["gpt-5.6-sol", "future-official-model"]
+    );
+
+    apply_official_model_selection(
+        &mut config,
+        "openai",
+        &available,
+        &["gpt-6-astra".into(), "gpt-5.6-sol".into()],
+        Some(&known),
+    )
+    .unwrap();
+
+    assert!(config.excluded_official_models_by_provider["openai"].is_empty());
+    assert_eq!(config.selected_models_by_provider["openai"], available);
+}
+
+#[test]
+fn old_official_selection_request_does_not_exclude_new_catalog_models() {
+    let mut config = CodeyConfig::default();
+    let available = vec![
+        "gpt-6-astra".into(),
+        "gpt-5.6-sol".into(),
+        "future-official-model".into(),
+    ];
+
+    apply_official_model_selection(
+        &mut config,
+        "openai",
+        &available,
+        &["gpt-5.6-sol".into()],
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(
+        config.selected_models_by_provider["openai"],
+        ["gpt-6-astra", "gpt-5.6-sol", "future-official-model"]
+    );
+    assert!(
+        !config.excluded_official_models_by_provider["openai"]
+            .iter()
+            .any(|model| model == "gpt-6-astra" || model == "future-official-model")
+    );
+}
+
+#[test]
+fn native_renderer_preserves_only_the_default_official_catalog() {
+    let mut config = CodeyConfig::default();
+    config
+        .excluded_official_models_by_provider
+        .insert("openai".into(), vec!["gpt-6-astra".into()]);
+
+    let mut official = json!({});
+    apply_native_catalog_policy(&mut official, &config, "openai", true, false);
+    assert_eq!(official["preserve_native_models"], true);
+    assert_eq!(official["excluded_native_models"], json!(["gpt-6-astra"]));
+
+    let mut api_key = json!({});
+    apply_native_catalog_policy(&mut api_key, &config, "relay", false, false);
+    assert!(api_key.get("preserve_native_models").is_none());
+    assert!(api_key.get("excluded_native_models").is_none());
+
+    let mut user_catalog = json!({});
+    apply_native_catalog_policy(&mut user_catalog, &config, "openai", true, true);
+    assert!(user_catalog.get("preserve_native_models").is_none());
+    assert!(user_catalog.get("excluded_native_models").is_none());
+}
+
+#[test]
+fn disabled_native_provider_clears_models_without_preservation() {
+    let mut profile = ProviderProfile::new("OpenAI");
+    profile.id = "openai".into();
+    profile.source_provider_id = Some("openai".into());
+    profile.enabled = false;
+    let config = CodeyConfig {
+        profiles: vec![profile],
+        ..CodeyConfig::default()
+    };
+    let mut catalog = json!({});
+
+    apply_native_catalog_policy(&mut catalog, &config, "openai", true, false);
+
+    assert_eq!(catalog["clear_models"], true);
+    assert!(catalog.get("preserve_native_models").is_none());
+    assert!(catalog.get("excluded_native_models").is_none());
 }
 
 #[test]
@@ -382,9 +503,16 @@ fn native_third_party_gpt_selection_keeps_raw_ids_and_does_not_restore_unchecked
         provider.id.clone(),
         vec!["gpt-5.5".into(), "claude-sonnet-4-5".into()],
     );
-    let selected =
-        config_with_native_selected_models(&config, &provider, &[], &["gpt-5.5".into()], &[], &[])
-            .unwrap();
+    let selected = config_with_native_selected_models(
+        &config,
+        &provider,
+        &[],
+        &[],
+        &["gpt-5.5".into()],
+        &[],
+        &[],
+    )
+    .unwrap();
     let state = native_model_state_for_provider(&selected, &provider, home.path()).unwrap();
     assert_eq!(selected.profiles, config.profiles);
     assert_eq!(

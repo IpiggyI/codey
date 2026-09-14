@@ -70,7 +70,11 @@
     routeByAnyProviderSource: new Map(),
     legacyAliases: new Map(),
     nativeProviderId: "",
+    preserveNativeModels: false,
+    excludedNativeModels: [],
   };
+  const nativeModelArrays = new WeakMap();
+  const excludedNativeDescriptors = new Map();
   let refreshTimer = 0;
   let refreshUntil = 0;
   let refreshRetryDelay = 120;
@@ -414,7 +418,7 @@
       return null;
     }
     const models = uniqueModelNames(value.models);
-    if (nativeSelectionOnly && models.length === 0 && value.clear_models !== true) return null;
+    if (nativeSelectionOnly && models.length === 0 && value.clear_models !== true && value.preserve_native_models !== true) return null;
     const requestedDefault = [value.default_model, value.model]
       .map((model) => canonicalModelName(models, model))
       .find(Boolean);
@@ -549,6 +553,8 @@
       routeByAnyProviderSource,
       legacyAliases,
       nativeProviderId: nativeSelectionOnly ? requestProviderId(value.native_model_provider) : "",
+      preserveNativeModels: nativeSelectionOnly && value.preserve_native_models === true && value.clear_models !== true,
+      excludedNativeModels: uniqueModelNames(value.excluded_native_models).map(modelKey),
     };
   };
 
@@ -659,6 +665,10 @@
       autoCompactTokenLimit: Object.hasOwn(metadata || {}, "auto_compact_token_limit") ? metadata.auto_compact_token_limit : current?.autoCompactTokenLimit,
       contextSource: metadata?.codey_context_source ?? current?.contextSource,
     };
+    if (catalog.preserveNativeModels && current) {
+      return Object.entries(descriptorMetadata).every(([key, value]) => current[key] === value)
+        ? current : { ...current, ...descriptorMetadata };
+    }
     const presentation = modelPresentation(modelName, current);
     const displayName = presentation.displayName;
     const supportedReasoningEfforts = reasoningEffortDescriptors(
@@ -787,6 +797,8 @@
     && sameModelNames(left.models, right.models)
     && left.defaultModel === right.defaultModel
     && left.nativeProviderId === right.nativeProviderId
+    && left.preserveNativeModels === right.preserveNativeModels
+    && sameModelNames(left.excludedNativeModels, right.excludedNativeModels)
     && left.legacyAliases.size === right.legacyAliases.size
     && Array.from(left.legacyAliases).every(([alias, source]) => right.legacyAliases.get(alias) === source)
     && sameModelMetadata(left.modelMetadata, right.modelMetadata, right.models)
@@ -802,12 +814,52 @@
     ))
   );
 
+  const nativeArraySource = (models) => nativeModelArrays.get(models) || models;
+
+  const selectedModelNames = (models) => {
+    if (!catalog.preserveNativeModels) return [...catalog.models];
+    return uniqueModelNames([...models, ...catalog.models])
+      .filter((name) => !catalog.excludedNativeModels.includes(modelKey(name)));
+  };
+
+  const patchedModelNames = (models) => {
+    const source = Array.isArray(models) ? nativeArraySource(models) : [];
+    const next = selectedModelNames(source);
+    if (sameModelNames(models, next)) return models;
+    if (catalog.preserveNativeModels) nativeModelArrays.set(next, source);
+    return next;
+  };
+
+  const rememberNativeArraySources = (source, stored) => {
+    if (!catalog.preserveNativeModels || !source || !stored || typeof stored !== "object") return;
+    if (Array.isArray(source) && Array.isArray(stored)) {
+      const native = nativeModelArrays.get(source);
+      if (native) nativeModelArrays.set(stored, native);
+      return;
+    }
+    for (const key of ["data", "models", "result", "message", "availableModels", "available_models"]) {
+      if (source[key] && stored[key]) rememberNativeArraySources(source[key], stored[key]);
+    }
+  };
+
   const patchedModelArray = (models, allowEmpty = false) => {
     if (!catalog.loaded || !modelArrayLooksPatchable(models, allowEmpty)) return null;
-    const existing = new Map(models.map((item) => [modelKey(item.model), item]));
-    const nextModels = catalog.models.map((modelName) => (
-      modelDescriptor(modelName, existing.get(modelKey(modelName)))
-    ));
+    const source = catalog.preserveNativeModels ? nativeArraySource(models) : models;
+    if (catalog.preserveNativeModels) {
+      for (const model of source) {
+        if (catalog.excludedNativeModels.includes(modelKey(model.model))) {
+          excludedNativeDescriptors.set(modelKey(model.model), model);
+        }
+      }
+    }
+    const existing = new Map([...source, ...models].map((item) => [modelKey(item.model), item]));
+    const nextModels = selectedModelNames(source.map((item) => item.model)).map((modelName) => {
+      const current = existing.get(modelKey(modelName))
+        || (catalog.preserveNativeModels ? excludedNativeDescriptors.get(modelKey(modelName)) : null);
+      if (catalog.preserveNativeModels && current && !catalog.modelNamesByKey.has(modelKey(modelName))) return current;
+      return modelDescriptor(modelName, current);
+    });
+    if (catalog.preserveNativeModels) nativeModelArrays.set(nextModels, source);
     if (nativeSelectionOnly) {
       return models.length === nextModels.length
         && models.every((model, index) => model === nextModels[index])
@@ -879,18 +931,11 @@
       next[key] = nested.value;
       changed = true;
     }
-    if (
-      Array.isArray(value.availableModels)
-      && !sameModelNames(value.availableModels, catalog.models)
-    ) {
-      next.availableModels = [...catalog.models];
-      changed = true;
-    }
-    if (
-      Array.isArray(value.available_models)
-      && !sameModelNames(value.available_models, catalog.models)
-    ) {
-      next.available_models = [...catalog.models];
+    for (const key of ["availableModels", "available_models"]) {
+      if (!Array.isArray(value[key])) continue;
+      const models = patchedModelNames(value[key]);
+      if (models === value[key]) continue;
+      next[key] = models;
       changed = true;
     }
     if (!nativeSelectionOnly && "defaultModel" in value && catalog.defaultModel) {
@@ -925,7 +970,7 @@
     }
     const value = config.value;
     if (
-      sameModelNames(value.available_models, catalog.models)
+      sameModelNames(value.available_models, patchedModelNames(value.available_models))
       && (nativeSelectionOnly || value.default_model === catalog.defaultModel)
     ) {
       return config;
@@ -934,7 +979,7 @@
       ...config,
       value: {
         ...value,
-        available_models: [...catalog.models],
+        available_models: patchedModelNames(value.available_models),
         ...(nativeSelectionOnly ? {} : { default_model: catalog.defaultModel }),
       },
     };
@@ -976,7 +1021,7 @@
       for (const [key, current] of memoCache.entries()) {
         if (!String(key).includes(modelConfigId)) continue;
         const alreadyPatched = (
-          sameModelNames(current?.value?.available_models, catalog.models)
+          sameModelNames(current?.value?.available_models, patchedModelNames(current?.value?.available_models))
           && (nativeSelectionOnly || current?.value?.default_model === catalog.defaultModel)
         );
         const next = patchedModelConfig(current);
@@ -993,7 +1038,7 @@
     for (const { parent, key } of statsigModelConfigReferences(client)) {
       const current = parent[key];
       const alreadyPatched = (
-        sameModelNames(current?.value?.available_models, catalog.models)
+        sameModelNames(current?.value?.available_models, patchedModelNames(current?.value?.available_models))
         && (nativeSelectionOnly || current?.value?.default_model === catalog.defaultModel)
       );
       const next = patchedModelConfig(current);
@@ -1587,7 +1632,8 @@
         const patched = patchedModelPayload(current);
         if (!patched.changed) continue;
         try {
-          client.setQueryData(queryKey, patched.value);
+          const stored = client.setQueryData(queryKey, patched.value);
+          rememberNativeArraySources(patched.value, stored);
           changedEntries += 1;
         } catch {
           // The response interceptor still patches the next active refetch.
@@ -1767,6 +1813,9 @@
         rememberSupersededModelMenuItems(catalog, nextCatalog);
         rememberSupersededDefaultRoute(catalog, nextCatalog);
         catalogRevision += 1;
+        if (catalog.nativeProviderId !== nextCatalog.nativeProviderId || !nextCatalog.preserveNativeModels) {
+          excludedNativeDescriptors.clear();
+        }
         catalog = nextCatalog;
         await deliverModelCatalog();
         scheduleRefresh();
@@ -1793,6 +1842,9 @@
     rememberSupersededModelMenuItems(catalog, nextCatalog);
     rememberSupersededDefaultRoute(catalog, nextCatalog);
     catalogRevision += 1;
+    if (catalog.nativeProviderId !== nextCatalog.nativeProviderId || !nextCatalog.preserveNativeModels) {
+      excludedNativeDescriptors.clear();
+    }
     catalog = nextCatalog;
     return deliverModelCatalog().then((delivered) => {
       scheduleRefresh();
@@ -2440,7 +2492,7 @@
   const patchedNativeRequestParams = (method, params) => {
     if (!modelBoundRequestMethods.has(method) || !params || typeof params !== "object") return params;
     if (method === "thread/settings/update" && params.model === null) return params;
-    if (catalog.loaded && catalog.models.length === 0) {
+    if (catalog.loaded && catalog.models.length === 0 && !catalog.preserveNativeModels) {
       return markBlockedProviderRequest({ ...params }, {
         reason: "provider_disabled",
         message: "当前线路已禁用，请先在 Codey 中启用线路或切换到可用线路后重试。",
@@ -2712,6 +2764,7 @@
     }),
     dispose() {
       disposed = true;
+      excludedNativeDescriptors.clear();
       restoreNativeFastPermissions();
       window.clearTimeout(refreshTimer);
       refreshTimer = 0;

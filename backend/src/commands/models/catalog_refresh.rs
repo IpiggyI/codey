@@ -169,16 +169,31 @@ pub(crate) fn try_refresh_model_catalog(config: &CodeyConfig) -> anyhow::Result<
     let home = codex_home();
     let catalog_dir = crate::codex_config::codey_model_catalog_dir();
     let user_catalog = crate::codex_config::configured_user_model_catalog_path(home, &catalog_dir)?;
+    let available_official_models =
+        model_catalog::available_official_models(home, &catalog_dir, user_catalog.as_deref())?
+            .into_iter()
+            .map(|model| model.slug)
+            .collect::<Vec<_>>();
+    let mut config = config.clone();
+    config.synchronize_runtime_official_model_selections(&available_official_models);
     let has_third_party_route = config.has_third_party_route();
     let (upstream_models, selected_models) = config.runtime_catalog_models();
     let websocket_models = config.runtime_websocket_model_aliases();
     let native_web_search_models = config.runtime_native_web_search_model_aliases();
+    let include_official_models = config.official_account_available_this_launch
+        && config
+            .profiles
+            .iter()
+            .any(|profile| profile.official_account);
+    let excluded_official_models = config.runtime_official_model_exclusions();
     model_catalog::refresh_catalog(model_catalog::CatalogRefreshArgs {
         codex_home: home,
         catalog_dir: &catalog_dir,
         official_provider: config.official_account_available_this_launch && !has_third_party_route,
+        include_official_models,
         upstream_models: has_third_party_route.then_some(upstream_models).as_deref(),
         selected_models: &selected_models,
+        excluded_official_models: &excluded_official_models,
         websocket_models: Some(&websocket_models),
         native_web_search_models: Some(&native_web_search_models),
         user_catalog: user_catalog.as_deref(),

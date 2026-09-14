@@ -608,6 +608,10 @@ pub struct CodeyConfig {
     /// the local Codex configuration.
     #[serde(default)]
     pub selected_models_by_provider: BTreeMap<String, Vec<String>>,
+    /// Official native models explicitly hidden by the user. An empty entry is
+    /// retained as the migration marker so later native models default to visible.
+    #[serde(default)]
+    pub excluded_official_models_by_provider: BTreeMap<String, Vec<String>>,
     #[serde(default, rename = "supports1MContextByProvider")]
     pub supports_1m_context_by_provider: BTreeMap<String, Vec<String>>,
     #[serde(default)]
@@ -753,6 +757,7 @@ impl Default for CodeyConfig {
             codex_app_path: String::new(),
             user_scripts: Vec::new(),
             selected_models_by_provider: BTreeMap::new(),
+            excluded_official_models_by_provider: BTreeMap::new(),
             supports_1m_context_by_provider: BTreeMap::new(),
             model_context_by_provider: BTreeMap::new(),
             manual_third_party_models_by_provider: BTreeMap::new(),
@@ -826,6 +831,7 @@ impl CodeyConfig {
         }
         normalize_model_lists(&mut self.supports_1m_context_by_provider);
         normalize_model_lists(&mut self.selected_models_by_provider);
+        normalize_upstream_model_lists(&mut self.excluded_official_models_by_provider);
         normalize_model_lists(&mut self.manual_third_party_models_by_provider);
         normalize_model_lists(&mut self.declared_official_models_by_provider);
         normalize_upstream_model_lists(&mut self.upstream_models_by_provider);
@@ -883,6 +889,8 @@ impl CodeyConfig {
         // empty placeholder owns route-scoped data that can be removed.
         if let Some(provider_id) = placeholder_provider_id {
             self.selected_models_by_provider.remove(&provider_id);
+            self.excluded_official_models_by_provider
+                .remove(&provider_id);
             self.supports_1m_context_by_provider.remove(&provider_id);
             self.model_context_by_provider.remove(&provider_id);
             self.manual_third_party_models_by_provider
@@ -948,6 +956,11 @@ impl CodeyConfig {
         );
         migrate_provider_model_list(
             &mut self.selected_models_by_provider,
+            previous_provider_id,
+            official_provider_id,
+        );
+        migrate_provider_model_list_allow_empty(
+            &mut self.excluded_official_models_by_provider,
             previous_provider_id,
             official_provider_id,
         );
@@ -1060,7 +1073,7 @@ impl CodeyConfig {
                 )
             })
             .collect::<Vec<_>>();
-        crate::model_ownership::migrate_model_maps(
+        let outcome = crate::model_ownership::migrate_model_maps(
             [
                 &mut self.selected_models_by_provider,
                 &mut self.manual_third_party_models_by_provider,
@@ -1069,7 +1082,15 @@ impl CodeyConfig {
             ],
             legacy,
             snapshot,
-        )
+        );
+        if let crate::model_ownership::MigrationOutcome::Migrated { from, to } = &outcome
+            && !self.excluded_official_models_by_provider.contains_key(to)
+            && let Some(models) = self.excluded_official_models_by_provider.get(from).cloned()
+        {
+            self.excluded_official_models_by_provider
+                .insert(to.clone(), models);
+        }
+        outcome
     }
 
     pub fn selected_models(&self) -> &[String] {
@@ -1186,11 +1207,113 @@ impl CodeyConfig {
     }
 
     pub(crate) fn enabled_official_route_models(&self, provider_id: &str) -> Vec<String> {
+        if self
+            .excluded_official_models_by_provider
+            .contains_key(provider_id)
+        {
+            return self
+                .selected_models_by_provider
+                .get(provider_id)
+                .cloned()
+                .unwrap_or_default();
+        }
         self.selected_models_by_provider
             .get(provider_id)
             .filter(|models| !models.is_empty())
             .cloned()
             .unwrap_or_else(model_catalog::default_official_model_slugs)
+    }
+
+    pub(crate) fn official_model_exclusions(&self, provider_id: &str) -> Vec<String> {
+        if let Some(models) = self.excluded_official_models_by_provider.get(provider_id) {
+            return models.clone();
+        }
+        let Some(selected) = self
+            .selected_models_by_provider
+            .get(provider_id)
+            .filter(|selected| !selected.is_empty())
+        else {
+            return Vec::new();
+        };
+        let selected_keys = selected
+            .iter()
+            .map(|model| model_id::key(model))
+            .collect::<BTreeSet<_>>();
+        model_catalog::legacy_selectable_official_model_slugs()
+            .into_iter()
+            .filter(|model| !selected_keys.contains(&model_id::key(model)))
+            .collect()
+    }
+
+    pub(crate) fn synchronize_official_model_selection(
+        &mut self,
+        provider_id: &str,
+        available_models: &[String],
+    ) {
+        let exclusions = self.official_model_exclusions(provider_id);
+        let excluded_keys = exclusions
+            .iter()
+            .map(|model| model_id::key(model))
+            .collect::<BTreeSet<_>>();
+        let selected = model_id::dedupe_preserving_first(
+            available_models
+                .iter()
+                .map(String::as_str)
+                .filter(|model| !excluded_keys.contains(&model_id::key(model))),
+        );
+        self.excluded_official_models_by_provider
+            .insert(provider_id.to_string(), exclusions);
+        if selected.is_empty() {
+            self.selected_models_by_provider.remove(provider_id);
+        } else {
+            self.selected_models_by_provider
+                .insert(provider_id.to_string(), selected);
+        }
+    }
+
+    pub(crate) fn synchronize_runtime_official_model_selections(
+        &mut self,
+        available_models: &[String],
+    ) {
+        let mut keys = self
+            .profiles
+            .iter()
+            .filter(|profile| profile.official_account)
+            .map(|profile| self.model_list_key_for_profile(profile))
+            .collect::<BTreeSet<_>>();
+        if let Some(snapshot) = self
+            .current_provider_snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.uses_official_account_auth)
+        {
+            keys.insert(snapshot.ownership_key.clone());
+        }
+        for key in keys {
+            self.synchronize_official_model_selection(&key, available_models);
+        }
+    }
+
+    pub(crate) fn runtime_official_model_exclusions(&self) -> Vec<String> {
+        let mut keys = self
+            .profiles
+            .iter()
+            .filter(|profile| profile.official_account)
+            .map(|profile| self.model_list_key_for_profile(profile))
+            .collect::<BTreeSet<_>>();
+        if let Some(snapshot) = self
+            .current_provider_snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.uses_official_account_auth)
+        {
+            keys.insert(snapshot.ownership_key.clone());
+        }
+        model_id::dedupe_preserving_first(
+            keys.iter()
+                .flat_map(|key| self.official_model_exclusions(key))
+                .collect::<Vec<_>>()
+                .iter()
+                .map(String::as_str),
+        )
     }
 
     /// Whether official ChatGPT routes can be served this launch.
@@ -1743,6 +1866,21 @@ fn migrate_provider_model_list(
         .or_default();
     destination.append(&mut models);
     normalize_model_list(destination);
+}
+
+fn migrate_provider_model_list_allow_empty(
+    models_by_provider: &mut BTreeMap<String, Vec<String>>,
+    previous_provider_id: &str,
+    official_provider_id: &str,
+) {
+    if previous_provider_id == official_provider_id
+        || models_by_provider.contains_key(official_provider_id)
+    {
+        return;
+    }
+    if let Some(models) = models_by_provider.get(previous_provider_id).cloned() {
+        models_by_provider.insert(official_provider_id.to_string(), models);
+    }
 }
 
 #[allow(dead_code)]
@@ -2709,6 +2847,7 @@ mod tests {
         assert_eq!(
             selected,
             [
+                "gpt-6-astra",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
@@ -3903,5 +4042,74 @@ mod tests {
 
         assert!(incoming.prompt_optimization.api_key.is_empty());
         assert!(!incoming.prompt_optimization.api_key_configured);
+    }
+
+    #[test]
+    fn legacy_official_allowlist_only_excludes_historically_selectable_models() {
+        let mut config = CodeyConfig::default();
+        config
+            .selected_models_by_provider
+            .insert("openai".into(), vec!["gpt-5.6-sol".into()]);
+
+        config.synchronize_official_model_selection(
+            "openai",
+            &[
+                "gpt-6-astra".into(),
+                "gpt-5.6-sol".into(),
+                "gpt-5.6-luna".into(),
+            ],
+        );
+
+        assert_eq!(
+            config.selected_models_by_provider["openai"],
+            ["gpt-6-astra", "gpt-5.6-sol"]
+        );
+        assert!(
+            config.excluded_official_models_by_provider["openai"]
+                .iter()
+                .any(|model| model == "gpt-5.6-luna")
+        );
+        assert!(
+            !config.excluded_official_models_by_provider["openai"]
+                .iter()
+                .any(|model| model == "gpt-6-astra")
+        );
+    }
+
+    #[test]
+    fn legacy_empty_official_selection_migrates_as_no_exclusions() {
+        let mut config = CodeyConfig::default();
+        config
+            .selected_models_by_provider
+            .insert("openai".into(), Vec::new());
+
+        config.synchronize_official_model_selection(
+            "openai",
+            &["gpt-6-astra".into(), "gpt-5.6-sol".into()],
+        );
+
+        assert!(config.excluded_official_models_by_provider["openai"].is_empty());
+        assert_eq!(
+            config.enabled_official_route_models("openai"),
+            ["gpt-6-astra", "gpt-5.6-sol"]
+        );
+    }
+
+    #[test]
+    fn migrated_empty_effective_selection_does_not_restore_bundled_models() {
+        let mut config = CodeyConfig::default();
+        config
+            .excluded_official_models_by_provider
+            .insert("openai".into(), Vec::new());
+
+        config.synchronize_official_model_selection("openai", &[]);
+        config = config.normalize();
+
+        assert!(config.enabled_official_route_models("openai").is_empty());
+        assert!(
+            config
+                .excluded_official_models_by_provider
+                .contains_key("openai")
+        );
     }
 }

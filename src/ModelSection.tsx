@@ -79,6 +79,7 @@ type ModelSectionProps = {
   onSaveOfficialRouteSettings?: (
     models: string[],
     showAccountUsageInHeader: boolean,
+    knownOfficialModels: string[],
   ) => Promise<boolean>;
   onSetDefaultModel: (model: string) => void;
   routerSessionDiagnosis: RouterSessionDiagnosis | null;
@@ -113,6 +114,7 @@ function ModelSectionComponent({
 }: ModelSectionProps) {
   const [officialEditorOpen, setOfficialEditorOpen] = useState(false);
   const [officialModelDraft, setOfficialModelDraft] = useState<string[]>([]);
+  const [officialCatalogDraft, setOfficialCatalogDraft] = useState<string[]>([]);
   const [migrateTargetProvider, setMigrateTargetProvider] = useState<string>("");
   const migrateTargets = routerSessionDiagnosis?.targetProviders ?? [];
   const selectedMigrateTarget = migrateTargets.includes(migrateTargetProvider)
@@ -148,9 +150,7 @@ function ModelSectionComponent({
     const listKey = currentProviderSnapshot.ownershipKey;
     const configuredModels = config.selectedModelsByProvider[listKey] || [];
     const models = official
-      ? configuredModels.length > 0
-        ? configuredModels
-        : officialCatalog
+      ? modelState.officialModels.filter((model) => model.supported).map((model) => model.slug)
       : uniqueModelIds([
           ...configuredModels,
           ...(config.declaredOfficialModelsByProvider[listKey] || []),
@@ -167,7 +167,7 @@ function ModelSectionComponent({
     config,
     currentProviderSnapshot,
     officialAccountAvailable,
-    officialCatalog,
+    modelState.officialModels,
   ]);
 
   const totalModelCount = useMemo(
@@ -177,11 +177,10 @@ function ModelSectionComponent({
 
   const openOfficialModelDialog = () => {
     if (!currentProviderSnapshot?.usesOfficialAccountAuth) return;
-    const listKey = currentProviderSnapshot.ownershipKey;
-    const configuredModels = config.selectedModelsByProvider[listKey] || [];
     setOfficialModelDraft(
-      configuredModels.length > 0 ? configuredModels : officialCatalog,
+      modelState.officialModels.filter((model) => model.supported).map((model) => model.slug),
     );
+    setOfficialCatalogDraft(officialCatalog);
     setOfficialEditorOpen(true);
   };
 
@@ -191,6 +190,7 @@ function ModelSectionComponent({
       ? await onSaveOfficialRouteSettings(
           officialModelDraft,
           showAccountUsageInHeader,
+          officialCatalogDraft,
         )
       : true;
     if (saved) {
@@ -539,11 +539,11 @@ function ModelSectionComponent({
                     <small>已启用 {officialModelDraft.length} 个，至少保留一个。</small>
                   </span>
                   <Badge variant="secondary">
-                    {officialModelDraft.length} / {officialCatalog.length}
+                    {officialModelDraft.length} / {officialCatalogDraft.length}
                   </Badge>
                 </div>
                 <div className="official-model-options">
-                  {officialCatalog.map((model) => {
+                  {officialCatalogDraft.map((model) => {
                     const checked = officialModelDraftKeys.has(modelKey(model));
                     return (
                       <label className="official-model-option" key={model}>
