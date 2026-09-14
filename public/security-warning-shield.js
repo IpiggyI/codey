@@ -16,6 +16,17 @@
   const titlePatterns = [
     /full access is on/i,
     /完(?:全|整)访问权限.*(?:已开启|开启中|已打开)/,
+    /enable ultra with full access/i,
+    /是否启用\s*ultra\s*搭配完整访问权限/i,
+  ];
+  const ultraTitlePatterns = [
+    /enable ultra with full access/i,
+    /是否启用\s*ultra\s*搭配完整访问权限/i,
+  ];
+  const ultraActionPatterns = [
+    /^use full access$/i,
+    /^enable full access$/i,
+    /^使用完整访问权限$/,
   ];
   const riskPatterns = [
     /without your permission/i,
@@ -25,6 +36,8 @@
     /未经(?:你|您)(?:的)?(?:许可|批准)/,
     /数据丢失/,
     /提示词?注入/,
+    /with ultra and full access enabled/i,
+    /开启\s*ultra\s*和完整访问权限后/i,
   ];
   let enabled = false;
   let scanTimer = 0;
@@ -90,18 +103,22 @@
     if (!enabled) return 0;
     let dismissed = 0;
     for (const control of actionControls(root)) {
-      if (
-        control.disabled
-        || control.getAttribute?.(dismissedAttribute) === "true"
-        || !normalizedControlLabels(control).some((label) => matchesAny(label, actionPatterns))
-      ) {
+      if (control.disabled || control.getAttribute?.(dismissedAttribute) === "true") {
         continue;
       }
+      const labels = normalizedControlLabels(control);
+      const isGeneralAction = labels.some((label) => matchesAny(label, actionPatterns));
+      const isUltraAction = labels.some((label) => matchesAny(label, ultraActionPatterns));
+      if (!isGeneralAction && !isUltraAction) continue;
       const container = warningContainerFor(control);
       if (!container) continue;
+      const isUltraConfirmation = matchesAny(normalizedText(container), ultraTitlePatterns);
+      if (isUltraConfirmation && !isUltraAction) continue;
+      if (!isUltraConfirmation && !isGeneralAction) continue;
       control.setAttribute?.(dismissedAttribute, "true");
       container.setAttribute?.(dismissedAttribute, "true");
       control.click?.();
+      if (isUltraConfirmation) container.remove?.();
       if (container.isConnected !== false) {
         container.style?.setProperty?.("display", "none", "important");
       }
@@ -196,7 +213,12 @@
         const target = mutation.target instanceof Element
           ? mutation.target
           : mutation.target?.parentElement;
-        if (target) addPendingRoot(target.closest?.("button, [role=button]") || target);
+        if (target) {
+          const scanRoot = target.closest?.("button, [role=button]") || target;
+          addPendingRoot(scanRoot);
+          // Process the mutation before the browser can paint the new dialog.
+          dismissWarnings(scanRoot);
+        }
       }
       if (added) scheduleScan();
     }, { childList: true });
