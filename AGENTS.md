@@ -27,3 +27,7 @@ single-context. See `docs/agents/domain.md`.
 ### Windows pack
 
 To build a Windows installer for local testing, run only `scripts/build-windows.sh` (same as `pnpm run build:windows`). Do not compile from `\\wsl.localhost`, do not push a tag or dispatch Actions to package uncommitted work, and do not install the package. See `docs/agents/windows-pack.md`.
+
+项目未跟踪的试行知识保存在 `.memory/`。
+任务可能依赖既往决定或经验时，先列出并按需读取其中相关文件，不要默认全量加载。
+若常规读取或搜索跳过 `.memory/`，改用可访问的本地文件读取；仍不可达则停止并报告，不要用其他记忆代答。

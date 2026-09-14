@@ -101,8 +101,13 @@ const createEnvironment = (options = {}) => {
   contextRing.setAttribute("role", "img");
   contextRing.setAttribute("aria-label", "上下文 10%");
   contextWrap.appendChild(contextRing);
+  const sendButton = new FakeElement("button", {
+    rect: { bottom: 300, height: 28, left: 900, right: 928, top: 272, width: 28 },
+  });
+  sendButton.setAttribute("aria-label", "发送");
   toolbar.appendChild(accessButton);
   toolbar.appendChild(modelButton);
+  toolbar.appendChild(sendButton);
   if (!options.omitContext) toolbar.appendChild(contextWrap);
   scope.appendChild(anchor);
   scope.appendChild(textarea);
@@ -167,7 +172,22 @@ const createEnvironment = (options = {}) => {
   };
   const notificationCallbacks = [];
   const calls = [];
+  let nowMs = options.nowMs ?? Date.now();
+  const RealDate = Date;
+  class TestDate extends RealDate {
+    constructor(...args) {
+      super(...(args.length ? args : [nowMs]));
+    }
+    static now() {
+      return nowMs;
+    }
+  }
+  let settingsResult = {
+    currentProviderSnapshot: { id: options.providerId ?? "gs" },
+    cacheValidMinutes: options.cacheValidMinutes ?? 30,
+  };
 
+  const documentListeners = new Map();
   const document = {
     body,
     documentElement,
@@ -177,7 +197,18 @@ const createEnvironment = (options = {}) => {
     getElementById: (id) => findById(documentElement, id) || findById(body, id),
     querySelector: (selector) => queryAll(selector)[0] || null,
     querySelectorAll: queryAll,
-    addEventListener() {},
+    addEventListener(type, handler) {
+      const handlers = documentListeners.get(type) || [];
+      handlers.push(handler);
+      documentListeners.set(type, handlers);
+    },
+    removeEventListener(type, handler) {
+      const handlers = documentListeners.get(type) || [];
+      documentListeners.set(type, handlers.filter((candidate) => candidate !== handler));
+    },
+    dispatchEvent(event) {
+      for (const handler of [...(documentListeners.get(event?.type) || [])]) handler(event);
+    },
   };
 
   const windowListeners = new Map();
@@ -201,6 +232,7 @@ const createEnvironment = (options = {}) => {
         : {
           kind: "manager",
           manager: {
+            getConversation: () => ({ latestTokenUsageInfo: null }),
             addNotificationCallback: (methodOrCallback, maybeCallback) => {
               const callback = typeof methodOrCallback === "function"
                 ? methodOrCallback
@@ -225,7 +257,9 @@ const createEnvironment = (options = {}) => {
         this.detail = init.detail;
       }
     },
-    dispatchEvent() {
+    dispatchEvent(event) {
+      const handlers = windowListeners.get(event?.type) || [];
+      for (const handler of handlers) handler(event);
       return true;
     },
     getComputedStyle: () => ({ display: "flex", visibility: "visible" }),
@@ -235,6 +269,7 @@ const createEnvironment = (options = {}) => {
 
   const sandbox = {
     Symbol,
+    Date: TestDate,
     document,
     window,
     MutationObserver: FakeMutationObserver,
@@ -244,11 +279,7 @@ const createEnvironment = (options = {}) => {
   };
   sandbox.window.__codexSessionDeleteBridge = async (path) => {
     calls.push(path);
-    if (path === "/settings/get") {
-      return {
-        currentProviderSnapshot: { id: options.providerId ?? "gs" },
-      };
-    }
+    if (path === "/settings/get") return settingsResult;
     if (path === "/account/usage") return accountUsageResult;
     return {};
   };
@@ -278,12 +309,29 @@ const createEnvironment = (options = {}) => {
       sandbox.window.__codeyComposerUsage.scan();
     },
     toolbar,
+    sendButton,
+    submitComposer: (text = "在吗") => {
+      textarea.value = text;
+      document.dispatchEvent({ type: "keydown", key: "Enter", target: textarea });
+      textarea.value = "";
+    },
+    clickSend: () => {
+      document.dispatchEvent({ type: "click", target: sendButton });
+    },
+    document,
     getElementById: (id) => findById(documentElement, id) || findById(body, id),
     setAccountUsage: (next) => {
       accountUsageResult = next;
     },
     emitNotification: (message) => {
       sandbox.window.__codeyComposerUsage.applyNotification(message);
+    },
+    advanceMs: (ms) => {
+      nowMs += ms;
+      sandbox.window.__codeyComposerUsage.scan();
+    },
+    setSettings: (patch) => {
+      Object.assign(settingsResult, patch);
     },
     snapshot: () => sandbox.window.__codeyComposerUsage.snapshot(),
     refreshCredits: () => sandbox.window.__codeyComposerUsage.refreshCredits(),
@@ -362,6 +410,8 @@ test("reads history without a new notification and refreshes on thread re-entry"
   const env = createEnvironment({ loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }) });
   await flush();
   assert.equal(env.snapshot().usageLabel, "CH 99.6%");
+  assert.equal(env.snapshot().cacheRingVisible, false);
+  assert.match(env.getElementById("codey-thread-usage-popover").innerHTML, /已过期/);
   env.window.__codeyComposerUsage.scan();
   await flush();
   assert.deepEqual(reads, ["thread-1"]);
@@ -371,10 +421,215 @@ test("reads history without a new notification and refreshes on thread re-entry"
   env.setConversationId("thread-1");
   await flush();
   assert.equal(env.snapshot().usageVisible, true);
+  assert.equal(env.snapshot().cacheRingVisible, false);
   assert.deepEqual(reads, ["thread-1", "thread-2", "thread-1"]);
   env.setConversationId("");
   await flush();
   assert.equal(env.snapshot().usageVisible, false);
+});
+
+test("replaying stored token usage on thread enter does not start the cache ring", async () => {
+  const rpc = rpcManager((id) => (
+    id === "thread-1" ? tokenUsageMessage().params.tokenUsage : null
+  ));
+  const env = createEnvironment({
+    loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }),
+  });
+  await flush();
+  assert.equal(env.snapshot().cacheRingVisible, false);
+  rpc.subscriptions[0].listener(tokenUsageMessage());
+  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
+  assert.equal(env.snapshot().cacheRingVisible, false);
+  assert.match(env.getElementById("codey-thread-usage-popover").innerHTML, /已过期/);
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("a notification during history hydration does not start the cache ring", async () => {
+  let resolve;
+  const rpc = rpcManager(() => new Promise((done) => { resolve = done; }));
+  const env = createEnvironment({
+    loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }),
+  });
+  await flush();
+  rpc.subscriptions[0].listener(tokenUsageMessage());
+  assert.equal(env.snapshot().cacheRingVisible, false);
+  resolve(tokenUsageMessage().params.tokenUsage);
+  await flush();
+  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
+  assert.equal(env.snapshot().cacheRingVisible, false);
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("a replay that arrives before history hydration does not start the cache ring", async () => {
+  const rpc = rpcManager((id) => (
+    id === "thread-1" ? tokenUsageMessage().params.tokenUsage : null
+  ));
+  const env = createEnvironment({
+    loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }),
+  });
+  env.emitNotification(tokenUsageMessage());
+  await flush();
+  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
+  assert.equal(env.snapshot().cacheRingVisible, false);
+  assert.match(env.getElementById("codey-thread-usage-popover").innerHTML, /已过期/);
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("a submitted turn starts the cache ring while the history read is still pending", async () => {
+  const rpc = rpcManager(() => new Promise(() => {}));
+  const env = createEnvironment({
+    loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }),
+  });
+  await flush();
+  env.submitComposer();
+  env.emitNotification(tokenUsageMessage());
+  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
+  assert.equal(env.snapshot().cacheRingVisible, true);
+  assert.equal(env.snapshot().cacheTone, "ok");
+  assert.equal(env.snapshot().storedUsageRead, "");
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("clicking the send button also opens the cache timer", async () => {
+  const env = createEnvironment();
+  await flush();
+  env.clickSend();
+  env.emitNotification(tokenUsageMessage());
+  assert.equal(env.snapshot().cacheRingVisible, true);
+  assert.equal(env.snapshot().submittedThreadCount, 1);
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("a new conversation with no id yet still starts the cache ring", async () => {
+  const env = createEnvironment({ conversationId: "" });
+  await flush();
+  env.submitComposer();
+  assert.equal(env.snapshot().pendingSubmit, true);
+  env.setConversationId("thread-9");
+  await flush();
+  env.emitNotification(tokenUsageMessage("thread-9"));
+  assert.equal(env.snapshot().cacheRingVisible, true);
+  assert.equal(env.snapshot().pendingSubmit, false);
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("a pending submit is not claimed by a thread this page already showed", async () => {
+  const env = createEnvironment();
+  await flush();
+  env.emitNotification(tokenUsageMessage("thread-1"));
+  assert.equal(env.snapshot().cacheRingVisible, false);
+  env.textarea.value = "在吗";
+  env.document.dispatchEvent({ type: "keydown", key: "Enter", target: env.textarea });
+  env.textarea.value = "";
+  const update = tokenUsageMessage("thread-1");
+  update.params.tokenUsage.last.cachedInputTokens = 400;
+  env.emitNotification(update);
+  assert.equal(env.snapshot().cacheRingVisible, true);
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("an empty composer Enter never opens the cache timer", async () => {
+  const env = createEnvironment();
+  await flush();
+  env.document.dispatchEvent({ type: "keydown", key: "Enter", target: env.textarea });
+  env.emitNotification(tokenUsageMessage());
+  assert.equal(env.snapshot().cacheRingVisible, false);
+  assert.equal(env.snapshot().submittedThreadCount, 0);
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("a keystroke that is not a send never opens the cache timer", async () => {
+  const env = createEnvironment();
+  await flush();
+  env.textarea.value = "换行不算发送";
+  for (const event of [
+    { type: "keydown", key: "Enter", shiftKey: true, target: env.textarea },
+    { type: "keydown", key: "Enter", isComposing: true, target: env.textarea },
+    { type: "keydown", key: "a", target: env.textarea },
+    { type: "keydown", key: "Enter", target: env.toolbar },
+  ]) env.document.dispatchEvent(event);
+  env.textarea.value = "";
+  env.emitNotification(tokenUsageMessage());
+  assert.equal(env.snapshot().cacheRingVisible, false);
+  assert.equal(env.snapshot().submittedThreadCount, 0);
+  assert.equal(env.snapshot().pendingSubmit, false);
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("entering a thread whose history read comes back empty does not start the cache ring", async () => {
+  const rpc = rpcManager(() => null);
+  const env = createEnvironment({
+    loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }),
+  });
+  await flush();
+  rpc.subscriptions[0].listener(tokenUsageMessage());
+  await flush();
+  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
+  assert.equal(env.snapshot().cacheRingVisible, false);
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("two differing replays on thread enter do not start the cache ring", async () => {
+  const rpc = rpcManager((id) => (
+    id === "thread-1" ? tokenUsageMessage().params.tokenUsage : null
+  ));
+  const env = createEnvironment({
+    loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }),
+  });
+  await flush();
+  const partial = tokenUsageMessage();
+  delete partial.params.tokenUsage.last;
+  rpc.subscriptions[0].listener(partial);
+  rpc.subscriptions[0].listener(tokenUsageMessage());
+  await flush();
+  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
+  assert.equal(env.snapshot().cacheRingVisible, false);
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("a later token usage change after hydration starts the cache ring", async () => {
+  const rpc = rpcManager((id) => (
+    id === "thread-1" ? tokenUsageMessage().params.tokenUsage : null
+  ));
+  const env = createEnvironment({
+    loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }),
+  });
+  await flush();
+  env.submitComposer();
+  const update = tokenUsageMessage();
+  update.params.tokenUsage.last.cachedInputTokens = 500;
+  rpc.subscriptions[0].listener(update);
+  assert.equal(env.snapshot().usageLabel, "CH 50%");
+  assert.equal(env.snapshot().cacheRingVisible, true);
+  assert.equal(env.snapshot().storedUsageRead, "ok");
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("switching to another thread with stored usage does not start a cache ring", async () => {
+  const usageFor = (id) => {
+    const message = tokenUsageMessage(id);
+    if (id === "thread-2") message.params.tokenUsage.last.cachedInputTokens = 400;
+    return message.params.tokenUsage;
+  };
+  const rpc = rpcManager((id) => usageFor(id));
+  const env = createEnvironment({
+    loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }),
+  });
+  await flush();
+  env.submitComposer();
+  const live = tokenUsageMessage("thread-1");
+  live.params.tokenUsage.last.cachedInputTokens = 500;
+  rpc.subscriptions[0].listener(live);
+  assert.equal(env.snapshot().cacheRingVisible, true);
+  env.setConversationId("thread-2");
+  await flush();
+  rpc.subscriptions[0].listener({
+    method: "thread/tokenUsage/updated",
+    params: { threadId: "thread-2", tokenUsage: usageFor("thread-2") },
+  });
+  assert.equal(env.snapshot().usageLabel, "CH 40%");
+  assert.equal(env.snapshot().cacheRingVisible, false);
+  env.window.__codeyComposerUsage.dispose();
 });
 
 test("re-subscribes after an RPC connection breaks", async () => {
@@ -469,7 +724,7 @@ test("hides the usage chip until a matching thread token event arrives", async (
 
   env.emitNotification(tokenUsageMessage());
   assert.equal(usage.style.display, "inline-flex");
-  assert.equal(usage.textContent, "CH 99.6%");
+  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
   assert.equal(usage.parentElement, env.toolbar);
   assert.equal(usage.nextElementSibling, env.contextWrap);
 });
@@ -485,6 +740,7 @@ test("usage popover lists screenshot fields and skips invented cost", async () =
   assert.match(popover.innerHTML, /上下文/);
   assert.match(popover.innerHTML, /最近缓存命中率/);
   assert.match(popover.innerHTML, /CH 99\.6%/);
+  assert.match(popover.innerHTML, /缓存剩余/);
   assert.match(popover.innerHTML, /缓存读取/);
   assert.match(popover.innerHTML, /缓存写入/);
   assert.match(popover.innerHTML, /推理/);
@@ -563,10 +819,20 @@ test("credits chip stays transparent until hover and uses an svg ring", async ()
   assert.match(style.textContent, /background:\s*transparent/);
   assert.match(style.textContent, /rgba\(127, 127, 127, 0\.08\)/);
   assert.doesNotMatch(style.textContent, /conic-gradient/);
+  assert.match(style.textContent, /\[data-codey-usage-ring\][\s\S]*position:\s*absolute/);
+  assert.match(style.textContent, /\[data-codey-credits-ring\][\s\S]*position:\s*absolute/);
   const credits = env.getElementById("codey-account-credits");
   const ring = credits.querySelector("[data-codey-credits-ring]");
-  assert.equal(ring?.children[0]?.tagName, "SVG");
-  assert.equal(ring?.children[0]?.children.length, 2);
+  const svg = ring?.children[0];
+  assert.equal(svg?.tagName, "SVG");
+  // The capsule is measured in chip pixels, so nothing is stretched.
+  assert.equal(svg?.getAttribute?.("preserveAspectRatio"), null);
+  assert.equal(svg?.getAttribute?.("viewBox"), "0 0 80 36");
+  assert.equal(svg?.children.length, 2);
+  const arc = svg?.children[1];
+  assert.match(arc?.getAttribute?.("d"), /^M 40 6\.8 H /);
+  assert.equal(arc?.getAttribute?.("pathLength"), "100");
+  assert.match(arc?.getAttribute?.("stroke-dasharray"), /^\d+(\.\d+)? 100$/);
   const popover = env.getElementById("codey-account-credits-popover");
   assert.match(String(popover.style.backgroundImage), /radial-gradient/);
   assert.equal(popover.style.borderRadius, "14px");
@@ -600,7 +866,7 @@ test("does not register the usage listener as a method after a filtered subscrib
   requestClientCallbacks[0].callback(tokenUsageMessage());
   const usage = env.getElementById("codey-thread-usage");
   assert.equal(usage.style.display, "inline-flex");
-  assert.equal(usage.textContent, "CH 99.6%");
+  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
 });
 
 test("shows CH from the composer requestClient when the session manager stays silent", async () => {
@@ -630,7 +896,7 @@ test("shows CH from the composer requestClient when the session manager stays si
   requestClientCallbacks[0].callback(tokenUsageMessage());
   const usage = env.getElementById("codey-thread-usage");
   assert.equal(usage.style.display, "inline-flex");
-  assert.equal(usage.textContent, "CH 99.6%");
+  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
 });
 
 test("shows CH from a composer fiber requestClient when the session manager stays silent", async () => {
@@ -660,7 +926,7 @@ test("shows CH from a composer fiber requestClient when the session manager stay
   fiberCallbacks[0].callback(tokenUsageMessage());
   const usage = env.getElementById("codey-thread-usage");
   assert.equal(usage.style.display, "inline-flex");
-  assert.equal(usage.textContent, "CH 99.6%");
+  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
 });
 
 test("binds a composer fiber requestClient that appears after the session manager subscription", async () => {
@@ -701,7 +967,7 @@ test("binds a composer fiber requestClient that appears after the session manage
   fiberCallbacks[0].callback(tokenUsageMessage());
   const usage = env.getElementById("codey-thread-usage");
   assert.equal(usage.style.display, "inline-flex");
-  assert.equal(usage.textContent, "CH 99.6%");
+  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
 });
 
 test("subscribes to thread/tokenUsage/updated on the session manager", async () => {
@@ -715,7 +981,7 @@ test("subscribes to thread/tokenUsage/updated on the session manager", async () 
   env.notificationCallbacks[0].callback(tokenUsageMessage());
   const usage = env.getElementById("codey-thread-usage");
   assert.equal(usage.style.display, "inline-flex");
-  assert.equal(usage.textContent, "CH 99.6%");
+  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
 });
 
 test("matches a local: composer conversation id to the native thread id", async () => {
@@ -724,7 +990,7 @@ test("matches a local: composer conversation id to the native thread id", async 
   env.emitNotification(tokenUsageMessage("thread-1"));
   const usage = env.getElementById("codey-thread-usage");
   assert.equal(usage.style.display, "inline-flex");
-  assert.equal(usage.textContent, "CH 99.6%");
+  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
 });
 
 test("parses snake_case token usage fields into the CH chip", async () => {
@@ -746,7 +1012,7 @@ test("parses snake_case token usage fields into the CH chip", async () => {
   });
   const usage = env.getElementById("codey-thread-usage");
   assert.equal(usage.style.display, "inline-flex");
-  assert.equal(usage.textContent, "CH 99.6%");
+  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
 });
 
 test("retries usage subscription after the session manager is late", async () => {
@@ -782,7 +1048,7 @@ test("retries usage subscription after the session manager is late", async () =>
   env.notificationCallbacks[0].callback(tokenUsageMessage());
   const usage = env.getElementById("codey-thread-usage");
   assert.equal(usage.style.display, "inline-flex");
-  assert.equal(usage.textContent, "CH 99.6%");
+  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
 });
 
 test("places the usage chip before a model picker that only shows the model name", async () => {
@@ -811,4 +1077,106 @@ test("places the usage chip before a Luna light model picker", async () => {
   assert.equal(usage.style.display, "inline-flex");
   assert.equal(usage.parentElement, env.toolbar);
   assert.equal(usage.nextElementSibling, env.modelButton);
+});
+
+test("shows a remaining-time ring after a live usage notification", async () => {
+  const env = createEnvironment();
+  await flush();
+  env.submitComposer();
+  env.emitNotification(tokenUsageMessage());
+  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
+  assert.equal(env.snapshot().cacheRingVisible, true);
+  assert.equal(env.snapshot().cacheTone, "ok");
+  assert.match(env.getElementById("codey-thread-usage-popover").innerHTML, /30:00|29:59/);
+  const ring = env.getElementById("codey-thread-usage")
+    .querySelector("[data-codey-usage-ring]");
+  assert.equal(ring.children[0]?.getAttribute?.("viewBox"), "0 0 80 36");
+  assert.equal(ring.children[0]?.children[1]?.getAttribute?.("pathLength"), "100");
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("does not restart the cache ring when switching conversations", async () => {
+  const env = createEnvironment();
+  await flush();
+  env.submitComposer();
+  env.emitNotification(tokenUsageMessage("thread-1"));
+  env.advanceMs(120_000);
+  assert.equal(env.snapshot().cacheRingVisible, true);
+  assert.match(env.getElementById("codey-thread-usage-popover").innerHTML, /28:00|27:59/);
+  env.setConversationId("thread-2");
+  await flush();
+  assert.equal(env.snapshot().usageVisible, false);
+  env.setConversationId("thread-1");
+  await flush();
+  assert.equal(env.snapshot().cacheRingVisible, true);
+  assert.match(env.getElementById("codey-thread-usage-popover").innerHTML, /28:00|27:59/);
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("turns the cache ring yellow then red, and drops it after expiry", async () => {
+  const env = createEnvironment();
+  await flush();
+  env.submitComposer();
+  env.emitNotification(tokenUsageMessage());
+  env.advanceMs(22.5 * 60_000);
+  assert.equal(env.snapshot().cacheTone, "warn");
+  env.advanceMs(4.5 * 60_000);
+  assert.equal(env.snapshot().cacheTone, "hot");
+  env.advanceMs(3 * 60_000);
+  assert.equal(env.snapshot().cacheRingVisible, false);
+  assert.equal(env.snapshot().cacheTone, "");
+  assert.match(env.getElementById("codey-thread-usage-popover").innerHTML, /已过期/);
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("expires the live cache ring when the composer model changes", async () => {
+  const env = createEnvironment();
+  await flush();
+  env.submitComposer();
+  env.emitNotification(tokenUsageMessage());
+  assert.equal(env.snapshot().cacheRingVisible, true);
+  env.modelButton.textContent = "Grok 4.6 高";
+  env.window.__codeyComposerUsage.scan();
+  assert.equal(env.snapshot().cacheRingVisible, false);
+  assert.match(env.getElementById("codey-thread-usage-popover").innerHTML, /已过期/);
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("expires every live cache ring when the provider changes", async () => {
+  const env = createEnvironment();
+  await flush();
+  env.submitComposer();
+  env.emitNotification(tokenUsageMessage());
+  assert.equal(env.snapshot().cacheRingVisible, true);
+  env.window.dispatchEvent(new env.window.CustomEvent("codey:config-changed", {
+    detail: {
+      config: { cacheValidMinutes: 30 },
+      currentProviderSnapshot: { id: "other-provider" },
+    },
+  }));
+  assert.equal(env.snapshot().cacheRingVisible, false);
+  assert.match(env.getElementById("codey-thread-usage-popover").innerHTML, /已过期/);
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("recomputes remaining time when the configured TTL changes", async () => {
+  const env = createEnvironment();
+  await flush();
+  env.submitComposer();
+  env.emitNotification(tokenUsageMessage());
+  env.advanceMs(10 * 60_000);
+  env.setSettings({ cacheValidMinutes: 10 });
+  env.window.dispatchEvent(new env.window.CustomEvent("codey:config-changed", {
+    detail: { config: { cacheValidMinutes: 10 } },
+  }));
+  await flush();
+  assert.equal(env.snapshot().cacheRingVisible, false);
+  env.setSettings({ cacheValidMinutes: 60 });
+  env.window.dispatchEvent(new env.window.CustomEvent("codey:config-changed", {
+    detail: { config: { cacheValidMinutes: 60 } },
+  }));
+  await flush();
+  assert.equal(env.snapshot().cacheRingVisible, true);
+  assert.equal(env.snapshot().cacheTone, "ok");
+  env.window.__codeyComposerUsage.dispose();
 });

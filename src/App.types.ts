@@ -80,6 +80,7 @@ export type Config = {
   subagentRoles: Record<SubagentRoleId, SubagentRoleConfig>;
   hideFullAccessWarning: boolean;
   showAccountUsageInHeader: boolean;
+  cacheValidMinutes: number;
 };
 
 export type OfficialModelState = {

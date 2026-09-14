@@ -181,6 +181,7 @@ if (import.meta.env.DEV) {
       },
       hideFullAccessWarning: false,
       showAccountUsageInHeader: true,
+      cacheValidMinutes: 30,
     };
     let previewModelState: ModelState = {
       officialModels: previewOfficialModels.map((model) => ({

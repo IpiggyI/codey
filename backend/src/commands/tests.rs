@@ -399,7 +399,11 @@ async fn settings_bridge_matches_the_redacted_config_contract() {
         url: "https://open.feishu.cn/open-apis/bot/v2/hook/bridge-secret".to_string(),
         ..NotificationChannelConfig::default()
     });
-    let expected = serde_json::to_value(redacted_config(&config)).unwrap();
+    let mut expected = serde_json::to_value(redacted_config(&config)).unwrap();
+    expected.as_object_mut().unwrap().insert(
+        "currentProviderSnapshot".into(),
+        json_current_provider_snapshot(&config),
+    );
     *state.config.write().await = config;
 
     let actual = state

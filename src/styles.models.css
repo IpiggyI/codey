@@ -732,6 +732,29 @@
   line-height: 14px;
 }
 
+.route-cache-ttl {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 12px;
+  max-width: 320px;
+}
+
+.route-cache-ttl label {
+  display: grid;
+  gap: 4px;
+  color: var(--mac-text-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.route-cache-ttl p {
+  margin: 0;
+  color: var(--mac-text-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+  font-weight: 400;
+}
+
 .current-provider-snapshot {
   margin: 0 0 12px;
   padding: 12px 14px;

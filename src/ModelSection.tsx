@@ -72,6 +72,7 @@ type ModelSectionProps = {
   isBusy: boolean;
   busy: string | null;
   showAccountUsageInHeader: boolean;
+  onCacheValidMinutesChange?: (minutes: number) => void;
   onSyncCurrentProvider: () => void;
   onFetchRouteModels: () => void;
   onToggleAccountUsage?: (checked: boolean) => void;
@@ -101,6 +102,7 @@ function ModelSectionComponent({
   isBusy,
   busy,
   showAccountUsageInHeader,
+  onCacheValidMinutesChange,
   onSyncCurrentProvider,
   onFetchRouteModels,
   onToggleAccountUsage,
@@ -277,6 +279,33 @@ function ModelSectionComponent({
           </dl>
         </aside>
       ) : null}
+
+      <div className="route-cache-ttl">
+        <label>
+          <span>缓存有效时间（分钟）</span>
+          <Input
+            type="number"
+            min={1}
+            max={180}
+            step={1}
+            disabled={isBusy}
+            value={config.cacheValidMinutes ?? 30}
+            aria-label="缓存有效时间（分钟）"
+            onChange={(event) => {
+              const raw = event.target.value;
+              if (raw === "") return;
+              const next = Number(raw);
+              if (!Number.isFinite(next)) return;
+              onCacheValidMinutesChange?.(
+                Math.min(180, Math.max(1, Math.round(next))),
+              );
+            }}
+          />
+        </label>
+        <p>
+          这是本机估计的对话缓存有效时间，不是服务商返回的到期时刻。还没过期时，输入栏用量芯片会显示剩余时间圈。
+        </p>
+      </div>
 
       {routerSessionDiagnosis &&
       routerSessionDiagnosis.affectedSessionCount > 0 ? (

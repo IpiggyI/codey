@@ -354,7 +354,10 @@ export function App({
     );
     window.dispatchEvent(
       new CustomEvent("codey:config-changed", {
-        detail: { config: result.config },
+        detail: {
+          config: result.config,
+          currentProviderSnapshot: result.currentProviderSnapshot,
+        },
       }),
     );
     if (result.providerStatus) setProviderStatus(result.providerStatus);
@@ -463,6 +466,14 @@ export function App({
           ? "已重新读取 Codex 配置，重启后应用当前 provider"
           : "已重新读取 Codex 配置",
       });
+      window.dispatchEvent(
+        new CustomEvent("codey:config-changed", {
+          detail: {
+            config: result.config,
+            currentProviderSnapshot: result.currentProviderSnapshot,
+          },
+        }),
+      );
     });
   }
 
@@ -488,7 +499,10 @@ export function App({
     setDirty(false);
     window.dispatchEvent(
       new CustomEvent("codey:config-changed", {
-        detail: { config: result.config },
+        detail: {
+          config: result.config,
+          currentProviderSnapshot: result.currentProviderSnapshot,
+        },
       }),
     );
   }
@@ -881,6 +895,13 @@ export function App({
       showAccountUsageInHeader: checked,
     });
   });
+  const handleCacheValidMinutesChange = useStableEvent((minutes: number) => {
+    if (!config) return;
+    editConfig({
+      ...config,
+      cacheValidMinutes: minutes,
+    });
+  });
   const handleSaveOfficialRouteSettings = useStableEvent(
     saveOfficialRouteSettings,
   );
@@ -1103,6 +1124,7 @@ export function App({
               isBusy={isBusy}
               busy={busy}
               showAccountUsageInHeader={config.showAccountUsageInHeader}
+              onCacheValidMinutesChange={handleCacheValidMinutesChange}
               onSyncCurrentProvider={handleSyncCurrentProvider}
               onFetchRouteModels={handleFetchRouteModels}
               onToggleAccountUsage={handleToggleAccountUsage}

@@ -681,6 +681,10 @@ pub struct CodeyConfig {
     /// composer when auth.json has a usable ChatGPT login.
     #[serde(default = "default_true")]
     pub show_account_usage_in_header: bool,
+    /// Local estimate of how long a conversation's prompt cache stays warm,
+    /// in minutes. This is not a vendor-reported expiry.
+    #[serde(default = "default_cache_valid_minutes")]
+    pub cache_valid_minutes: u32,
     /// Launch-scoped authentication capability captured from Codex before
     /// Codey's temporary provider overrides are applied. It is intentionally
     /// never persisted or exposed as part of the editable configuration.
@@ -768,6 +772,7 @@ impl Default for CodeyConfig {
             initial_route_import_completed: false,
             hide_full_access_warning: false,
             show_account_usage_in_header: true,
+            cache_valid_minutes: DEFAULT_CACHE_VALID_MINUTES,
             official_account_available_this_launch: false,
             official_account_status_this_launch: LaunchOfficialAccountStatus::Unauthenticated,
             current_provider_snapshot: None,
@@ -841,6 +846,9 @@ impl CodeyConfig {
         }
         self.webhook.normalize();
         self.prompt_optimization.normalize();
+        self.cache_valid_minutes = self
+            .cache_valid_minutes
+            .clamp(MIN_CACHE_VALID_MINUTES, MAX_CACHE_VALID_MINUTES);
         self
     }
 
@@ -1846,6 +1854,14 @@ fn merge_declared_official_models_into_upstream(
 
 fn default_true() -> bool {
     true
+}
+
+pub const MIN_CACHE_VALID_MINUTES: u32 = 1;
+pub const MAX_CACHE_VALID_MINUTES: u32 = 180;
+pub const DEFAULT_CACHE_VALID_MINUTES: u32 = 30;
+
+fn default_cache_valid_minutes() -> u32 {
+    DEFAULT_CACHE_VALID_MINUTES
 }
 
 pub const DEFAULT_SUBAGENT_MODEL: &str = "gpt-5.6-terra";
@@ -3747,6 +3763,32 @@ mod tests {
             .normalize();
 
         assert!(config.show_account_usage_in_header);
+    }
+
+    #[test]
+    fn cache_valid_minutes_defaults_to_thirty_for_existing_configs() {
+        let config = serde_json::from_str::<CodeyConfig>(r#"{"activeProfileId":"","profiles":[]}"#)
+            .unwrap()
+            .normalize();
+
+        assert_eq!(config.cache_valid_minutes, DEFAULT_CACHE_VALID_MINUTES);
+    }
+
+    #[test]
+    fn cache_valid_minutes_clamps_to_supported_range() {
+        let too_small = serde_json::from_str::<CodeyConfig>(
+            r#"{"activeProfileId":"","profiles":[],"cacheValidMinutes":0}"#,
+        )
+        .unwrap()
+        .normalize();
+        let too_large = serde_json::from_str::<CodeyConfig>(
+            r#"{"activeProfileId":"","profiles":[],"cacheValidMinutes":240}"#,
+        )
+        .unwrap()
+        .normalize();
+
+        assert_eq!(too_small.cache_valid_minutes, MIN_CACHE_VALID_MINUTES);
+        assert_eq!(too_large.cache_valid_minutes, MAX_CACHE_VALID_MINUTES);
     }
 
     #[test]

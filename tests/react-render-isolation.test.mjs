@@ -48,6 +48,10 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
     app,
     /onToggleAccountUsage=\{handleToggleAccountUsage\}/,
   );
+  assert.equal(
+    [...app.matchAll(/currentProviderSnapshot: result\.currentProviderSnapshot/g)].length,
+    3,
+  );
   assert.match(app, /onSave=\{saveModelSelection\}/);
   assert.doesNotMatch(modelSelection, /withTimeout/);
   assert.match(modelSelection, /routeId: modelPickerRouteId/);
@@ -70,6 +74,8 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
   assert.match(sections, /checked=\{showAccountUsageInHeader\}/);
   assert.match(sections, /checked=\{checked\}/);
   assert.match(sections, /额度显示/);
+  assert.match(sections, /缓存有效时间（分钟）/);
+  assert.match(sections, /config\.cacheValidMinutes/);
   assert.match(sections, /<DialogTitle>/);
   assert.match(sections, /重新读取 Codex 配置/);
   assert.doesNotMatch(

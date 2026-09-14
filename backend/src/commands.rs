@@ -315,9 +315,16 @@ impl AppState {
         }
         match path.as_str() {
             "/settings/get" => {
-                let config = self.config.read().await;
-                serde_json::to_value(redacted_config(&config))
-                    .expect("CodeyConfig must be JSON-serializable")
+                let config = self.config.read().await.clone();
+                let mut value = serde_json::to_value(redacted_config(&config))
+                    .expect("CodeyConfig must be JSON-serializable");
+                if let Some(object) = value.as_object_mut() {
+                    object.insert(
+                        "currentProviderSnapshot".into(),
+                        json_current_provider_snapshot(&config),
+                    );
+                }
+                value
             }
             "/codex-model-catalog" => {
                 let current_config = self.config.read().await.clone();
@@ -1479,6 +1486,7 @@ async fn save_codey_config_locked(
     }
     config.hide_full_access_warning = config_input.hide_full_access_warning;
     config.show_account_usage_in_header = config_input.show_account_usage_in_header;
+    config.cache_valid_minutes = config_input.cache_valid_minutes;
     let mut config = config.normalize();
     validate_official_account_config_change(&previous, &config)?;
     config.remember_current_provider_official_model_support(explicitly_configured_subagent_models);

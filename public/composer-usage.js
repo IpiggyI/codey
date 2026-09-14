@@ -5,7 +5,8 @@
 // stored usage when entering a thread. Copy host chip chrome and the SVG ring
 // only. Keep Codey's
 // product contract: 5h/7d labels, plan + Credits balance, CH → context% → 用量,
-// hide usage until token data, and never invent unit prices.
+// live cache remaining ring on CH, hover 缓存剩余, hide usage until token data,
+// and never invent unit prices.
 (() => {
   const moduleLoaded = window.__codeyComposerUsageModuleLoaded === true;
   window.__codeyComposerUsageModuleLoaded = true;
@@ -23,6 +24,13 @@
   const injectionStatusChangedEvent = "codey-injection-status-changed";
   const accountUsageRefreshIntervalMs = 60_000;
   const accountUsageTimeoutMs = 8_000;
+  const cacheValidMinutesMin = 1;
+  const cacheValidMinutesMax = 180;
+  const cacheValidMinutesDefault = 30;
+  const cacheWarnElapsedRatio = 0.75;
+  const cacheHotElapsedRatio = 0.90;
+  const chipRingStrokeWidth = 1.6;
+  const chipRingHeight = 24;
   const composerAnchorSelector = "[data-above-composer-conversation-id]";
   const composerCandidateSelector =
     "textarea, [contenteditable='true'], [role='textbox']";
@@ -62,6 +70,18 @@
   let disposed = false;
   let usageSelection = null;
   let usageError = null;
+  let cacheValidMinutes = cacheValidMinutesDefault;
+  let liveCacheAtByThread = new Map();
+  let liveCacheModelByThread = new Map();
+  // Threads this page watched the user send a turn in. Nothing else may start
+  // the cache timer: entering a thread replays usage that looks just like a new
+  // turn, and the replay cannot be told apart by its numbers alone.
+  const submittedThreads = new Set();
+  // A new conversation has no conversation id until after the first send, so a
+  // submit with no thread yet waits for that thread's first usage to claim it.
+  let pendingSubmit = false;
+  let storedUsageRead = "";
+  let cacheTimer = 0;
 
   const publishInjectionStatus = (detail) => {
     const entry = window.__codeyInjectionStatus?.[injectionStatusId];
@@ -140,6 +160,59 @@
 
   const formatCacheHit = (value) => `CH ${decimal(value, 1)}%`;
 
+  const normalizeCacheValidMinutes = (value) => {
+    const minutes = Number(value);
+    if (!Number.isFinite(minutes)) return cacheValidMinutesDefault;
+    return Math.min(
+      cacheValidMinutesMax,
+      Math.max(cacheValidMinutesMin, Math.round(minutes)),
+    );
+  };
+
+  const usageFingerprint = (usage) => {
+    if (!usage || usage.cacheHitRatePercent === undefined) return "";
+    return [
+      usage.cacheHitRatePercent,
+      usage.cachedInputTokens,
+      usage.cacheWriteInputTokens,
+      usage.inputTokens,
+      usage.outputTokens,
+      usage.totalTokens,
+      usage.contextUsedTokens,
+      usage.contextWindowTokens,
+    ].map((value) => (value === undefined ? "" : String(value))).join("|");
+  };
+
+  const startLiveCache = (threadId) => {
+    liveCacheAtByThread.set(threadId, Date.now());
+    liveCacheModelByThread.set(threadId, currentModelSignature());
+  };
+
+  const formatCacheRemaining = (remainingMs) => {
+    const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${String(seconds).padStart(2, "0")}`;
+  };
+
+  const cacheTimerState = (threadId, now = Date.now()) => {
+    const startedAt = threadId ? liveCacheAtByThread.get(threadId) : undefined;
+    if (!startedAt) return { kind: "expired" };
+    const ttlMs = cacheValidMinutes * 60_000;
+    const remainingMs = ttlMs - (now - startedAt);
+    if (remainingMs <= 0) return { kind: "expired" };
+    const elapsedRatio = 1 - remainingMs / ttlMs;
+    let tone = "ok";
+    if (elapsedRatio >= cacheHotElapsedRatio) tone = "hot";
+    else if (elapsedRatio >= cacheWarnElapsedRatio) tone = "warn";
+    return {
+      kind: "live",
+      remainingMs,
+      remainingPercent: (remainingMs / ttlMs) * 100,
+      tone,
+    };
+  };
+
   const remainingPercent = (usedPercent) =>
     Math.min(100, Math.max(0, 100 - Number(usedPercent)));
 
@@ -150,9 +223,9 @@
   };
 
   const toneColor = (tone) => {
-    if (tone === "hot") return "#c45c4a";
-    if (tone === "warn") return "#c9a227";
-    return "#3d9a64";
+    if (tone === "hot") return "#ff3b30";
+    if (tone === "warn") return "#ffbf00";
+    return "#22c55e";
   };
 
   const formatCreditsPercent = (value) => `${decimal(value, 1)}%`;
@@ -172,43 +245,64 @@
     ["outputTokensPerSecond", "output_tokens_per_second"],
   ];
 
+  const chipRingBox = (chip) => {
+    const rect = chip?.getBoundingClientRect?.();
+    const width = rect?.width ?? 0;
+    const height = rect?.height ?? 0;
+    return width > 0 && height > 0 ? { width, height } : null;
+  };
+
+  // A capsule traced from top centre clockwise, so the arc starts where a clock
+  // hand does and the chip keeps the pill shape it already has.
+  const capsuleRingPath = (left, top, width, height) => {
+    const radius = height / 2;
+    const middle = left + width / 2;
+    const right = left + width - radius;
+    return `M ${middle} ${top} H ${right} A ${radius} ${radius} 0 0 1 ${right} ${top + height}`
+      + ` H ${left + radius} A ${radius} ${radius} 0 0 1 ${left + radius} ${top}`
+      + ` H ${middle}`;
+  };
+
   const createUsageRing = (percent, options) => {
-    const size = options.size;
+    const boxWidth = options.width;
+    const boxHeight = options.height;
     const strokeWidth = options.strokeWidth;
+    const ringHeight = Math.min(options.ringHeight ?? boxHeight, boxHeight);
     const color = options.color;
     const trackColor = options.trackColor
       ?? "color-mix(in srgb, currentColor 18%, transparent)";
-    const radius = (size - strokeWidth) / 2;
-    const circumference = 2 * Math.PI * radius;
     const clamped = Math.min(100, Math.max(0, percent));
-    const offset = circumference * (1 - clamped / 100);
-    const center = size / 2;
+    const path = capsuleRingPath(
+      strokeWidth / 2,
+      (boxHeight - ringHeight) / 2 + strokeWidth / 2,
+      boxWidth - strokeWidth,
+      ringHeight - strokeWidth,
+    );
     const svg = document.createElementNS(SVG_NS, "svg");
-    svg.setAttribute("width", String(size));
-    svg.setAttribute("height", String(size));
-    svg.setAttribute("viewBox", `0 0 ${size} ${size}`);
+    svg.setAttribute("viewBox", `0 0 ${boxWidth} ${boxHeight}`);
     svg.setAttribute("aria-hidden", "true");
     svg.style.display = "block";
-    svg.style.flex = "0 0 auto";
-    svg.style.transform = "rotate(-90deg)";
-    const track = document.createElementNS(SVG_NS, "circle");
-    track.setAttribute("cx", String(center));
-    track.setAttribute("cy", String(center));
-    track.setAttribute("r", String(radius));
+    svg.style.width = "100%";
+    svg.style.height = "100%";
+    const track = document.createElementNS(SVG_NS, "path");
+    track.setAttribute("d", path);
     track.setAttribute("fill", "none");
     track.setAttribute("stroke", trackColor);
     track.setAttribute("stroke-width", String(strokeWidth));
-    const fill = document.createElementNS(SVG_NS, "circle");
-    fill.setAttribute("cx", String(center));
-    fill.setAttribute("cy", String(center));
-    fill.setAttribute("r", String(radius));
-    fill.setAttribute("fill", "none");
-    fill.setAttribute("stroke", color);
-    fill.setAttribute("stroke-width", String(strokeWidth));
-    fill.setAttribute("stroke-linecap", "round");
-    fill.setAttribute("stroke-dasharray", String(circumference));
-    fill.setAttribute("stroke-dashoffset", String(offset));
-    svg.append(track, fill);
+    svg.append(track);
+    if (clamped > 0) {
+      const fill = document.createElementNS(SVG_NS, "path");
+      fill.setAttribute("d", path);
+      fill.setAttribute("fill", "none");
+      fill.setAttribute("stroke", color);
+      fill.setAttribute("stroke-width", String(strokeWidth));
+      fill.setAttribute("stroke-linecap", "round");
+      // pathLength makes one unit of dash one percent of the capsule, whatever
+      // the chip measures.
+      fill.setAttribute("pathLength", "100");
+      fill.setAttribute("stroke-dasharray", `${clamped} 100`);
+      svg.append(fill);
+    }
     return svg;
   };
 
@@ -526,20 +620,41 @@
       .codey-trigger-chip[data-state="open"] {
         background: rgba(127, 127, 127, 0.08);
       }
-      #${usageRootId} {
-        gap: 4px;
+      #${usageRootId},
+      #${creditsRootId} {
+        position: relative;
+        isolation: isolate;
         width: fit-content;
+      }
+      #${usageRootId} {
         max-width: min(180px, 30vw);
         color: var(--color-text-tertiary, #8f8f8f);
       }
       #${creditsRootId} {
-        gap: 5px;
-        width: fit-content;
-        max-width: min(72px, 18vw);
+        max-width: min(88px, 22vw);
+      }
+      #${usageRootId} [data-codey-usage-ring],
+      #${creditsRootId} [data-codey-credits-ring] {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        z-index: 0;
+      }
+      #${usageRootId} [data-codey-usage-ring] {
+        display: none;
       }
       #${creditsRootId} [data-codey-credits-ring] {
-        display: inline-flex;
-        flex: 0 0 auto;
+        display: block;
+      }
+      #${usageRootId} [data-codey-usage-label],
+      #${creditsRootId} [data-codey-credits-label] {
+        position: relative;
+        z-index: 1;
+        display: inline-block;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       #${usagePopoverId}[hidden], #${creditsPopoverId}[hidden] { display: none !important; }
       #${usagePopoverId} [data-codey-usage-title],
@@ -672,6 +787,12 @@
       controlDescriptor(control),
     );
 
+  const controlLooksLikeSend = (control) =>
+    /(^|[^a-z])(send|submit)([^a-z]|$)|发送|提交/i.test(controlDescriptor(control));
+
+  const isButtonLike = (node) =>
+    node?.tagName === "BUTTON" || node?.getAttribute?.("role") === "button";
+
   const hasComposerActionContext = (element) => {
     if (!element?.parentElement) return false;
     const inputRect = element.getBoundingClientRect();
@@ -749,6 +870,44 @@
     ) || null;
   };
 
+  const composerTextOf = (node) => {
+    if (!node) return "";
+    const value = typeof node.value === "string" ? node.value : "";
+    const text = value || node.innerText || node.textContent || "";
+    return typeof text === "string" ? text.trim() : "";
+  };
+
+  const isComposerLike = (node) =>
+    node?.tagName === "TEXTAREA"
+    || node?.getAttribute?.("contenteditable") === "true"
+    || node?.getAttribute?.("role") === "textbox";
+
+  const markComposerSubmitted = () => {
+    const threadId = findComposerConversationId(inputElement);
+    if (threadId) submittedThreads.add(threadId);
+    else pendingSubmit = true;
+  };
+
+  // Bound on the document in the capture phase: the composer is replaced on
+  // every thread switch, and Codex keeps its own capture listeners on window and
+  // document, so an element-level listener is both stale-prone and preemptable.
+  const onDocumentKeyDown = (event) => {
+    if (event?.key !== "Enter" || event.shiftKey || event.altKey || event.isComposing) return;
+    if (!isComposerLike(event.target) || !composerTextOf(event.target)) return;
+    markComposerSubmitted();
+  };
+
+  const onDocumentClick = (event) => {
+    let node = event?.target;
+    for (let depth = 0; node && depth < 4; depth += 1) {
+      if (isButtonLike(node) && controlLooksLikeSend(node)) {
+        markComposerSubmitted();
+        return;
+      }
+      node = node.parentElement;
+    }
+  };
+
   const unwrapSingleton = (control) => {
     let anchor = control;
     let host = control.parentElement;
@@ -819,6 +978,27 @@
       depth += 1;
     }
     return bestControl ? unwrapSingleton(bestControl) : null;
+  };
+
+  const currentModelSignature = () => {
+    const control = findModelInsertionTarget()?.anchor;
+    if (!control) return "";
+    const visibleText = [control.textContent, control.innerText]
+      .filter((value) => typeof value === "string" && value.trim())
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return visibleText || controlDescriptor(control);
+  };
+
+  const expireLiveCacheIfModelChanged = (threadId) => {
+    if (!threadId || !liveCacheAtByThread.has(threadId)) return;
+    const previous = liveCacheModelByThread.get(threadId);
+    const current = currentModelSignature();
+    if (previous && current && previous !== current) {
+      liveCacheAtByThread.delete(threadId);
+      liveCacheModelByThread.delete(threadId);
+    }
   };
 
   const findContextInsertionTarget = () => {
@@ -973,6 +1153,14 @@
     addStyle();
     if (!usageRoot) {
       usageRoot = createChip(usageRootId, "对话用量详情");
+      const ring = document.createElement("span");
+      ring.setAttribute("data-codey-usage-ring", "");
+      ring.setAttribute("aria-hidden", "true");
+      ring.style.display = "none";
+      const label = document.createElement("span");
+      label.setAttribute("data-codey-usage-label", "");
+      usageRoot.appendChild(ring);
+      usageRoot.appendChild(label);
       usagePopover = createPopover(usagePopoverId, "对话用量详情");
       bindChipPopover("usage", usageRoot, usagePopover);
     }
@@ -981,15 +1169,8 @@
       const ring = document.createElement("span");
       ring.setAttribute("data-codey-credits-ring", "");
       ring.setAttribute("aria-hidden", "true");
-      ring.style.display = "inline-flex";
-      ring.style.flex = "0 0 auto";
       const label = document.createElement("span");
       label.setAttribute("data-codey-credits-label", "");
-      label.style.display = "inline-block";
-      label.style.maxWidth = "100%";
-      label.style.overflow = "hidden";
-      label.style.textOverflow = "ellipsis";
-      label.style.whiteSpace = "nowrap";
       creditsRoot.appendChild(ring);
       creditsRoot.appendChild(label);
       creditsPopover = createPopover(creditsPopoverId, "账号额度详情");
@@ -1002,18 +1183,63 @@
     return threadId ? usageByThread.get(threadId) || null : null;
   };
 
+  const scheduleCacheTick = () => {
+    window.clearTimeout(cacheTimer);
+    cacheTimer = 0;
+    if (disposed) return;
+    const threadId = findComposerConversationId(inputElement);
+    if (cacheTimerState(threadId).kind !== "live") return;
+    cacheTimer = window.setTimeout(() => {
+      cacheTimer = 0;
+      renderUsage();
+    }, 1000);
+  };
+
+  const renderCacheRing = (timer) => {
+    const ring = usageRoot?.querySelector?.("[data-codey-usage-ring]");
+    if (!ring) return;
+    const box = timer.kind === "live" ? chipRingBox(usageRoot) : null;
+    if (!box) {
+      ring.style.display = "none";
+      ring.replaceChildren();
+      ring.removeAttribute("data-tone");
+      return;
+    }
+    ring.style.display = "block";
+    ring.setAttribute("data-tone", timer.tone);
+    ring.replaceChildren(createUsageRing(timer.remainingPercent, {
+      ...box,
+      ringHeight: chipRingHeight,
+      strokeWidth: chipRingStrokeWidth,
+      color: toneColor(timer.tone),
+    }));
+  };
+
   const renderUsage = () => {
     if (!usageRoot || !usagePopover) return;
+    const threadId = findComposerConversationId(inputElement);
+    expireLiveCacheIfModelChanged(threadId);
     const usage = currentUsage();
     if (!usageHasDisplayData(usage) || !inputElement) {
       usageRoot.style.display = "none";
       setPopoverOpen("usage", false);
+      scheduleCacheTick();
       return;
     }
+    const timer = cacheTimerState(threadId);
     const label = usageChipLabel(usage);
-    usageRoot.textContent = label;
-    usageRoot.setAttribute("aria-label", `对话用量：${label}`);
+    const labelNode = usageRoot.querySelector?.("[data-codey-usage-label]");
+    if (labelNode) {
+      labelNode.textContent = label;
+      labelNode.style.color = timer.kind === "live" ? toneColor(timer.tone) : "";
+    } else usageRoot.textContent = label;
+    const ariaRemaining = timer.kind === "live"
+      ? `，缓存剩余 ${formatCacheRemaining(timer.remainingMs)}`
+      : "";
+    usageRoot.setAttribute("aria-label", `对话用量：${label}${ariaRemaining}`);
     usageRoot.style.display = "inline-flex";
+    // The capsule is measured from the laid-out chip, so it runs after display.
+    renderCacheRing(timer);
     const rows = [
       ["账号", accountIdentity()],
     ];
@@ -1025,6 +1251,15 @@
     }
     if (usage.cacheHitRatePercent !== undefined) {
       rows.push(["最近缓存命中率", formatCacheHit(usage.cacheHitRatePercent)]);
+      if (timer.kind === "live") {
+        rows.push({
+          name: "缓存剩余",
+          value: formatCacheRemaining(timer.remainingMs),
+          color: toneColor(timer.tone),
+        });
+      } else {
+        rows.push(["缓存剩余", "已过期"]);
+      }
     }
     if (usage.cachedInputTokens !== undefined) {
       rows.push(["缓存读取", formatTokenCount(usage.cachedInputTokens)]);
@@ -1055,9 +1290,16 @@
     }
     usagePopover.innerHTML =
       `<div data-codey-usage-title>用量</div>` +
-      rows.map(([name, value]) =>
-        `<div data-codey-usage-row><span>${escapeText(name)}</span><span>${escapeText(value)}</span></div>`
-      ).join("");
+      rows.map((row) => {
+        const name = Array.isArray(row) ? row[0] : row.name;
+        const value = Array.isArray(row) ? row[1] : row.value;
+        const color = Array.isArray(row) ? undefined : row.color;
+        const remaining = name === "缓存剩余";
+        const valueAttr = remaining ? " data-codey-cache-remaining" : "";
+        const valueStyle = color ? ` style="color:${color}"` : "";
+        return `<div data-codey-usage-row><span>${escapeText(name)}</span><span${valueAttr}${valueStyle}>${escapeText(value)}</span></div>`;
+      }).join("");
+    scheduleCacheTick();
   };
 
   const creditsWindows = (result) => {
@@ -1098,22 +1340,27 @@
     const color = toneColor(tone);
     creditsRoot.style.setProperty("--codey-credits-remaining", String(remaining));
     creditsRoot.style.setProperty("--codey-credits-tone", color);
-    const ring = creditsRoot.querySelector?.("[data-codey-credits-ring]");
-    if (ring) {
-      ring.replaceChildren(createUsageRing(remaining, {
-        size: 14,
-        strokeWidth: 2.4,
-        color,
-      }));
-    }
     const label = creditsRoot.querySelector?.("[data-codey-credits-label]");
-    if (label) label.textContent = percent;
+    if (label) {
+      label.textContent = percent;
+      label.style.color = color;
+    }
     creditsRoot.setAttribute(
       "aria-label",
       `${windowLabel(primary.kind)} ${percent}`,
     );
     creditsRoot.title = `${windowLabel(primary.kind)} ${percent}`;
     creditsRoot.style.display = "inline-flex";
+    const ring = creditsRoot.querySelector?.("[data-codey-credits-ring]");
+    const box = chipRingBox(creditsRoot);
+    if (ring && box) {
+      ring.replaceChildren(createUsageRing(remaining, {
+        ...box,
+        ringHeight: chipRingHeight,
+        strokeWidth: chipRingStrokeWidth,
+        color,
+      }));
+    }
     const plan = planLabel(creditsResult.planType);
     const secondary = windows.slice(1);
     const balance = creditsBalanceLabel(creditsResult.credits);
@@ -1270,21 +1517,50 @@
     }
   };
 
+  const applyProviderId = (nextId) => {
+    const nextProvider = typeof nextId === "string" && nextId.trim() ? nextId.trim() : "";
+    if (!nextProvider) return;
+    if (providerId && providerId !== nextProvider) {
+      liveCacheAtByThread.clear();
+      liveCacheModelByThread.clear();
+      submittedThreads.clear();
+    }
+    providerId = nextProvider;
+  };
+
   const loadSettings = async () => {
     try {
       const settings = await callBridge(settingsPath);
-      const nextId = settings?.currentProviderSnapshot?.id;
-      if (typeof nextId === "string" && nextId.trim()) providerId = nextId.trim();
+      applyProviderId(settings?.currentProviderSnapshot?.id);
+      cacheValidMinutes = normalizeCacheValidMinutes(settings?.cacheValidMinutes);
+      renderUsage();
     } catch {
       // Provider id is only the no-login fallback for the usage account row.
     }
   };
 
-  const applyTokenUsage = (message) => {
+  const applyTokenUsage = (message, options = {}) => {
     if (disposed) return false;
     const observed = observeTokenUsage(message);
     if (!observed) return false;
+    const previousFingerprint = usageFingerprint(usageByThread.get(observed.threadId));
+    const nextFingerprint = usageFingerprint(observed.usage);
     usageByThread.set(observed.threadId, observed.usage);
+    // A submit made before the thread existed belongs to the first thread that
+    // reports usage this page has never seen.
+    const claimsPendingSubmit = pendingSubmit && !previousFingerprint;
+    if (
+      options.live === true
+      && nextFingerprint
+      && nextFingerprint !== previousFingerprint
+      && (submittedThreads.has(observed.threadId) || claimsPendingSubmit)
+    ) {
+      if (claimsPendingSubmit) {
+        pendingSubmit = false;
+        submittedThreads.add(observed.threadId);
+      }
+      startLiveCache(observed.threadId);
+    }
     renderUsage();
     return true;
   };
@@ -1324,7 +1600,7 @@
         type: "notification",
         key: { hostId },
         methods: tokenUsageNotificationMethod,
-        listener: (message) => { if (!stopped) applyTokenUsage(message); },
+        listener: (message) => { if (!stopped) applyTokenUsage(message, { live: true }); },
       });
       request.onRpcBroken?.(onBroken);
       await withTimeout(Promise.resolve(request).then((value) => {
@@ -1366,10 +1642,25 @@
     usageSelection = selection;
     const previous = usageByThread.get(threadId);
     void readStoredUsage(manager, threadId).then((tokenUsage) => {
-      if (disposed || usageSelection !== selection || usageByThread.get(threadId) !== previous) return;
-      usageError = null;
-      applyTokenUsage({ method: tokenUsageNotificationMethod, params: { threadId, tokenUsage } });
+      if (disposed || usageSelection !== selection) return;
+      const stored = tokenUsage
+        ? observeTokenUsage({
+          method: tokenUsageNotificationMethod,
+          params: { threadId, tokenUsage },
+        })
+        : null;
+      // Records whether the manager really answers with stored usage. The chip
+      // otherwise fills from the subscription replay and hides a broken read.
+      storedUsageRead = stored ? "ok" : "empty";
+      if (usageByThread.get(threadId) === previous && stored) {
+        usageError = null;
+        applyTokenUsage({
+          method: tokenUsageNotificationMethod,
+          params: { threadId, tokenUsage },
+        });
+      }
     }).catch(() => {
+      storedUsageRead = "failed";
       if (usageSelection === selection) usageError = "读取历史对话用量失败";
     });
   };
@@ -1379,7 +1670,7 @@
       if (boundNotificationTargets.has(target)) continue;
       const unsubscribe = isRpcManager(target)
         ? await bindRpcNotifications(target)
-        : bindNotificationCallback(target, applyTokenUsage);
+        : bindNotificationCallback(target, (message) => applyTokenUsage(message, { live: true }));
       if (!unsubscribe) continue;
       if (disposed) { unsubscribe(); continue; }
       boundNotificationTargets.set(target, unsubscribe);
@@ -1488,8 +1779,14 @@
     observer.observe(document.documentElement, options);
   };
 
-  const onConfigChanged = () => {
+  const onConfigChanged = (event) => {
     creditsPollingEnabled = true;
+    const nextMinutes = event?.detail?.config?.cacheValidMinutes;
+    if (nextMinutes !== undefined) {
+      cacheValidMinutes = normalizeCacheValidMinutes(nextMinutes);
+    }
+    applyProviderId(event?.detail?.currentProviderSnapshot?.id);
+    renderUsage();
     void loadSettings();
     scheduleAccountUsageCheck(0);
   };
@@ -1516,6 +1813,8 @@
     window.addEventListener?.(configChangedEvent, onConfigChanged);
     window.addEventListener?.("focus", onFocus);
     document.addEventListener?.("visibilitychange", onVisibilityChanged);
+    document.addEventListener?.("keydown", onDocumentKeyDown, true);
+    document.addEventListener?.("click", onDocumentClick, true);
   };
 
   window.__codeyComposerUsage = {
@@ -1527,23 +1826,37 @@
       creditsVisible: creditsRoot?.style.display === "inline-flex",
       subscribed: boundNotificationTargets.size > 0,
       usageError,
-      usageLabel: usageRoot?.textContent || "",
+      usageLabel: usageRoot?.querySelector?.("[data-codey-usage-label]")?.textContent
+        || usageRoot?.textContent
+        || "",
       creditsLabel: creditsRoot?.querySelector?.("[data-codey-credits-label]")?.textContent
         || creditsRoot?.textContent
         || "",
+      cacheRemaining: usagePopover?.querySelector?.("[data-codey-cache-remaining]")?.textContent
+        || "",
+      cacheRingVisible: Boolean(
+        usageRoot?.querySelector?.("[data-codey-usage-ring]")?.getAttribute?.("data-tone"),
+      ),
+      cacheTone: usageRoot?.querySelector?.("[data-codey-usage-ring]")?.getAttribute?.("data-tone")
+        || "",
+      storedUsageRead,
+      pendingSubmit,
+      submittedThreadCount: submittedThreads.size,
       threadCount: usageByThread.size,
     }),
     scan,
     refreshCredits: checkAccountUsage,
-    applyNotification: applyTokenUsage,
+    applyNotification: (message) => applyTokenUsage(message, { live: true }),
     dispose: () => {
       disposed = true;
       window.removeEventListener?.(configChangedEvent, onConfigChanged);
       window.removeEventListener?.("focus", onFocus);
       document.removeEventListener?.("visibilitychange", onVisibilityChanged);
+      document.removeEventListener?.("keydown", onDocumentKeyDown, true);
+      document.removeEventListener?.("click", onDocumentClick, true);
       observer?.disconnect();
       unsubscribeNotifications?.();
-      for (const timer of [scanTimer, creditsTimer, usageCloseTimer, creditsCloseTimer]) {
+      for (const timer of [scanTimer, creditsTimer, usageCloseTimer, creditsCloseTimer, cacheTimer]) {
         window.clearTimeout(timer);
       }
       for (const element of [usageRoot, creditsRoot, usagePopover, creditsPopover]) element?.remove();
