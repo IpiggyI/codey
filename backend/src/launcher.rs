@@ -304,6 +304,26 @@ fn model_context_explicit_official_budget_requires_generated_catalog() {
     assert!(should_install_codey_model_catalog(false, true, false));
 }
 
+/// An official-account launch honours a custom context budget only through the
+/// generated catalog. When that catalog is unavailable the budget cannot be
+/// applied, and the launch continues on Codex's built-in capacities instead of
+/// failing, so the drop has to be reported rather than left silent.
+fn custom_context_budget_dropped(
+    official_only: bool,
+    catalog_available: bool,
+    custom_context: bool,
+) -> bool {
+    official_only && custom_context && !catalog_available
+}
+
+#[test]
+fn a_dropped_custom_context_budget_is_detected_only_when_the_catalog_is_missing() {
+    assert!(custom_context_budget_dropped(true, false, true));
+    assert!(!custom_context_budget_dropped(true, true, true));
+    assert!(!custom_context_budget_dropped(true, false, false));
+    assert!(!custom_context_budget_dropped(false, false, true));
+}
+
 fn should_inject_runtime_model_catalog(
     user_catalog_configured: bool,
     leftover_codey_catalog: bool,
@@ -500,13 +520,29 @@ async fn prepare_startup_model_catalog(
     // generated catalog remains necessary for third-party model filtering and
     // synthetic model entries. A user-supplied model_catalog_json always
     // installs the derived copy so Codex never reads the user file.
+    let official_only = !current_provider_is_third_party;
+    let custom_context = !config.runtime_model_contexts().is_empty();
     let install_codey_catalog = should_inject_runtime_model_catalog(
         user_catalog_configured,
         leftover_codey_catalog,
-        !current_provider_is_third_party,
+        official_only,
         catalog_available_for_runtime,
-        !config.runtime_model_contexts().is_empty(),
+        custom_context,
     );
+    if !install_codey_catalog
+        && custom_context_budget_dropped(official_only, catalog_available_for_runtime, custom_context)
+    {
+        error_log::record_failure(
+            "patch_degraded",
+            "apply_custom_model_context",
+            "生成的模型目录不可用，本次启动未应用自定义上下文预算".to_string(),
+            serde_json::json!({
+                "fallback": "codex_builtin_context",
+                "officialProvider": official_provider,
+            }),
+        );
+        eprintln!("模型目录不可用，本次启动未应用自定义上下文预算，Codex 使用内置容量。");
+    }
     let model_catalog_path = install_codey_catalog
         .then(|| crate::model_catalog_store::derived_catalog_path(&catalog_dir));
     let model_state = match selection_result {
