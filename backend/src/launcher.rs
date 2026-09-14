@@ -5,7 +5,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use codey_runtime_core::app_paths::resolve_codex_app_dir_with_saved;
@@ -1304,6 +1304,7 @@ async fn spawn_and_inject_runtime(
     patch: &StartupPatchState,
     runtime_config_overrides: &[String],
 ) -> Result<SpawnedRenderer> {
+    let spawn_inject_started = Instant::now();
     let mut spawned = match spawn_codex(
         &mut storage.app_dir,
         patch.debug_port,
@@ -1319,6 +1320,7 @@ async fn spawn_and_inject_runtime(
             return Err(restore_runtime_config_after_error(home, error).await);
         }
     };
+    let codex_spawn_ms = spawn_inject_started.elapsed().as_millis() as u64;
     let maintenance = MaintenanceStatus {
         session_status: storage.session_maintenance.status,
         session_files_fixed: storage.session_maintenance.files_fixed,
@@ -1338,6 +1340,15 @@ async fn spawn_and_inject_runtime(
         &child,
     )
     .await?;
+    let inject_renderer_ms = spawn_inject_started.elapsed().as_millis() as u64 - codex_spawn_ms;
+    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+        "launcher.spawn_inject_timings",
+        serde_json::json!({
+            "codexSpawnAndCompatibilityMs": codex_spawn_ms,
+            "rendererInjectionMs": inject_renderer_ms,
+            "totalMs": spawn_inject_started.elapsed().as_millis() as u64,
+        }),
+    );
     Ok(SpawnedRenderer {
         app_dir: storage.app_dir,
         spawned,
