@@ -260,9 +260,17 @@ fn refresh_for_provider_with_transport_preferences(args: CatalogRefreshArgs<'_>)
     }
 
     if !official_provider {
+        // Mixed catalogs must keep compatible official raw slugs for spawn_agent,
+        // but a newly bundled official model without a local runtime template
+        // cannot fail the whole refresh. Official-only generation still
+        // fail-closes on that slug.
+        catalog_models.retain(model_is_runtime_source_compatible);
         let template = official_models
             .iter()
-            .find(|model| model.get("visibility").and_then(Value::as_str) == Some("list"))
+            .find(|model| {
+                model.get("visibility").and_then(Value::as_str) == Some("list")
+                    && model_instruction_source(model).is_some()
+            })
             .or_else(|| official_models.first())
             .cloned()
             .ok_or_else(|| {
@@ -1261,11 +1269,12 @@ fn ensure_runtime_compatible_models(models: &[Value]) -> Result<()> {
     Err(RuntimeModelCacheUnavailable.into())
 }
 
+fn model_is_runtime_source_compatible(model: &Value) -> bool {
+    model_instruction_source(model).is_some() && model_has_runtime_description(model)
+}
+
 fn source_models_are_runtime_compatible(models: &[Value]) -> bool {
-    !models.is_empty()
-        && models.iter().all(|model| {
-            model_instruction_source(model).is_some() && model_has_runtime_description(model)
-        })
+    !models.is_empty() && models.iter().all(model_is_runtime_source_compatible)
 }
 
 fn runtime_compatible_models(models: &[Value]) -> bool {
@@ -1942,6 +1951,47 @@ mod tests {
             .filter_map(|model| model["slug"].as_str())
             .collect::<Vec<_>>();
         assert!(slugs.contains(&"gpt-5.6-sol"));
+        assert!(!slugs.contains(&"gpt-5.3-codex-spark"));
+    }
+
+    #[test]
+    fn mixed_catalog_drops_prompt_free_official_stubs_without_blocking_supported_models() {
+        let home = tempfile::tempdir().unwrap();
+        let mut cache = official_cache();
+        let stub = cache["models"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|model| model["slug"] == "gpt-5.3-codex-spark")
+            .unwrap()
+            .as_object_mut()
+            .unwrap();
+        stub.remove("base_instructions");
+        stub.remove("model_messages");
+        fs::write(
+            home.path().join("models_cache.json"),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+        let selected = vec![
+            "gpt-5.6-sol".to_string(),
+            "gpt-5.3-codex-spark".to_string(),
+            "provider-custom-model".to_string(),
+        ];
+
+        refresh_for_provider(home.path(), false, Some(&selected), &selected).unwrap();
+
+        let catalog: Value =
+            serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
+                .unwrap();
+        let slugs = catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|model| model["slug"].as_str())
+            .collect::<Vec<_>>();
+        assert!(slugs.contains(&"gpt-5.6-sol"));
+        assert!(slugs.contains(&"provider-custom-model"));
         assert!(!slugs.contains(&"gpt-5.3-codex-spark"));
     }
 
