@@ -364,6 +364,7 @@ async fn prepare_startup_model_catalog(
     let (runtime_upstream_models, runtime_selected_models) = config.runtime_catalog_models();
     let runtime_websocket_models = config.runtime_websocket_model_aliases();
     let runtime_native_web_search_models = config.runtime_native_web_search_model_aliases();
+    let runtime_1m_context_models = config.runtime_1m_context_model_aliases();
     let refresh_official_provider =
         config.official_account_available_this_launch && !current_provider_is_third_party;
     let include_official_models = config.official_account_available_this_launch
@@ -408,6 +409,7 @@ async fn prepare_startup_model_catalog(
                 excluded_official_models: &excluded_official_models,
                 websocket_models: Some(&runtime_websocket_models),
                 native_web_search_models: Some(&runtime_native_web_search_models),
+                context_1m_models: Some(&runtime_1m_context_models),
                 user_catalog: user_catalog_for_refresh.as_deref(),
             });
             let catalog_available =

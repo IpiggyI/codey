@@ -149,7 +149,7 @@ pub(crate) fn model_catalog_fallback(
     result: anyhow::Result<()>,
     catalog_dir: &std::path::Path,
     native_web_search_models: &[String],
-    _context_1m_models: &[String],
+    context_1m_models: &[String],
 ) -> Result<bool, String> {
     match result {
         Ok(()) => Ok(false),
@@ -157,6 +157,7 @@ pub(crate) fn model_catalog_fallback(
             model_catalog::prepare_cached_catalog_for_native_web_search(
                 catalog_dir,
                 native_web_search_models,
+                context_1m_models,
             )
             .map(|available| !available)
             .map_err(|fallback_error| fallback_error.to_string())
@@ -180,6 +181,7 @@ pub(crate) fn try_refresh_model_catalog(config: &CodeyConfig) -> anyhow::Result<
     let (upstream_models, selected_models) = config.runtime_catalog_models();
     let websocket_models = config.runtime_websocket_model_aliases();
     let native_web_search_models = config.runtime_native_web_search_model_aliases();
+    let context_1m_models = config.runtime_1m_context_model_aliases();
     let include_official_models = config.official_account_available_this_launch
         && config
             .profiles
@@ -196,6 +198,7 @@ pub(crate) fn try_refresh_model_catalog(config: &CodeyConfig) -> anyhow::Result<
         excluded_official_models: &excluded_official_models,
         websocket_models: Some(&websocket_models),
         native_web_search_models: Some(&native_web_search_models),
+        context_1m_models: Some(&context_1m_models),
         user_catalog: user_catalog.as_deref(),
     })
     .map(|_| ())
