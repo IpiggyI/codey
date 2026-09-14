@@ -217,7 +217,6 @@ fn refresh_for_provider_with_transport_preferences(args: CatalogRefreshArgs<'_>)
     if user_catalog.is_some() && ensure_runtime_compatible_models(official_models).is_err() {
         return materialize_user_catalog_without_generated(catalog_dir, codex_home, user_catalog);
     }
-    ensure_runtime_compatible_models(official_models)?;
     let official_slugs = official_models
         .iter()
         .filter_map(|model| model.get("slug").and_then(Value::as_str))
@@ -1896,6 +1895,54 @@ mod tests {
                 .unwrap()
                 .supported
         );
+    }
+
+    #[test]
+    fn an_excluded_model_without_a_runtime_template_still_allows_the_official_refresh() {
+        let home = tempfile::tempdir().unwrap();
+        let mut cache = official_cache();
+        let stub = cache["models"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|model| model["slug"] == "gpt-5.3-codex-spark")
+            .unwrap()
+            .as_object_mut()
+            .unwrap();
+        stub.remove("base_instructions");
+        stub.remove("model_messages");
+        fs::write(
+            home.path().join("models_cache.json"),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+        let excluded = vec!["gpt-5.3-codex-spark".to_string()];
+
+        refresh_catalog(CatalogRefreshArgs {
+            codex_home: home.path(),
+            catalog_dir: home.path(),
+            official_provider: true,
+            include_official_models: true,
+            upstream_models: None,
+            selected_models: &[],
+            excluded_official_models: &excluded,
+            websocket_models: None,
+            native_web_search_models: None,
+            user_catalog: None,
+        })
+        .unwrap();
+
+        let catalog: Value =
+            serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
+                .unwrap();
+        let slugs = catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|model| model["slug"].as_str())
+            .collect::<Vec<_>>();
+        assert!(slugs.contains(&"gpt-5.6-sol"));
+        assert!(!slugs.contains(&"gpt-5.3-codex-spark"));
     }
 
     #[test]
