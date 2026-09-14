@@ -2148,6 +2148,44 @@ mod tests {
     }
 
     #[test]
+    fn astra_reasoning_levels_follow_the_native_cache_when_it_drops_a_tier() {
+        let home = tempfile::tempdir().unwrap();
+        let mut cache = official_cache();
+        let astra = cache["models"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|model| model["slug"] == "gpt-6-astra")
+            .unwrap();
+        astra["supported_reasoning_levels"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|level| level["effort"] != "ultra");
+        fs::write(
+            home.path().join("models_cache.json"),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+        let route = vec!["relay/gpt-6-astra".to_string()];
+
+        refresh_for_provider(home.path(), false, Some(&route), &route).unwrap();
+
+        let catalog: Value =
+            serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
+                .unwrap();
+        let astra = catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["slug"] == "relay/gpt-6-astra")
+            .unwrap();
+        assert_eq!(
+            reasoning_efforts_from_value(astra),
+            ["low", "medium", "high", "xhigh", "max"]
+        );
+    }
+
+    #[test]
     fn user_catalog_limits_official_selection_candidates() {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
