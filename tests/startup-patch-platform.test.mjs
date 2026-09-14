@@ -2,33 +2,44 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-async function loadWindowsStartupSource() {
+const normalizeLineEndings = (source) => source.replace(/\r\n/g, "\n");
+
+async function readSource(relativePath) {
+  return normalizeLineEndings(await readFile(
+    new URL(`../${relativePath}`, import.meta.url),
+    "utf8",
+  ));
+}
+
+// Slices spawn_codex into its per-platform blocks so both platform contracts
+// can be asserted from any CI host.
+async function loadSpawnCodexSections() {
   const [launcher, launcherPlatform, startupPatch] = await Promise.all([
-    readFile(new URL("../backend/src/launcher/process.rs", import.meta.url), "utf8"),
-    readFile(
-      new URL("../backend/src/launcher/platform.rs", import.meta.url),
-      "utf8",
-    ),
-    readFile(
-      new URL("../backend/src/codex_startup_patch.rs", import.meta.url),
-      "utf8",
-    ),
-  ]).then((sources) => sources.map((source) => source.replace(/\r\n/g, "\n")));
+    readSource("backend/src/launcher/process.rs"),
+    readSource("backend/src/launcher/platform.rs"),
+    readSource("backend/src/codex_startup_patch.rs"),
+  ]);
+  const spawnStart = launcher.indexOf("async fn spawn_codex");
+  const macosStart = launcher.indexOf('#[cfg(target_os = "macos")]\n    {', spawnStart);
+  const otherStart = launcher.indexOf('#[cfg(not(any(windows, target_os = "macos")))]', macosStart);
+  assert.ok(spawnStart >= 0 && macosStart > spawnStart && otherStart > macosStart);
   const windowsSpawn = launcher.slice(
-    launcher.indexOf("#[cfg(windows)]\n    {", launcher.indexOf("async fn spawn_codex")),
-    launcher.indexOf("#[cfg(target_os = \"macos\")]", launcher.indexOf("async fn spawn_codex")),
+    launcher.indexOf("#[cfg(windows)]\n    {", spawnStart),
+    launcher.indexOf('#[cfg(target_os = "macos")]', spawnStart),
   );
+  const macosSpawn = launcher.slice(macosStart, otherStart);
   const cleanup = launcherPlatform.slice(
     launcherPlatform.indexOf("async fn stop_windows_spawned_codex"),
     launcherPlatform.indexOf(
-      "#[cfg(target_os = \"macos\")]\npub(super) fn build_fresh_macos_open_command",
+      '#[cfg(target_os = "macos")]\npub(super) fn build_fresh_macos_open_command',
     ),
   );
-  return { cleanup, launcher, launcherPlatform, startupPatch, windowsSpawn };
+  return { cleanup, launcher, launcherPlatform, macosSpawn, startupPatch, windowsSpawn };
 }
 
+// Static contracts keep both platforms' spawn_codex wiring visible on any CI host.
 test("Windows startup compatibility failure cleans the process before compatible restart", async () => {
-  const { cleanup, windowsSpawn } = await loadWindowsStartupSource();
+  const { cleanup, windowsSpawn } = await loadSpawnCodexSections();
   const cleanupCall = windowsSpawn.indexOf(
     "stop_windows_spawned_codex(&mut spawned, app_dir).await",
   );
@@ -43,8 +54,6 @@ test("Windows startup compatibility failure cleans the process before compatible
     windowsSpawn,
     /Codex 已启动，但部分启动设置未能应用/,
   );
-  assert.doesNotMatch(windowsSpawn, /宠物精简启动补丁未能确认生效/);
-  assert.doesNotMatch(windowsSpawn, /petSlimRequested/);
   assert.match(cleanup, /-> Result<\(\)>/);
   assert.match(
     cleanup,
@@ -57,7 +66,7 @@ test("Windows startup compatibility failure cleans the process before compatible
 });
 
 test("Windows skips the Inspector when the Electron fuse is off and retries without a breakpoint", async () => {
-  const { launcher, windowsSpawn } = await loadWindowsStartupSource();
+  const { launcher, windowsSpawn } = await loadSpawnCodexSections();
   const fuseProbe = windowsSpawn.indexOf(
     "crate::electron_fuses::detect_electron_fuses(app_dir.to_path_buf()).await",
   );
@@ -65,8 +74,8 @@ test("Windows skips the Inspector when the Electron fuse is off and retries with
   const prepareRequire = windowsSpawn.indexOf("prepare_startup_require_launch(");
   const prepare = windowsSpawn.indexOf("prepare_cli_wrapper(");
   const reservePort = windowsSpawn.indexOf("reserve_loopback_port()");
-  const noEntry = windowsSpawn.indexOf(
-    "if inspector_port.is_none() && wrapper.is_none() && require_patch.is_none() {",
+  const noEntry = windowsSpawn.search(
+    /if inspector_port\.is_none\(\) && wrapper\.is_none\(\)\s*&& require_patch\.is_none\(\)/,
   );
   const launch = windowsSpawn.indexOf("spawn_windows_codex(", noEntry);
   const budget = windowsSpawn.indexOf("let deadline =");
@@ -78,20 +87,20 @@ test("Windows skips the Inspector when the Electron fuse is off and retries with
   // Store updates can change the executable between attempts; refresh before probing it.
   const refresh = windowsSpawn.indexOf("refresh_windows_packaged_app_dir(app_dir)");
   assert.ok(loop >= 0 && loop < refresh && refresh < fuseProbe && fuseProbe < prepareRequire);
-  // NODE_OPTIONS `--require` and the Inspector both wrap Module._load, so the
-  // Inspector is reachable only when `--require` was not prepared.
+  assert.ok(prepareRequire < prepare);
+  assert.match(windowsSpawn, /let require_wanted = fuses\.node_options\.node_options_possible\(\);/);
+  assert.match(windowsSpawn, /let use_require = require_patch\.is_some\(\);/);
   assert.match(
     windowsSpawn,
     /let use_inspector =\s*!use_require && inspect_fuse\.inspector_possible\(\) && !retry_without_inspector;/,
   );
-  assert.ok(
-    loop < prepareRequire
-      && prepareRequire < prepare
-      && prepare < reservePort
-      && reservePort < noEntry
-      && noEntry < launch,
+  assert.match(windowsSpawn, /use_inspector \|\| use_require/);
+  assert.ok(loop < prepare && prepare < reservePort && reservePort < noEntry && noEntry < launch);
+  assert.match(windowsSpawn, /let inspector_port = if use_inspector \{/);
+  assert.match(
+    windowsSpawn,
+    /use_require \|\| \(!use_inspector && constrained\)/,
   );
-  assert.match(windowsSpawn, /let inspector_port = if use_inspector \{\s*Some\(/);
   assert.match(windowsSpawn, /startup_launch_arguments\(&runtime_arguments, inspector_port\)/);
   // Without any compatibility entry the decision is made before launching.
   assert.match(
@@ -131,7 +140,7 @@ test("Windows skips the Inspector when the Electron fuse is off and retries with
 });
 
 test("Startup waits end on process exit, marker confirmation or renderer evidence", async () => {
-  const { launcher, startupPatch } = await loadWindowsStartupSource();
+  const { launcher, startupPatch } = await loadSpawnCodexSections();
 
   assert.match(
     launcher,
@@ -165,7 +174,7 @@ test("Startup waits end on process exit, marker confirmation or renderer evidenc
 });
 
 test("Windows startup patch requires app-server runtime override validation", async () => {
-  const { launcher, launcherPlatform, windowsSpawn } = await loadWindowsStartupSource();
+  const { launcher, launcherPlatform, windowsSpawn } = await loadSpawnCodexSections();
 
   assert.match(
     launcher,
@@ -193,4 +202,94 @@ test("Windows startup patch requires app-server runtime override validation", as
   const packageSetup = launcherPlatform.indexOf("match WindowsPackageDebugSession::start(app_dir, environment)");
   const activation = launcherPlatform.indexOf("codey_runtime_core::launcher::activate_packaged_app", packageSetup);
   assert.match(launcherPlatform.slice(packageSetup, activation), /if require_wrapper_environment \{\s*return Err\(error\)/);
+});
+
+test("macOS startup patch requires app-server runtime override validation", async () => {
+  const { launcher: source, macosSpawn } = await loadSpawnCodexSections();
+  const successStart = macosSpawn.indexOf("Ok(mode) =>");
+  const failureStart = macosSpawn.indexOf("Err(error) =>", successStart);
+
+  assert.match(macosSpawn, /install_startup_patch_with_cli_fallback\(/);
+  assert.match(
+    macosSpawn,
+    /Ok\(mode\)[\s\S]*?startup_injection_mode = mode\.as_str\(\)\.to_string\(\)[\s\S]*?performance_status = "ready"/,
+  );
+  assert.ok(successStart >= 0);
+  assert.ok(failureStart > successStart);
+  assert.doesNotMatch(
+    macosSpawn.slice(successStart, failureStart),
+    /stop_macos_codex|reap_child_after_cleanup|degraded/,
+  );
+  assert.match(
+    source,
+    /"launcher\.startup_compatibility_mode"[\s\S]*?"main_process_inspector_unavailable"[\s\S]*?Ok\(StartupInjectionMode::CliWrapper\)/,
+  );
+  assert.match(
+    macosSpawn,
+    /let use_inspector = !use_require && inspect_fuse\.inspector_possible\(\);/,
+  );
+  assert.match(
+    macosSpawn,
+    /let pass_inspect_brk = use_inspector \|\| !inspect_fuse\.inspector_possible\(\);/,
+  );
+  assert.match(
+    macosSpawn,
+    /let wait_inspector_port = if use_inspector \{\s*inspector_port\s*\} else \{\s*None\s*\}/,
+  );
+  assert.match(
+    macosSpawn,
+    /install_startup_patch_with_cli_fallback\(\s*wait_inspector_port,/,
+  );
+});
+
+test("Codex CLI wrapper environment does not leak into the real CLI", async () => {
+  const { startupPatch } = await loadSpawnCodexSections();
+  assert.match(
+    startupPatch,
+    /for name in \[\s*"CODEX_CLI_PATH",\s*CLI_WRAPPER_TARGET_ENV,/,
+  );
+  assert.match(
+    startupPatch,
+    /for name in \[[\s\S]*?STARTUP_PATCH_MARKER_ENV,[\s\S]*?"NODE_OPTIONS",/,
+  );
+});
+
+test("NODE_OPTIONS require path is preferred when the fuse is on", async () => {
+  const { launcher, macosSpawn, startupPatch, windowsSpawn } = await loadSpawnCodexSections();
+
+  assert.match(startupPatch, /pub\(crate\) const STARTUP_PATCH_MARKER_ENV/);
+  assert.match(startupPatch, /CODEY_STARTUP_PATCH_MARKER/);
+  assert.match(startupPatch, /fn prepare_startup_require_in\(/);
+  assert.match(startupPatch, /Ok\(format!\("--require=\{rendered\}"\)\)/);
+  assert.match(windowsSpawn, /detect_electron_fuses\(app_dir\.to_path_buf\(\)\)\.await/);
+  assert.match(windowsSpawn, /fuses\.node_options\.node_options_possible\(\)/);
+  assert.match(windowsSpawn, /let use_require = require_patch\.is_some\(\);/);
+  assert.match(
+    windowsSpawn,
+    /let use_inspector =\s*!use_require && inspect_fuse\.inspector_possible\(\) && !retry_without_inspector;/,
+  );
+  assert.match(
+    windowsSpawn,
+    /if inspector_port\.is_none\(\) && wrapper_handshake\.is_none\(\)\s*&& require_marker\.is_none\(\)/,
+  );
+  assert.match(macosSpawn, /detect_electron_fuses\(app_dir\.to_path_buf\(\)\)\.await/);
+  assert.match(
+    macosSpawn,
+    /is_app_bundle && fuses\.node_options\.node_options_possible\(\)/,
+  );
+  assert.doesNotMatch(
+    macosSpawn,
+    /!inspect_fuse\.inspector_possible\(\)\s*&&\s*fuses\.node_options\.node_options_possible\(\)/,
+  );
+  assert.match(macosSpawn, /add_macos_cli_wrapper\(&mut command, &require\.environment\)/);
+  assert.match(
+    launcher,
+    /"reason": "main_process_require_unavailable"/,
+  );
+  assert.match(
+    launcher,
+    /wait_for_require_patch_with_cli_fallback\(/,
+  );
+  assert.match(launcher, /Ok\(StartupInjectionMode::NodeRequire\)/);
+  assert.match(launcher, /Ok\(StartupInjectionMode::CliWrapper\)/);
 });

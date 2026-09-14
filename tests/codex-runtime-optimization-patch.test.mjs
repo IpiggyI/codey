@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -95,6 +95,82 @@ async function loadPatchInIsolatedContext(runtimeConfigOverrides, contextOverrid
   }
 }
 
+test("build chunks retain native CommonJS loading and restore temporary compilers", async () => {
+  const directory = await realpath(await mkdtemp(join(tmpdir(), "codey-build-loading-")));
+  const build = join(directory, ".vite", "build");
+  await mkdir(build, { recursive: true });
+  const dependency = join(build, "dependency.cjs");
+  const entry = join(build, "entry.cjs");
+  const broken = join(build, "broken.cjs");
+  const passthrough = join(directory, "passthrough.cjs");
+  await writeFile(dependency, "module.exports=41;");
+  await writeFile(entry, "#!/usr/bin/env node\nmodule.exports=require('./dependency.cjs')+1;");
+  await writeFile(broken, "module.exports=;");
+  await writeFile(passthrough, "module.exports=43;");
+  const Module = process.getBuiltinModule("module");
+  const fs = process.getBuiltinModule("fs");
+  const nativeRead = fs.readFileSync;
+  const reads = new Map();
+  const runtime = await loadPatchInIsolatedContext([], {}, false);
+  fs.readFileSync = function(filename, ...args) {
+    const path = String(filename);
+    if (path.startsWith(directory)) {
+      reads.set(path, (reads.get(path) ?? 0) + 1);
+    }
+    return Reflect.apply(nativeRead, this, [filename, ...args]);
+  };
+  try {
+    const require = Module.createRequire(join(directory, "probe.cjs"));
+    assert.equal(require(entry), 42);
+    assert.equal(require(entry), 42);
+    assert.equal(require(passthrough), 43);
+    assert.equal(reads.get(entry), 1);
+    assert.equal(reads.get(dependency), 1);
+    assert.equal(reads.get(passthrough), 1);
+    const loaded = require.cache[entry];
+    assert.equal(Object.hasOwn(loaded, "_compile"), false);
+    assert.equal(loaded.loaded, true);
+    assert.equal(loaded.children[0].filename, dependency);
+    delete require.cache[dependency];
+    await writeFile(dependency, "module.exports=99;");
+    assert.equal(require(dependency), 99);
+    assert.equal(reads.get(dependency), 2);
+
+    const compileProbe = join(build, "main-compile-probe.cjs");
+    const compiling = new Module(compileProbe);
+    compiling.filename = compileProbe;
+    let compiledSource = "";
+    Object.defineProperty(compiling, "_compile", {
+      configurable: true,
+      value(source) { compiledSource = source; },
+      writable: true,
+    });
+    const compileDescriptor = Object.getOwnPropertyDescriptor(compiling, "_compile");
+    await writeFile(compiling.filename, [
+      "class Sampler{start(){this.appStateHeartbeat=setInterval(()=>{",
+      "this.requestAppStateSnapshot(`heartbeat`)},gX),this.appStateHeartbeat.unref()}}",
+      "const request=`electron-app-state-snapshot-request`;",
+    ].join(""));
+    Module._extensions[".js"](compiling, compiling.filename);
+    assert.match(compiledSource, /this\.appStateHeartbeat=null/);
+    assert.deepEqual(
+      Object.getOwnPropertyDescriptor(compiling, "_compile"),
+      compileDescriptor,
+    );
+
+    const failed = new Module(broken);
+    assert.throws(() => Module._extensions[".js"](failed, broken), SyntaxError);
+    assert.equal(Object.hasOwn(failed, "_compile"), false);
+  } finally {
+    fs.readFileSync = nativeRead;
+    runtime.restore();
+    delete Module._cache[entry];
+    delete Module._cache[dependency];
+    delete Module._cache[passthrough];
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("startup patch disables Codex analytics and trims diagnostic polling", async () => {
   const Module = process.getBuiltinModule("module");
   const childProcess = process.getBuiltinModule("child_process");
@@ -138,7 +214,7 @@ test("startup patch disables Codex analytics and trims diagnostic polling", asyn
       (config) => !config.startsWith("__CODEY_WSL_ONLY__:"),
     );
     const expression = await loadPatchExpression(runtimeConfigOverrides);
-    assert.equal((0, eval)(expression), "codey-startup-patch-installed-v39");
+    assert.equal((0, eval)(expression), "codey-startup-patch-installed-v40");
     const patchedElectron = Module._load("electron");
     const passthroughGitHandler = () => "git-handler";
     const passthroughMessageHandler = () => "message-handler";
@@ -661,6 +737,34 @@ test("desktop patches follow split 26.903 chunks and preserve dollar-prefixed li
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test("macOS child-process sampler patch skips only the process-tree call", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "codey-macos-sampler-patch-"));
+  const build = join(directory, ".vite", "build");
+  await mkdir(build, { recursive: true });
+  const filename = join(build, "main-fixture.js");
+  await writeFile(filename, [
+    "const sampler={async collectSnapshotFields(e){return process.platform!==`win32`&&await this.addChildProcessFields(i),e}};",
+    "module.exports=sampler;",
+  ].join(""));
+  const runtime = await loadPatchInIsolatedContext([], {
+    process: { ...process, platform: "darwin", env: {
+      ...process.env,
+      CODEY_DISABLE_MACOS_CHILD_PROCESS_SAMPLER: "true",
+    } },
+  }, false);
+  try {
+    let compiled;
+    process.getBuiltinModule("module")._extensions[".js"]({
+      _compile(source) { compiled = source; },
+    }, filename);
+    assert.match(compiled, /return false,e/);
+    assert.equal(runtime.context.__CODEY_MACOS_CHILD_PROCESS_SAMPLER_SOURCE_PATCHED__, true);
+  } finally {
+    runtime.restore();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("startup patch fails closed when app-server runtime override injection is never observed", async () => {
   const runtimeConfigOverrides = [
     'model_catalog_json="/tmp/codey-catalog.json"',
@@ -681,7 +785,7 @@ test("startup patch fails closed when app-server runtime override injection is n
       await loadPatchExpression(runtimeConfigOverrides, false, true),
       /appServerRuntimeOverrideTimeoutMs = 20_000/,
     );
-    assert.equal(runtime.result, "codey-startup-patch-installed-v39");    assert.equal(
+    assert.equal(runtime.result, "codey-startup-patch-installed-v40");    assert.equal(
       runtime.context.__CODEY_CODEX_STARTUP_PATCH__.appServerRuntimeOverrides.observed,
       false,
     );

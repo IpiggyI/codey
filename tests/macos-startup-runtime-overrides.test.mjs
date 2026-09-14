@@ -14,11 +14,14 @@ test("macOS startup patch requires app-server runtime override validation", asyn
   assert.ok(start >= 0);
   assert.ok(end > start);
   const macosSpawn = source.slice(start, end);
-  const successStart = macosSpawn.indexOf("Ok(()) =>");
+  const successStart = macosSpawn.indexOf("Ok(mode) =>");
   const failureStart = macosSpawn.indexOf("Err(error) =>", successStart);
 
   assert.match(macosSpawn, /install_startup_patch_with_cli_fallback\(/);
-  assert.match(macosSpawn, /Ok\(\(\)\)[\s\S]*?performance_status = "ready"/);
+  assert.match(
+    macosSpawn,
+    /Ok\(mode\)[\s\S]*?startup_injection_mode = mode\.as_str\(\)[\s\S]*?performance_status = "ready"/,
+  );
   assert.ok(successStart >= 0);
   assert.ok(failureStart > successStart);
   assert.doesNotMatch(
@@ -27,7 +30,7 @@ test("macOS startup patch requires app-server runtime override validation", asyn
   );
   assert.match(
     source,
-    /"launcher\.startup_compatibility_mode"[\s\S]*?"main_process_inspector_unavailable"[\s\S]*?Ok\(\(\)\)/,
+    /"launcher\.startup_compatibility_mode"[\s\S]*?"main_process_inspector_unavailable"[\s\S]*?StartupInjectionMode::CliWrapper/,
   );
   assert.match(
     source,
@@ -38,9 +41,18 @@ test("macOS startup patch requires app-server runtime override validation", asyn
     /codex_startup_patch::install\(\s*inspector_port,\s*patch_options,\s*runtime_config_overrides,\s*false,/,
   );
   // A disabled fuse keeps the launch marker but waits on the CLI wrapper alone.
+  // NODE_OPTIONS `--require` also excludes the Inspector: both wrap Module._load.
   assert.match(
     macosSpawn,
-    /install_startup_patch_with_cli_fallback\(\s*inspect_fuse\.inspector_possible\(\)\.then_some\(inspector_port\),/,
+    /let use_inspector = !use_require && inspect_fuse\.inspector_possible\(\);/,
+  );
+  assert.match(
+    macosSpawn,
+    /let wait_inspector_port = if use_inspector \{ inspector_port \} else \{ None \};/,
+  );
+  assert.match(
+    macosSpawn,
+    /install_startup_patch_with_cli_fallback\(\s*wait_inspector_port,/,
   );
 });
 

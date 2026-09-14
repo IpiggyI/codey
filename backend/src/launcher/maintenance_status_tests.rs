@@ -38,6 +38,7 @@ fn maintenance_status_exposes_structured_session_metrics() {
         ghost_tasks_pruned: summary.ghost_tasks_pruned,
         performance_status: "ready".to_string(),
         performance_detail: String::new(),
+        startup_injection_mode: "node_options".to_string(),
     };
     let value = serde_json::to_value(status).unwrap();
 
@@ -45,6 +46,7 @@ fn maintenance_status_exposes_structured_session_metrics() {
     assert_eq!(value["sessionFilesFixed"], 0);
     assert_eq!(value["sqliteRowsUpdated"], 0);
     assert_eq!(value["ghostTasksPruned"], 2);
+    assert_eq!(value["startupInjectionMode"], "node_options");
 }
 
 #[test]

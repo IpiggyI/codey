@@ -120,6 +120,7 @@ export type Maintenance = {
   ghostTasksPruned?: number;
   performanceStatus?: string;
   performanceDetail?: string;
+  startupInjectionMode?: string;
 };
 
 export type InjectionScriptStatus = {

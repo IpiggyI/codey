@@ -130,6 +130,30 @@
   const threadOwnerDiscoveryTimeoutMs = 150;
   const disableWindowsOptimizations = process.platform === "win32";
   const disableMicro = disableWindowsOptimizations;
+  const disableWindowsWmiSampler = disableWindowsOptimizations;
+  const disableMacosChildProcessSampler =
+    process.platform === "darwin" &&
+    process.env.CODEY_DISABLE_MACOS_CHILD_PROCESS_SAMPLER === "true";
+  const startupPatchMarkerPath = process.env.CODEY_STARTUP_PATCH_MARKER;
+  const loadedViaNodeRequire =
+    typeof startupPatchMarkerPath === "string" &&
+    startupPatchMarkerPath.length > 0;
+  if (loadedViaNodeRequire) {
+    // NODE_OPTIONS has no quoting; children and workers must not inherit
+    // `--require`. Only clear it for the launcher-owned require path so
+    // Inspector eval tests do not clobber the host process.
+    try {
+      delete process.env.NODE_OPTIONS;
+    } catch {}
+    if (process.env.NODE_OPTIONS) {
+      try {
+        process.env.NODE_OPTIONS = "";
+      } catch {}
+    }
+    try {
+      delete process.env.CODEY_STARTUP_PATCH_MARKER;
+    } catch {}
+  }
   const Module = process.getBuiltinModule("module");
   const originalLoad = Module._load;
   const readCodexAppVersion = () => {
@@ -146,6 +170,20 @@
   };
   const isInspectorArgument = (argument) =>
     typeof argument === "string" && /^--inspect(?:-brk)?(?:=|$)/.test(argument);
+  const isRequireArgument = (argument) =>
+    typeof argument === "string" && /^(?:--require|-r)(?:=|$)/.test(argument);
+  const withoutRequireArguments = (argv) => {
+    const stripped = [];
+    for (let index = 0; index < argv.length; index += 1) {
+      const argument = argv[index];
+      if (!isRequireArgument(argument)) {
+        stripped.push(argument);
+        continue;
+      }
+      if (argument === "--require" || argument === "-r") index += 1;
+    }
+    return stripped;
+  };
   const maxRendererPatchFingerprints = 64;
   const rendererPatchFailuresByFingerprint = new Map();
   let activeRendererPatchFailures = null;
@@ -972,12 +1010,17 @@
     });
   };
 
-  // The inspector is only a startup injection mechanism. Do not pass its
-  // pause state or command-line flags to Codex workers.
+  // The inspector and NODE_OPTIONS --require path are only startup injection
+  // mechanisms. Do not pass their flags to Codex workers or child processes.
+  const withoutInspectorArguments = process.execArgv.filter(
+    (argument) => !isInspectorArgument(argument),
+  );
   process.execArgv.splice(
     0,
     process.execArgv.length,
-    ...process.execArgv.filter((argument) => !isInspectorArgument(argument)),
+    ...(loadedViaNodeRequire
+      ? withoutRequireArguments(withoutInspectorArguments)
+      : withoutInspectorArguments),
   );
   process.argv.splice(
     0,
@@ -1874,22 +1917,395 @@
     },
   );
 
+  // Codex prewarms the shared avatar/voice overlay at startup by creating a
+  // hidden BrowserWindow. In slim-pet mode the pet entry points are already
+  // unavailable, so keep the manager and voice path intact but make prewarm a
+  // no-op. Voice can still create the overlay on demand through the manager's
+  // regular presentation path.
+  const patchCodexAvatarOverlayPrewarm = (source) => {
+    if (!disablePet) return source;
+    let count = 0;
+    let patched = "";
+    let lastIndex = 0;
+    const prewarmMethodPattern = /async\s+prewarm\s*\([^)]*\)\s*\{/g;
+    for (const match of source.matchAll(prewarmMethodPattern)) {
+      const bodyStart = match.index + match[0].length;
+      // The native prewarm body is a flat minified method. Stop at its first
+      // closing brace so an unrelated prewarm method cannot borrow semantic
+      // anchors from a later class in the monolithic bundle.
+      const bodyEnd = source.indexOf("}", bodyStart);
+      if (bodyEnd < 0) continue;
+      const bodyPreview = source.slice(
+        bodyStart,
+        Math.min(bodyEnd, bodyStart + 1600),
+      );
+      if (
+        !bodyPreview.includes("this.windowVisibilitySequence") ||
+        !bodyPreview.includes("this.openingWindowPromise") ||
+        !bodyPreview.includes("this.isAppQuitting") ||
+        !bodyPreview.includes("this.ensureWindow(") ||
+        !bodyPreview.includes("this.positionWindow(")
+      ) {
+        continue;
+      }
+      count += 1;
+      patched += source.slice(lastIndex, bodyStart) + "return;";
+      lastIndex = bodyStart;
+    }
+    patched += source.slice(lastIndex);
+    if (count !== 1) {
+      throw new Error(`Codey avatar overlay prewarm matches ${count}`);
+    }
+    return patched;
+  };
+
+  const patchCodexMacosChildProcessSampler = (source) => {
+    if (!disableMacosChildProcessSampler) return source;
+    const pattern = /process\.platform!==`win32`&&await this\.addChildProcessFields\(i\)/g;
+    const matches = source.match(pattern) ?? [];
+    if (matches.length !== 1) {
+      throw new Error(`Codey macOS child process sampler matches ${matches.length}`);
+    }
+    return source.replace(pattern, "false");
+  };
+  Object.defineProperty(
+    globalThis,
+    "__CODEY_PATCH_CODEX_AVATAR_OVERLAY_PREWARM__",
+    {
+      configurable: false,
+      value: patchCodexAvatarOverlayPrewarm,
+      writable: false,
+    },
+  );
+
   const workerThreads = process.getBuiltinModule("worker_threads");
   const NativeWorker = workerThreads.Worker;
+  const windowsWmiSamplerSelfTest = Symbol("codey-wmi-sampler-self-test");
+  const windowsWmiSamplerInstalledAtMs = Date.now();
+  const windowsWmiSamplerEvidence = {
+    version: 4,
+    enabled: disableWindowsWmiSampler,
+    workerWrapperPatched: false,
+    esmExportsSynchronized: false,
+    selfTestPassed: false,
+    selfTestError: "",
+    workersObserved: 0,
+    sourceInspections: 0,
+    sourceSignatureMatches: 0,
+    sourceSignatureMisses: 0,
+    sourceReadFailures: 0,
+    blocked: 0,
+    lastMatchReason: "",
+    lastWorkerName: "",
+    lastObservedWorkerName: "",
+    lastObservedThreadName: "",
+    lastObservedSourceSignals: [],
+  };
+  const windowsWmiSamplerSnapshot = () => ({
+    ...windowsWmiSamplerEvidence,
+    installed:
+      !windowsWmiSamplerEvidence.enabled ||
+      (windowsWmiSamplerEvidence.workerWrapperPatched &&
+        windowsWmiSamplerEvidence.esmExportsSynchronized),
+    observationMs: Math.max(0, Date.now() - windowsWmiSamplerInstalledAtMs),
+  });
   if (!NativeWorker.__codeyNoInspectWrapper) {
+    const EventEmitter = process.getBuiltinModule("events").EventEmitter;
+    const maximumWmiWorkerSourceBytes = 2 * 1024 * 1024;
+    const maximumWmiWorkerSourceCacheEntries = 256;
+    const workerSourceMatchCache = new Map();
+    const rememberWorkerSourceMatch = (key, value) => {
+      if (!key) return;
+      workerSourceMatchCache.delete(key);
+      workerSourceMatchCache.set(key, value);
+      while (
+        workerSourceMatchCache.size > maximumWmiWorkerSourceCacheEntries
+      ) {
+        const oldestKey = workerSourceMatchCache.keys().next().value;
+        if (oldestKey === undefined) break;
+        workerSourceMatchCache.delete(oldestKey);
+      }
+    };
+    const workerSpecifierText = (filename) => {
+      if (typeof filename === "string") return filename;
+      if (typeof filename?.href === "string") return filename.href;
+      return String(filename ?? "");
+    };
+    const workerDisplayName = (filename, options) => {
+      const rawSpecifier = workerSpecifierText(filename);
+      if (options?.eval === true) return "eval-worker";
+      if (/^data:/i.test(rawSpecifier)) return "data-worker";
+      const specifier = rawSpecifier
+        .replace(/[?#].*$/, "")
+        .replace(/[/\\]+$/, "");
+      const encodedName = specifier.split(/[/\\]/).at(-1) || "unknown-worker";
+      try {
+        return decodeURIComponent(encodedName).slice(0, 160);
+      } catch {
+        return encodedName.slice(0, 160);
+      }
+    };
+    const isKnownWmiSnapshotWorkerName = (filename) =>
+      /(?:^|[/\\])child[-_]process[-_]snapshot[-_]worker(?:[-.][^/\\?#]+)?\.(?:c?js|mjs)(?:[?#].*)?$/i
+        .test(workerSpecifierText(filename));
+    const isKnownWmiSnapshotWorkerThreadName = (options) =>
+      typeof options?.name === "string" &&
+      /^child[-_]process[-_]snapshot$/i.test(options.name.trim());
+    const workerThreadName = (options) =>
+      typeof options?.name === "string"
+        ? options.name
+            .replace(/[\u0000-\u001f\u007f]/g, " ")
+            .trim()
+            .slice(0, 80)
+        : "";
+    const wmiSnapshotSourceSignals = (source) => ({
+      cim: /Get-(?:CimInstance|WmiObject)/i.test(source),
+      win32Process: /\bWin32_Process\b/i.test(source),
+      perfProcess:
+        /\bWin32_Perf(?:Formatted|Raw)Data_PerfProc_Process\b/i.test(source),
+      powershell: /\b(?:powershell|pwsh)(?:\.exe)?\b/i.test(source),
+      workerMessaging:
+        /(?:worker_threads|parentPort|postMessage|workerData)/.test(source),
+    });
+    const hasWmiSnapshotSourceSignature = (signals) =>
+      Object.values(signals).every(Boolean);
+    const decodeDataWorkerSource = (specifier) => {
+      const commaIndex = specifier.indexOf(",");
+      if (commaIndex < 0) return "";
+      const metadata = specifier.slice(0, commaIndex);
+      const payload = specifier.slice(commaIndex + 1);
+      const source = /;base64(?:;|$)/i.test(metadata)
+        ? Buffer.from(payload, "base64").toString("utf8")
+        : decodeURIComponent(payload);
+      return source.slice(0, maximumWmiWorkerSourceBytes);
+    };
+    const workerFilePath = (filename) => {
+      const specifier = workerSpecifierText(filename);
+      if (/^file:/i.test(specifier)) {
+        const urlModule = process.getBuiltinModule("url");
+        const url = new urlModule.URL(specifier);
+        url.search = "";
+        url.hash = "";
+        return urlModule.fileURLToPath(url);
+      }
+      if (
+        /^[A-Za-z][A-Za-z+.-]*:/.test(specifier) &&
+        !/^[A-Za-z]:[/\\]/.test(specifier)
+      ) {
+        return null;
+      }
+      return specifier.replace(/[?#].*$/, "");
+    };
+    const describeWorkerSource = (filename, options) => {
+      if (options?.eval === true) {
+        return {
+          cacheKey: null,
+          load: () => String(filename ?? "").slice(
+            0,
+            maximumWmiWorkerSourceBytes,
+          ),
+        };
+      }
+      const specifier = workerSpecifierText(filename);
+      if (/^data:/i.test(specifier)) {
+        return {
+          cacheKey: null,
+          load: () => decodeDataWorkerSource(specifier),
+        };
+      }
+      const path = workerFilePath(filename);
+      if (!path) return null;
+      const fs = process.getBuiltinModule("fs");
+      const stats = fs.statSync(path, { bigint: true });
+      return {
+        cacheKey: [
+          path,
+          stats.dev,
+          stats.ino,
+          stats.size,
+          stats.mtimeNs,
+          stats.ctimeNs,
+        ].join("\0"),
+        load: () => fs
+          .readFileSync(path, "utf8")
+          .slice(0, maximumWmiWorkerSourceBytes),
+      };
+    };
+    const classifyWmiSnapshotWorker = (filename, options) => {
+      if (!disableWindowsWmiSampler) return null;
+      const workerName = workerDisplayName(filename, options);
+      if (options?.[windowsWmiSamplerSelfTest] === true) {
+        return { reason: "self-test", workerName };
+      }
+      windowsWmiSamplerEvidence.workersObserved += 1;
+      windowsWmiSamplerEvidence.lastObservedWorkerName = workerName;
+      windowsWmiSamplerEvidence.lastObservedThreadName =
+        workerThreadName(options);
+      windowsWmiSamplerEvidence.lastObservedSourceSignals = [];
+      if (isKnownWmiSnapshotWorkerName(filename)) {
+        return { reason: "known-worker-name", workerName };
+      }
+      if (isKnownWmiSnapshotWorkerThreadName(options)) {
+        return { reason: "worker-option-name", workerName };
+      }
+
+      try {
+        const descriptor = describeWorkerSource(filename, options);
+        if (!descriptor) return null;
+        if (
+          descriptor.cacheKey &&
+          workerSourceMatchCache.has(descriptor.cacheKey)
+        ) {
+          const cached = workerSourceMatchCache.get(descriptor.cacheKey);
+          windowsWmiSamplerEvidence.lastObservedSourceSignals =
+            cached?.sourceSignals ?? [];
+          return cached ? { ...cached, workerName } : null;
+        }
+        windowsWmiSamplerEvidence.sourceInspections += 1;
+        const sourceSignals = wmiSnapshotSourceSignals(descriptor.load());
+        const matchedSourceSignals = Object.entries(
+          sourceSignals,
+        )
+          .filter(([, matched]) => matched)
+          .map(([signal]) => signal);
+        windowsWmiSamplerEvidence.lastObservedSourceSignals =
+          matchedSourceSignals;
+        const matched = hasWmiSnapshotSourceSignature(sourceSignals);
+        if (matched) {
+          windowsWmiSamplerEvidence.sourceSignatureMatches += 1;
+          const match = {
+            reason: "source-signature",
+            sourceSignals: matchedSourceSignals,
+          };
+          rememberWorkerSourceMatch(descriptor.cacheKey, match);
+          return { ...match, workerName };
+        }
+        windowsWmiSamplerEvidence.sourceSignatureMisses += 1;
+        rememberWorkerSourceMatch(descriptor.cacheKey, null);
+      } catch {
+        windowsWmiSamplerEvidence.sourceReadFailures += 1;
+      }
+      return null;
+    };
+
+    // Windows-only: Codex historically spawned a child-process snapshot worker
+    // that ran two full CIM/WMI process scans per telemetry interval. Current
+    // 26.903 asar no longer ships that filename, but renamed/eval/data workers
+    // with the full process-sampler signature are still intercepted. A
+    // one-shot Win32_ComputerSystem manufacturer query is not a match.
+    class CodeyDisabledWmiSnapshotWorker extends EventEmitter {
+      constructor(selfTest = false) {
+        super();
+        this.threadId = -1;
+        this.stdin = null;
+        this.stdout = null;
+        this.stderr = null;
+        this.codeyTerminated = false;
+        Object.defineProperty(this, "__codeyWmiSamplerSelfTest", {
+          value: selfTest,
+        });
+        process.nextTick(() => {
+          if (this.codeyTerminated) return;
+          this.emit("message", { type: "ok", value: [] });
+          this.emit("exit", 0);
+        });
+      }
+      postMessage() {}
+      ref() { return this; }
+      unref() { return this; }
+      terminate() {
+        if (!this.codeyTerminated) {
+          this.codeyTerminated = true;
+          process.nextTick(() => this.emit("exit", 0));
+        }
+        return Promise.resolve(0);
+      }
+    }
+
     class CodeyNoInspectWorker extends NativeWorker {
       constructor(filename, options = {}) {
-        super(filename, { ...options, execArgv: options.execArgv ?? [] });
+        const match = classifyWmiSnapshotWorker(filename, options);
+        if (match) {
+          const selfTest = match.reason === "self-test";
+          if (!selfTest) {
+            windowsWmiSamplerEvidence.blocked += 1;
+            windowsWmiSamplerEvidence.lastMatchReason = match.reason;
+            windowsWmiSamplerEvidence.lastWorkerName = match.workerName;
+          }
+          return new CodeyDisabledWmiSnapshotWorker(selfTest);
+        }
+        super(filename, {
+          ...options,
+          execArgv: options.execArgv ?? [],
+        });
       }
     }
     Object.defineProperty(CodeyNoInspectWorker, "__codeyNoInspectWrapper", {
       value: true,
     });
+    Object.defineProperty(
+      CodeyNoInspectWorker,
+      "__codeyRunWmiSamplerSelfTest",
+      {
+        value() {
+          const sourceProbe = [
+            'const { parentPort } = require("node:worker_threads");',
+            'const executable = "powershell.exe";',
+            'const command = "Get-CimInstance Win32_Process Win32_PerfFormattedData_PerfProc_Process";',
+            "parentPort.postMessage({ executable, command });",
+          ].join("\n");
+          const recognizersPassed =
+            isKnownWmiSnapshotWorkerName(
+              "child-process-snapshot-worker-codey-self-test.js",
+            ) &&
+            isKnownWmiSnapshotWorkerThreadName({
+              name: "child-process-snapshot",
+            }) &&
+            hasWmiSnapshotSourceSignature(
+              wmiSnapshotSourceSignals(sourceProbe),
+            );
+          if (!recognizersPassed) return false;
+          const probe = new CodeyNoInspectWorker(
+            "codey-wmi-sampler-self-test.js",
+            { [windowsWmiSamplerSelfTest]: true },
+          );
+          const passed =
+            probe?.__codeyWmiSamplerSelfTest === true &&
+            probe?.threadId === -1;
+          probe?.terminate?.();
+          return passed;
+        },
+      },
+    );
     workerThreads.Worker = CodeyNoInspectWorker;
+  }
+  windowsWmiSamplerEvidence.workerWrapperPatched =
+    workerThreads.Worker?.__codeyNoInspectWrapper === true;
+  try {
+    Module.syncBuiltinESMExports?.();
+    windowsWmiSamplerEvidence.esmExportsSynchronized = true;
+  } catch (error) {
+    windowsWmiSamplerEvidence.esmExportsSynchronized = false;
+    recordCodeyPatchFailure("sync_worker_threads_esm_exports", error);
+  }
+  if (
+    disableWindowsWmiSampler &&
+    windowsWmiSamplerEvidence.workerWrapperPatched &&
+    windowsWmiSamplerEvidence.esmExportsSynchronized
+  ) {
     try {
-      Module.syncBuiltinESMExports?.();
+      const runSelfTest =
+        workerThreads.Worker?.__codeyRunWmiSamplerSelfTest;
+      windowsWmiSamplerEvidence.selfTestPassed =
+        typeof runSelfTest === "function" && runSelfTest();
+      if (!windowsWmiSamplerEvidence.selfTestPassed) {
+        throw new Error("WMI sampler Worker wrapper did not intercept its self-test");
+      }
     } catch (error) {
-      recordCodeyPatchFailure("sync_worker_threads_esm_exports", error);
+      windowsWmiSamplerEvidence.selfTestPassed = false;
+      windowsWmiSamplerEvidence.selfTestError =
+        error instanceof Error ? error.message.slice(0, 240) : String(error);
+      recordCodeyPatchFailure("wmi_sampler_self_test", error);
     }
   }
 
@@ -1941,16 +2357,7 @@
 
   // The app-server transport can live in a shared Vite chunk, outside main.
   {
-    const originalJsExtension = Module._extensions[".js"];
-    Module._extensions[".js"] = function codeyMainBundleCompileHook(module, filename) {
-      const isCodexBuildScript =
-        /[\\/]\.vite[\\/]build[\\/][^\\/]+\.(?:cjs|js)$/i.test(filename);
-      if (!isCodexBuildScript) {
-        return Reflect.apply(originalJsExtension, this, arguments);
-      }
-
-      const fs = process.getBuiltinModule("fs");
-      let source = fs.readFileSync(filename, "utf8");
+    const patchCodexBuildScript = (source, filename) => {
       const hasAppServerMessages = localRouterRuntimeEnabled &&
         source.includes("this.options.transformOutgoingMessage");
       if (hasAppServerMessages) {
@@ -1993,10 +2400,7 @@
           !hasOptionalMainBundlePatchFailure("threadTitleModel");
       }
       if (!hasMainBundleName && !hasMainBundleSignature) {
-        if (hasAppServerMessages || hasDesktopAnalyticsTransport || hasThreadTitleModel) {
-          return module._compile(source, filename);
-        }
-        return Reflect.apply(originalJsExtension, this, arguments);
+        return source;
       }
 
       mainBundleSourcePatchAttempted = true;
@@ -2012,15 +2416,56 @@
         patchCodexMainAppStateHeartbeat,
         source,
       );
+      if (disablePet) {
+        source = applyOptionalMainBundlePatch(
+          "avatarOverlayPrewarm",
+          patchCodexAvatarOverlayPrewarm,
+          source,
+        );
+      }
+      if (disableMacosChildProcessSampler) {
+        source = applyOptionalMainBundlePatch(
+          "macosChildProcessSampler",
+          patchCodexMacosChildProcessSampler,
+          source,
+        );
+      }
       globalThis.__CODEY_EXTERNAL_PLUGIN_FOCUS_RECONCILE_SOURCE_PATCHED__ =
         !hasOptionalMainBundlePatchFailure("externalPluginFocusReconcile");
       globalThis.__CODEY_APP_STATE_HEARTBEAT_SOURCE_PATCHED__ =
         !hasOptionalMainBundlePatchFailure("appStateHeartbeat");
+      globalThis.__CODEY_AVATAR_OVERLAY_PREWARM_SOURCE_PATCHED__ =
+        disablePet && !hasOptionalMainBundlePatchFailure("avatarOverlayPrewarm");
+      globalThis.__CODEY_MACOS_CHILD_PROCESS_SAMPLER_SOURCE_PATCHED__ =
+        disableMacosChildProcessSampler &&
+        !hasOptionalMainBundlePatchFailure("macosChildProcessSampler");
       mainBundleSourcePatched = true;
-      module._compile(source, filename);
+      return source;
       } catch (error) {
         recordCodeyPatchFailure("patch_codex_main_bundle", error, { filename });
         throw error;
+      }
+    };
+    const originalJsExtension = Module._extensions[".js"];
+    Module._extensions[".js"] = function codeyMainBundleCompileHook(module, filename) {
+      const isCodexBuildScript =
+        /[\\/]\.vite[\\/]build[\\/][^\\/]+\.(?:cjs|js)$/i.test(filename);
+      if (!isCodexBuildScript) {
+        return Reflect.apply(originalJsExtension, this, arguments);
+      }
+      const compileDescriptor = Object.getOwnPropertyDescriptor(module, "_compile");
+      const originalCompile = module._compile;
+      module._compile = function codeyCompile(source, ...args) {
+        const patched = typeof source === "string"
+          ? patchCodexBuildScript(source, filename)
+          : source;
+        return Reflect.apply(originalCompile, this, [patched, ...args]);
+      };
+      try {
+        return Reflect.apply(originalJsExtension, this, arguments);
+      } finally {
+        if (compileDescriptor) Object.defineProperty(module, "_compile", compileDescriptor);
+        else delete module._compile;
       }
     };
   }
@@ -2053,6 +2498,7 @@
 
   let electronProxy = null;
   let electronProtocolProxy = null;
+  let electronBrowserWindowProxy = null;
   const electronMainRequests = new Set(["electron", "electron/main"]);
   Module._load = function codeyStartupPatchLoader(request, parent, isMain) {
     if (disableMicro && request === "@worklouder/device-kit-oai") return microStub;
@@ -2082,9 +2528,51 @@
         },
       });
     }
+    if (disablePet && typeof loaded.BrowserWindow === "function") {
+      electronBrowserWindowProxy = new Proxy(loaded.BrowserWindow, {
+        construct(target, args, newTarget) {
+          const [options, ...rest] = args;
+          const isHiddenAvatarOverlay =
+            options?.alwaysOnTop === true &&
+            options?.transparent === true &&
+            options?.focusable === false &&
+            options?.frame === false &&
+            options?.skipTaskbar === true &&
+            options?.show === false;
+          const restoreVisibleFrameRate =
+            options?.webPreferences?.backgroundThrottling === false;
+          const effectiveOptions = isHiddenAvatarOverlay
+            ? {
+                ...options,
+                webPreferences: {
+                  ...options.webPreferences,
+                  backgroundThrottling: true,
+                },
+              }
+            : options;
+          const window = Reflect.construct(
+            target,
+            [effectiveOptions, ...rest],
+            newTarget,
+          );
+          if (isHiddenAvatarOverlay && restoreVisibleFrameRate) {
+            window.on?.("show", () => {
+              window.webContents?.setBackgroundThrottling?.(false);
+            });
+            window.on?.("hide", () => {
+              window.webContents?.setBackgroundThrottling?.(true);
+            });
+          }
+          return window;
+        },
+      });
+    }
     electronProxy = new Proxy(loaded, {
       get(target, property, receiver) {
         if (property === "protocol" && electronProtocolProxy) return electronProtocolProxy;
+        if (property === "BrowserWindow" && electronBrowserWindowProxy) {
+          return electronBrowserWindowProxy;
+        }
         return Reflect.get(target, property, receiver);
       },
     });
@@ -2101,6 +2589,14 @@
     disableWindowsOptimizations,
     disableMicro,
     disablePet,
+    disableWindowsWmiSampler,
+    throttleHiddenAvatarOverlay: disablePet,
+    get windowsWmiSampler() {
+      return windowsWmiSamplerSnapshot();
+    },
+    get avatarOverlayPrewarm() {
+      return disablePet && !hasOptionalMainBundlePatchFailure("avatarOverlayPrewarm");
+    },
     disableAppServerAnalytics: true,
     get disableDesktopCesAnalytics() {
       return !hasOptionalMainBundlePatchFailure("desktopCesAnalytics") &&
@@ -2145,5 +2641,30 @@
     if (requireAppServerRuntimeOverrideValidation) return;
     try { process.getBuiltinModule("inspector").close(); } catch {}
   });
-  return "codey-startup-patch-installed-v39";
+  if (loadedViaNodeRequire) {
+    try {
+      const fs = process.getBuiltinModule("fs");
+      const path = process.getBuiltinModule("path");
+      if (
+        path.isAbsolute(startupPatchMarkerPath) &&
+        startupPatchMarkerPath.endsWith(".json")
+      ) {
+        fs.mkdirSync(path.dirname(startupPatchMarkerPath), {
+          recursive: true,
+          mode: 0o700,
+        });
+        const payload = `${JSON.stringify({
+          status: "executed",
+          pid: process.pid,
+          timestamp_ms: Date.now(),
+        })}\n`;
+        const tempPath = `${startupPatchMarkerPath}.${process.pid}.tmp`;
+        fs.writeFileSync(tempPath, payload, { encoding: "utf8", mode: 0o600 });
+        fs.renameSync(tempPath, startupPatchMarkerPath);
+      }
+    } catch (error) {
+      recordCodeyPatchFailure("write_startup_patch_marker", error);
+    }
+  }
+  return "codey-startup-patch-installed-v40";
 })()

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import vm from "node:vm";
 
 const normalizeLineEndings = (source) => source.replace(/\r\n/g, "\n");
 
@@ -14,6 +15,30 @@ async function loadStartupPatchExpression() {
   return template
     .replaceAll("__DISABLE_PET__", "false")
     .replaceAll("__REQUIRE_APP_SERVER_RUNTIME_OVERRIDES__", "false");
+}
+
+function evalStartupPatchInIsolatedProcess(source, envOverrides = {}) {
+  const isolatedProcess = Object.create(process);
+  isolatedProcess.env = { ...process.env };
+  for (const [name, value] of Object.entries(envOverrides)) {
+    if (value == null) delete isolatedProcess.env[name];
+    else isolatedProcess.env[name] = value;
+  }
+  isolatedProcess.execArgv = process.execArgv.slice();
+  isolatedProcess.argv = process.argv.slice();
+  const context = {
+    console,
+    process: isolatedProcess,
+    setImmediate,
+    setTimeout,
+    clearTimeout,
+    Promise,
+  };
+  context.globalThis = context;
+  return {
+    process: isolatedProcess,
+    result: vm.runInNewContext(source, context),
+  };
 }
 
 test("main bundle detection accepts renamed CommonJS entry chunks by signature", async () => {
@@ -62,7 +87,7 @@ test("startup patch preserves native child processes and ordinary BrowserWindows
     Object.defineProperty(process, "platform", { ...platformDescriptor, value: "win32" });
     assert.equal(
       (0, eval)(await loadStartupPatchExpression()),
-      "codey-startup-patch-installed-v39",
+      "codey-startup-patch-installed-v40",
     );
 
     const childProcess = Module._load("node:child_process", undefined, false);
@@ -82,22 +107,103 @@ test("startup patch preserves native child processes and ordinary BrowserWindows
 
     const electron = Module._load("electron", undefined, false);
     assert.ok(new electron.BrowserWindow({ title: "Settings" }) instanceof FakeBrowserWindow);
+    const overlaySource = [
+      "class AvatarOverlayManager{",
+      "async prewarm(e){",
+      "if(this.window!=null||this.openingWindowPromise!=null||this.isAppQuitting)return;",
+      "let t=this.windowVisibilitySequence,n=await this.ensureWindow(t);",
+      "n==null||t!==this.windowVisibilitySequence||this.positionWindow(n,e)}",
+      "}",
+    ].join("");
+    assert.equal(
+      globalThis.__CODEY_PATCH_CODEX_AVATAR_OVERLAY_PREWARM__(overlaySource),
+      overlaySource,
+    );
     const worker = new workerThreads.Worker([
       'const { parentPort } = require("node:worker_threads");',
       'const query = "powershell.exe Get-CimInstance Win32_Process Win32_PerfFormattedData_PerfProc_Process";',
       'parentPort.postMessage({ executed: true, query });',
     ].join("\n"), { eval: true, name: "child-process-snapshot" });
     try {
+      assert.equal(worker.threadId, -1);
       const [message] = await once(worker, "message");
-      assert.equal(message.executed, true);
+      assert.deepEqual(message, { type: "ok", value: [] });
     } finally {
       await worker.terminate();
     }
+    assert.equal(
+      globalThis.__CODEY_CODEX_STARTUP_PATCH__.windowsWmiSampler.lastMatchReason,
+      "worker-option-name",
+    );
   } finally {
     Object.defineProperty(process, "platform", platformDescriptor);
     workerThreads.Worker = NativeWorker;
     Module.syncBuiltinESMExports?.();
     childProcessModule.spawn = nativeSpawn;
+    Module._load = nativeLoad;
+    Module._extensions[".js"] = nativeJsExtension;
+  }
+});
+
+test("NODE_OPTIONS require path writes a marker and clears inherited options", async () => {
+  const fs = process.getBuiltinModule("fs");
+  const os = process.getBuiltinModule("os");
+  const path = process.getBuiltinModule("path");
+  const Module = process.getBuiltinModule("module");
+  const workerThreads = process.getBuiltinModule("worker_threads");
+  const nativeLoad = Module._load;
+  const nativeJsExtension = Module._extensions[".js"];
+  const NativeWorker = workerThreads.Worker;
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "codey-startup-require-"));
+  const markerPath = path.join(tempDir, "marker.json");
+
+  try {
+    const isolated = evalStartupPatchInIsolatedProcess(
+      await loadStartupPatchExpression(),
+      {
+        NODE_OPTIONS: "--require=/tmp/codey-should-not-leak.js",
+        CODEY_STARTUP_PATCH_MARKER: markerPath,
+      },
+    );
+    assert.equal(isolated.result, "codey-startup-patch-installed-v40");
+    assert.ok(!isolated.process.env.NODE_OPTIONS);
+    assert.ok(!isolated.process.env.CODEY_STARTUP_PATCH_MARKER);
+    const payload = JSON.parse(fs.readFileSync(markerPath, "utf8"));
+    assert.equal(payload.status, "executed");
+    assert.equal(payload.pid, process.pid);
+    assert.equal(typeof payload.timestamp_ms, "number");
+  } finally {
+    workerThreads.Worker = NativeWorker;
+    Module.syncBuiltinESMExports?.();
+    Module._load = nativeLoad;
+    Module._extensions[".js"] = nativeJsExtension;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("inspector eval does not clear NODE_OPTIONS without the require marker", async () => {
+  const Module = process.getBuiltinModule("module");
+  const workerThreads = process.getBuiltinModule("worker_threads");
+  const nativeLoad = Module._load;
+  const nativeJsExtension = Module._extensions[".js"];
+  const NativeWorker = workerThreads.Worker;
+
+  try {
+    const isolated = evalStartupPatchInIsolatedProcess(
+      await loadStartupPatchExpression(),
+      {
+        NODE_OPTIONS: "--require=/tmp/codey-keep-node-options.js",
+        CODEY_STARTUP_PATCH_MARKER: null,
+      },
+    );
+    assert.equal(isolated.result, "codey-startup-patch-installed-v40");
+    assert.equal(
+      isolated.process.env.NODE_OPTIONS,
+      "--require=/tmp/codey-keep-node-options.js",
+    );
+  } finally {
+    workerThreads.Worker = NativeWorker;
+    Module.syncBuiltinESMExports?.();
     Module._load = nativeLoad;
     Module._extensions[".js"] = nativeJsExtension;
   }
