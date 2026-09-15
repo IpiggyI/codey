@@ -2495,7 +2495,7 @@
     if (catalog.loaded && catalog.models.length === 0 && !catalog.preserveNativeModels) {
       return markBlockedProviderRequest({ ...params }, {
         reason: "provider_disabled",
-        message: "当前线路已禁用，请先在 Codey 中启用线路或切换到可用线路后重试。",
+        message: "当前 provider 没有可用模型，请在 Codey 中同步模型清单后重试。",
       });
     }
     const threadId = threadIdFromParams(params);
@@ -2516,12 +2516,12 @@
       return markBlockedProviderRequest(next, {
         reason: "historical_route_unavailable",
         message: needsResume
-          ? "该任务仍使用旧线路，请重新打开任务，恢复到当前线路后重试。"
+          ? "该任务仍指向已移除的本机代理或旧 provider，请重新打开任务后重试。"
           : !catalog.loaded
             ? "模型目录尚未加载，请稍后重试。"
             : !targetProvider
-              ? "无法确认当前原生线路，请刷新设置后重试。"
-            : `历史线路已不可用，当前线路未确认支持模型 ${sourceModel || model}，请重新选择可用模型。`,
+              ? "无法确认当前 provider，请刷新设置后重试。"
+            : `历史模型已不可用，当前 provider 未确认支持模型 ${sourceModel || model}，请重新选择可用模型。`,
       });
     }
     if (canonical) next.model = canonical;
@@ -2578,11 +2578,11 @@
   const showBlockedProviderNotice = (detail) => {
     const blocked = blockedProviderRequest(detail);
     if (!blocked) return false;
-    const target = blocked.routeName || blocked.targetProviderId || "所选线路";
+    const target = blocked.routeName || blocked.targetProviderId || "所选 provider";
     const current = blocked.currentProviderId
       ? `当前任务仍绑定在 ${blocked.currentProviderId}`
       : "当前任务的运行时供应商身份尚未确认";
-    const message = blocked.message || `${current}，尚未完成迁入 Codey 统一路由，暂时不能安全发送到「${target}」。请重新打开该任务后重试；恢复完成后即可跨供应商切换。本次消息已在本地拦截，未请求任何上游。`;
+    const message = blocked.message || `${current}，仍指向已移除的本机代理，暂时不能安全发送到「${target}」。请在控制台迁移后重新打开该任务。本次消息已在本地拦截，未向任何服务发送。`;
     console.warn("[Codey] provider migration required before routed turn", blocked);
     try {
       const noticeId = "codey-provider-mismatch-notice";

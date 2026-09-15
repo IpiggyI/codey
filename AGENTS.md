@@ -12,6 +12,10 @@
 
 ## Agent skills
 
+### 上游差异
+
+本分叉与上游的当前差异及原因维护在 `docs/agents/fork-upstream.md`。对照上游、cherry-pick、跳过或改写上游提交后，在同一次改动内更新该文件；差异若用户可感知，同步更新 `README.md`「与上游的差异」。原因已有 ADR 的只链接，不重述。逐次同步的摘要和计划仍放 `docs/upstream-sync/`。
+
 ### Issue tracker
 
 Issues live in this repo's GitHub Issues via `gh`. See `docs/agents/issue-tracker.md`.

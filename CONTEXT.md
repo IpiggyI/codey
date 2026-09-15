@@ -9,7 +9,7 @@ Codex 桌面客户端的增强启动器。本分叉只做运行期增强，不�
 _Avoid_: Codex 配置、线路配置
 
 **运行期覆盖**：
-通过 `-c key=value` 传给单次 Codex 进程的配置值，随进程结束而消失，不落盘。
+通过 `-c key=value` 传给单次 Codex 进程的配置值；主进程补丁把同一批覆盖打进 `NODE_OPTIONS=--require` 脚本。二者都随进程结束而消失，不落盘。
 _Avoid_: 临时配置、注入配置
 
 **运行期产物**：
@@ -20,7 +20,7 @@ _Avoid_: 临时文件、运行时配置
 
 **provider**：
 用户配置里 `[model_providers.*]` 的一项，一律用它的 id 称呼（`openai`、`official`、`gs`）。Codex 直接向它发请求。
-_Avoid_: 线路、route、渠道
+_Avoid_: 线路、route
 
 **官方账号**：
 `~/.codex/auth.json` 里的 ChatGPT 登录态。它与任何 provider 的 `base_url` 无关——一个 id 叫 `official` 的 provider 不是官方账号，一个指向自建中转的 provider 也可能使用官方账号鉴权。
@@ -61,6 +61,9 @@ _Avoid_: 官方额度、quota、周额度
 **对话用量**：
 当前对话的 token 消耗、上下文占用和最近一轮缓存命中。它描述这次对话发生了什么，不是账号套餐还剩多少。
 _Avoid_: 会话详细信息、会话用量
+
+**通知渠道**：
+飞书、企业微信、Telegram、微信 ClawBot 四类消息出口。与 provider 无关。
 
 **FastCtx**：
 随 Codey 分发的文件读取与搜索工具，以 MCP 服务形式提供给 Codex。

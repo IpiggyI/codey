@@ -14,13 +14,15 @@
 
 启动先恢复 Codey 自有临时状态，再只读检查用户配置、登录状态和应用位置。受控 Codex 停止后完成会话维护、模型目录准备和诊断保护，再生成运行期覆盖、Hook 与页面增强，启动客户端并安装页面桥接。不检查、下载或安装客户端更新，也不建立内置路由。
 
-- 主进程 Inspector 与 CLI 包装器承担运行配置加载。启动前检测 Electron fuse；Inspector 不可用时使用包装器，必要配置无法确认时停止启动。
+- 主进程优先使用 `NODE_OPTIONS=--require` 加载运行配置，Inspector evaluate 为回退；二者不同时使用。启动前检测 Electron fuse；NODE_OPTIONS 不可用且 Inspector 仍可用时改走 Inspector，否则使用包装器，必要配置无法确认时停止启动。控制台「系统优化」展开后展示已确认的注入路径（`--require` / Inspector / CLI）。CLI 包装器确认 app-server 参数不代表主进程补丁已应用。
+- `--require` 启动环境会关闭 Codex 自带 Sparkle 更新路径；本分叉本来就不检查、下载或安装客户端更新。该变量只传给桌面主进程，不传给 app-server 包装器。
 - 包装器调用应用内置 CLI，并检查配套工具宿主；通过认证握手或运行记录确认目标已执行。该确认不代表 app-server 已完成初始化。
 - 辅助进程过滤环境变量时，包装器从已保存应用位置恢复 CLI。独立工具调用原样转发；受控 app-server 必须携带本次配置，禁止误入桌面启动及进程清理流程。
 - Windows Store 按当前用户注册包定位，每次尝试按原 package family 刷新路径，激活后核验实际身份。包切换时先成功清理再重试，不跨正式版、Beta 或发布者切换。
 - Windows 最多尝试两次，仅暂时性启动错误或已确认包切换允许重试。权限、配置、身份和清理失败直接报错；进程查询失败不能视为已退出或已清理。
 - Store 配套文件暂存于 Codey 私有目录，通过清单、大小及复制时哈希校验复用。诊断记录阶段、进程身份和退出码，不记录令牌或完整配置。
-- 宠物精简只调整对应开关，保留其他 JSON 值；主文件失败时尝试备份，仍失败则记录原因并继续启动。
+- 宠物精简只调整对应开关，保留其他 JSON 值；主文件失败时尝试备份，仍失败则记录原因并继续启动。精简开启时，主进程跳过隐藏 avatar overlay 启动预热，并对隐藏浮窗恢复节流；语音仍可按需创建浮窗。
+- Windows 主进程拦截 Codex 周期进程采样 Worker（已知文件名、线程名，或同时具备 CIM/WMI、`Win32_Process` 与 worker 消息的源码特征）。一次性厂商查询不在范围内。
 - 可兼容设置热更新；启动参数、角色集合、模型能力及上下文预算等变化需要重启。前端等待超时只停止查询，不取消后台重启，可重新查询状态。
 
 退出时先确认 Codex 停止，再关闭监视任务、回收进程、恢复临时运行期产物。停止或恢复失败时保留已建立运行时供重试；启动尚未完成就无法终止进程的情况可能需要人工退出残留 Codex。
@@ -65,7 +67,7 @@ provider、模型和上游格式分别识别。控制台只读展示当前 Codex
 - 控制台只读展示当前 provider，不提供新增、编辑或删除 provider 的入口，也不提供请求日志页或检查更新入口。
 - 模型选择器使用分组、搜索及虚拟列表，手动输入保留自定义模型；列表更新通过 QueryClient 发布，避免直接修改共享查询对象。
 - 子代理详情从原生会话控制器异步读取实际模型及思考强度；切换后丢弃旧响应，缺失时显示待获取，不使用父任务或角色默认值代替。
-- 页面补丁按功能锚点和语义定位，匹配失败保留原代码及失败状态。Inspector 专属修改不能因 CLI 启动成功就宣称生效。`performanceStatus` / `performanceDetail` 表达启动健康状态，不是用户可切换的运行模式。
+- 页面补丁按功能锚点和语义定位，匹配失败保留原代码及失败状态。主进程补丁只在 Inspector 或 `--require` 确认后宣称生效；CLI 启动成功不能冒充主进程补丁。`performanceStatus` / `performanceDetail` 表达启动健康状态，不是用户可切换的运行模式。
 
 ## 会话、插件与提示词
 
@@ -157,8 +159,8 @@ macOS 本地调试未签名安装包时，确认来源后可用 `xattr -dr com.a
 ## 维护约束
 
 - 不恢复内置路由。见 [ADR 0001](docs/adr/0001-remove-built-in-router.md)。`local_router_enabled` 缺省为关闭；加载和保存 Codey 配置时若磁盘上仍为 true，按关闭处理。这不是保留路由，只是清掉同步残留的开关。
-- 用户配置只读，永不写入。见 [ADR 0002](docs/adr/0002-user-config-is-read-only.md)。运行期配置只走命令行覆盖；唯一落盘例外是运行期产物 `hooks.json`。
-- 按提交挑选跟踪上游，不整段 merge。见 [ADR 0003](docs/adr/0003-track-upstream-by-cherry-pick.md)。
+- 用户配置只读，永不写入。见 [ADR 0002](docs/adr/0002-user-config-is-read-only.md)。运行期配置走命令行覆盖和主进程 `--require`；唯一落盘例外是运行期产物 `hooks.json`。
+- 按提交挑选跟踪上游，不整段 merge。见 [ADR 0003](docs/adr/0003-track-upstream-by-cherry-pick.md)。与上游的当前差异及原因维护在 [docs/agents/fork-upstream.md](docs/agents/fork-upstream.md)；对照、挑选或跳过上游后必须同步更新该文件，用户可感知的条目同步 README「与上游的差异」。
 - `vendor/CodeyRuntime` 整目录替换，内部未调用代码不删。见 ADR 0003。同步时不要在 vendor 内手工删除未引用模块；backend 只停止调用。
 - 自动更新必须关闭。见 ADR 0003 后果。默认更新源硬编码指向上游发布清单，一次在线更新会把上游正式版装回来，覆盖本分叉。保留 `tests/update-disabled.test.mjs`。
 - README.md 只写用户能感知的功能与必要注意事项；实现、构建、发布、路径和限制写在本文档。

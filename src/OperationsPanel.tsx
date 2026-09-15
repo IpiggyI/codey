@@ -130,6 +130,40 @@ function OperationsPanelComponent({
     remoteMarketplaceReady && managedConfigCompatible;
   const performanceError = maintenance?.performanceStatus === "error";
   const startupNeedsAttention = maintenance?.performanceStatus === "degraded";
+  const startupInjectionMode = maintenance?.startupInjectionMode ?? "";
+  const injectionModeCard =
+    !status.running
+      ? {
+          label: "待启动",
+          tone: "info" as const,
+          description: "Codex 启动后将在这里显示主进程补丁的注入路径。",
+        }
+      : startupInjectionMode === "node_options"
+        ? {
+            label: "--require",
+            tone: "success" as const,
+            description:
+              "主进程已通过 NODE_OPTIONS=--require 加载补丁，覆盖范围与 Inspector evaluate 相同。",
+          }
+        : startupInjectionMode === "inspector"
+          ? {
+              label: "Inspector",
+              tone: "success" as const,
+              description: "主进程已通过 Inspector evaluate 加载补丁。",
+            }
+          : startupInjectionMode === "cli"
+            ? {
+                label: "CLI",
+                tone: "warning" as const,
+                description:
+                  "仅 CLI 包装器确认了 app-server 参数；主进程补丁未应用。",
+              }
+            : {
+                label: "未应用",
+                tone: "warning" as const,
+                description:
+                  "本次启动未确认主进程注入方式，页面功能以检测结果为准。",
+              };
   const injectionScripts = status.injectionScripts ?? EMPTY_INJECTION_SCRIPTS;
   const enabledOptimizationFeatures = useMemo<EnabledOptimizationFeature[]>(
     () =>
@@ -538,6 +572,25 @@ function OperationsPanelComponent({
                         );
                       })}
                     </div>
+                  )}
+
+                  {expandedStatusCard.showInjectionScripts && (
+                    <section
+                      className="injection-status-section"
+                      aria-labelledby="injection-mode-title"
+                    >
+                      <div className="injection-status-header">
+                        <div>
+                          <h4 id="injection-mode-title">主进程注入</h4>
+                          <span className="injection-script-detail">
+                            {injectionModeCard.description}
+                          </span>
+                        </div>
+                        <Badge variant={injectionModeCard.tone}>
+                          {injectionModeCard.label}
+                        </Badge>
+                      </div>
+                    </section>
                   )}
 
                   {expandedStatusCard.showInjectionScripts && (

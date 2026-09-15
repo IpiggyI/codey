@@ -478,7 +478,7 @@
         const update = (thread) => {
           const model = typeof thread?.model === "string" && thread.model.trim() || "待获取";
           const effort = typeof thread?.reasoningEffort === "string" && thread.reasoningEffort.trim() || "待获取";
-          const description = `模型：${model} · 推理强度：${effort}`;
+          const description = `模型：${model} · 思考强度：${effort}`;
           if (element.title === description) return;
           element.title = description;
           element.setAttribute("aria-label", description);

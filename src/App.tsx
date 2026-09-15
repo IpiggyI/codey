@@ -647,7 +647,7 @@ export function App({
         text: subagentConfigRepaired
           ? "Codey 设置已保存；已校验并修复子代理运行配置，下一次派生将使用当前角色映射"
           : subagentHotReloaded
-            ? "Codey 设置已保存；子代理模型和思考深度已实时更新"
+            ? "Codey 设置已保存；子代理模型和思考强度已实时更新"
           : subagentHotReloadFailed
             ? "Codey 设置已保存；子代理配置暂未能热更新，重启 Codex 后生效"
             : result.restartRequired
@@ -965,7 +965,7 @@ export function App({
               </Badge>
             )}
           </div>
-          <p className="m-0 mt-0.5 text-[11px] text-[#6e6e73] max-[760px]:hidden">查看当前 provider、管理模型服务、运行策略与诊断日志</p>
+          <p className="m-0 mt-0.5 text-[11px] text-[#6e6e73] max-[760px]:hidden">查看当前 provider、管理模型清单、运行策略与诊断存储</p>
         </div>
       </div>
 

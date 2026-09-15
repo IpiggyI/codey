@@ -23,7 +23,7 @@ export function modelSelectionNotice(
       ? "Codex 模型列表将在打开模型选择器时更新"
       : "Codex 模型列表已立即更新");
   } else if (result.restartRequired) {
-    messages.push("线路运行配置需重启，Codex 模型列表将在重启后更新");
+    messages.push("运行配置需重启，Codex 模型列表将在重启后更新");
   }
 
   if (result.subagentConfigHotReloadError) {

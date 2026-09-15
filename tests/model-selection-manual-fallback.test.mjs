@@ -91,7 +91,7 @@ test("model save notices distinguish delivery, pending restart and subagent erro
     [{ modelHotReloaded: true, modelHotReloadDeferred: true }, "info", "；Codex 模型列表将在打开模型选择器时更新"],
     [{ modelHotReloaded: true, restartRequired: true }, "info", "；Codex 模型列表已立即更新；模型能力或其他设置需重启 Codex 后生效"],
     [{ modelHotReloaded: true, modelHotReloadDeferred: true, restartRequired: true }, "info", "；Codex 模型列表将在打开模型选择器时更新；模型能力或其他设置需重启 Codex 后生效"],
-    [{ modelHotReloaded: false, restartRequired: true }, "info", "；线路运行配置需重启，Codex 模型列表将在重启后更新"],
+    [{ modelHotReloaded: false, restartRequired: true }, "info", "；运行配置需重启，Codex 模型列表将在重启后更新"],
     [{ modelHotReloaded: false, modelHotReloadError: "CDP failed" }, "info", "；Codex 模型列表刷新失败，重启 Codex 后生效"],
     [{ modelHotReloaded: false, subagentConfigHotReloadError: "reload failed" }, "info", "；子代理配置暂未能更新，重启 Codex 后生效"],
     [{ modelHotReloaded: true, subagentConfigHotReloadError: "reload failed" }, "info", "；Codex 模型列表已立即更新；子代理配置暂未能更新，重启 Codex 后生效"],

@@ -265,7 +265,7 @@ export function SubagentPolicyCardComponent({
                                   ? selection.reasoningEffort
                                   : undefined
                               }
-                              placeholder="暂无可选深度"
+                              placeholder="暂无可选强度"
                               disabled={
                                 subagentPolicyControlsDisabled ||
                                 roleDisabled ||

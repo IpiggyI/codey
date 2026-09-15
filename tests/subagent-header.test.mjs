@@ -45,11 +45,11 @@ test("subagent headers await native thread metadata and discard stale responses"
   });
   await flush();
   assert.equal(pending[0].id, "child");
-  assert.equal(header.children[0].title, "模型：待获取 · 推理强度：待获取");
+  assert.equal(header.children[0].title, "模型：待获取 · 思考强度：待获取");
   pending.shift().resolve({ thread: { model: "openai/gpt-5.6-luna", reasoningEffort: "xhigh" } });
   await flush();
   const label = header.children[0];
-  assert.equal(label.title, "模型：openai/gpt-5.6-luna · 推理强度：xhigh");
+  assert.equal(label.title, "模型：openai/gpt-5.6-luna · 思考强度：xhigh");
   assert.equal(label.children[0].textContent, "gpt-5.6-luna");
   assert.equal(label.children[1].textContent, "· xhigh");
   assert.equal(label.getAttribute("aria-label"), label.title);
@@ -66,7 +66,7 @@ test("subagent headers await native thread metadata and discard stale responses"
   pending.shift().resolve({ thread: { model: "gpt-6-astra", reasoningEffort: "none" } });
   await flush();
   assert.equal(header.children.length, 1);
-  assert.equal(header.children[0].title, "模型：gpt-6-astra · 推理强度：none");
+  assert.equal(header.children[0].title, "模型：gpt-6-astra · 思考强度：none");
   header.isConnected = false;
   window.__codeySyncSubagentHeaders();
   assert.equal(header.children.length, 0);
