@@ -145,11 +145,11 @@ provider、模型和上游格式分别识别。控制台只读展示当前 Codex
 
     pnpm run build
 
-该命令先重建前端与注入脚本，再进行 Rust release 构建；随后的 cargo 调用带 `CODEY_SKIP_OVERLAY_BUILD=1`，`backend/build.rs` 据此跳过再跑一次 Vite，只校验 overlay 产物已存在。直接运行 cargo 时不设该变量，build.rs 仍会自动构建前端产物。macOS 会额外生成 `target/release/bundle/macos/Codey.app`；Windows 安装包由 `.github/workflows/build-desktop.yml` 使用 NSIS 生成。CI 的实际门禁以 `.github/workflows/ci.yml` 为准。
+未设置 `CODEY_SKIP_OVERLAY_BUILD` 时，该命令先重建前端与注入脚本。该变量已为 `1` 时，要求 `dist-overlay/codey-overlay.js` 已经存在，不再重建。随后的 cargo 调用只编译 `codey` 包的 release 二进制（`cargo build --release -p codey --bins`），并带 `CODEY_SKIP_OVERLAY_BUILD=1`，`backend/build.rs` 据此跳过再跑一次 Vite，只校验 overlay 产物已存在。直接运行 cargo 时不设该变量，build.rs 仍会自动构建前端产物。macOS 会额外生成 `target/release/bundle/macos/Codey.app`。Windows 安装包由 `.github/workflows/build-desktop.yml` 用固定版本的 NSIS 压缩包生成，不经过 Chocolatey。桌面发布任务先执行一次 `pnpm run vite:build`，再以 `CODEY_SKIP_OVERLAY_BUILD=1` 调用上述构建，打包时不再重编前端。CI 的实际门禁以 `.github/workflows/ci.yml` 为准。
 
 本机 Windows 验证包（不推送）只走 `scripts/build-windows.sh`，流程见 `docs/agents/windows-pack.md`。GitHub 的 `v*` 标签仍由 `.github/workflows/build-desktop.yml` 打发布安装包。
 
-Windows x64 发布任务通过 `CARGO_PROFILE_RELEASE_LTO=thin` 和 `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16` 覆盖默认的 fat LTO 与单代码生成单元，以减少 release 优化和链接耗时；macOS 及本地构建沿用 Cargo.toml 默认配置。Windows 的 Rust 测试、Clippy 和格式检查继续保留。此调整可能影响二进制体积和运行性能。
+Windows x64 与 macOS arm64 发布打包任务通过 `CARGO_PROFILE_RELEASE_LTO=thin` 和 `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16` 覆盖默认的 fat LTO 与单代码生成单元，以减少 release 优化和链接耗时。Windows 发布打包另用 `rust-lld` 链接。本地构建，以及与 macOS 打包并行的检查任务，沿用 Cargo.toml 默认配置。Windows 发布打包不再重复 Rust 测试、Clippy 和格式检查，这些留在 `.github/workflows/ci.yml` 的 Windows 任务。macOS 的 TypeScript、JavaScript 与 Rust 检查在独立任务里与打包并行，发布前都要通过。此调整可能影响二进制体积和运行性能。
 
 macOS 本地调试未签名安装包时，确认来源后可用 `xattr -dr com.apple.quarantine /Applications/Codey.app` 移除隔离属性。此操作不会补齐签名或公证，发布包仍需单独处理。
 
@@ -161,7 +161,7 @@ macOS 本地调试未签名安装包时，确认来源后可用 `xattr -dr com.a
 
 默认要求工作区干净。确实要把现有改动纳入发布时使用 `--include-existing-changes`；只在本地创建标签时使用 `--no-push`。
 
-`v*` 标签会触发 macOS arm64、macOS x64 和 Windows x64 构建，并附加到 GitHub Release。本分叉不向客户端分发在线更新：安装包只通过 GitHub Release 和 Actions 产物提供，客户端启动和控制台都不会检查、下载或安装更新。发布标签版本必须与项目版本一致，也不要使用上游已经占用的版本名。
+`v*` 标签会并行打出 macOS arm64 与 Windows x64 安装包，并同时运行 macOS 检查，然后把安装包附加到 GitHub Release。本分叉不向客户端分发在线更新：安装包只通过 GitHub Release 和 Actions 产物提供，客户端启动和控制台都不会检查、下载或安装更新。发布标签版本必须与项目版本一致。分叉的版本号自行递增，不跟随上游。本地把上游标签取到 `upstream/` 标签命名空间（`remote.upstream.fetch` 含 `+refs/tags/*:refs/tags/upstream/*`，`remote.upstream.tagopt` 为 `--no-tags`），因此分叉标签不会与上游标签撞名。每次发布在 README 和 GitHub Release 说明里写明这次同步到的上游版本。
 
 ## 维护约束
 
