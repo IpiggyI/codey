@@ -55,6 +55,7 @@ const STOP_ABSOLUTE_GRACE_MILLIS: u64 = 60 * 60 * 1000;
 const PENDING_INIT_OBSERVED_FILE: &str = "pending-init-observed.state";
 const STOP_BLOCKED_SINCE_FILE: &str = "stop-blocked-since.state";
 const STOP_ABSOLUTE_SINCE_FILE: &str = "stop-absolute-since.state";
+const CHILD_TOOL_IN_FLIGHT_PREFIX: &str = "child-tool-in-flight-";
 const STATUS_PROGRESS_FINGERPRINT_FILE: &str = "status-progress.state";
 const STATE_ERROR_SINCE_FILE: &str = "state-error-since.state";
 const PROTOCOL_HEALTH_FILE: &str = "protocol-health.json";
@@ -355,6 +356,7 @@ fn handle_hook_for_runtime_at(
                     now_ms,
                 )?;
                 remove_active_marker(state_root, runtime_id, &input.session_id, agent_id)?;
+                clear_child_tool_in_flight(state_root, runtime_id, &input.session_id, agent_id)?;
                 if active_agent_count_for_runtime(state_root, runtime_id, &input.session_id)? == 0 {
                     remove_session_state(state_root, runtime_id, &input.session_id)?;
                 }
@@ -960,9 +962,11 @@ fn pre_tool_use_output(
             tool_name,
             input.tool_input.as_ref(),
         ) {
+            refresh_stop_stall_clock_if_running(state_root, runtime_id, &input.session_id, now_ms)?;
             return Ok(json!({}));
         }
         if let Some(reason) = runtime_subagent_attestation_denial(input, state_root, runtime_id)? {
+            refresh_stop_stall_clock_if_running(state_root, runtime_id, &input.session_id, now_ms)?;
             return Ok(pre_tool_reason_denial(&reason));
         }
         if let Some(agent_id) = child_agent_id {
@@ -979,8 +983,15 @@ fn pre_tool_use_output(
                 },
                 now_ms,
             )? {
+                refresh_stop_stall_clock_if_running(
+                    state_root,
+                    runtime_id,
+                    &input.session_id,
+                    now_ms,
+                )?;
                 return Ok(pre_tool_reason_denial(&reason));
             }
+            note_allowed_child_tool(state_root, runtime_id, &input.session_id, agent_id, now_ms)?;
             return Ok(json!({}));
         }
         return Ok(subagent_identity_missing_denial());
@@ -1152,6 +1163,12 @@ fn post_tool_use_output(
     now_ms: u64,
 ) -> Result<Value> {
     if input_has_subagent_context(input) {
+        if input.tool_name.is_some() {
+            refresh_stop_stall_clock_if_running(state_root, runtime_id, &input.session_id, now_ms)?;
+            if let Some(agent_id) = nonempty(input.agent_id.as_deref()) {
+                clear_child_tool_in_flight(state_root, runtime_id, &input.session_id, agent_id)?;
+            }
+        }
         return Ok(json!({}));
     }
     let Some(tool_name) = input.tool_name.as_deref() else {
@@ -1406,16 +1423,18 @@ fn stop_output(
             now_ms,
             PENDING_INIT_GRACE_MILLIS,
         )?;
-    if legacy_pending_init_elapsed
-        || observe_and_check_elapsed(
-            state_root,
-            runtime_id,
-            &input.session_id,
-            STOP_BLOCKED_SINCE_FILE,
-            now_ms,
-            STOP_STALL_GRACE_MILLIS,
-        )?
-    {
+    let stall_elapsed = observe_and_check_elapsed(
+        state_root,
+        runtime_id,
+        &input.session_id,
+        STOP_BLOCKED_SINCE_FILE,
+        now_ms,
+        STOP_STALL_GRACE_MILLIS,
+    )?;
+    // 已放行、尚未结束的 child 工具说明子代理仍在工作。根代理状态快照
+    // 不变不能据此做 10 分钟回收；60 分钟绝对上限不看这个标记。
+    let child_tool_running = any_child_tool_in_flight(state_root, runtime_id, &input.session_id)?;
+    if legacy_pending_init_elapsed || (stall_elapsed && !child_tool_running) {
         crate::subagent_orchestrator::recover_active_reservations(
             state_root,
             runtime_id,
@@ -1456,6 +1475,94 @@ fn stop_output(
     }
     let protocol_issue = protocol_issue_reason(state_root, runtime_id, &input.session_id)?;
     Ok(stop_continuation(active, protocol_issue.as_deref()))
+}
+
+// Child tool calls are progress even when the root status snapshot stays on the
+// same "running" value. Only an already-started stall clock moves; the absolute
+// cap is untouched. An allowed call also stays in flight until PostToolUse or
+// SubagentStop, so one long command is not fenced at the 10-minute mark.
+fn refresh_stop_stall_clock_if_running(
+    state_root: &Path,
+    runtime_id: &str,
+    session_id: &str,
+    now_ms: u64,
+) -> Result<()> {
+    let session_dir = session_state_dir(state_root, session_id);
+    let path = session_auxiliary_path(&session_dir, runtime_id, STOP_BLOCKED_SINCE_FILE);
+    if read_observation_timestamp(&path)?.is_some() {
+        write_observation_timestamp(&session_dir, &path, now_ms)?;
+    }
+    Ok(())
+}
+
+fn note_allowed_child_tool(
+    state_root: &Path,
+    runtime_id: &str,
+    session_id: &str,
+    agent_id: &str,
+    now_ms: u64,
+) -> Result<()> {
+    let session_dir = session_state_dir(state_root, session_id);
+    let path = session_auxiliary_path(
+        &session_dir,
+        runtime_id,
+        &child_tool_in_flight_file_name(agent_id),
+    );
+    write_observation_timestamp(&session_dir, &path, now_ms)?;
+    refresh_stop_stall_clock_if_running(state_root, runtime_id, session_id, now_ms)
+}
+
+fn clear_child_tool_in_flight(
+    state_root: &Path,
+    runtime_id: &str,
+    session_id: &str,
+    agent_id: &str,
+) -> Result<()> {
+    remove_session_auxiliary_file(
+        state_root,
+        runtime_id,
+        session_id,
+        &child_tool_in_flight_file_name(agent_id),
+    )
+}
+
+fn child_tool_in_flight_file_name(agent_id: &str) -> String {
+    format!(
+        "{CHILD_TOOL_IN_FLIGHT_PREFIX}{}.state",
+        hash_component(agent_id)
+    )
+}
+
+fn any_child_tool_in_flight(state_root: &Path, runtime_id: &str, session_id: &str) -> Result<bool> {
+    let session_dir = session_state_dir(state_root, session_id);
+    let prefix = format!(
+        "{}{CHILD_TOOL_IN_FLIGHT_PREFIX}",
+        runtime_marker_prefix(runtime_id)
+    );
+    let entries = match fs::read_dir(&session_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "读取 Codex 子代理门禁会话状态失败：{}",
+                    session_dir.display()
+                )
+            });
+        }
+    };
+    for entry in entries {
+        let entry = entry.with_context(|| {
+            format!(
+                "读取 Codex 子代理门禁会话状态失败：{}",
+                session_dir.display()
+            )
+        })?;
+        if entry.file_name().to_string_lossy().starts_with(&prefix) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn finalize_root_turn(
@@ -6690,5 +6797,265 @@ mod tests {
         assert!(first.starts_with("sha256:"));
         assert_eq!(first.len(), "sha256:".len() + 64);
         assert_ne!(first, changed);
+    }
+
+    fn start_recovery_child(root: &Path, session: &str) {
+        start_recovery_child_named(root, session, "reader");
+    }
+
+    fn start_recovery_child_named(root: &Path, session: &str, task_name: &str) {
+        write_test_runtime_policy(root);
+        let mut spawn = input("PreToolUse", session);
+        spawn.turn_id = Some("root-turn-a".into());
+        spawn.tool_name = Some("agents.spawn_agent".into());
+        spawn.tool_input = Some(json!({
+            "task_name": task_name,
+            "agent_type": "codey_quick_scan",
+            "message": "Read the source"
+        }));
+        assert_eq!(
+            handle_hook_for_runtime_at(&spawn, root, "runtime-a", 10).unwrap(),
+            json!({})
+        );
+        spawn.hook_event_name = "PostToolUse".into();
+        let target = format!("/root/{task_name}");
+        spawn.tool_response = Some(json!({ "agent_id": target }));
+        handle_hook_for_runtime_at(&spawn, root, "runtime-a", 11).unwrap();
+        let mut start = input("SubagentStart", session);
+        start.agent_id = Some(target);
+        start.agent_type = Some("codey_quick_scan".into());
+        handle_hook_for_runtime_at(&start, root, "runtime-a", 12).unwrap();
+    }
+
+    fn root_stop(session: &str) -> HookInput {
+        input("Stop", session)
+    }
+
+    fn reader_tool(session: &str, event: &str) -> HookInput {
+        let mut child = input(event, session);
+        child.agent_id = Some("/root/reader".into());
+        child.agent_type = Some("codey_quick_scan".into());
+        child.tool_name = Some("mcp__codey_fastctx__inspect_local_file".into());
+        child
+    }
+
+    fn child_tool_in_flight_exists(root: &Path, session: &str) -> bool {
+        fs::read_dir(session_state_dir(root, session))
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("child-tool-in-flight-")
+            })
+    }
+
+    fn assert_stop_blocked(root: &Path, session: &str, now_ms: u64) {
+        assert_eq!(
+            handle_hook_for_runtime_at(&root_stop(session), root, "runtime-a", now_ms).unwrap()
+                ["decision"]
+                .as_str(),
+            Some("block"),
+        );
+    }
+
+    #[test]
+    fn child_tool_activity_postpones_stall_recovery_without_moving_the_absolute_deadline() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let session = "child-still-working";
+        start_recovery_child(root, session);
+        let session_dir = session_state_dir(root, session);
+        let stalled = session_auxiliary_path(&session_dir, "runtime-a", STOP_BLOCKED_SINCE_FILE);
+        let absolute = session_auxiliary_path(&session_dir, "runtime-a", STOP_ABSOLUTE_SINCE_FILE);
+
+        // 根代理还没受阻时，child 工具不能自己打开停滞计时。
+        let mut child = reader_tool(session, "PreToolUse");
+        attest_test_child(&child, root, "runtime-a");
+        assert_eq!(
+            handle_hook_for_runtime_at(&child, root, "runtime-a", 500).unwrap(),
+            json!({})
+        );
+        child.hook_event_name = "PostToolUse".into();
+        handle_hook_for_runtime_at(&child, root, "runtime-a", 600).unwrap();
+        assert!(!stalled.exists());
+        assert!(!child_tool_in_flight_exists(root, session));
+
+        assert_stop_blocked(root, session, 1_000);
+        assert_eq!(fs::read_to_string(&absolute).unwrap(), "1000\n");
+        assert_eq!(fs::read_to_string(&stalled).unwrap(), "1000\n");
+
+        let activity_at = 1_000 + STOP_STALL_GRACE_MILLIS - 1;
+        child.hook_event_name = "PreToolUse".into();
+        assert_eq!(
+            handle_hook_for_runtime_at(&child, root, "runtime-a", activity_at).unwrap(),
+            json!({})
+        );
+        assert_eq!(
+            fs::read_to_string(&stalled).unwrap(),
+            format!("{activity_at}\n")
+        );
+        assert_eq!(fs::read_to_string(&absolute).unwrap(), "1000\n");
+        assert_stop_blocked(root, session, 1_000 + STOP_STALL_GRACE_MILLIS);
+        assert_eq!(
+            active_agent_count_for_runtime(root, "runtime-a", session).unwrap(),
+            1
+        );
+
+        child.hook_event_name = "PostToolUse".into();
+        let finished_at = activity_at + 1_000;
+        handle_hook_for_runtime_at(&child, root, "runtime-a", finished_at).unwrap();
+        assert_eq!(
+            fs::read_to_string(&stalled).unwrap(),
+            format!("{finished_at}\n")
+        );
+        assert_eq!(fs::read_to_string(&absolute).unwrap(), "1000\n");
+        assert!(!child_tool_in_flight_exists(root, session));
+        assert_stop_blocked(root, session, finished_at + STOP_STALL_GRACE_MILLIS - 1);
+        assert_eq!(
+            handle_hook_for_runtime_at(
+                &root_stop(session),
+                root,
+                "runtime-a",
+                finished_at + STOP_STALL_GRACE_MILLIS
+            )
+            .unwrap(),
+            json!({})
+        );
+        assert_eq!(
+            active_agent_count_for_runtime(root, "runtime-a", session).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn in_flight_child_tool_holds_past_the_stall_grace_until_the_absolute_cap() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let session = "long-child-tool";
+        start_recovery_child(root, session);
+        assert_stop_blocked(root, session, 1_000);
+
+        let child = reader_tool(session, "PreToolUse");
+        attest_test_child(&child, root, "runtime-a");
+        assert_eq!(
+            handle_hook_for_runtime_at(&child, root, "runtime-a", 2_000).unwrap(),
+            json!({})
+        );
+        assert!(child_tool_in_flight_exists(root, session));
+
+        let past_stall = 2_000 + STOP_STALL_GRACE_MILLIS;
+        assert_stop_blocked(root, session, past_stall);
+        assert_eq!(
+            active_agent_count_for_runtime(root, "runtime-a", session).unwrap(),
+            1
+        );
+        let session_dir = session_state_dir(root, session);
+        let absolute = session_auxiliary_path(&session_dir, "runtime-a", STOP_ABSOLUTE_SINCE_FILE);
+        assert_eq!(fs::read_to_string(&absolute).unwrap(), "1000\n");
+
+        assert_eq!(
+            handle_hook_for_runtime_at(
+                &root_stop(session),
+                root,
+                "runtime-a",
+                1_000 + STOP_ABSOLUTE_GRACE_MILLIS
+            )
+            .unwrap(),
+            json!({})
+        );
+        assert_eq!(
+            active_agent_count_for_runtime(root, "runtime-a", session).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn denied_child_tool_postpones_stall_without_holding_an_in_flight_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let session = "denied-child-tool";
+        start_recovery_child(root, session);
+        assert_stop_blocked(root, session, 1_000);
+
+        let mut child = input("PreToolUse", session);
+        child.agent_id = Some("/root/reader".into());
+        child.agent_type = Some("codey_quick_scan".into());
+        child.tool_name = Some("functions.exec_command".into());
+        child.tool_input = Some(json!({ "cmd": "git status --short" }));
+        attest_test_child(&child, root, "runtime-a");
+        let denied_at = 1_000 + STOP_STALL_GRACE_MILLIS - 1;
+        assert_eq!(
+            handle_hook_for_runtime_at(&child, root, "runtime-a", denied_at).unwrap()
+                ["hookSpecificOutput"]["permissionDecision"]
+                .as_str(),
+            Some("deny")
+        );
+        assert!(!child_tool_in_flight_exists(root, session));
+        let stalled = session_auxiliary_path(
+            &session_state_dir(root, session),
+            "runtime-a",
+            STOP_BLOCKED_SINCE_FILE,
+        );
+        assert_eq!(
+            fs::read_to_string(&stalled).unwrap(),
+            format!("{denied_at}\n")
+        );
+        assert_stop_blocked(root, session, 1_000 + STOP_STALL_GRACE_MILLIS);
+        assert_eq!(
+            handle_hook_for_runtime_at(
+                &root_stop(session),
+                root,
+                "runtime-a",
+                denied_at + STOP_STALL_GRACE_MILLIS
+            )
+            .unwrap(),
+            json!({})
+        );
+        assert_eq!(
+            active_agent_count_for_runtime(root, "runtime-a", session).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn stopping_a_child_clears_its_in_flight_tool_so_stall_recovery_can_continue() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let session = "stop-clears-in-flight";
+        start_recovery_child(root, session);
+        start_recovery_child_named(root, session, "sibling");
+        assert_stop_blocked(root, session, 1_000);
+
+        let child = reader_tool(session, "PreToolUse");
+        attest_test_child(&child, root, "runtime-a");
+        handle_hook_for_runtime_at(&child, root, "runtime-a", 2_000).unwrap();
+        assert!(child_tool_in_flight_exists(root, session));
+
+        let mut stopped = input("SubagentStop", session);
+        stopped.agent_id = Some("/root/reader".into());
+        stopped.agent_type = Some("codey_quick_scan".into());
+        handle_hook_for_runtime_at(&stopped, root, "runtime-a", 3_000).unwrap();
+        assert!(!child_tool_in_flight_exists(root, session));
+        assert_eq!(
+            active_agent_count_for_runtime(root, "runtime-a", session).unwrap(),
+            1
+        );
+        assert_stop_blocked(root, session, 2_000 + STOP_STALL_GRACE_MILLIS - 1);
+        assert_eq!(
+            handle_hook_for_runtime_at(
+                &root_stop(session),
+                root,
+                "runtime-a",
+                2_000 + STOP_STALL_GRACE_MILLIS
+            )
+            .unwrap(),
+            json!({})
+        );
+        assert_eq!(
+            active_agent_count_for_runtime(root, "runtime-a", session).unwrap(),
+            0
+        );
     }
 }

@@ -25,7 +25,11 @@
   ].join(", ");
   const headerSelector = "header, nav";
   const subagentHeaderSelector = ".h-12.shrink-0.border-b";
-  const bootstrapProbeSelector = `${headerSelector}, ${sidebarSelector}`;
+  // Codex 把左侧图标栏收进 nav[data-app-navigation-rail]，图标栏底部的贴底
+  // 堆栈里放着帮助与个人资料按钮，Codey 入口跟随它们落在这里。
+  const navigationRailSelector = '[data-app-navigation-rail="true"]';
+  const railHelpLabelPattern = /帮助|help/i;
+  const bootstrapProbeSelector = `${headerSelector}, ${sidebarSelector}, ${navigationRailSelector}`;
   const settingsIcon = `
     <svg viewBox="0 0 350 350" aria-hidden="true" focusable="false">
       <rect x="0" y="0" width="350" height="350" rx="34" fill="#fff" stroke="none"></rect>
@@ -72,12 +76,18 @@
     const style = document.createElement("style");
     style.id = styleId;
     style.textContent = `
-      #${buttonId} { -webkit-app-region: no-drag !important; pointer-events: auto !important; position: relative; z-index: 2147483641; display: inline-grid; place-items: center; flex: 0 0 auto; width: 32px; height: 32px; border: 0; border-radius: 8px; padding: 0; margin-inline-start: 8px; margin-inline-end: 18px; background: transparent; color: inherit; cursor: pointer; opacity: .86; user-select: none; transition: background .15s ease, opacity .15s ease, transform .15s ease; }
+      /* Codex 原生小按钮：28×28、圆角 12.5px、图标继承按钮前景色，
+         图标栏入口为 36×36，前景色与相邻帮助按钮一致。 */
+      #${buttonId} { --codey-icon-size: 16px; --codey-icon-color: currentColor; -webkit-app-region: no-drag !important; pointer-events: auto !important; position: relative; z-index: 2147483641; display: inline-grid; place-items: center; flex: 0 0 auto; width: 32px; height: 32px; border: 0; border-radius: 12.5px; padding: 0; margin-inline-start: 8px; margin-inline-end: 18px; background: transparent; color: inherit; cursor: pointer; opacity: .86; user-select: none; transition: background .15s ease, opacity .15s ease, transform .15s ease; }
       #${buttonId}[data-codey-header-actions="true"] { width: 28px; height: 28px; margin-inline-start: 0; margin-inline-end: 6px; }
+      #${buttonId}[data-codey-rail-slot="true"] { --codey-icon-size: 20px; box-sizing: border-box; flex: 0 0 auto; width: 36px; height: 36px; margin: 0; border-radius: 12.5px; color: color-mix(in srgb, CanvasText 52%, transparent); }
+      #${buttonId}[data-codey-rail-slot="true"] svg { width: 20px; height: 20px; }
+      #${buttonId}[data-codey-rail-slot="true"]:hover { color: CanvasText; }
+      #${buttonId}[data-codey-rail-slot="true"]::after { top: 4px; right: 4px; }
       #${buttonId}:hover { background: rgba(127, 127, 127, .14); opacity: 1; }
       #${buttonId}:active { transform: translateY(1px); }
       #${buttonId}:focus-visible { outline: 2px solid rgba(139, 151, 255, .72); outline-offset: 2px; }
-      #${buttonId} svg { display: block; width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 22; stroke-linecap: round; stroke-linejoin: round; }
+      #${buttonId} svg { display: block; flex: 0 0 auto; width: var(--codey-icon-size); height: var(--codey-icon-size); fill: none; stroke: var(--codey-icon-color); stroke-width: 22; stroke-linecap: round; stroke-linejoin: round; }
       #${buttonId} .codey-settings-label { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
       #${buttonId} .codey-runtime-badge { position: absolute; top: -2px; right: -2px; display: grid; width: 13px; height: 13px; place-items: center; border: 2px solid Canvas; border-radius: 999px; background: #ff453a; color: #fff; font: 800 9px/1 -apple-system, BlinkMacSystemFont, sans-serif; opacity: 0; transform: scale(.65); transition: opacity .15s ease, transform .15s ease; pointer-events: none; }
       #${buttonId}[data-codey-runtime-state="unavailable"] { background: rgba(255, 69, 58, .12); color: #ff453a; opacity: 1; }
@@ -284,6 +294,29 @@
     };
   };
 
+  // 图标栏底部的贴底堆栈：nav 的最后一个可见子容器 → 它的 flex 列容器，
+  // 里面依次是帮助菜单与个人资料菜单。Codey 入口插在帮助菜单之前。
+  const findRailFooterMount = () => {
+    const rail = document.querySelector(navigationRailSelector);
+    if (!(rail instanceof HTMLElement)) return null;
+    const cluster = [...rail.children]
+      .filter((child) => child instanceof HTMLElement
+        && child.getAttribute("aria-hidden") !== "true"
+        && child.getBoundingClientRect().width > 0)
+      .at(-1);
+    const stack = cluster?.firstElementChild;
+    if (!(stack instanceof HTMLElement)) return null;
+    const help = [...stack.querySelectorAll("button")]
+      .find((candidate) => candidate.id !== buttonId
+        && railHelpLabelPattern.test(candidate.getAttribute("aria-label") || ""));
+    if (!(help instanceof HTMLElement)) return null;
+    // 帮助按钮外面可能还包着 radix 的触发层，只取 stack 的直接子容器作锚点。
+    const before = [...stack.children]
+      .find((child) => child instanceof HTMLElement && child.contains(help));
+    if (!(before instanceof HTMLElement)) return null;
+    return { target: stack, before };
+  };
+
   const mountedButtonIsUsable = (button) => {
     if (headerMountDirty || !(button instanceof HTMLElement) || button.isConnected !== true) {
       return false;
@@ -291,6 +324,13 @@
     const parent = button.parentElement;
     if (!(parent instanceof HTMLElement) || button.closest("[hidden], [aria-hidden=true]")) {
       return false;
+    }
+    if (button.dataset.codeyRailSlot === "true") {
+      const rail = button.closest?.(navigationRailSelector);
+      return !!rail
+        && rail.isConnected !== false
+        && parent === button.__codeyRailStack
+        && button.nextElementSibling === button.__codeyRailAnchor;
     }
     const validParent = parent.matches?.(headerSelector);
     const anchored = button.dataset.codeyHeaderActions !== "true"
@@ -305,7 +345,8 @@
     addStyle();
     const existingButton = document.getElementById(buttonId);
     if (mountedButtonIsUsable(existingButton)) return;
-    const mount = findHeaderMount();
+    const railMount = findRailFooterMount();
+    const mount = railMount || findHeaderMount();
     if (!mount) {
       existingButton?.remove?.();
       return;
@@ -324,6 +365,22 @@
         openSettings();
       }, true);
     }
+    if (railMount) {
+      button.dataset.codeyRailSlot = "true";
+      delete button.dataset.codeyHeaderActions;
+      button.__codeyHeaderAnchor = null;
+      button.__codeyRailStack = mount.target;
+      button.__codeyRailAnchor = mount.before;
+      if (button.parentElement !== mount.target || button.nextElementSibling !== mount.before) {
+        mount.target.insertBefore(button, mount.before);
+      }
+      applyRuntimeBadge(button);
+      headerMountDirty = false;
+      return;
+    }
+    delete button.dataset.codeyRailSlot;
+    button.__codeyRailStack = null;
+    button.__codeyRailAnchor = null;
     if (mount.before) {
       button.dataset.codeyHeaderActions = "true";
     } else {

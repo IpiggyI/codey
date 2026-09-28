@@ -53,6 +53,10 @@ class FakeElement extends FakeElementCore {
       : { bottom: 0, height: 0, left: 0, right: 0, top: 0, width: 0 };
   }
 
+  get firstElementChild() {
+    return this.children[0] || null;
+  }
+
   getClientRects() {
     return this.visible ? [this.getBoundingClientRect()] : [];
   }
@@ -134,6 +138,116 @@ test("moves the Codey button beside the visible header's trailing action region"
   assert.equal(codeyButton.dataset.codeyHeaderActions, "true");
   assert.equal(hiddenHeader.children.includes(codeyButton), false);
   assert.deepEqual(visibleHeader.children, [codeyButton, rightRegion]);
+});
+
+test("mounts above the native help entry in the navigation rail footer", () => {
+  const header = new FakeElement("header", { right: 1200 });
+  header.appendChild(new FakeElement("button", { right: 1192, width: 28 }));
+  const rail = new FakeElement("nav", { right: 52, width: 52, height: 846, top: 44 });
+  rail.setAttribute("data-app-navigation-rail", "true");
+  const scroller = new FakeElement("div", { right: 46, width: 40, height: 750, top: 50 });
+  const cluster = new FakeElement("div", { right: 44, width: 36, height: 80, top: 806 });
+  const stack = new FakeElement("div", { right: 44, width: 36, height: 80, top: 806 });
+  const helpSlot = new FakeElement("span", { right: 44, width: 36, height: 36, top: 806 });
+  const help = new FakeElement("button", { right: 44, width: 36, height: 36, top: 806 });
+  help.setAttribute("aria-label", "帮助菜单");
+  const profileSlot = new FakeElement("span", { right: 44, width: 36, height: 36, top: 850 });
+  const profile = new FakeElement("button", { right: 44, width: 36, height: 36, top: 850 });
+  profile.setAttribute("aria-label", "打开个人资料菜单");
+  helpSlot.appendChild(help);
+  profileSlot.appendChild(profile);
+  stack.append(helpSlot, profileSlot);
+  cluster.appendChild(stack);
+  rail.append(scroller, cluster);
+  const documentElement = new FakeElement("html");
+  documentElement.append(header, rail);
+  const elementsById = new Map();
+  const document = {
+    body: new FakeElement("body"),
+    documentElement,
+    visibilityState: "visible",
+    addEventListener() {},
+    createElement: (tagName) => {
+      const element = new FakeElement(tagName);
+      let id = "";
+      Object.defineProperty(element, "id", {
+        configurable: true,
+        get: () => id,
+        set: (value) => {
+          if (id) elementsById.delete(id);
+          id = String(value || "");
+          if (id) elementsById.set(id, element);
+        },
+      });
+      return element;
+    },
+    getElementById: (id) => {
+      const element = elementsById.get(id);
+      return element?.isConnected ? element : null;
+    },
+    querySelector: (selector) =>
+      rail.isConnected === true && String(selector).includes("data-app-navigation-rail")
+        ? rail
+        : null,
+    querySelectorAll: (selector) => selector === "header" ? [header] : [],
+    removeEventListener() {},
+  };
+  const window = {
+    addEventListener() {},
+    clearTimeout() {},
+    dispatchEvent() {},
+    getComputedStyle: (element) => ({
+      display: element.visible ? "flex" : "none",
+      visibility: element.visible ? "visible" : "hidden",
+    }),
+    innerWidth: 1200,
+    localStorage: { getItem: () => null, key: () => null, length: 0, setItem() {} },
+    setTimeout: () => 1,
+  };
+  window.window = window;
+  runRenderer({
+    console,
+    document,
+    HTMLElement: FakeElement,
+    location: { pathname: "/", search: "" },
+    MutationObserver: class {
+      disconnect() {}
+      observe() {}
+    },
+    URLSearchParams,
+    window,
+  });
+
+  const button = document.getElementById("codey-settings-button");
+  assert.equal(button.parentElement, stack);
+  assert.equal(button.dataset.codeyRailSlot, "true");
+  assert.equal(button.hasAttribute("data-codey-native-slot"), false);
+  assert.equal(stack.children[0], button, "the Codey entry sits above the help entry");
+  assert.equal(button.nextElementSibling, helpSlot);
+  assert.equal(document.getElementById("codey-settings-button-measure"), null);
+  assert.equal(header.querySelector("#codey-settings-button"), null, "the header keeps only native actions");
+
+  const reads = rail.rectReads;
+  window.__codeyRendererScan();
+  assert.equal(rail.rectReads, reads, "stable rail mounts skip geometry reads");
+
+  const replacement = new FakeElement("div", { right: 44, width: 36, height: 80, top: 806 });
+  const replacementHelp = new FakeElement("button", { right: 44, width: 36, height: 36, top: 806 });
+  replacementHelp.setAttribute("aria-label", "帮助菜单");
+  replacement.appendChild(replacementHelp);
+  stack.remove();
+  cluster.appendChild(replacement);
+  window.__codeyRendererInvalidateHeaderMount();
+  window.__codeyRendererScan();
+  assert.equal(document.getElementById("codey-settings-button").parentElement, replacement);
+  assert.equal(replacement.children[0], document.getElementById("codey-settings-button"));
+
+  rail.remove();
+  window.__codeyRendererInvalidateHeaderMount();
+  window.__codeyRendererScan();
+  const fallback = document.getElementById("codey-settings-button");
+  assert.equal(fallback.parentElement, header);
+  assert.equal(fallback.dataset.codeyRailSlot, undefined);
 });
 
 const createStartupUpdateFixture = (bridge) => {
