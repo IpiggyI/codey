@@ -19,6 +19,14 @@ struct AppPackageSpec {
 const CODEX_PACKAGE_EXECUTABLES: &[&str] = &["ChatGPT.exe", "Codex.exe"];
 const STANDALONE_CODEX_EXECUTABLES: &[&str] = &["ChatGPT.exe", "Codex.exe"];
 
+/// Windows resolves program names case-insensitively, so an install whose main
+/// binary is spelled `codex.exe` must not be skipped.
+const EXECUTABLE_NAMES_ARE_CASE_INSENSITIVE: bool = cfg!(windows);
+
+/// Windows refuses a selected file that no Codex launcher sits beside, so a
+/// third-party tool's binary cannot name its own directory as the Codex app.
+const SELECTED_FILE_REQUIRES_SIBLING_EXECUTABLE: bool = cfg!(windows);
+
 const APP_PACKAGE_SPECS: &[AppPackageSpec] = &[
     AppPackageSpec {
         identity: "OpenAI.Codex",
@@ -43,7 +51,7 @@ pub fn find_latest_codex_app_dir(root: &Path) -> Option<PathBuf> {
         .filter_map(|path| {
             let spec = package_spec_from_path(&path)?;
             let version = version_tuple(&path)?;
-            let app_dir = package_entry_dir(&path, spec)?;
+            let app_dir = package_entry_dir(&path)?;
             Some((spec.priority, version, app_dir))
         })
         .collect::<Vec<_>>();
@@ -215,7 +223,7 @@ pub fn normalize_codex_app_path(path: &Path) -> Option<PathBuf> {
     }
 
     if path.is_file() {
-        return path.parent().map(Path::to_path_buf);
+        return install_dir_from_selected_file(path, SELECTED_FILE_REQUIRES_SIBLING_EXECUTABLE);
     }
 
     if executable_in_dir(path).is_some() {
@@ -242,6 +250,23 @@ pub fn normalize_codex_app_path(path: &Path) -> Option<PathBuf> {
     None
 }
 
+/// Names the install directory a user-selected file belongs to.
+///
+/// A file only names a Codex install when a launchable launcher sits beside it.
+/// Guessing the parent of an unrelated binary (a CLI build or a third-party
+/// Codex launcher such as `codex-x.exe`) would hand the launcher a path it can
+/// never start, and the failure would only surface as a spawn error.
+fn install_dir_from_selected_file(
+    path: &Path,
+    require_sibling_executable: bool,
+) -> Option<PathBuf> {
+    let parent = path.parent()?;
+    if !require_sibling_executable || executable_in_dir(parent).is_some() {
+        return Some(parent.to_path_buf());
+    }
+    None
+}
+
 pub fn build_codex_executable(app_dir: &Path) -> PathBuf {
     if app_dir.extension() == Some(OsStr::new("app")) {
         let macos_dir = app_dir.join("Contents").join("MacOS");
@@ -262,33 +287,116 @@ pub fn build_codex_executable(app_dir: &Path) -> PathBuf {
 }
 
 pub fn codex_app_version(app_dir: &Path) -> Option<String> {
+    // 应用版本与平台包版本独立，不能从安装目录名或 build 编号推导。
     if app_dir.extension() == Some(OsStr::new("app")) {
-        return macos_app_version(app_dir);
+        return macos_app_version(app_dir)
+            .or_else(|| codex_resources_app_version(&app_dir.join("Contents").join("Resources")));
     }
-    let package_dir = if app_dir
-        .file_name()
-        .and_then(OsStr::to_str)
-        .is_some_and(|name| name.eq_ignore_ascii_case("app"))
-    {
-        app_dir.parent()?
-    } else {
-        app_dir
-    };
-    codex_package_version(package_dir)
-        .or_else(|| codex_directory_version(package_dir))
-        .or_else(|| codex_directory_version(app_dir))
-        .or_else(|| codex_version_file(package_dir))
-        .or_else(|| codex_version_file(app_dir))
+
+    codex_resources_app_version(&app_dir.join("resources"))
+        .or_else(|| codex_resources_app_version(&app_dir.join("app").join("resources")))
         .or_else(|| codex_executable_product_version(app_dir))
+}
+
+const MAX_ASAR_HEADER_BYTES: u32 = 16 * 1024 * 1024;
+const MAX_APP_PACKAGE_JSON_BYTES: u64 = 1024 * 1024;
+
+fn codex_resources_app_version(resources_dir: &Path) -> Option<String> {
+    asar_app_version(&resources_dir.join("app.asar"))
+        .or_else(|| app_package_json_version(&resources_dir.join("app").join("package.json")))
+}
+
+fn app_package_json_version(path: &Path) -> Option<String> {
+    use std::io::Read;
+
+    let mut contents = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(MAX_APP_PACKAGE_JSON_BYTES + 1)
+        .read_to_end(&mut contents)
+        .ok()?;
+    package_json_version(&contents)
+}
+
+fn package_json_version(contents: &[u8]) -> Option<String> {
+    if contents.len() as u64 > MAX_APP_PACKAGE_JSON_BYTES {
+        return None;
+    }
+    let package: serde_json::Value = serde_json::from_slice(contents).ok()?;
+    normalize_version_value(package.get("version")?.as_str()?)
+}
+
+fn asar_app_version(path: &Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    // 只解析根 package.json 的索引，其余文件条目由反序列化器跳过。
+    #[derive(serde::Deserialize)]
+    struct Header {
+        files: RootFiles,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct RootFiles {
+        #[serde(rename = "package.json")]
+        package: PackageEntry,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct PackageEntry {
+        size: u64,
+        offset: Option<String>,
+        #[serde(default)]
+        unpacked: bool,
+    }
+
+    let mut archive = std::fs::File::open(path).ok()?;
+    let archive_size = archive.metadata().ok()?.len();
+    let mut prefix = [0u8; 16];
+    archive.read_exact(&mut prefix).ok()?;
+    let size_pickle_length = u32::from_le_bytes(prefix[0..4].try_into().ok()?);
+    let header_size = u32::from_le_bytes(prefix[4..8].try_into().ok()?);
+    let payload_size = u32::from_le_bytes(prefix[8..12].try_into().ok()?);
+    let json_size = u32::from_le_bytes(prefix[12..16].try_into().ok()?);
+    if size_pickle_length != 4
+        || header_size.checked_sub(4)? != payload_size
+        || !(8..=MAX_ASAR_HEADER_BYTES).contains(&header_size)
+        || json_size == 0
+        || json_size > header_size - 8
+        || header_size - 8 - json_size > 3
+    {
+        return None;
+    }
+    let data_start = 8 + u64::from(header_size);
+    if data_start > archive_size {
+        return None;
+    }
+    let mut header_json = vec![0u8; json_size as usize];
+    archive.read_exact(&mut header_json).ok()?;
+    let header: Header = serde_json::from_slice(&header_json).ok()?;
+    let package = header.files.package;
+    if package.size > MAX_APP_PACKAGE_JSON_BYTES {
+        return None;
+    }
+    if package.unpacked {
+        return app_package_json_version(
+            &path.with_extension("asar.unpacked").join("package.json"),
+        );
+    }
+
+    let offset = package.offset?.parse::<u64>().ok()?;
+    let start = data_start.checked_add(offset)?;
+    if start.checked_add(package.size)? > archive_size {
+        return None;
+    }
+    archive.seek(SeekFrom::Start(start)).ok()?;
+    let mut contents = vec![0u8; package.size as usize];
+    archive.read_exact(&mut contents).ok()?;
+    package_json_version(&contents)
 }
 
 #[cfg(windows)]
 fn codex_executable_product_version(app_dir: &Path) -> Option<String> {
-    use std::ffi::c_void;
-    use windows::Win32::Storage::FileSystem::{
-        GetFileVersionInfoSizeW, GetFileVersionInfoW, VS_FFI_SIGNATURE, VS_FIXEDFILEINFO,
-        VerQueryValueW,
-    };
+    use windows::Win32::Storage::FileSystem::{GetFileVersionInfoSizeW, GetFileVersionInfoW};
     use windows::core::PCWSTR;
 
     let executable = build_codex_executable(app_dir);
@@ -331,29 +439,7 @@ fn codex_executable_product_version(app_dir: &Path) -> Option<String> {
         }
     }
 
-    let mut fixed_info = std::ptr::null_mut::<c_void>();
-    let mut fixed_info_len = 0u32;
-    let root = ['\\' as u16, 0];
-    if !unsafe {
-        VerQueryValueW(
-            info.as_ptr().cast(),
-            PCWSTR(root.as_ptr()),
-            &mut fixed_info,
-            &mut fixed_info_len,
-        )
-    }
-    .as_bool()
-        || fixed_info.is_null()
-        || fixed_info_len < std::mem::size_of::<VS_FIXEDFILEINFO>() as u32
-    {
-        return None;
-    }
-
-    let fixed_info = unsafe { fixed_info.cast::<VS_FIXEDFILEINFO>().read_unaligned() };
-    if fixed_info.dwSignature != VS_FFI_SIGNATURE as u32 {
-        return None;
-    }
-    fixed_windows_product_version(&fixed_info)
+    None
 }
 
 #[cfg(windows)]
@@ -434,53 +520,79 @@ fn query_windows_version_string(info: &[u8], sub_block: &str) -> Option<String> 
         .and_then(|value| normalize_version_value(&value))
 }
 
-#[cfg(windows)]
-fn fixed_windows_product_version(
-    info: &windows::Win32::Storage::FileSystem::VS_FIXEDFILEINFO,
-) -> Option<String> {
-    let (version_ms, version_ls) = if info.dwProductVersionMS != 0 || info.dwProductVersionLS != 0 {
-        (info.dwProductVersionMS, info.dwProductVersionLS)
-    } else {
-        (info.dwFileVersionMS, info.dwFileVersionLS)
-    };
-    let mut parts = vec![
-        version_ms >> 16,
-        version_ms & 0xffff,
-        version_ls >> 16,
-        version_ls & 0xffff,
-    ];
-    while parts.len() > 2 && parts.last() == Some(&0) {
-        parts.pop();
-    }
-    let version = parts
-        .into_iter()
-        .map(|part| part.to_string())
-        .collect::<Vec<_>>()
-        .join(".");
-    normalize_version_value(&version)
-}
-
 #[cfg(not(windows))]
 fn codex_executable_product_version(_app_dir: &Path) -> Option<String> {
     None
 }
 
-#[cfg(any(windows, test))]
 fn normalize_version_value(value: &str) -> Option<String> {
     let value = value.trim().trim_start_matches(['v', 'V']);
-    is_version_like(value).then(|| value.to_string())
+    let parts = value.split('.').collect::<Vec<_>>();
+    (parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|ch| ch.is_ascii_digit())))
+    .then(|| value.to_string())
+}
+
+/// 内置 CLI 的候选位置。Codex 更新改动过文件名与目录层级，所以按已知命名逐个
+/// 尝试：只认单一路径时，一次改名就等于「找不到内置 CLI」并卡死启动。
+/// 首选项与历史行为一致，因此存在同名文件时仍选到原来的那一个。
+pub fn codex_runtime_executable_candidates(app_dir: &Path) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if app_dir.extension() == Some(OsStr::new("app")) {
+        let resources = app_dir.join("Contents").join("Resources");
+        candidates.push(resources.join("codex"));
+        candidates.push(resources.join("codex-cli"));
+        // 新版把 CLI 收进 `codex-cli` 包：`bin/codex` 是包清单声明的入口，并且
+        // 与 `codex-code-mode-host` 同级，包装器与宿主校验都依赖这一层布局。
+        candidates.push(resources.join("codex-cli").join("bin").join("codex"));
+        candidates.push(resources.join("bin").join("codex"));
+        candidates.push(app_dir.join("Contents").join("MacOS").join("codex"));
+    } else {
+        let resources = app_dir.join("resources");
+        candidates.push(resources.join("codex.exe"));
+        candidates.push(app_dir.join("Resources").join("codex.exe"));
+        candidates.push(resources.join("bin").join("codex.exe"));
+        candidates.push(resources.join("codex-cli").join("bin").join("codex.exe"));
+        candidates.push(resources.join("codex-cli.exe"));
+    }
+    candidates
+}
+
+/// 失败时把尝试过的路径带回调用点。缺少这层信息时，一次改名只会留下
+/// 「未找到内置 CLI」，排查还得先去猜 Codex 把文件挪到了哪里。
+pub fn codex_runtime_executable_missing(app_dir: &Path) -> String {
+    format!(
+        "Codex App 内未找到内置 CLI；已尝试：{}",
+        codex_runtime_executable_candidates(app_dir)
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join("、")
+    )
 }
 
 pub fn codex_runtime_executable(app_dir: &Path) -> Option<PathBuf> {
-    let candidates = if app_dir.extension() == Some(OsStr::new("app")) {
-        vec![app_dir.join("Contents").join("Resources").join("codex")]
-    } else {
-        vec![
-            app_dir.join("resources").join("codex.exe"),
-            app_dir.join("Resources").join("codex.exe"),
-        ]
-    };
-    candidates.into_iter().find(|path| path.is_file())
+    let gui_executable = build_codex_executable(app_dir);
+    codex_runtime_executable_candidates(app_dir)
+        .into_iter()
+        .find(|path| path.is_file() && !is_same_file(path, &gui_executable))
+}
+
+/// 大小写不敏感的文件系统上，候选 `Contents/MacOS/codex` 会命中同目录下的 GUI 主
+/// 二进制 `Codex`。把 GUI 程序当作内置 CLI 会让启动在缺少 code-mode 宿主时报错，
+/// 因此按文件身份排除；非 Unix 平台退回忽略大小写的路径比较。
+fn is_same_file(left: &Path, right: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(left), Ok(right)) = (std::fs::metadata(left), std::fs::metadata(right)) {
+            return left.dev() == right.dev() && left.ino() == right.ino();
+        }
+    }
+    left.to_string_lossy()
+        .eq_ignore_ascii_case(&right.to_string_lossy())
 }
 
 pub fn packaged_app_user_model_id(app_dir: &Path) -> Option<String> {
@@ -502,69 +614,9 @@ fn package_name_from_app_dir(app_dir: &Path) -> Option<String> {
     Some(package_name.to_string())
 }
 
-fn codex_package_version(package_dir: &Path) -> Option<String> {
-    let path = package_dir.to_string_lossy().replace('\\', "/");
-    let name = path
-        .split('/')
-        .rev()
-        .find(|part| codex_package_parts(part).is_some())?;
-    let (_, version, _) = codex_package_parts(name)?;
-    if version.is_empty() {
-        None
-    } else {
-        Some(version.to_string())
-    }
-}
-
-fn codex_directory_version(app_dir: &Path) -> Option<String> {
-    directory_version(app_dir).or_else(|| {
-        app_dir
-            .canonicalize()
-            .ok()
-            .and_then(|path| directory_version(&path))
-    })
-}
-
-fn directory_version(path: &Path) -> Option<String> {
-    let version = path.file_name()?.to_str()?;
-    if is_version_like(version) {
-        Some(version.to_string())
-    } else {
-        None
-    }
-}
-
-fn is_version_like(version: &str) -> bool {
-    let mut parts = version.split('.');
-    let Some(first) = parts.next() else {
-        return false;
-    };
-    if first.is_empty() || !first.chars().all(|ch| ch.is_ascii_digit()) {
-        return false;
-    }
-    let mut count = 1;
-    for part in parts {
-        if part.is_empty() || !part.chars().all(|ch| ch.is_ascii_digit()) {
-            return false;
-        }
-        count += 1;
-    }
-    count >= 2
-}
-
-fn codex_version_file(app_dir: &Path) -> Option<String> {
-    let version = std::fs::read_to_string(app_dir.join("version")).ok()?;
-    let version = version.trim();
-    if version.is_empty() {
-        None
-    } else {
-        Some(version.to_string())
-    }
-}
-
 fn macos_app_version(app_dir: &Path) -> Option<String> {
     macos_app_plist_value(app_dir, "CFBundleShortVersionString")
-        .or_else(|| macos_app_plist_value(app_dir, "CFBundleVersion"))
+        .and_then(|version| normalize_version_value(&version))
 }
 
 fn macos_app_plist_value(app_dir: &Path, key: &str) -> Option<String> {
@@ -641,17 +693,10 @@ fn app_dir_sort_key(app_dir: &Path) -> Option<(std::cmp::Reverse<u8>, Vec<u32>)>
     ))
 }
 
-fn package_entry_dir(package_dir: &Path, spec: AppPackageSpec) -> Option<PathBuf> {
-    let app = package_dir.join("app");
-    if app.is_dir() {
-        return Some(app);
-    }
-    for name in spec.executable_names {
-        if package_dir.join(name).is_file() {
-            return Some(package_dir.to_path_buf());
-        }
-    }
-    None
+fn package_entry_dir(package_dir: &Path) -> Option<PathBuf> {
+    [package_dir.join("app"), package_dir.to_path_buf()]
+        .into_iter()
+        .find(|dir| executable_in_dir(dir).is_some())
 }
 
 fn executable_in_dir(dir: &Path) -> Option<PathBuf> {
@@ -662,12 +707,26 @@ fn executable_in_dir(dir: &Path) -> Option<PathBuf> {
         let entry = std::fs::read_dir(dir)
             .ok()?
             .filter_map(Result::ok)
-            .find(|entry| entry.file_name() == OsStr::new(name) && entry.path().is_file());
+            .find(|entry| {
+                executable_name_matches(&entry.file_name(), name) && entry.path().is_file()
+            });
         if let Some(entry) = entry {
             return Some(entry.path());
         }
     }
     None
+}
+
+fn executable_name_matches(candidate: &OsStr, expected: &str) -> bool {
+    executable_name_matches_with(candidate, expected, EXECUTABLE_NAMES_ARE_CASE_INSENSITIVE)
+}
+
+fn executable_name_matches_with(candidate: &OsStr, expected: &str, case_insensitive: bool) -> bool {
+    if case_insensitive {
+        candidate.to_string_lossy().eq_ignore_ascii_case(expected)
+    } else {
+        candidate == OsStr::new(expected)
+    }
 }
 
 fn codex_package_parts(package_name: &str) -> Option<(AppPackageSpec, &str, &str)> {
@@ -690,16 +749,56 @@ fn codex_package_parts(package_name: &str) -> Option<(AppPackageSpec, &str, &str
 }
 
 fn strip_prefix_ignore_ascii_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
-    if value.len() < prefix.len() {
-        return None;
-    }
-    let (head, rest) = value.split_at(prefix.len());
+    let (head, rest) = value.split_at_checked(prefix.len())?;
     head.eq_ignore_ascii_case(prefix).then_some(rest)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_discovery_skips_incomplete_newer_installations() {
+        let temp = tempfile::tempdir().unwrap();
+        let valid = temp
+            .path()
+            .join("OpenAI.Codex_1.0.0.0_x64__publisher")
+            .join("app");
+        let incomplete = temp
+            .path()
+            .join("OpenAI.Codex_2.0.0.0_x64__publisher")
+            .join("app");
+        std::fs::create_dir_all(&valid).unwrap();
+        std::fs::write(valid.join("Codex.exe"), []).unwrap();
+        std::fs::create_dir_all(&incomplete).unwrap();
+        // A directory named like an executable is not a runnable installation.
+        std::fs::create_dir(incomplete.join("Codex.exe")).unwrap();
+        assert_eq!(find_latest_codex_app_dir(temp.path()), Some(valid));
+    }
+
+    #[test]
+    fn package_discovery_uses_root_launcher_when_app_directory_is_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = temp.path().join("OpenAI.Codex_1.0.0.0_x64__publisher");
+        let nested = package.join("app");
+        std::fs::create_dir_all(&nested).unwrap();
+        assert_eq!(find_latest_codex_app_dir(temp.path()), None);
+        std::fs::write(package.join("Codex.exe"), []).unwrap();
+        assert_eq!(find_latest_codex_app_dir(temp.path()), Some(package));
+        std::fs::write(nested.join("ChatGPT.exe"), []).unwrap();
+        assert_eq!(find_latest_codex_app_dir(temp.path()), Some(nested));
+    }
+
+    #[test]
+    fn package_discovery_ignores_non_ascii_directory_names() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(temp.path().join("中文应用目录")).unwrap();
+        assert_eq!(find_latest_codex_app_dir(temp.path()), None);
+        assert_eq!(
+            strip_prefix_ignore_ascii_case("openai.codex_suffix", "OpenAI.Codex"),
+            Some("_suffix")
+        );
+    }
 
     #[test]
     fn standalone_discovery_includes_local_programs_codex() {
@@ -716,10 +815,299 @@ mod tests {
 
     #[test]
     fn product_version_normalization_accepts_desktop_version_format() {
+        for (raw, expected) in [
+            ("  v26.803.81509  ", "26.803.81509"),
+            ("V26.915.31945", "26.915.31945"),
+            ("26.903.0", "26.903.0"),
+        ] {
+            assert_eq!(normalize_version_value(raw).as_deref(), Some(expected));
+        }
+        for raw in [
+            "26.915.4065.0",
+            "26.903",
+            "9922",
+            "Codex 26.803.81509",
+            "26..1",
+        ] {
+            assert_eq!(normalize_version_value(raw), None, "{raw}");
+        }
+    }
+
+    fn test_asar(package_entry: serde_json::Value, data: &[u8]) -> Vec<u8> {
+        let header = serde_json::to_vec(&serde_json::json!({
+            "files": { "package.json": package_entry }
+        }))
+        .unwrap();
+        let padded_size = (header.len() + 3) & !3;
+        let header_size = padded_size + 8;
+        let mut bytes = Vec::new();
+        for value in [
+            4,
+            header_size as u32,
+            header_size as u32 - 4,
+            header.len() as u32,
+        ] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(&header);
+        bytes.resize(8 + header_size, 0);
+        bytes.extend_from_slice(data);
+        bytes
+    }
+
+    fn write_app_asar(resources: &Path, version: &str) {
+        let package = serde_json::to_vec(&serde_json::json!({
+            "name": "openai-codex-electron",
+            "version": version,
+            "codexBuildNumber": "9922"
+        }))
+        .unwrap();
+        let mut data = b"other file".to_vec();
+        let entry = serde_json::json!({ "size": package.len(), "offset": data.len().to_string() });
+        data.extend_from_slice(&package);
+        std::fs::create_dir_all(resources).unwrap();
+        std::fs::write(resources.join("app.asar"), test_asar(entry, &data)).unwrap();
+    }
+
+    #[test]
+    fn app_version_uses_application_metadata_instead_of_windows_package_version() {
+        let temp = tempfile::tempdir().unwrap();
+        let package = temp
+            .path()
+            .join("OpenAI.Codex_26.915.4065.0_x64__publisher");
+        let app_dir = package.join("app");
+        write_app_asar(&app_dir.join("resources"), "26.915.31945");
+        for path in [&package, &app_dir] {
+            assert_eq!(codex_app_version(path).as_deref(), Some("26.915.31945"));
+        }
+        assert_eq!(version_tuple(&package), Some(vec![26, 915, 4065, 0]));
+
+        let standalone = temp.path().join("Codex");
+        write_app_asar(&standalone.join("resources"), "26.915.31945");
         assert_eq!(
-            normalize_version_value("  v26.803.81509  ").as_deref(),
-            Some("26.803.81509")
+            codex_app_version(&standalone).as_deref(),
+            Some("26.915.31945")
         );
-        assert_eq!(normalize_version_value("Codex 26.803.81509"), None);
+    }
+
+    #[test]
+    fn app_version_does_not_use_package_directory_or_component_version_file() {
+        let temp = tempfile::tempdir().unwrap();
+        for name in [
+            "OpenAI.Codex_26.915.4065.0_x64__publisher",
+            "26.915.4065.0",
+            "26.915.4065",
+        ] {
+            let directory = temp.path().join(name);
+            let app_dir = directory.join("app");
+            std::fs::create_dir_all(&app_dir).unwrap();
+            std::fs::write(directory.join("version"), "26.915.4065.0").unwrap();
+            std::fs::write(app_dir.join("version"), "40.0.0").unwrap();
+            assert_eq!(codex_app_version(&directory), None);
+            assert_eq!(codex_app_version(&app_dir), None);
+        }
+    }
+
+    #[test]
+    fn macos_app_version_uses_short_version_and_asar_instead_of_build_number() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = temp.path().join("Codex.app");
+        let contents = bundle.join("Contents");
+        std::fs::create_dir_all(&contents).unwrap();
+        assert_eq!(codex_app_version(&bundle), None);
+
+        let plist = contents.join("Info.plist");
+        std::fs::write(&plist, "<key>CFBundleVersion</key><string>9922</string>").unwrap();
+        assert_eq!(codex_app_version(&bundle), None);
+        write_app_asar(&contents.join("Resources"), "26.915.31945");
+        assert_eq!(codex_app_version(&bundle).as_deref(), Some("26.915.31945"));
+        std::fs::write(&plist, "<key>CFBundleShortVersionString</key><string>26.908.70816</string><key>CFBundleVersion</key><string>9275</string>").unwrap();
+        assert_eq!(codex_app_version(&bundle).as_deref(), Some("26.908.70816"));
+    }
+
+    #[test]
+    fn app_version_reads_unpacked_package_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let resources = temp.path().join("resources");
+        let app = resources.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(app.join("package.json"), r#"{"version":"26.908.70816"}"#).unwrap();
+        assert_eq!(
+            codex_app_version(temp.path()).as_deref(),
+            Some("26.908.70816")
+        );
+
+        let package = br#"{"version":"26.915.31945","codexBuildNumber":"9922"}"#;
+        let unpacked = resources.join("app.asar.unpacked");
+        std::fs::create_dir_all(&unpacked).unwrap();
+        std::fs::write(unpacked.join("package.json"), package).unwrap();
+        let entry = serde_json::json!({ "size": package.len(), "unpacked": true });
+        std::fs::write(resources.join("app.asar"), test_asar(entry, &[])).unwrap();
+        assert_eq!(
+            codex_app_version(temp.path()).as_deref(),
+            Some("26.915.31945")
+        );
+    }
+
+    #[test]
+    fn asar_app_version_rejects_invalid_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let archive = temp.path().join("app.asar");
+        let package = br#"{"version":"26.915.31945"}"#;
+        for entry in [
+            serde_json::json!({ "size": package.len(), "offset": u64::MAX.to_string() }),
+            serde_json::json!({ "size": MAX_APP_PACKAGE_JSON_BYTES + 1, "offset": "0" }),
+            serde_json::json!({ "size": package.len() + 1, "offset": "0" }),
+            serde_json::json!({ "size": package.len(), "offset": "invalid" }),
+        ] {
+            std::fs::write(&archive, test_asar(entry, package)).unwrap();
+            assert_eq!(asar_app_version(&archive), None);
+        }
+
+        let entry = serde_json::json!({ "size": package.len(), "offset": "0" });
+        let valid = test_asar(entry, package);
+        let mut oversized = valid.clone();
+        oversized[4..8].copy_from_slice(&(MAX_ASAR_HEADER_BYTES + 1).to_le_bytes());
+        oversized[8..12].copy_from_slice(&(MAX_ASAR_HEADER_BYTES - 3).to_le_bytes());
+        for bytes in [
+            vec![],
+            valid[..15].to_vec(),
+            valid[..valid.len() - 1].to_vec(),
+            oversized,
+        ] {
+            std::fs::write(&archive, bytes).unwrap();
+            assert_eq!(asar_app_version(&archive), None);
+        }
+        write_app_asar(temp.path(), "26.915.4065.0");
+        assert_eq!(asar_app_version(&archive), None);
+    }
+
+    #[test]
+    fn selected_executable_requires_a_sibling_codex_launcher() {
+        let temp = tempfile::tempdir().unwrap();
+        let app_dir = temp.path().join("Codex-X");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        let third_party = app_dir.join("codex-x.exe");
+        std::fs::write(&third_party, []).unwrap();
+
+        // A third-party launcher must not turn its own directory into the Codex app.
+        assert_eq!(install_dir_from_selected_file(&third_party, true), None);
+        assert_eq!(
+            install_dir_from_selected_file(&third_party, false).as_deref(),
+            Some(app_dir.as_path())
+        );
+
+        std::fs::write(app_dir.join("Codex.exe"), []).unwrap();
+        assert_eq!(
+            install_dir_from_selected_file(&third_party, true).as_deref(),
+            Some(app_dir.as_path())
+        );
+    }
+
+    /// 新版把 CLI 收进 `codex-cli` 包，入口是 `bin/codex`。候选必须跟到包内，
+    /// 否则一次布局调整就等于「找不到内置 CLI」并卡死启动。
+    #[test]
+    fn runtime_executable_follows_the_packaged_cli_layout() {
+        let temp = tempfile::tempdir().unwrap();
+        let app_dir = temp.path().join("ChatGPT.app");
+        let contents = app_dir.join("Contents");
+        let packaged = contents.join("Resources").join("codex-cli").join("bin");
+        std::fs::create_dir_all(&packaged).unwrap();
+        std::fs::create_dir_all(contents.join("MacOS")).unwrap();
+        std::fs::write(
+            contents.join("Info.plist"),
+            "<key>CFBundleExecutable</key><string>ChatGPT</string>",
+        )
+        .unwrap();
+        std::fs::write(contents.join("MacOS").join("ChatGPT"), "desktop").unwrap();
+        std::fs::write(packaged.join("codex"), "packaged CLI").unwrap();
+        std::fs::write(packaged.join("codex-code-mode-host"), "packaged host").unwrap();
+
+        assert_eq!(
+            codex_runtime_executable(&app_dir).as_deref(),
+            Some(packaged.join("codex").as_path())
+        );
+
+        // 历史布局仍在时保持原选择。
+        let legacy = contents.join("Resources").join("codex");
+        std::fs::write(&legacy, "legacy CLI").unwrap();
+        assert_eq!(
+            codex_runtime_executable(&app_dir).as_deref(),
+            Some(legacy.as_path())
+        );
+    }
+
+    /// Windows 分支同样要覆盖包内布局；这里只校验候选路径拼接。
+    #[test]
+    fn runtime_executable_candidates_include_the_packaged_windows_layout() {
+        let app_dir = PathBuf::from("Codex");
+        assert!(
+            codex_runtime_executable_candidates(&app_dir).contains(
+                &app_dir
+                    .join("resources")
+                    .join("codex-cli")
+                    .join("bin")
+                    .join("codex.exe")
+            )
+        );
+    }
+
+    #[test]
+    fn windows_executable_lookup_ignores_letter_case() {
+        assert!(executable_name_matches_with(
+            OsStr::new("codex.exe"),
+            "Codex.exe",
+            true
+        ));
+        assert!(executable_name_matches_with(
+            OsStr::new("CHATGPT.EXE"),
+            "ChatGPT.exe",
+            true
+        ));
+        assert!(!executable_name_matches_with(
+            OsStr::new("codex.exe"),
+            "Codex.exe",
+            false
+        ));
+        assert!(!executable_name_matches_with(
+            OsStr::new("codex-x.exe"),
+            "Codex.exe",
+            true
+        ));
+    }
+
+    /// A third-party Codex launcher installs its own binary beside no Codex
+    /// desktop app, so its directory must not resolve to a launchable app.
+    #[cfg(windows)]
+    #[test]
+    fn third_party_launcher_does_not_name_a_codex_install_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let app_dir = temp.path().join("Codex-X");
+        std::fs::create_dir_all(&app_dir).unwrap();
+        let third_party = app_dir.join("codex-x.exe");
+        std::fs::write(&third_party, []).unwrap();
+
+        assert_eq!(normalize_codex_app_path(&third_party), None);
+        assert_eq!(normalize_codex_app_path(&app_dir), None);
+
+        std::fs::write(app_dir.join("Codex.exe"), []).unwrap();
+        assert_eq!(
+            normalize_codex_app_path(&third_party).as_deref(),
+            Some(app_dir.as_path())
+        );
+    }
+
+    /// Windows installs may spell the launcher in lower case; the discovery
+    /// must still find it.
+    #[cfg(windows)]
+    #[test]
+    fn lowercase_launcher_name_still_names_its_install_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("codex.exe"), []).unwrap();
+
+        assert_eq!(
+            normalize_codex_app_path(temp.path()).as_deref(),
+            Some(temp.path())
+        );
     }
 }

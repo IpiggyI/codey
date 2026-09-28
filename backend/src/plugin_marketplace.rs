@@ -226,7 +226,13 @@ mod tests {
     fn write_marketplace(home: &Path, directory: &str, name: &str, plugin: &str) {
         let root = home.join(".tmp").join(directory);
         fs::create_dir_all(root.join(".agents").join("plugins")).unwrap();
-        fs::create_dir_all(root.join("plugins").join(plugin)).unwrap();
+        let manifest_dir = root.join("plugins").join(plugin).join(".codex-plugin");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        fs::write(
+            manifest_dir.join("plugin.json"),
+            json!({"name": plugin}).to_string(),
+        )
+        .unwrap();
         fs::write(
             root.join(".agents")
                 .join("plugins")

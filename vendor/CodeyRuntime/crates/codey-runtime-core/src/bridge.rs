@@ -167,13 +167,29 @@ pub async fn evaluate_script_with_await_promise(
     script: &str,
     await_promise: bool,
 ) -> anyhow::Result<Value> {
+    evaluate_script_with_await_promise_timeout(
+        websocket_url,
+        script,
+        await_promise,
+        CDP_COMMAND_TIMEOUT,
+    )
+    .await
+}
+
+pub async fn evaluate_script_with_await_promise_timeout(
+    websocket_url: &str,
+    script: &str,
+    await_promise: bool,
+    timeout: Duration,
+) -> anyhow::Result<Value> {
     let socket = connect_cdp_websocket(websocket_url).await?;
     let mut session = CdpSession::new(socket);
     let response = session
-        .send_command(
+        .send_command_with_timeout(
             1,
             "Runtime.evaluate",
             runtime_evaluate_params_with_await_promise(script, await_promise),
+            timeout,
         )
         .await?;
     ensure_runtime_evaluate_succeeded(response)
@@ -288,17 +304,82 @@ type ConnectedCdpSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 async fn connect_cdp_websocket(websocket_url: &str) -> anyhow::Result<ConnectedCdpSocket> {
-    let (socket, _) = tokio::time::timeout(CDP_CONNECT_TIMEOUT, connect_async(websocket_url))
-        .await
-        .with_context(|| {
-            format!(
-                "timed out connecting CDP websocket after {}s",
-                CDP_CONNECT_TIMEOUT.as_secs()
-            )
-        })?
-        .context("failed to connect CDP websocket")?;
+    let candidates = cdp_websocket_connect_candidates(websocket_url);
+    // 候选共享原来的连接总预算，避免回退把单轮代价翻倍后吃掉启动注入窗口。
+    let attempt_timeout = cdp_connect_attempt_timeout(candidates.len());
+    let mut last_error = None;
+    for candidate in &candidates {
+        match tokio::time::timeout(attempt_timeout, connect_async(candidate.as_str())).await {
+            Ok(Ok((socket, _))) => return Ok(socket),
+            Ok(Err(error)) => {
+                last_error =
+                    Some(anyhow::Error::new(error).context("failed to connect CDP websocket"));
+            }
+            Err(_) => {
+                last_error = Some(anyhow::anyhow!(
+                    "timed out connecting CDP websocket after {}s",
+                    CDP_CONNECT_TIMEOUT.as_secs()
+                ));
+            }
+        }
+    }
 
-    Ok(socket)
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("CDP websocket address is empty")))
+}
+
+fn cdp_connect_attempt_timeout(candidate_count: usize) -> Duration {
+    CDP_CONNECT_TIMEOUT / candidate_count.max(1) as u32
+}
+
+/// Chromium 的 `/json` 会把请求用的 Host 原样写进 `webSocketDebuggerUrl`，而
+/// Codey 枚举 CDP 时优先使用 `localhost`（Chromium 150+ 拒绝 IP 字面量 Host），
+/// 于是拿到的地址通常是 `ws://localhost:<port>/devtools/page/<id>`。
+/// `connect_async` 对一个主机名只按解析顺序逐个尝试、每个地址没有独立超时：若
+/// 排在前面的是被安全软件静默丢弃的回环 IPv6，它会一直挂到预算耗尽而轮不到
+/// `127.0.0.1`，表现就是 HTTP 列表可达但 WebSocket 连不上（HTTP 侧已显式枚举
+/// 三个回环地址，因此不受影响）。这里把回环别名展开成显式候选，先用回环 IPv4
+/// 直连，再退回原始主机名。
+fn cdp_websocket_connect_candidates(websocket_url: &str) -> Vec<String> {
+    let trimmed = websocket_url.trim();
+    let Some((scheme, rest)) = trimmed.split_once("://") else {
+        return vec![trimmed.to_string()];
+    };
+    let (authority, path) = match rest.find(['/', '?', '#']) {
+        Some(index) => (&rest[..index], &rest[index..]),
+        None => (rest, ""),
+    };
+    let authority = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    let (host, port) = split_authority_host_port(authority);
+    let mut candidates = Vec::with_capacity(2);
+    if is_loopback_alias(host) {
+        let port = port.map_or(String::new(), |port| format!(":{port}"));
+        candidates.push(format!("{scheme}://127.0.0.1{port}{path}"));
+    }
+    candidates.push(trimmed.to_string());
+    candidates.dedup();
+    candidates
+}
+
+fn is_loopback_alias(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost") || host == "[::1]" || host == "::1"
+}
+
+fn split_authority_host_port(authority: &str) -> (&str, Option<&str>) {
+    if let Some(rest) = authority.strip_prefix('[') {
+        return match rest.split_once(']') {
+            Some((host, tail)) => (
+                &authority[..host.len() + 2],
+                tail.strip_prefix(':').filter(|port| !port.is_empty()),
+            ),
+            None => (authority, None),
+        };
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() && !port.is_empty() => (host, Some(port)),
+        _ => (authority, None),
+    }
 }
 
 struct BridgeCall {
@@ -481,23 +562,10 @@ fn queue_bridge_dispatch(
         Some(ParsedBridgeDispatch::Call(call)) if bridge_path_can_run_concurrently(&call.path) => {
             pending_concurrent.push_back(call);
         }
-        Some(ParsedBridgeDispatch::Call(call))
-            if bridge_path_is_high_priority_serial(&call.path) =>
-        {
-            let insertion_index = pending_serial
-                .iter()
-                .position(|queued| !bridge_path_is_high_priority_serial(&queued.path))
-                .unwrap_or(pending_serial.len());
-            pending_serial.insert(insertion_index, call);
-        }
         Some(ParsedBridgeDispatch::Call(call)) => pending_serial.push_back(call),
         Some(ParsedBridgeDispatch::Completion(completion)) => ready.push_back(completion),
         None => {}
     }
-}
-
-fn bridge_path_is_high_priority_serial(path: &str) -> bool {
-    matches!(path, "/session/delete")
 }
 
 fn bridge_path_can_run_concurrently(path: &str) -> bool {
@@ -618,6 +686,17 @@ where
         method: &str,
         params: Value,
     ) -> anyhow::Result<Value> {
+        self.send_command_with_timeout(message_id, method, params, CDP_COMMAND_TIMEOUT)
+            .await
+    }
+
+    async fn send_command_with_timeout(
+        &mut self,
+        message_id: u64,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> anyhow::Result<Value> {
         self.socket
             .send(Message::Text(
                 json!({
@@ -631,17 +710,14 @@ where
             .await
             .with_context(|| format!("failed to send CDP command {method} id {message_id}"))?;
 
-        tokio::time::timeout(
-            CDP_COMMAND_TIMEOUT,
-            self.wait_for_id(message_id, method.to_string()),
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "timed out waiting for CDP command {method} id {message_id} response after {}s",
-                CDP_COMMAND_TIMEOUT.as_secs()
-            )
-        })?
+        tokio::time::timeout(timeout, self.wait_for_id(message_id, method.to_string()))
+            .await
+            .with_context(|| {
+                format!(
+                    "timed out waiting for CDP command {method} id {message_id} response after {}s",
+                    timeout.as_secs()
+                )
+            })?
     }
 
     async fn wait_for_id(&mut self, message_id: u64, method: String) -> anyhow::Result<Value> {
@@ -745,42 +821,55 @@ fn next_message_id() -> u64 {
 mod tests {
     use super::*;
 
+    #[test]
+    fn loopback_websocket_aliases_expand_to_ipv4_first() {
+        assert_eq!(
+            cdp_websocket_connect_candidates("ws://localhost:9229/devtools/page/ABC"),
+            [
+                "ws://127.0.0.1:9229/devtools/page/ABC",
+                "ws://localhost:9229/devtools/page/ABC",
+            ]
+        );
+        assert_eq!(
+            cdp_websocket_connect_candidates("ws://[::1]:9229/devtools/page/ABC"),
+            [
+                "ws://127.0.0.1:9229/devtools/page/ABC",
+                "ws://[::1]:9229/devtools/page/ABC",
+            ]
+        );
+        assert_eq!(
+            cdp_websocket_connect_candidates("ws://localhost/devtools/page/ABC"),
+            [
+                "ws://127.0.0.1/devtools/page/ABC",
+                "ws://localhost/devtools/page/ABC",
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_websocket_hosts_stay_single_candidate() {
+        for url in [
+            "ws://127.0.0.1:9229/devtools/page/ABC",
+            "wss://codex.example/devtools/page/ABC",
+        ] {
+            let candidates = cdp_websocket_connect_candidates(url);
+            assert_eq!(candidates, [url], "{url} must be tried as written");
+        }
+    }
+
+    #[test]
+    fn websocket_connect_candidates_share_one_connect_budget() {
+        assert_eq!(cdp_connect_attempt_timeout(0), CDP_CONNECT_TIMEOUT);
+        assert_eq!(cdp_connect_attempt_timeout(1), CDP_CONNECT_TIMEOUT);
+        assert_eq!(cdp_connect_attempt_timeout(2), CDP_CONNECT_TIMEOUT / 2);
+    }
+
     fn bridge_call(request_id: &str, path: &str) -> ParsedBridgeDispatch {
         ParsedBridgeDispatch::Call(BridgeCall {
             request_id: request_id.to_string(),
             path: path.to_string(),
             payload: json!({}),
         })
-    }
-
-    #[test]
-    fn session_deletes_jump_ahead_of_pending_serial_reads_without_reordering_each_other() {
-        let mut pending_concurrent = VecDeque::new();
-        let mut pending_serial = VecDeque::new();
-        let mut ready = VecDeque::new();
-        for (request_id, path) in [
-            ("usage", "/thread-usage-history"),
-            ("delete-1", "/session/delete"),
-            ("settings", "/settings/set"),
-            ("delete-2", "/session/delete"),
-        ] {
-            queue_bridge_dispatch(
-                Some(bridge_call(request_id, path)),
-                &mut pending_concurrent,
-                &mut pending_serial,
-                &mut ready,
-            );
-        }
-
-        assert!(pending_concurrent.is_empty());
-        assert!(ready.is_empty());
-        assert_eq!(
-            pending_serial
-                .iter()
-                .map(|call| call.request_id.as_str())
-                .collect::<Vec<_>>(),
-            ["delete-1", "delete-2", "usage", "settings"]
-        );
     }
 
     #[test]

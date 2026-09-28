@@ -21,7 +21,11 @@ pub struct CdpTarget {
 
 pub async fn list_targets(debug_port: u16) -> anyhow::Result<Vec<CdpTarget>> {
     let client = cdp_http_client()?;
+    // Chrome 150+ rejects DevTools HTTP when the Host header is an IP literal
+    // and answers the same listener for `localhost`. Older builds and an
+    // IPv6-only socket still need the explicit loopback URLs.
     let urls = [
+        format!("http://localhost:{debug_port}/json"),
         format!("http://127.0.0.1:{debug_port}/json"),
         format!("http://[::1]:{debug_port}/json"),
     ];
@@ -91,7 +95,13 @@ pub fn is_injectable_page_target(target: &CdpTarget) -> bool {
 }
 
 pub fn is_codex_page_target(target: &CdpTarget) -> bool {
-    if target.target_type != "page" {
+    if target.target_type != "page"
+        || target
+            .url
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with("data:text/html")
+    {
         return false;
     }
     let haystack = format!("{} {}", target.title, target.url).to_lowercase();
@@ -121,8 +131,7 @@ fn is_chatgpt_desktop_page(title: &str, url: &str) -> bool {
         && (url == "https://chatgpt.com"
             || url.starts_with("https://chatgpt.com/")
             || url == "https://chat.openai.com"
-            || url.starts_with("https://chat.openai.com/")
-            || url.starts_with("data:text/html"))
+            || url.starts_with("https://chat.openai.com/"))
 }
 
 fn is_packaged_codex_page(url: &str) -> bool {

@@ -1286,10 +1286,30 @@ async fn prepare_native_runtime_state(
 async fn prepare_startup_patches(
     home: &std::path::Path,
     config: &CodeyConfig,
-) -> StartupPatchState {
+) -> Result<StartupPatchState> {
+    // The vendored helper only probes the port on Windows. A busy 9229 on macOS
+    // (another Node/Electron debugger) otherwise leaves Chromium without a
+    // remote-debugging port and the injection times out after 30 s.
+    prepare_startup_patches_with_port_selector(home, config, || {
+        codey_runtime_core::ports::try_select_packaged_codex_debug_port_with(
+            9229,
+            true,
+            codey_runtime_core::ports::can_bind_loopback_port,
+            codey_runtime_core::ports::try_find_available_loopback_port,
+        )
+    })
+    .await
+}
+
+async fn prepare_startup_patches_with_port_selector(
+    home: &std::path::Path,
+    config: &CodeyConfig,
+    select_debug_port: impl FnOnce() -> std::io::Result<u16>,
+) -> Result<StartupPatchState> {
+    let debug_port = select_debug_port().context("无法为 Codex 分配本地调试端口")?;
+    anyhow::ensure!(debug_port != 0, "无法为 Codex 分配有效的本地调试端口");
     let slim_codex_pet = config.slim_codex_pet;
     let pet_result = configure_startup_pet(home, slim_codex_pet).await;
-    let debug_port = codey_runtime_core::ports::select_packaged_codex_debug_port(9229);
     match pet_result {
         Ok(Ok(_)) => {}
         Ok(Err(error)) => {
@@ -1324,7 +1344,7 @@ async fn prepare_startup_patches(
             );
         }
     };
-    StartupPatchState { debug_port }
+    Ok(StartupPatchState { debug_port })
 }
 
 async fn spawn_and_inject_runtime(
@@ -1534,7 +1554,12 @@ impl CodeyRuntime {
                 return Err(restore_runtime_config_after_error(home, error).await);
             }
         };
-        let patch = prepare_startup_patches(home, config).await;
+        let patch = match prepare_startup_patches(home, config).await {
+            Ok(patch) => patch,
+            Err(error) => {
+                return Err(restore_runtime_config_after_error(home, error).await);
+            }
+        };
         let SpawnedRenderer {
             app_dir,
             spawned,

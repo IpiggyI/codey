@@ -38,15 +38,17 @@ const CONTEXT_1M_WINDOW: u64 = 1_000_000;
 const DEFAULT_CONTEXT_WINDOW: u64 = 272_000;
 const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT: u64 = 95;
 const PERSONALITY_PLACEHOLDER: &str = "{{ personality }}";
-const OFFICIAL_MODELS: [(&str, &str); 8] = [
+/// Official account models Codey exposes. Upstream retires a model by dropping
+/// it from the Codex model cache, so a retired slug has to leave this list in
+/// the same change; otherwise the picker keeps offering a model the account can
+/// no longer call, and catalog generation fails when the bundled template is
+/// gone.
+const OFFICIAL_MODELS: [(&str, &str); 5] = [
     ("gpt-6-astra", "GPT-6-Astra"),
     ("gpt-5.6-sol", "GPT-5.6-Sol"),
     ("gpt-5.6-terra", "GPT-5.6-Terra"),
     ("gpt-5.6-luna", "GPT-5.6-Luna"),
     ("gpt-5.5", "GPT-5.5"),
-    ("gpt-5.4", "GPT-5.4"),
-    ("gpt-5.4-mini", "GPT-5.4-Mini"),
-    ("gpt-5.3-codex-spark", "GPT-5.3-Codex-Spark"),
 ];
 
 #[derive(Debug)]
@@ -1797,7 +1799,7 @@ mod tests {
                 "gpt-5.6-luna" => {
                     model["multi_agent_version"] = json!("v1");
                 }
-                "gpt-5.4" => {
+                "gpt-5.4" | "gpt-5.3-codex-spark" => {
                     model["multi_agent_version"] = json!("disabled");
                 }
                 _ => {
@@ -2257,7 +2259,7 @@ mod tests {
 
         assert_eq!(
             refresh_for_provider(home.path(), true, None, &[]).unwrap(),
-            7
+            6
         );
         let catalog: Value =
             serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
@@ -2275,7 +2277,6 @@ mod tests {
                 "gpt-6-astra",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
-                "gpt-5.4-mini",
             ]
         );
         assert!(models.iter().all(|model| model["visibility"] == "list"));
@@ -2305,6 +2306,7 @@ mod tests {
             .unwrap();
         assert_eq!(luna["multi_agent_version"], "v1");
         assert!(models.iter().all(|model| model["slug"] != "gpt-5.4"));
+        assert!(models.iter().all(|model| model["slug"] != "gpt-5.4-mini"));
         let spark = models
             .iter()
             .find(|model| model["slug"] == "gpt-5.3-codex-spark")
@@ -2312,11 +2314,6 @@ mod tests {
         assert_eq!(spark["supported_in_api"], true);
         assert_eq!(spark["supports_reasoning_summaries"], true);
         assert_no_native_fast(spark);
-        let mini = models
-            .iter()
-            .find(|model| model["slug"] == "gpt-5.4-mini")
-            .unwrap();
-        assert_no_native_fast(mini);
         assert_eq!(
             models
                 .iter()
@@ -2657,10 +2654,12 @@ mod tests {
                 "gpt-5.6-luna",
             ]
         );
-        for slug in ["gpt-5.4-mini", "gpt-5.3-codex-spark"] {
-            let model = models.iter().find(|model| model["slug"] == slug).unwrap();
-            assert_no_native_fast(model);
-        }
+        assert!(models.iter().all(|model| model["slug"] != "gpt-5.4-mini"));
+        let spark = models
+            .iter()
+            .find(|model| model["slug"] == "gpt-5.3-codex-spark")
+            .unwrap();
+        assert_no_native_fast(spark);
     }
 
     #[test]
@@ -3204,14 +3203,12 @@ mod tests {
         refresh_for_provider(home.path(), true, None, &[]).unwrap();
 
         let catalog: Value = serde_json::from_slice(&fs::read(catalog_path).unwrap()).unwrap();
+        let models = catalog["models"].as_array().unwrap();
         for slug in ["gpt-5.4-mini", "gpt-5.3-codex-spark"] {
-            let model = catalog["models"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|model| model["slug"] == slug)
-                .unwrap();
-            assert_no_native_fast(model);
+            assert!(
+                models.iter().all(|model| model["slug"] != slug),
+                "{slug} is retired and a stale fast flag must not bring it back"
+            );
         }
     }
 
@@ -3498,12 +3495,21 @@ mod tests {
                 .find(|model| model.slug == "gpt-5.6-sol")
                 .is_some_and(|model| model.supported)
         );
+        for slug in &excluded {
+            assert!(
+                state
+                    .official_models
+                    .iter()
+                    .any(|model| model.slug == *slug && !model.supported),
+                "{slug} should stay excluded"
+            );
+        }
         assert!(
             state
                 .official_models
                 .iter()
-                .filter(|model| model.slug != "gpt-5.6-sol")
-                .all(|model| !model.supported)
+                .any(|model| model.slug == "gpt-5.3-codex-spark" && model.supported),
+            "a cache-visible model outside the fixed official list stays selectable"
         );
     }
 

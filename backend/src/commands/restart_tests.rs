@@ -740,7 +740,7 @@ fn manual_model_selection_separates_official_and_other_models() {
 
     let (supported_official, selected_third_party) = validate_manual_model_selection(
         &official,
-        &["gpt-5.6-luna".into(), "gpt-5.4".into()],
+        &["gpt-5.6-luna".into(), "gpt-5.5".into()],
         &[
             " provider-manual-model ".into(),
             "provider-manual-model".into(),
@@ -748,7 +748,7 @@ fn manual_model_selection_separates_official_and_other_models() {
     )
     .unwrap();
 
-    assert_eq!(supported_official, ["gpt-5.6-luna", "gpt-5.4"]);
+    assert_eq!(supported_official, ["gpt-5.6-luna", "gpt-5.5"]);
     assert_eq!(selected_third_party, ["provider-manual-model"]);
 }
 
