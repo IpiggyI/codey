@@ -42,19 +42,30 @@ pub async fn save_default_model(
         model_target_for_current_provider(&config, requested_model)
             .or_else(|| {
                 config.runtime_model_targets().into_iter().find(|target| {
-                    model_id::equal(&target.upstream_model, requested_model)
-                        || model_id::equal(&target.alias, requested_model)
+                    model_matches_current_provider_selector(
+                        &target.upstream_model,
+                        requested_model,
+                        &target.provider_id,
+                    ) || model_id::equal(&target.alias, requested_model)
                 })
             })
             .ok_or_else(|| format!("模型 {requested_model} 当前不可用，无法设为默认"))?
     };
-    config.default_model = target.alias;
+    let stored_default = if config.local_router_enabled {
+        target.alias.clone()
+    } else {
+        target.upstream_model.clone()
+    };
+    config.default_model = stored_default.clone();
     // `active_profile_id` remains a compatibility projection for older features.
     // The model default is authoritative and therefore owns that projection.
     if let Some(profile) = target_profile {
         config.active_profile_id = profile.id;
     }
     config = config.normalize();
+    if !config.local_router_enabled {
+        config.default_model = stored_default;
+    }
     config.settings_revision = config.settings_revision.saturating_add(1);
     let model_state = current_model_state_async(&config).await?;
     save_config_to_store(state, &config).await?;

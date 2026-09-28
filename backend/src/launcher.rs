@@ -336,18 +336,8 @@ fn should_inject_runtime_model_catalog(
         || should_install_codey_model_catalog(official_only, catalog_available, custom_context)
 }
 
-fn runtime_default_model(
-    config: &CodeyConfig,
-    codey_catalog_installed: bool,
-    model_state: &model_catalog::ModelSelectionState,
-) -> Option<String> {
-    let model = if codey_catalog_installed {
-        config.default_model().unwrap_or(&model_state.default_model)
-    } else {
-        // Official-account-only launches keep Codex's built-in catalog.
-        &model_state.default_model
-    };
-    let model = model.trim();
+fn runtime_default_model(model_state: &model_catalog::ModelSelectionState) -> Option<String> {
+    let model = model_state.default_model.trim();
     (!model.is_empty()).then(|| model.to_string())
 }
 
@@ -530,7 +520,11 @@ async fn prepare_startup_model_catalog(
         custom_context,
     );
     if !install_codey_catalog
-        && custom_context_budget_dropped(official_only, catalog_available_for_runtime, custom_context)
+        && custom_context_budget_dropped(
+            official_only,
+            catalog_available_for_runtime,
+            custom_context,
+        )
     {
         error_log::record_failure(
             "patch_degraded",
@@ -576,8 +570,7 @@ async fn prepare_codex_startup_state(
         model_state,
     } = startup_catalog;
     let runtime_config_home = home.to_path_buf();
-    let runtime_default_model =
-        runtime_default_model(config, model_catalog_path.is_some(), &model_state);
+    let runtime_default_model = runtime_default_model(&model_state);
     let fast_context_tools = config.fast_context_tools;
     let mut runtime_subagent_config = config.clone();
     subagent_policy::reconcile_with_model_state(&mut runtime_subagent_config, Some(&model_state));

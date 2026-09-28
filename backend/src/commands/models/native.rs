@@ -116,7 +116,6 @@ pub(crate) fn native_model_state_for_provider(
             .map(Vec::as_slice)
             .unwrap_or_default()
     };
-    let requested_default = native_upstream_model(config, &config.subagent_model);
     let catalog_dir = crate::codex_config::codey_model_catalog_dir();
     let user_catalog = crate::codex_config::configured_user_model_catalog_path(home, &catalog_dir)
         .map_err(|error| error.to_string())?;
@@ -129,7 +128,7 @@ pub(crate) fn native_model_state_for_provider(
         &selected_models,
         manual_third_party_models,
         &excluded_official_models,
-        Some(&requested_default),
+        config.default_model(),
         user_catalog.as_deref(),
     )
     .map_err(|error| error.to_string())

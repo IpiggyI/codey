@@ -572,17 +572,17 @@ fn effective_default_model(
         .map(str::trim)
         .filter(|model| !model.is_empty());
     if let Some(requested) = requested {
-        if let Some(model) = official_models
-            .iter()
-            .find(|model| model.supported && model_id::equal(&model.slug, requested))
+        if let Some(model) =
+            available_requested_model(official_models, third_party_models, requested)
         {
-            return model.slug.clone();
+            return model;
         }
-        if let Some(model) = third_party_models
-            .iter()
-            .find(|model| model_id::equal(model, requested))
+        let stripped = model_id::strip_route_alias(requested);
+        if stripped != requested
+            && let Some(model) =
+                available_requested_model(official_models, third_party_models, stripped)
         {
-            return model.clone();
+            return model;
         }
     }
     official_models
@@ -591,6 +591,23 @@ fn effective_default_model(
         .map(|model| model.slug.clone())
         .or_else(|| third_party_models.first().cloned())
         .unwrap_or_default()
+}
+
+fn available_requested_model(
+    official_models: &[OfficialModelAvailability],
+    third_party_models: &[String],
+    requested: &str,
+) -> Option<String> {
+    official_models
+        .iter()
+        .find(|model| model.supported && model_id::equal(&model.slug, requested))
+        .map(|model| model.slug.clone())
+        .or_else(|| {
+            third_party_models
+                .iter()
+                .find(|model| model_id::equal(model, requested))
+                .cloned()
+        })
 }
 
 pub fn is_available(catalog_dir: &Path) -> bool {
@@ -3349,6 +3366,42 @@ mod tests {
     }
 
     #[test]
+    fn selection_state_resolves_a_leftover_alias_to_the_upstream_id() {
+        let home = tempfile::tempdir().unwrap();
+        write_cache(home.path());
+
+        let state =
+            selection_state(home.path(), true, None, &[], Some("openai/gpt-6-astra")).unwrap();
+
+        assert_eq!(state.first_available_model(), Some("gpt-5.6-sol"));
+        assert_eq!(state.default_model, "gpt-6-astra");
+        assert!(
+            state
+                .official_models
+                .iter()
+                .any(|model| model.slug == "gpt-6-astra" && model.supported)
+        );
+    }
+
+    #[test]
+    fn selection_state_keeps_a_slash_containing_third_party_id() {
+        let home = tempfile::tempdir().unwrap();
+        write_cache(home.path());
+        let upstream = vec!["org/model-a".into(), "model-a".into(), "live-model".into()];
+
+        let state = selection_state(
+            home.path(),
+            false,
+            Some(&upstream),
+            &upstream,
+            Some("org/model-a"),
+        )
+        .unwrap();
+
+        assert_eq!(state.default_model, "org/model-a");
+    }
+
+    #[test]
     fn selection_state_uses_requested_default_when_available() {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
@@ -3378,6 +3431,23 @@ mod tests {
         assert_eq!(state.available_model("third-model"), Some("third-model"));
         assert_eq!(state.available_model("gpt-5.4"), None);
         assert!(state.official_models.is_empty());
+    }
+
+    #[test]
+    fn leftover_alias_missing_from_the_current_list_falls_back_to_the_first_available_model() {
+        let home = tempfile::tempdir().unwrap();
+        write_cache(home.path());
+
+        let state = selection_state(
+            home.path(),
+            true,
+            None,
+            &[],
+            Some("openai/not-a-real-model"),
+        )
+        .unwrap();
+
+        assert_eq!(state.default_model, "gpt-5.6-sol");
     }
 
     #[test]
@@ -3434,6 +3504,37 @@ mod tests {
                 .iter()
                 .filter(|model| model.slug != "gpt-5.6-sol")
                 .all(|model| !model.supported)
+        );
+    }
+
+    #[test]
+    fn leftover_alias_does_not_revive_an_excluded_official_model() {
+        let home = tempfile::tempdir().unwrap();
+        write_cache(home.path());
+        let excluded = default_official_model_slugs()
+            .into_iter()
+            .filter(|model| model != "gpt-5.6-sol")
+            .collect::<Vec<_>>();
+
+        let state = selection_state_with_manual_models_and_exclusions(
+            home.path(),
+            home.path(),
+            true,
+            None,
+            &[],
+            &[],
+            &excluded,
+            Some("openai/gpt-6-astra"),
+        )
+        .unwrap();
+
+        assert_eq!(state.default_model, "gpt-5.6-sol");
+        assert!(
+            state
+                .official_models
+                .iter()
+                .find(|model| model.slug == "gpt-6-astra")
+                .is_some_and(|model| !model.supported)
         );
     }
 

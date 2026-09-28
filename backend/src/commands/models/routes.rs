@@ -272,6 +272,17 @@ pub(crate) fn profile_matches_current_snapshot(
     profile_matches_snapshot(profile, snapshot)
 }
 
+pub(crate) fn model_matches_current_provider_selector(
+    model: &str,
+    requested_model: &str,
+    provider_id: &str,
+) -> bool {
+    let stripped = model_id::strip_route_alias(requested_model);
+    model_id::equal(model, requested_model)
+        || model_id::equal(&model_id::model_alias(provider_id, model), requested_model)
+        || (stripped != requested_model && model_id::equal(model, stripped))
+}
+
 pub(crate) fn model_target_for_current_provider(
     config: &CodeyConfig,
     requested_model: &str,
@@ -281,8 +292,7 @@ pub(crate) fn model_target_for_current_provider(
         .enabled_route_models(&snapshot.ownership_key)
         .into_iter()
         .find(|model| {
-            model_id::equal(model, requested_model)
-                || model_id::equal(&model_id::model_alias(&snapshot.id, model), requested_model)
+            model_matches_current_provider_selector(model, requested_model, &snapshot.id)
         })?;
     let alias = model_id::model_alias(&snapshot.id, &upstream);
     Some(crate::config::RuntimeModelTarget {

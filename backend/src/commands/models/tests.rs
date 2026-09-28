@@ -191,6 +191,36 @@ fn native_model_state_and_subagent_defaults_follow_only_the_current_provider() {
 }
 
 #[test]
+fn native_model_state_resolves_a_leftover_default_alias() {
+    let home = tempfile::tempdir().unwrap();
+    let provider = codex_provider::CurrentProvider {
+        id: "relay".into(),
+        name: "Relay".into(),
+        official: false,
+        supports_remote_compaction: false,
+        base_url: "https://relay.example/v1".into(),
+    };
+    let config = CodeyConfig {
+        local_router_enabled: false,
+        default_model: "openai/gpt-6-astra".into(),
+        selected_models_by_provider: BTreeMap::from([(
+            "relay".into(),
+            vec!["gpt-5.6-sol".into(), "gpt-6-astra".into()],
+        )]),
+        upstream_models_by_provider: BTreeMap::from([(
+            "relay".into(),
+            vec!["gpt-5.6-sol".into(), "gpt-6-astra".into()],
+        )]),
+        ..CodeyConfig::default()
+    };
+
+    let state = native_model_state_for_provider(&config, &provider, home.path()).unwrap();
+
+    assert_eq!(state.third_party_models, ["gpt-5.6-sol", "gpt-6-astra"]);
+    assert_eq!(state.default_model, "gpt-6-astra");
+}
+
+#[test]
 fn disabled_native_provider_returns_an_explicit_empty_renderer_catalog() {
     let home = tempfile::tempdir().unwrap();
     let mut route = configured_route("route-a", Some("model-a"));
@@ -1450,6 +1480,51 @@ fn provider_route_restart_detection_catches_route_connection_changes() {
     changed.profiles[0].base_url = "https://route-a.example/v2".into();
 
     assert!(provider_route_requires_restart(&applied, &changed));
+}
+
+#[tokio::test]
+async fn save_default_model_stores_the_upstream_id_when_the_built_in_router_is_off() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut profile = ProviderProfile::new("Relay");
+    profile.id = "relay-profile".into();
+    profile.source_provider_id = Some("relay".into());
+    profile.base_url = "https://relay.example/v1".into();
+    profile.api_key = "relay-key".into();
+    profile.normalize();
+    let snapshot = crate::model_ownership::CurrentProviderSnapshot::from_parts(
+        "relay",
+        "https://relay.example/v1",
+        "responses",
+        false,
+    );
+    let mut config = CodeyConfig {
+        local_router_enabled: false,
+        active_profile_id: profile.id.clone(),
+        profiles: vec![profile],
+        default_model: "openai/gpt-6-astra".into(),
+        selected_models_by_provider: BTreeMap::from([(
+            snapshot.ownership_key.clone(),
+            vec!["gpt-5.6-sol".into(), "gpt-6-astra".into()],
+        )]),
+        upstream_models_by_provider: BTreeMap::from([(
+            snapshot.ownership_key.clone(),
+            vec!["gpt-5.6-sol".into(), "gpt-6-astra".into()],
+        )]),
+        ..CodeyConfig::default()
+    };
+    config.attach_current_provider_snapshot(snapshot);
+    let state = std::sync::Arc::new(super::super::AppState {
+        store: crate::config::ConfigStore::new(directory.path().join("config.json")),
+        config: tokio::sync::RwLock::new(config),
+        ..super::super::AppState::default()
+    });
+
+    let result = save_default_model(&state, "openai/gpt-6-astra".into(), None)
+        .await
+        .unwrap();
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(state.config.read().await.default_model, "gpt-6-astra");
 }
 
 #[test]

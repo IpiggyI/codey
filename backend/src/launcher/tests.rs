@@ -171,23 +171,29 @@ async fn startup_fallback_does_not_inject_a_catalog_for_an_isolated_chat_route()
 
 #[test]
 fn generated_catalog_uses_the_configured_default_selector() {
-    let config = CodeyConfig {
-        default_model: "shared-model".into(),
-        ..CodeyConfig::default()
+    let leftover = model_catalog::ModelSelectionState {
+        default_model: "gpt-6-astra".into(),
+        ..model_catalog::ModelSelectionState::default()
     };
-    let state = model_catalog::ModelSelectionState {
+    assert_eq!(
+        runtime_default_model(&leftover).as_deref(),
+        Some("gpt-6-astra")
+    );
+
+    let resolved = model_catalog::ModelSelectionState {
         default_model: "catalog-default".into(),
         ..model_catalog::ModelSelectionState::default()
     };
-
     assert_eq!(
-        runtime_default_model(&config, true, &state).as_deref(),
-        Some("shared-model")
-    );
-    assert_eq!(
-        runtime_default_model(&config, false, &state).as_deref(),
+        runtime_default_model(&resolved).as_deref(),
         Some("catalog-default")
     );
+
+    let empty = model_catalog::ModelSelectionState {
+        default_model: "   ".into(),
+        ..model_catalog::ModelSelectionState::default()
+    };
+    assert_eq!(runtime_default_model(&empty), None);
 }
 
 #[test]
