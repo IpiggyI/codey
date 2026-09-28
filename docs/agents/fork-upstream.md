@@ -26,7 +26,7 @@
 
 2026-09-23 调查了上游 v1.1.6（`921dab3`），没有挑选。远端 `v1.0.1` 标签现为 `341284d`，与上表 `aae9fe6` 的树相同。差异表仍相对这份内容。摘要在 [2026-09-23-digest.md](../upstream-sync/2026-09-23-digest.md)。
 
-2026-09-28 调查了上游 v1.1.6 到 `upstream/master`（`a95f1f5`，含 v1.1.13），没有挑选。摘要在 [2026-09-28-digest.md](../upstream-sync/2026-09-28-digest.md)。
+2026-09-28 调查并按主题挑选了上游 v1.1.6 到 `upstream/master`（`a95f1f5`，含 v1.1.13）的提交，vendor 整目录替换到 `a95f1f5`。摘要在 [2026-09-28-digest.md](../upstream-sync/2026-09-28-digest.md)。
 
 ## 当前差异
 
