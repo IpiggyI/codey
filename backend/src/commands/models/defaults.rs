@@ -82,6 +82,10 @@ pub async fn save_default_model(
     })))
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "参数逐项对应官方模型保存命令的请求字段"
+)]
 pub async fn save_official_route_models(
     state: &Arc<AppState>,
     route_id: String,

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -50,10 +50,6 @@ const OFFICIAL_MODELS: [(&str, &str); 5] = [
     ("gpt-5.6-luna", "GPT-5.6-Luna"),
     ("gpt-5.5", "GPT-5.5"),
 ];
-/// Account `/models` payloads live beside `models_cache.json` in the Codex
-/// home. They name the slugs the signed-in account can call. This is not the
-/// Codey-owned derived catalog.
-const ACCOUNT_RUNTIME_SNAPSHOT_RELATIVE_PATH: &str = "model-catalogs/codey-runtime-catalog.json";
 
 #[derive(Debug)]
 struct RuntimeModelCacheUnavailable;
@@ -430,6 +426,7 @@ pub fn selection_state_with_manual_models(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn selection_state_with_manual_models_and_exclusions(
     home: &Path,
     catalog_dir: &Path,
@@ -928,7 +925,6 @@ fn read_official_entries(
     paths.extend([
         codex_home.join("models_cache.json"),
         derived_catalog_path(catalog_dir),
-        codex_home.join(ACCOUNT_RUNTIME_SNAPSHOT_RELATIVE_PATH),
     ]);
     let signature = catalog_signature(&paths);
     let cache = OFFICIAL_ENTRIES_CACHE.get_or_init(|| std::sync::Mutex::new(None));
@@ -956,7 +952,6 @@ fn read_official_entries_uncached(
 ) -> Result<OfficialCatalogEntries> {
     let mut catalogs = Vec::new();
     let mut native_models = None;
-    let mut account_snapshot_models = None;
     let mut bundled_fast_model_slugs = HashSet::new();
     let mut last_error = None;
     for (index, path) in paths.iter().enumerate() {
@@ -975,15 +970,7 @@ fn read_official_entries_uncached(
                 continue;
             }
         };
-        let account_snapshot = is_account_runtime_snapshot_path(path)
-            && value
-                .get("codey_account_snapshot")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
         let models = official_models_from_value(&value);
-        if account_snapshot {
-            account_snapshot_models = Some(models.clone());
-        }
         if index == 0 {
             native_models = Some(models);
         } else if !models.is_empty() {
@@ -1000,19 +987,6 @@ fn read_official_entries_uncached(
                     .map(model_id::key)
             }));
             catalogs.push(models);
-        }
-    }
-
-    // Account `/models` payloads name the slugs the signed-in account can call,
-    // but they omit the instruction templates Codex needs to launch a model.
-    // Fill those from the local cache before deciding the snapshot is unusable,
-    // so a newly released slug is not dropped back to the fixed fallback list.
-    if !complete_candidate_from_fallbacks && let Some(account_models) = account_snapshot_models {
-        let mut templates = native_models.clone().unwrap_or_default();
-        templates.extend(catalogs.iter().flatten().cloned());
-        let completed = complete_account_models(&account_models, &templates);
-        if let Some(entries) = account_snapshot_catalog(&completed) {
-            return Ok(entries);
         }
     }
 
@@ -1104,260 +1078,6 @@ fn read_official_entries_uncached(
         candidates: templates.clone(),
         templates,
     })
-}
-
-fn is_account_runtime_snapshot_path(path: &Path) -> bool {
-    path.ends_with(ACCOUNT_RUNTIME_SNAPSHOT_RELATIVE_PATH)
-}
-
-/// Merges the account-specific model response into the Codey-owned runtime
-/// snapshot. The account response is the availability list. It usually has no
-/// Codex instruction template, so an existing runtime entry keeps those
-/// fields, and a slug the local catalog has never seen borrows the closest
-/// template.
-pub(crate) fn merge_account_runtime_models(home: &Path, models: &[Value]) -> Result<()> {
-    let path = home.join(ACCOUNT_RUNTIME_SNAPSHOT_RELATIVE_PATH);
-    let mut catalog = fs::read(&path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .unwrap_or_else(|| json!({"models": [], "codey_account_snapshot": true}));
-    let entries = catalog
-        .get_mut("models")
-        .and_then(Value::as_array_mut)
-        .ok_or_else(|| anyhow::anyhow!("Codex 模型目录快照格式无效"))?;
-    let mut templates = cached_instruction_templates(home);
-    templates.extend(entries.iter().cloned());
-    let mut positions = entries
-        .iter()
-        .enumerate()
-        .filter_map(|(index, model)| {
-            model
-                .get("slug")
-                .and_then(Value::as_str)
-                .map(|slug| (model_id::key(slug), index))
-        })
-        .collect::<HashMap<_, _>>();
-    for model in models.iter().filter(|model| {
-        model
-            .get("slug")
-            .and_then(Value::as_str)
-            .is_some_and(|slug| !slug.trim().is_empty())
-    }) {
-        let key = model_id::key(model["slug"].as_str().unwrap_or_default());
-        let existing = positions
-            .get(&key)
-            .copied()
-            .map(|index| entries[index].clone());
-        let merged = merge_account_model(existing.as_ref(), model, &templates);
-        if model_instruction_source(&merged).is_some() {
-            templates.push(merged.clone());
-        }
-        if let Some(index) = positions.get(&key).copied() {
-            entries[index] = merged;
-        } else {
-            positions.insert(key, entries.len());
-            entries.push(merged);
-        }
-    }
-    catalog["codey_account_snapshot"] = Value::Bool(true);
-    let bytes = serde_json::to_vec_pretty(&catalog).context("序列化官方模型目录快照失败")?;
-    crate::fs_util::atomic_write_private_with_parent(&path, &bytes)
-        .context("写入官方模型目录快照失败")
-}
-
-fn cached_instruction_templates(home: &Path) -> Vec<Value> {
-    fs::read(home.join("models_cache.json"))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .map(|value| official_models_from_value(&value))
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|model| model_instruction_source(model).is_some())
-        .collect()
-}
-
-fn complete_account_models(models: &[Value], templates: &[Value]) -> Vec<Value> {
-    models
-        .iter()
-        .map(|model| {
-            if model_instruction_source(model).is_some() || model_is_hidden(model) {
-                return model.clone();
-            }
-            let slug = model.get("slug").and_then(Value::as_str).unwrap_or("");
-            instruction_template_for(slug, templates)
-                .map(|template| account_model_with_runtime_template(template, model))
-                .unwrap_or_else(|| model.clone())
-        })
-        .collect()
-}
-
-fn account_snapshot_catalog(models: &[Value]) -> Option<OfficialCatalogEntries> {
-    if !snapshot_has_runtime_models(models) {
-        return None;
-    }
-    let mut seen = HashSet::new();
-    let entries = models
-        .iter()
-        .filter(|model| {
-            model_instruction_source(model).is_some()
-                && model
-                    .get("visibility")
-                    .and_then(Value::as_str)
-                    .is_none_or(|visibility| visibility != "hide")
-        })
-        .filter_map(|model| {
-            let slug = model.get("slug").and_then(Value::as_str)?.trim();
-            if slug.is_empty() || !seen.insert(model_id::key(slug)) {
-                return None;
-            }
-            let mut model = model.clone();
-            let display_name = model
-                .get("display_name")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .unwrap_or(slug)
-                .to_string();
-            normalize_official_model(&mut model, slug, &display_name, seen.len() - 1);
-            Some(model)
-        })
-        .collect::<Vec<_>>();
-    if entries.is_empty() {
-        return None;
-    }
-    Some(OfficialCatalogEntries {
-        candidates: entries.clone(),
-        templates: entries,
-    })
-}
-
-fn merge_account_model(existing: Option<&Value>, incoming: &Value, templates: &[Value]) -> Value {
-    if model_instruction_source(incoming).is_some() {
-        return existing
-            .map(|existing| account_model_with_runtime_template(existing, incoming))
-            .unwrap_or_else(|| incoming.clone());
-    }
-    if let Some(existing) = existing.filter(|model| model_instruction_source(model).is_some()) {
-        return account_model_with_runtime_template(existing, incoming);
-    }
-    let slug = incoming.get("slug").and_then(Value::as_str).unwrap_or("");
-    if let Some(template) = instruction_template_for(slug, templates) {
-        return account_model_with_runtime_template(template, incoming);
-    }
-    existing.cloned().unwrap_or_else(|| incoming.clone())
-}
-
-/// `gpt-6-sol` and `gpt-5.6-sol` share the trailing family token.
-fn model_family_key(slug: &str) -> &str {
-    slug.rsplit_once('-')
-        .map(|(_, family)| family)
-        .unwrap_or(slug)
-}
-
-fn model_is_hidden(model: &Value) -> bool {
-    model.get("visibility").and_then(Value::as_str) == Some("hide")
-}
-
-fn instruction_template_for<'a>(slug: &str, templates: &'a [Value]) -> Option<&'a Value> {
-    let same_slug = templates.iter().find(|model| {
-        model
-            .get("slug")
-            .and_then(Value::as_str)
-            .is_some_and(|candidate| model_id::equal(candidate, slug))
-            && model_instruction_source(model).is_some()
-    });
-    if let Some(model) = same_slug {
-        return Some(model);
-    }
-    let family = model_family_key(slug);
-    templates
-        .iter()
-        .find(|model| {
-            !model_is_hidden(model)
-                && model_instruction_source(model).is_some()
-                && model
-                    .get("slug")
-                    .and_then(Value::as_str)
-                    .is_some_and(|candidate| model_family_key(candidate) == family)
-        })
-        .or_else(|| {
-            templates
-                .iter()
-                .find(|model| !model_is_hidden(model) && model_instruction_source(model).is_some())
-        })
-}
-
-fn account_model_with_runtime_template(base: &Value, account: &Value) -> Value {
-    let base_slug = base.get("slug").and_then(Value::as_str).unwrap_or("");
-    let account_slug = account.get("slug").and_then(Value::as_str).unwrap_or("");
-    let mut merged = overlay_account_fields(base, account);
-    if !account_slug.is_empty() && !model_id::equal(base_slug, account_slug) {
-        if account
-            .get("description")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .is_none_or(|description| description.is_empty())
-        {
-            let name = account
-                .get("display_name")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|name| !name.is_empty())
-                .unwrap_or(account_slug);
-            merged["description"] = json!(name);
-        }
-        if let Some(object) = merged.as_object_mut() {
-            object.remove("upgrade");
-            object.remove("availability_nux");
-        }
-    }
-    merged
-}
-
-fn overlay_account_fields(base: &Value, account: &Value) -> Value {
-    let Some(account_object) = account.as_object() else {
-        return base.clone();
-    };
-    let mut merged = base.clone();
-    let Some(merged_object) = merged.as_object_mut() else {
-        return account.clone();
-    };
-    for (key, value) in account_object {
-        if value.is_null() {
-            continue;
-        }
-        if key == "base_instructions"
-            && value
-                .as_str()
-                .is_none_or(|instructions| instructions.trim().is_empty())
-        {
-            continue;
-        }
-        if key == "model_messages"
-            && model_instruction_source(&json!({ "model_messages": value })).is_none()
-        {
-            continue;
-        }
-        if key == "description"
-            && value
-                .as_str()
-                .is_some_and(|description| description.trim().is_empty())
-        {
-            continue;
-        }
-        merged_object.insert(key.clone(), value.clone());
-    }
-    merged
-}
-
-/// A runtime snapshot is useful even when upstream has added a model Codey has
-/// not learned about yet. The account-backed directory only needs at least one
-/// complete model entry; the fixed list remains the fallback when nothing can
-/// produce a snapshot.
-fn snapshot_has_runtime_models(models: &[Value]) -> bool {
-    models
-        .iter()
-        .any(|model| model_instruction_source(model).is_some())
 }
 
 fn fill_missing_model_fields(target: &mut Value, source: &Value) {
@@ -2295,155 +2015,6 @@ mod tests {
             .unwrap(),
             cache
         );
-    }
-
-    #[test]
-    fn account_snapshot_borrows_a_local_template_for_slugs_the_fallback_list_omits() {
-        let home = tempfile::tempdir().unwrap();
-        write_cache(home.path());
-        let snapshot = json!({
-            "codey_account_snapshot": true,
-            "models": [
-                {
-                    "slug": "gpt-6-sol",
-                    "display_name": "GPT-6-Sol",
-                    "visibility": "list",
-                    "description": "GPT-6-Sol"
-                },
-                {
-                    "slug": "gpt-6-luna",
-                    "display_name": "GPT-6-Luna",
-                    "visibility": "list"
-                },
-                {"slug": "codex-auto-review", "visibility": "hide"}
-            ]
-        });
-        fs::create_dir_all(home.path().join("model-catalogs")).unwrap();
-        fs::write(
-            home.path().join(ACCOUNT_RUNTIME_SNAPSHOT_RELATIVE_PATH),
-            serde_json::to_vec(&snapshot).unwrap(),
-        )
-        .unwrap();
-
-        let state = selection_state(home.path(), true, None, &[], None).unwrap();
-        assert_eq!(state.official_model_ids, ["gpt-6-sol", "gpt-6-luna"]);
-        let sol = state
-            .official_models
-            .iter()
-            .find(|model| model.slug == "gpt-6-sol")
-            .unwrap();
-        assert!(
-            sol.supported_reasoning_efforts
-                .iter()
-                .any(|effort| effort == "ultra")
-        );
-        assert_eq!(
-            refresh_for_provider(home.path(), true, None, &[]).unwrap(),
-            2
-        );
-        let catalog: Value =
-            serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
-                .unwrap();
-        let models = catalog["models"].as_array().unwrap();
-        assert!(
-            models
-                .iter()
-                .all(|model| model_instruction_source(model).is_some())
-        );
-        let luna = models
-            .iter()
-            .find(|model| model["slug"] == "gpt-6-luna")
-            .unwrap();
-        assert_eq!(luna["description"], "GPT-6-Luna");
-        assert_eq!(luna["multi_agent_version"], "v1");
-        let sol = models
-            .iter()
-            .find(|model| model["slug"] == "gpt-6-sol")
-            .unwrap();
-        assert_eq!(sol["multi_agent_version"], "v2");
-        assert_eq!(sol["description"], "GPT-6-Sol");
-    }
-
-    #[test]
-    fn merging_account_models_preserves_runtime_templates_for_new_slugs() {
-        let home = tempfile::tempdir().unwrap();
-        fs::create_dir_all(home.path().join("model-catalogs")).unwrap();
-        let snapshot = json!({
-            "codey_account_snapshot": true,
-            "models": [
-                {
-                    "slug": "gpt-5.6-sol",
-                    "display_name": "GPT-5.6-Sol",
-                    "visibility": "list",
-                    "description": "Local Sol",
-                    "base_instructions": "sol instructions",
-                    "multi_agent_version": "v2"
-                },
-                {
-                    "slug": "gpt-5.6-luna",
-                    "display_name": "GPT-5.6-Luna",
-                    "visibility": "list",
-                    "description": "Local Luna",
-                    "base_instructions": "luna instructions",
-                    "multi_agent_version": "v1"
-                }
-            ]
-        });
-        fs::write(
-            home.path().join(ACCOUNT_RUNTIME_SNAPSHOT_RELATIVE_PATH),
-            serde_json::to_vec(&snapshot).unwrap(),
-        )
-        .unwrap();
-
-        merge_account_runtime_models(
-            home.path(),
-            &[
-                json!({
-                    "slug": "gpt-5.6-sol",
-                    "display_name": "GPT-5.6-Sol",
-                    "visibility": "list",
-                    "description": "Updated Sol"
-                }),
-                json!({
-                    "slug": "gpt-6-sol",
-                    "display_name": "GPT-6-Sol",
-                    "visibility": "list",
-                    "description": "GPT-6-Sol"
-                }),
-                json!({
-                    "slug": "gpt-6-luna",
-                    "display_name": "GPT-6-Luna",
-                    "visibility": "list"
-                }),
-            ],
-        )
-        .unwrap();
-
-        let saved: Value = serde_json::from_slice(
-            &fs::read(home.path().join(ACCOUNT_RUNTIME_SNAPSHOT_RELATIVE_PATH)).unwrap(),
-        )
-        .unwrap();
-        let models = saved["models"].as_array().unwrap();
-        let sol = models
-            .iter()
-            .find(|model| model["slug"] == "gpt-5.6-sol")
-            .unwrap();
-        assert_eq!(sol["base_instructions"], "sol instructions");
-        assert_eq!(sol["description"], "Updated Sol");
-        let gpt6_sol = models
-            .iter()
-            .find(|model| model["slug"] == "gpt-6-sol")
-            .unwrap();
-        assert_eq!(gpt6_sol["base_instructions"], "sol instructions");
-        assert_eq!(gpt6_sol["description"], "GPT-6-Sol");
-        assert_eq!(gpt6_sol["multi_agent_version"], "v2");
-        let gpt6_luna = models
-            .iter()
-            .find(|model| model["slug"] == "gpt-6-luna")
-            .unwrap();
-        assert_eq!(gpt6_luna["base_instructions"], "luna instructions");
-        assert_eq!(gpt6_luna["description"], "GPT-6-Luna");
-        assert_eq!(gpt6_luna["multi_agent_version"], "v1");
     }
 
     #[test]
