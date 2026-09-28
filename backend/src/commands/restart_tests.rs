@@ -460,6 +460,15 @@ fn restart_sensitive_config_changes_are_detected() {
         &account_usage_change
     ));
 
+    let mut quota_unlock_change = applied.clone();
+    quota_unlock_change.quota_unlock_enabled = false;
+    assert!(config_requires_restart(
+        &applied,
+        &applied_models,
+        &applied_subagent,
+        &quota_unlock_change
+    ));
+
     let mut disabled_subagent_change = applied.clone();
     disabled_subagent_change.subagent_model = "gpt-5.6-sol".into();
     assert!(!config_requires_restart(

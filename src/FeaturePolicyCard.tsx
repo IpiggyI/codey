@@ -571,6 +571,27 @@ function FeaturePolicyCardComponent({
               </small>
             </div>
           </div>
+
+          <div
+            className={`feature-card ${config.quotaUnlockEnabled ? "active" : ""}`}
+          >
+            <div className="feature-card-header">
+              <strong>额度用尽后仍可发送</strong>
+              <Switch
+                checked={config.quotaUnlockEnabled}
+                disabled={isBusy}
+                onCheckedChange={(checked) =>
+                  onConfigChange({ ...config, quotaUnlockEnabled: checked })
+                }
+                aria-label="额度用尽后仍可发送"
+              />
+            </div>
+            <div className="feature-card-body">
+              <small>
+                官方额度耗尽后不锁定输入框，便于切换到 API 登录继续对话；关闭后需重启
+              </small>
+            </div>
+          </div>
         </div>
       </Card>
     </section>

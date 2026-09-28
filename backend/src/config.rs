@@ -681,10 +681,15 @@ pub struct CodeyConfig {
     /// renderer. Opt-in so the native warning remains visible by default.
     #[serde(default)]
     pub hide_full_access_warning: bool,
-    /// Shows the current ChatGPT account rate-limit windows beside the Codex
-    /// composer when auth.json has a usable ChatGPT login.
+    /// Shows the current ChatGPT account rate-limit windows in the Codex
+    /// sidebar footer when auth.json has a usable ChatGPT login.
     #[serde(default = "default_true")]
     pub show_account_usage_in_header: bool,
+    /// Injects the document-start quota-unlock script so Codex does not lock
+    /// the composer after the official quota is exhausted. Missing values stay
+    /// enabled. Changing it applies on the next Codex launch.
+    #[serde(default = "default_true")]
+    pub quota_unlock_enabled: bool,
     /// Local estimate of how long a conversation's prompt cache stays warm,
     /// in minutes. This is not a vendor-reported expiry.
     #[serde(default = "default_cache_valid_minutes")]
@@ -777,6 +782,7 @@ impl Default for CodeyConfig {
             initial_route_import_completed: false,
             hide_full_access_warning: false,
             show_account_usage_in_header: true,
+            quota_unlock_enabled: true,
             cache_valid_minutes: DEFAULT_CACHE_VALID_MINUTES,
             official_account_available_this_launch: false,
             official_account_status_this_launch: LaunchOfficialAccountStatus::Unauthenticated,
@@ -3899,6 +3905,22 @@ mod tests {
             .normalize();
 
         assert!(config.show_account_usage_in_header);
+    }
+
+    #[test]
+    fn quota_unlock_defaults_to_enabled_for_existing_configs() {
+        let config = serde_json::from_str::<CodeyConfig>(r#"{"activeProfileId":"","profiles":[]}"#)
+            .unwrap()
+            .normalize();
+
+        assert!(config.quota_unlock_enabled);
+
+        let disabled = serde_json::from_str::<CodeyConfig>(
+            r#"{"activeProfileId":"","profiles":[],"quotaUnlockEnabled":false}"#,
+        )
+        .unwrap()
+        .normalize();
+        assert!(!disabled.quota_unlock_enabled);
     }
 
     #[test]

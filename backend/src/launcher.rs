@@ -1534,6 +1534,7 @@ impl CodeyRuntime {
             false,
             config.slim_codex_pet,
             config.hide_full_access_warning,
+            config.quota_unlock_enabled,
             &config.user_scripts,
         );
         resolve_startup_provider(config)?;

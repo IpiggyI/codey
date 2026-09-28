@@ -35,6 +35,7 @@ const PLUGIN_MARKETPLACE_FIX_SCRIPT: &str =
     include_str!("../../dist-overlay/inject/plugin-marketplace-fix.js");
 const PROMPT_OPTIMIZE_SCRIPT: &str = include_str!("../../dist-overlay/inject/prompt-optimize.js");
 const COMPOSER_USAGE_SCRIPT: &str = include_str!("../../dist-overlay/inject/composer-usage.js");
+const QUOTA_UNLOCK_SCRIPT: &str = include_str!("../../dist-overlay/inject/quota-unlock.js");
 const MAX_INJECTION_ERROR_CHARS: usize = 500;
 static SETTINGS_OVERLAY_LOAD_SCRIPT: OnceLock<Arc<str>> = OnceLock::new();
 static SESSION_TOOLS_LOAD_SCRIPT: OnceLock<Arc<str>> = OnceLock::new();
@@ -166,11 +167,12 @@ pub fn prepare_injection_scripts(
     local_router_enabled: bool,
     slim_codex_pet: bool,
     hide_full_access_warning: bool,
+    quota_unlock_enabled: bool,
     user_scripts: &[String],
 ) -> PreparedInjectionScripts {
     use InjectionScriptVisibility::{Feature, Internal};
 
-    let builtin_scripts = [
+    let mut builtin_scripts = vec![
         (
             "bridge-helpers",
             "桥接辅助",
@@ -295,21 +297,37 @@ pub fn prepare_injection_scripts(
         ),
         (
             "composer-usage",
-            "输入栏用量与额度",
+            "输入栏用量",
             COMPOSER_USAGE_SCRIPT,
             r#"(() => {
               const usage = window.__codeyComposerUsage;
               if (!usage || typeof usage.snapshot !== "function") return "";
               const snapshot = usage.snapshot();
               if (snapshot.ready !== true) return "";
-              return snapshot.usageVisible === true || snapshot.creditsVisible === true
-                ? "输入栏用量与额度芯片已就绪"
+              return snapshot.usageVisible === true
+                ? "输入栏用量芯片已就绪"
                 : { effective: false, inactive: true, detail: "等待输入栏" };
             })()"#
                 .to_string(),
             Feature,
         ),
     ];
+    if quota_unlock_enabled {
+        builtin_scripts.push((
+            "quota-unlock",
+            "额度用尽后仍可发送",
+            QUOTA_UNLOCK_SCRIPT,
+            r#"(() => {
+              const status = window.__codeyQuotaUnlock?.status?.();
+              if (!status) return "";
+              return status.enabled === true
+                ? { effective: true, detail: `额度状态兼容已处理 ${status.sanitized ?? 0} 次` }
+                : { effective: false, inactive: true, detail: "额度状态兼容已关闭" };
+            })()"#
+                .to_string(),
+            Feature,
+        ));
+    }
     let mut core_bundle = String::with_capacity(
         CODEY_BRIDGE_SCRIPT.len()
             + MODEL_WHITELIST_INJECT_SCRIPT.len()
@@ -319,6 +337,7 @@ pub fn prepare_injection_scripts(
             + PLUGIN_MARKETPLACE_FIX_SCRIPT.len()
             + PROMPT_OPTIMIZE_SCRIPT.len()
             + COMPOSER_USAGE_SCRIPT.len()
+            + QUOTA_UNLOCK_SCRIPT.len()
             + 4096,
     );
     let mut descriptors = Vec::with_capacity(builtin_scripts.len() + user_scripts.len());
@@ -1227,6 +1246,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             &["window.attempts = (window.attempts || 0) + 1; if (window.fail) throw new Error('retry');".to_string()],
         );
         let harness = r#"
@@ -1450,6 +1470,7 @@ assert.equal(nextPage.window.attempts, 1);
             true,
             false,
             false,
+            false,
             &["".to_string(), "window.userScriptRan = true;".to_string()],
         );
 
@@ -1531,7 +1552,7 @@ assert.equal(nextPage.window.attempts, 1);
 
     #[test]
     fn disabled_local_router_installs_only_native_model_selection_mode() {
-        let prepared = prepare_injection_scripts(false, false, false, &[]);
+        let prepared = prepare_injection_scripts(false, false, false, false, &[]);
 
         assert!(
             prepared
@@ -1550,9 +1571,34 @@ assert.equal(nextPage.window.attempts, 1);
     }
 
     #[test]
+    fn quota_unlock_is_injected_at_document_start_only_when_enabled() {
+        let enabled = prepare_injection_scripts(false, false, false, true, &[]);
+        assert!(
+            enabled
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.id == "quota-unlock"
+                    && descriptor.name == "额度用尽后仍可发送"
+                    && descriptor.visibility == InjectionScriptVisibility::Feature)
+        );
+        assert!(enabled.scripts[0].contains("__codeyQuotaUnlock"));
+        assert!(enabled.scripts[0].contains("__codeyNativeJsonParse"));
+
+        let disabled = prepare_injection_scripts(false, false, false, false, &[]);
+        assert!(
+            !disabled
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.id == "quota-unlock")
+        );
+        assert!(!disabled.scripts[0].contains("__codeyNativeJsonParse"));
+    }
+
+    #[test]
     fn injection_statuses_preserve_script_order_and_report_missing_entries() {
         let prepared = prepare_injection_scripts(
             true,
+            false,
             false,
             false,
             &["window.userScriptRan = true;".to_string()],

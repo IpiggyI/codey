@@ -9,6 +9,10 @@ const source = readFileSync(
   new URL("../public/composer-usage.js", import.meta.url),
   "utf8",
 );
+const quotaUnlockSource = readFileSync(
+  new URL("../public/quota-unlock.js", import.meta.url),
+  "utf8",
+);
 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 20));
 
@@ -55,13 +59,6 @@ class FakeMutationObserver {
     this.observed = false;
   }
 }
-
-const walkText = (node) => {
-  if (!node) return "";
-  const parts = [node.textContent || "", node.innerHTML || ""];
-  for (const child of node.children || []) parts.push(walkText(child));
-  return parts.join(" ");
-};
 
 const createEnvironment = (options = {}) => {
   const documentElement = new FakeElement("html");
@@ -292,7 +289,9 @@ const createEnvironment = (options = {}) => {
       return: null,
     };
   }
-  vm.runInContext(source, vm.createContext(sandbox));
+  const context = vm.createContext(sandbox);
+  if (options.quotaUnlock) vm.runInContext(quotaUnlockSource, context);
+  vm.runInContext(source, context);
 
   return {
     accessButton,
@@ -334,7 +333,7 @@ const createEnvironment = (options = {}) => {
       Object.assign(settingsResult, patch);
     },
     snapshot: () => sandbox.window.__codeyComposerUsage.snapshot(),
-    refreshCredits: () => sandbox.window.__codeyComposerUsage.refreshCredits(),
+    context,
     window: sandbox.window,
   };
 };
@@ -707,17 +706,11 @@ test("reads existing usage from a legacy manager", async () => {
 test("hides the usage chip until a matching thread token event arrives", async () => {
   const env = createEnvironment();
   await flush();
-  await env.refreshCredits();
 
   const usage = env.getElementById("codey-thread-usage");
-  const credits = env.getElementById("codey-account-credits");
   assert.ok(usage);
-  assert.ok(credits);
+  assert.equal(env.getElementById("codey-account-credits"), null);
   assert.equal(usage.style.display, "none");
-  assert.equal(credits.style.display, "inline-flex");
-  assert.equal(credits.parentElement, env.toolbar);
-  assert.equal(credits.nextElementSibling, env.accessButton);
-  assert.match(env.snapshot().creditsLabel, /85%/);
 
   env.emitNotification(tokenUsageMessage("other-thread"));
   assert.equal(usage.style.display, "none");
@@ -736,7 +729,7 @@ test("usage popover lists screenshot fields and skips invented cost", async () =
   const popover = env.getElementById("codey-thread-usage-popover");
   assert.match(popover.innerHTML, /用量/);
   assert.match(popover.innerHTML, /账号/);
-  assert.match(popover.innerHTML, /user@example.com/);
+  assert.match(popover.innerHTML, />gs</);
   assert.match(popover.innerHTML, /上下文/);
   assert.match(popover.innerHTML, /最近缓存命中率/);
   assert.match(popover.innerHTML, /CH 99\.6%/);
@@ -751,91 +744,30 @@ test("usage popover lists screenshot fields and skips invented cost", async () =
   assert.doesNotMatch(popover.innerHTML, /输出速度/);
 });
 
-test("credits chip prefers the 5-hour window and keeps the 7-day tile", async () => {
-  const env = createEnvironment();
+test("quota unlock keeps the conversation usage chip on real token counts", async () => {
+  const env = createEnvironment({ quotaUnlock: true });
   await flush();
-  await env.refreshCredits();
-
-  const credits = env.getElementById("codey-account-credits");
-  const popover = env.getElementById("codey-account-credits-popover");
-  assert.equal(credits.style.display, "inline-flex");
-  assert.match(credits.getAttribute("aria-label"), /5 小时额度 85%/);
-  assert.match(popover.innerHTML, /5 小时额度/);
-  assert.match(popover.innerHTML, /7 天额度/);
-  assert.doesNotMatch(popover.innerHTML, /周额度/);
-  assert.doesNotMatch(popover.innerHTML, /更新于/);
-  assert.match(popover.innerHTML, /Pro 20x/);
-  assert.match(popover.innerHTML, /Credits 余额/);
-  assert.match(popover.innerHTML, /42/);
-  assert.match(walkText(popover), /剩余/);
-});
-
-test("falls back to the generic app-server rate limit when /account/usage errors", async () => {
-  const env = createEnvironment({
-    accountUsage: { status: "error", message: "官方额度接口返回 401" },
-  });
-  await flush();
-  await env.refreshCredits();
-  const credits = env.getElementById("codey-account-credits");
-  const popover = env.getElementById("codey-account-credits-popover");
-  assert.equal(credits.style.display, "inline-flex");
-  assert.match(popover.innerHTML, /7 天额度/);
-  assert.doesNotMatch(popover.innerHTML, /5 小时额度/);
-  assert.match(popover.innerHTML, /Plus/);
-  assert.match(popover.innerHTML, /77/);
-});
-
-test("hides credits when ChatGPT login is unavailable", async () => {
-  const env = createEnvironment({
-    accountUsage: { status: "unavailable", reason: "chatgpt_login_missing" },
-    accountLabel: "",
-  });
-  await flush();
-  await env.refreshCredits();
-  const credits = env.getElementById("codey-account-credits");
-  assert.equal(credits.style.display, "none");
   env.emitNotification(tokenUsageMessage());
-  const popover = env.getElementById("codey-thread-usage-popover");
-  assert.match(popover.innerHTML, />gs</);
+  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
+  const raw = JSON.stringify({
+    rateLimits: { primary: { used_percent: 100 } },
+    primary: { used_percent: 100, window_minutes: 10080 },
+  });
+  const literal = JSON.stringify(raw);
+  assert.equal(vm.runInContext(`JSON.parse(${literal}).primary.used_percent`, env.context), 3);
+  assert.equal(env.window.__codeyNativeJsonParse(raw).primary.used_percent, 100);
 });
 
-test("hover opens the credits popover", async () => {
+test("composer chip does not render the account quota control", async () => {
   const env = createEnvironment();
   await flush();
-  await env.refreshCredits();
-  const credits = env.getElementById("codey-account-credits");
-  const popover = env.getElementById("codey-account-credits-popover");
-  assert.equal(popover.hidden, true);
-  credits.dispatchEvent({ type: "pointerenter" });
-  assert.equal(popover.hidden, false);
-  assert.equal(credits.getAttribute("aria-expanded"), "true");
-});
-
-test("credits chip stays transparent until hover and uses an svg ring", async () => {
-  const env = createEnvironment();
-  await flush();
-  await env.refreshCredits();
+  assert.equal(env.getElementById("codey-account-credits"), null);
+  assert.equal(env.getElementById("codey-account-credits-popover"), null);
+  assert.equal(env.calls.includes("/account/usage"), false);
   const style = env.getElementById("codey-composer-usage-style");
   assert.match(style.textContent, /background:\s*transparent/);
-  assert.match(style.textContent, /rgba\(127, 127, 127, 0\.08\)/);
-  assert.doesNotMatch(style.textContent, /conic-gradient/);
   assert.match(style.textContent, /\[data-codey-usage-ring\][\s\S]*position:\s*absolute/);
-  assert.match(style.textContent, /\[data-codey-credits-ring\][\s\S]*position:\s*absolute/);
-  const credits = env.getElementById("codey-account-credits");
-  const ring = credits.querySelector("[data-codey-credits-ring]");
-  const svg = ring?.children[0];
-  assert.equal(svg?.tagName, "SVG");
-  // The capsule is measured in chip pixels, so nothing is stretched.
-  assert.equal(svg?.getAttribute?.("preserveAspectRatio"), null);
-  assert.equal(svg?.getAttribute?.("viewBox"), "0 0 80 36");
-  assert.equal(svg?.children.length, 2);
-  const arc = svg?.children[1];
-  assert.match(arc?.getAttribute?.("d"), /^M 40 6\.8 H /);
-  assert.equal(arc?.getAttribute?.("pathLength"), "100");
-  assert.match(arc?.getAttribute?.("stroke-dasharray"), /^\d+(\.\d+)? 100$/);
-  const popover = env.getElementById("codey-account-credits-popover");
-  assert.match(String(popover.style.backgroundImage), /radial-gradient/);
-  assert.equal(popover.style.borderRadius, "14px");
+  assert.doesNotMatch(style.textContent, /data-codey-credits-ring/);
 });
 
 test("does not register the usage listener as a method after a filtered subscribe succeeds", async () => {

@@ -228,7 +228,7 @@ function ModelSectionComponent({
               checked={showAccountUsageInHeader}
               disabled={isBusy}
               onCheckedChange={(checked) => onToggleAccountUsage?.(checked)}
-              aria-label="在输入栏显示账号额度"
+              aria-label="在侧栏底部显示账号额度"
             />
           </div>
           <Button

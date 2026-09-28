@@ -1520,6 +1520,7 @@ async fn save_codey_config_locked(
     }
     config.hide_full_access_warning = config_input.hide_full_access_warning;
     config.show_account_usage_in_header = config_input.show_account_usage_in_header;
+    config.quota_unlock_enabled = config_input.quota_unlock_enabled;
     config.cache_valid_minutes = config_input.cache_valid_minutes;
     let mut config = config.normalize();
     validate_official_account_config_change(&previous, &config)?;
@@ -2178,6 +2179,7 @@ pub(super) fn config_requires_restart_with_route_status(
         || applied.codex_app_path != current.codex_app_path
         || applied.user_scripts != current.user_scripts
         || applied.slim_codex_pet != current.slim_codex_pet
+        || applied.quota_unlock_enabled != current.quota_unlock_enabled
         || applied.gpu_launch_mode != current.gpu_launch_mode
         || applied.fast_context_tools != current.fast_context_tools
         || applied.subagent_optimization != current.subagent_optimization

@@ -181,6 +181,7 @@ if (import.meta.env.DEV) {
       },
       hideFullAccessWarning: false,
       showAccountUsageInHeader: true,
+      quotaUnlockEnabled: true,
       cacheValidMinutes: 30,
     };
     let previewModelState: ModelState = {

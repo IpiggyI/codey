@@ -1,29 +1,22 @@
-// Composer chips for thread usage and ChatGPT account credits.
-// Token counts come from Codex `thread/tokenUsage/updated`. Account credits
-// stay on `/account/usage` with `account/rateLimits/read` as fallback.
+// Composer chip for the current conversation's token usage and prompt-cache
+// countdown. Token counts come from Codex `thread/tokenUsage/updated`.
 // Subscribe through manager RPC or legacy requestClient callbacks, then read
-// stored usage when entering a thread. Copy host chip chrome and the SVG ring
-// only. Keep Codey's
-// product contract: 5h/7d labels, plan + Credits balance, CH → context% → 用量,
-// live cache remaining ring on CH, hover 缓存剩余, hide usage until token data,
-// and never invent unit prices.
+// stored usage when entering a thread. Account quota lives in the sidebar.
+// Keep Codey's product contract: CH → context% → 用量, live cache remaining
+// ring on CH, hover 缓存剩余, hide usage until token data, and never invent
+// unit prices.
 (() => {
   const moduleLoaded = window.__codeyComposerUsageModuleLoaded === true;
   window.__codeyComposerUsageModuleLoaded = true;
   if (moduleLoaded && window.__codeyComposerUsage) return;
 
   const settingsPath = "/settings/get";
-  const accountUsagePath = "/account/usage";
   const styleId = "codey-composer-usage-style";
   const usageRootId = "codey-thread-usage";
-  const creditsRootId = "codey-account-credits";
   const usagePopoverId = "codey-thread-usage-popover";
-  const creditsPopoverId = "codey-account-credits-popover";
   const configChangedEvent = "codey:config-changed";
   const injectionStatusId = "composer-usage";
   const injectionStatusChangedEvent = "codey-injection-status-changed";
-  const accountUsageRefreshIntervalMs = 60_000;
-  const accountUsageTimeoutMs = 8_000;
   const cacheValidMinutesMin = 1;
   const cacheValidMinutesMax = 180;
   const cacheValidMinutesDefault = 30;
@@ -45,21 +38,12 @@
 
   let ready = false;
   let providerId = "";
-  let accountLabel = "";
-  let creditsResult = null;
-  let creditsPollingEnabled = true;
-  let creditsCheckInFlight = false;
-  let creditsTimer = 0;
   let usageByThread = new Map();
   let inputElement = null;
   let usageRoot = null;
-  let creditsRoot = null;
   let usagePopover = null;
-  let creditsPopover = null;
   let usageOpen = false;
-  let creditsOpen = false;
   let usageCloseTimer = 0;
-  let creditsCloseTimer = 0;
   let scanTimer = 0;
   let observer = null;
   let unsubscribeMutations = null;
@@ -213,22 +197,11 @@
     };
   };
 
-  const remainingPercent = (usedPercent) =>
-    Math.min(100, Math.max(0, 100 - Number(usedPercent)));
-
-  const creditsTone = (usedPercent) => {
-    if (usedPercent >= 90) return "hot";
-    if (usedPercent >= 70) return "warn";
-    return "ok";
-  };
-
   const toneColor = (tone) => {
     if (tone === "hot") return "#ff3b30";
     if (tone === "warn") return "#ffbf00";
     return "#22c55e";
   };
-
-  const formatCreditsPercent = (value) => `${decimal(value, 1)}%`;
 
   const SVG_NS = "http://www.w3.org/2000/svg";
   const tokenUsageNotificationMethod = "thread/tokenUsage/updated";
@@ -441,67 +414,6 @@
     return targets;
   };
 
-  const windowKind = (window) => {
-    const minutes = Number(window?.windowMinutes);
-    if (!Number.isFinite(minutes) || !Number.isFinite(Number(window?.usedPercent))) {
-      return null;
-    }
-    if (minutes >= 6 * 24 * 60 && minutes <= 8 * 24 * 60) return "seven-day";
-    if (minutes >= 270 && minutes <= 330) return "five-hour";
-    return null;
-  };
-
-  const windowLabel = (kind) => {
-    if (kind === "five-hour") return "5 小时额度";
-    if (kind === "seven-day") return "7 天额度";
-    return "账号额度";
-  };
-
-  const planLabel = (planType) => {
-    const raw = String(planType || "").trim();
-    if (!raw) return "";
-    const compact = raw.toLowerCase().replace(/[\s_$-]+/g, "");
-    if (compact === "5x" || compact.includes("pro5x") || compact.includes("pro100")) {
-      return "Pro 5x";
-    }
-    if (compact === "pro" || compact.includes("pro20x") || compact.includes("pro200")) {
-      return "Pro 20x";
-    }
-    if (compact.includes("plus")) return "Plus";
-    if (compact.includes("free")) return "Free";
-    return raw.replace(/[_-]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
-  };
-
-  const resetTimeLabel = (resetsAt) => {
-    const timestamp = Number(resetsAt);
-    if (!Number.isFinite(timestamp) || timestamp <= 0) return "";
-    const resetAt = new Date(timestamp * 1000);
-    if (Number.isNaN(resetAt.getTime())) return "";
-    const now = new Date();
-    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-    const startOfResetDay = new Date(
-      resetAt.getFullYear(),
-      resetAt.getMonth(),
-      resetAt.getDate(),
-    ).getTime();
-    const dayOffset = Math.round((startOfResetDay - startOfToday) / (24 * 60 * 60 * 1000));
-    const time = resetAt.toLocaleTimeString("zh-CN", {
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-    });
-    if (dayOffset === 0) return `今天 ${time} 重置`;
-    if (dayOffset === 1) return `明天 ${time} 重置`;
-    return `${resetAt.getMonth() + 1}月${resetAt.getDate()}日 ${time} 重置`;
-  };
-
-  const creditsBalanceLabel = (credits) => {
-    if (!credits) return "";
-    if (credits.unlimited) return "不限";
-    if (credits.balance !== undefined && credits.balance !== null) return String(credits.balance);
-    return credits.hasCredits ? "可用" : "0";
-  };
-
   const addBreakdown = (target, source) => {
     if (!isRecord(source)) return;
     for (const [camel, snake] of tokenUsageFields) {
@@ -580,7 +492,7 @@
     return "用量";
   };
 
-  const accountIdentity = () => accountLabel || providerId || "未登录";
+  const accountIdentity = () => providerId || "未登录";
 
   const addStyle = () => {
     if (document.getElementById(styleId)) return;
@@ -620,34 +532,21 @@
       .codey-trigger-chip[data-state="open"] {
         background: rgba(127, 127, 127, 0.08);
       }
-      #${usageRootId},
-      #${creditsRootId} {
+      #${usageRootId} {
         position: relative;
         isolation: isolate;
         width: fit-content;
-      }
-      #${usageRootId} {
         max-width: min(180px, 30vw);
         color: var(--color-text-tertiary, #8f8f8f);
       }
-      #${creditsRootId} {
-        max-width: min(88px, 22vw);
-      }
-      #${usageRootId} [data-codey-usage-ring],
-      #${creditsRootId} [data-codey-credits-ring] {
+      #${usageRootId} [data-codey-usage-ring] {
         position: absolute;
         inset: 0;
         pointer-events: none;
         z-index: 0;
-      }
-      #${usageRootId} [data-codey-usage-ring] {
         display: none;
       }
-      #${creditsRootId} [data-codey-credits-ring] {
-        display: block;
-      }
-      #${usageRootId} [data-codey-usage-label],
-      #${creditsRootId} [data-codey-credits-label] {
+      #${usageRootId} [data-codey-usage-label] {
         position: relative;
         z-index: 1;
         display: inline-block;
@@ -656,27 +555,13 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      #${usagePopoverId}[hidden], #${creditsPopoverId}[hidden] { display: none !important; }
-      #${usagePopoverId} [data-codey-usage-title],
-      #${creditsPopoverId} [data-codey-credits-title] { font-size: 12.5px; font-weight: 600; }
-      #${usagePopoverId} [data-codey-usage-title] { margin-bottom: 6px; }
-      #${creditsPopoverId} [data-codey-credits-header] { margin-bottom: 11px; }
+      #${usagePopoverId}[hidden] { display: none !important; }
+      #${usagePopoverId} [data-codey-usage-title] { font-size: 12.5px; font-weight: 600; margin-bottom: 6px; }
       #${usagePopoverId} [data-codey-usage-row] {
         display: grid;
         grid-template-columns: minmax(0, 1fr) auto;
         gap: 20px;
         padding: 4px 0;
-      }
-      #${creditsPopoverId} [data-codey-credits-meta] {
-        display: flex;
-        gap: 12px;
-        align-items: flex-start;
-        justify-content: space-between;
-        margin-bottom: 5px;
-      }
-      #${usagePopoverId} [data-codey-usage-row] span:first-child,
-      #${creditsPopoverId} [data-codey-credits-reset] {
-        color: color-mix(in srgb, currentColor 62%, transparent);
       }
       #${usagePopoverId} [data-codey-usage-row] span:first-child {
         color: color-mix(in srgb, currentColor 68%, transparent);
@@ -685,45 +570,6 @@
         font-variant-numeric: tabular-nums;
         text-align: right;
         white-space: nowrap;
-      }
-      #${creditsPopoverId} [data-codey-credits-remaining] {
-        display: inline-flex;
-        align-items: baseline;
-        gap: 4px;
-        white-space: nowrap;
-        font-size: 26px;
-        font-weight: 700;
-        font-variant-numeric: tabular-nums;
-        color: var(--codey-credits-tone);
-      }
-      #${creditsPopoverId} [data-codey-credits-remaining] small {
-        font-size: 11px;
-        font-weight: 600;
-        opacity: .8;
-      }
-      #${creditsPopoverId} [data-codey-credits-bar] {
-        height: 6px;
-        overflow: hidden;
-        border-radius: 9999px;
-        background: color-mix(in srgb, currentColor 16%, transparent);
-      }
-      #${creditsPopoverId} [data-codey-credits-bar] > span {
-        display: block;
-        height: 100%;
-        width: calc(var(--codey-credits-remaining) * 1%);
-        border-radius: inherit;
-        background: var(--codey-credits-tone);
-      }
-      #${creditsPopoverId} [data-codey-credits-tile] { margin-bottom: 11px; }
-      #${creditsPopoverId} [data-codey-credits-tile]:last-of-type { margin-bottom: 0; }
-      #${creditsPopoverId} [data-codey-credits-plan] {
-        display: inline-block;
-        margin-left: 6px;
-        border: 1px solid color-mix(in srgb, CanvasText 18%, transparent);
-        border-radius: 4px;
-        padding: 0 4px;
-        font-size: 10px;
-        font-weight: 700;
       }
     `;
     document.documentElement.appendChild(style);
@@ -750,7 +596,7 @@
 
   const isVisibleControl = (element) => {
     if (!element) return false;
-    if (element === usageRoot || element === creditsRoot) return false;
+    if (element === usageRoot) return false;
     if (element.id === "codey-prompt-optimize-button") return false;
     if (element.closest?.(ignoredControlContainerSelector)) return false;
     if (element.closest?.("[hidden], [aria-hidden='true']")) return false;
@@ -1020,26 +866,6 @@
     return null;
   };
 
-  const findPermissionInsertionTarget = () => {
-    if (!inputElement?.parentElement) return null;
-    const inputRect = inputElement.getBoundingClientRect();
-    const seen = new Set();
-    let scope = inputElement.parentElement;
-    let depth = 0;
-    while (scope && depth < 8) {
-      for (const control of scope.querySelectorAll?.(composerControlSelector) || []) {
-        if (seen.has(control) || !isVisibleControl(control)) continue;
-        seen.add(control);
-        if (!controlIsNearInput(control, inputRect)) continue;
-        if (!/完全访问|full access/i.test(controlDescriptor(control))) continue;
-        return unwrapSingleton(control);
-      }
-      scope = scope.parentElement;
-      depth += 1;
-    }
-    return null;
-  };
-
   const isMountedBefore = (element, anchor, host) => {
     if (element?.parentElement !== host) return false;
     const children = [...(host.children || [])];
@@ -1078,13 +904,8 @@
     popover.style.font = "13px/1.35 system-ui, -apple-system, \"PingFang SC\", \"Segoe UI\", sans-serif";
     popover.style.letterSpacing = "0";
     popover.style.zIndex = "2147483647";
-    if (id === usagePopoverId) {
-      popover.style.width = "260px";
-      popover.style.maxWidth = "min(320px, calc(100vw - 24px))";
-    } else {
-      popover.style.width = "240px";
-      popover.style.maxWidth = "min(280px, calc(100vw - 24px))";
-    }
+    popover.style.width = "260px";
+    popover.style.maxWidth = "min(320px, calc(100vw - 24px))";
     applyPopoverChrome(popover);
     document.body.appendChild(popover);
     return popover;
@@ -1101,48 +922,35 @@
     popover.style.bottom = `${Math.max(12, (window.innerHeight || 800) - rect.top + 8)}px`;
   };
 
-  const setPopoverOpen = (kind, open) => {
-    const trigger = kind === "usage" ? usageRoot : creditsRoot;
-    const popover = kind === "usage" ? usagePopover : creditsPopover;
-    if (!trigger || !popover) return;
-    if (kind === "usage") usageOpen = open;
-    else creditsOpen = open;
-    popover.hidden = !open;
-    trigger.setAttribute("aria-expanded", String(open));
-    if (open) positionPopover(trigger, popover);
+  const setPopoverOpen = (open) => {
+    if (!usageRoot || !usagePopover) return;
+    usageOpen = open;
+    usagePopover.hidden = !open;
+    usageRoot.setAttribute("aria-expanded", String(open));
+    if (open) positionPopover(usageRoot, usagePopover);
   };
 
-  const bindChipPopover = (kind, trigger, popover) => {
+  const bindChipPopover = (trigger, popover) => {
     const cancelClose = () => {
-      if (kind === "usage") {
-        window.clearTimeout(usageCloseTimer);
-        usageCloseTimer = 0;
-      } else {
-        window.clearTimeout(creditsCloseTimer);
-        creditsCloseTimer = 0;
-      }
+      window.clearTimeout(usageCloseTimer);
+      usageCloseTimer = 0;
     };
     const scheduleClose = () => {
       cancelClose();
-      const timer = window.setTimeout(() => setPopoverOpen(kind, false), 140);
-      if (kind === "usage") usageCloseTimer = timer;
-      else creditsCloseTimer = timer;
+      usageCloseTimer = window.setTimeout(() => setPopoverOpen(false), 140);
     };
     trigger.addEventListener("click", () => {
       cancelClose();
-      const open = kind === "usage" ? !usageOpen : !creditsOpen;
-      setPopoverOpen(kind, open);
-      if (open && kind === "credits") void checkAccountUsage();
+      setPopoverOpen(!usageOpen);
     });
     trigger.addEventListener("pointerenter", () => {
       cancelClose();
-      setPopoverOpen(kind, true);
-      if (kind === "credits") void checkAccountUsage();
+      setPopoverOpen(true);
     });
     trigger.addEventListener("pointerleave", scheduleClose);
     trigger.addEventListener("focus", () => {
       cancelClose();
-      setPopoverOpen(kind, true);
+      setPopoverOpen(true);
     });
     trigger.addEventListener("blur", scheduleClose);
     popover.addEventListener("pointerenter", cancelClose);
@@ -1162,19 +970,7 @@
       usageRoot.appendChild(ring);
       usageRoot.appendChild(label);
       usagePopover = createPopover(usagePopoverId, "对话用量详情");
-      bindChipPopover("usage", usageRoot, usagePopover);
-    }
-    if (!creditsRoot) {
-      creditsRoot = createChip(creditsRootId, "账号额度详情");
-      const ring = document.createElement("span");
-      ring.setAttribute("data-codey-credits-ring", "");
-      ring.setAttribute("aria-hidden", "true");
-      const label = document.createElement("span");
-      label.setAttribute("data-codey-credits-label", "");
-      creditsRoot.appendChild(ring);
-      creditsRoot.appendChild(label);
-      creditsPopover = createPopover(creditsPopoverId, "账号额度详情");
-      bindChipPopover("credits", creditsRoot, creditsPopover);
+      bindChipPopover(usageRoot, usagePopover);
     }
   };
 
@@ -1222,7 +1018,7 @@
     const usage = currentUsage();
     if (!usageHasDisplayData(usage) || !inputElement) {
       usageRoot.style.display = "none";
-      setPopoverOpen("usage", false);
+      setPopoverOpen(false);
       scheduleCacheTick();
       return;
     }
@@ -1300,221 +1096,6 @@
         return `<div data-codey-usage-row><span>${escapeText(name)}</span><span${valueAttr}${valueStyle}>${escapeText(value)}</span></div>`;
       }).join("");
     scheduleCacheTick();
-  };
-
-  const creditsWindows = (result) => {
-    const windows = [];
-    for (const window of [result?.primary, result?.secondary]) {
-      const kind = windowKind(window);
-      if (!kind || windows.some((entry) => entry.kind === kind)) continue;
-      windows.push({ kind, window });
-    }
-    windows.sort((left, right) => {
-      if (left.kind === right.kind) return 0;
-      return left.kind === "five-hour" ? -1 : 1;
-    });
-    return windows;
-  };
-
-  const hideCredits = () => {
-    if (!creditsRoot) return;
-    creditsRoot.style.display = "none";
-    setPopoverOpen("credits", false);
-  };
-
-  const renderCredits = () => {
-    if (!creditsRoot || !creditsPopover) return;
-    if (!inputElement || creditsResult?.status !== "ok") {
-      hideCredits();
-      return;
-    }
-    const windows = creditsWindows(creditsResult);
-    if (!windows.length) {
-      hideCredits();
-      return;
-    }
-    const primary = windows[0];
-    const remaining = remainingPercent(primary.window.usedPercent);
-    const percent = formatCreditsPercent(remaining);
-    const tone = creditsTone(primary.window.usedPercent);
-    const color = toneColor(tone);
-    creditsRoot.style.setProperty("--codey-credits-remaining", String(remaining));
-    creditsRoot.style.setProperty("--codey-credits-tone", color);
-    const label = creditsRoot.querySelector?.("[data-codey-credits-label]");
-    if (label) {
-      label.textContent = percent;
-      label.style.color = color;
-    }
-    creditsRoot.setAttribute(
-      "aria-label",
-      `${windowLabel(primary.kind)} ${percent}`,
-    );
-    creditsRoot.title = `${windowLabel(primary.kind)} ${percent}`;
-    creditsRoot.style.display = "inline-flex";
-    const ring = creditsRoot.querySelector?.("[data-codey-credits-ring]");
-    const box = chipRingBox(creditsRoot);
-    if (ring && box) {
-      ring.replaceChildren(createUsageRing(remaining, {
-        ...box,
-        ringHeight: chipRingHeight,
-        strokeWidth: chipRingStrokeWidth,
-        color,
-      }));
-    }
-    const plan = planLabel(creditsResult.planType);
-    const secondary = windows.slice(1);
-    const balance = creditsBalanceLabel(creditsResult.credits);
-    creditsPopover.style.setProperty("--codey-credits-remaining", String(remaining));
-    creditsPopover.style.setProperty("--codey-credits-tone", color);
-    creditsPopover.style.backgroundImage =
-      `radial-gradient(160px 100px at 18% -10%, color-mix(in srgb, ${color} 20%, transparent), transparent 70%)`;
-    creditsPopover.innerHTML = `
-      <div data-codey-credits-header>
-        <div data-codey-credits-meta>
-          <div>
-            <div data-codey-credits-title>${escapeText(windowLabel(primary.kind))}${
-              plan ? `<span data-codey-credits-plan>${escapeText(plan)}</span>` : ""
-            }</div>
-            ${primary.window.resetsAt
-              ? `<div data-codey-credits-reset>${escapeText(resetTimeLabel(primary.window.resetsAt))}</div>`
-              : ""}
-          </div>
-          <div data-codey-credits-remaining><small>剩余</small>${escapeText(percent)}</div>
-        </div>
-        <div data-codey-credits-bar aria-hidden="true"><span></span></div>
-      </div>
-      ${secondary.map((entry) => {
-        const secondaryRemaining = remainingPercent(entry.window.usedPercent);
-        const secondaryPercent = formatCreditsPercent(secondaryRemaining);
-        const secondaryColor = toneColor(creditsTone(entry.window.usedPercent));
-        return `
-          <div data-codey-credits-tile data-window="${entry.kind}">
-            <div data-codey-credits-meta>
-              <div>
-                <div>${escapeText(windowLabel(entry.kind))}</div>
-                ${entry.window.resetsAt
-                  ? `<div data-codey-credits-reset>${escapeText(resetTimeLabel(entry.window.resetsAt))}</div>`
-                  : ""}
-              </div>
-              <div style="color:${secondaryColor};font-variant-numeric:tabular-nums">剩余 ${escapeText(secondaryPercent)}</div>
-            </div>
-            <div data-codey-credits-bar aria-hidden="true" style="--codey-credits-remaining:${secondaryRemaining};--codey-credits-tone:${secondaryColor}"><span></span></div>
-          </div>
-        `;
-      }).join("")}
-      ${balance ? `<div data-codey-credits-meta><span>Credits 余额</span><span>${escapeText(balance)}</span></div>` : ""}
-    `;
-  };
-
-  const normalizeAppServerAccountUsage = (payload) => {
-    const buckets = [];
-    if (isRecord(payload?.rateLimits)) buckets.push(payload.rateLimits);
-    const windowsByKind = new Map();
-    for (const bucket of buckets) {
-      for (const window of [bucket.primary, bucket.secondary]) {
-        const usedPercent = Number(window?.usedPercent);
-        const windowMinutes = Number(window?.windowDurationMins);
-        if (!Number.isFinite(usedPercent) || !Number.isFinite(windowMinutes) || windowMinutes <= 0) {
-          continue;
-        }
-        const normalized = {
-          usedPercent,
-          windowMinutes,
-          resetsAt: Number(window?.resetsAt) || undefined,
-        };
-        const kind = windowKind(normalized);
-        if (kind && !windowsByKind.has(kind)) windowsByKind.set(kind, normalized);
-      }
-    }
-    const fiveHour = windowsByKind.get("five-hour") || null;
-    const sevenDay = windowsByKind.get("seven-day") || null;
-    const credits = buckets.find((bucket) => bucket.credits)?.credits || payload.credits || null;
-    if (!fiveHour && !sevenDay && !credits) {
-      throw new Error("Codex 官方额度响应中没有可展示的信息");
-    }
-    const nextPlan = buckets
-      .map((bucket) => bucket.planType)
-      .find((value) => typeof value === "string" && value.trim())
-      || (typeof payload.planType === "string" ? payload.planType : undefined);
-    return {
-      status: "ok",
-      planType: nextPlan,
-      primary: fiveHour || sevenDay,
-      secondary: fiveHour && sevenDay ? sevenDay : null,
-      credits,
-      fetchedAt: Math.floor(Date.now() / 1000),
-    };
-  };
-
-  const readAccountUsageFromAppServer = async () => {
-    const loaded = typeof window.__codeyLoadSessionTools === "function"
-      ? await window.__codeyLoadSessionTools()
-      : window.__codeySessionToolsInjectLoaded === true;
-    if (!loaded || typeof window.__codeyReadAccountRateLimits !== "function") {
-      throw new Error("Codex 官方额度读取接口不可用");
-    }
-    const response = await window.__codeyReadAccountRateLimits();
-    return normalizeAppServerAccountUsage(response);
-  };
-
-  const scheduleAccountUsageCheck = (delayMs = accountUsageRefreshIntervalMs) => {
-    window.clearTimeout(creditsTimer);
-    creditsTimer = 0;
-    if (disposed || !creditsPollingEnabled || document.visibilityState === "hidden") return;
-    creditsTimer = window.setTimeout(() => {
-      creditsTimer = 0;
-      void checkAccountUsage();
-    }, delayMs);
-  };
-
-  const checkAccountUsage = async () => {
-    if (disposed || creditsCheckInFlight || document.visibilityState === "hidden") return creditsResult;
-    creditsCheckInFlight = true;
-    try {
-      let result = await withTimeout(
-        callBridge(accountUsagePath, {}, { timeoutMs: accountUsageTimeoutMs }),
-        accountUsageTimeoutMs,
-        "读取官方账号额度超时",
-      );
-      if (result?.status === "error") {
-        try {
-          result = await withTimeout(
-            readAccountUsageFromAppServer(),
-            accountUsageTimeoutMs,
-            "读取 Codex 官方额度超时",
-          );
-        } catch {
-          // Keep the backend error when AppServerManager is unavailable.
-        }
-      }
-      if (result?.status === "ok" && result.accountLabel) {
-        accountLabel = String(result.accountLabel);
-      }
-      if (result?.status === "disabled" || result?.status === "unavailable") {
-        creditsPollingEnabled = false;
-        creditsResult = result;
-        hideCredits();
-        return result;
-      }
-      creditsPollingEnabled = true;
-      if (result?.status === "error" && creditsResult?.status === "ok") {
-        return creditsResult;
-      }
-      creditsResult = result;
-      renderCredits();
-      return result;
-    } catch (error) {
-      if (creditsResult?.status === "ok") return creditsResult;
-      creditsResult = {
-        status: "error",
-        message: error instanceof Error ? error.message : String(error),
-      };
-      hideCredits();
-      return creditsResult;
-    } finally {
-      creditsCheckInFlight = false;
-      if (creditsPollingEnabled) scheduleAccountUsageCheck();
-    }
   };
 
   const applyProviderId = (nextId) => {
@@ -1737,15 +1318,11 @@
     inputElement = findComposerInput();
     if (!inputElement) {
       if (usageRoot) usageRoot.style.display = "none";
-      hideCredits();
       return false;
     }
     const usageTarget = findContextInsertionTarget() || findModelInsertionTarget();
     if (usageTarget) placeBefore(usageRoot, usageTarget);
-    const creditsTarget = findPermissionInsertionTarget();
-    if (creditsTarget) placeBefore(creditsRoot, creditsTarget);
     renderUsage();
-    renderCredits();
     void subscribeNotifications();
     return true;
   };
@@ -1754,7 +1331,7 @@
     if (disposed) return;
     ready = true;
     const mounted = updateChipPlacement();
-    publishInjectionStatus(mounted ? "输入栏用量与额度芯片已就绪" : "等待输入栏");
+    publishInjectionStatus(mounted ? "输入栏用量芯片已就绪" : "等待输入栏");
   };
 
   const scheduleScan = () => {
@@ -1780,7 +1357,6 @@
   };
 
   const onConfigChanged = (event) => {
-    creditsPollingEnabled = true;
     const nextMinutes = event?.detail?.config?.cacheValidMinutes;
     if (nextMinutes !== undefined) {
       cacheValidMinutes = normalizeCacheValidMinutes(nextMinutes);
@@ -1788,15 +1364,10 @@
     applyProviderId(event?.detail?.currentProviderSnapshot?.id);
     renderUsage();
     void loadSettings();
-    scheduleAccountUsageCheck(0);
   };
   const onFocus = () => {
     if (usageError) usageSelection = null;
     scan();
-    scheduleAccountUsageCheck(0);
-  };
-  const onVisibilityChanged = () => {
-    if (document.visibilityState !== "hidden") scheduleAccountUsageCheck(0);
   };
 
   const boot = async () => {
@@ -1806,13 +1377,9 @@
     await loadSettings();
     if (disposed) return;
     scan();
-    creditsPollingEnabled = true;
-    await checkAccountUsage();
-    if (disposed) return;
     renderUsage();
     window.addEventListener?.(configChangedEvent, onConfigChanged);
     window.addEventListener?.("focus", onFocus);
-    document.addEventListener?.("visibilitychange", onVisibilityChanged);
     document.addEventListener?.("keydown", onDocumentKeyDown, true);
     document.addEventListener?.("click", onDocumentClick, true);
   };
@@ -1821,16 +1388,11 @@
     snapshot: () => ({
       ready,
       providerId,
-      accountLabel,
       usageVisible: usageRoot?.style.display === "inline-flex",
-      creditsVisible: creditsRoot?.style.display === "inline-flex",
       subscribed: boundNotificationTargets.size > 0,
       usageError,
       usageLabel: usageRoot?.querySelector?.("[data-codey-usage-label]")?.textContent
         || usageRoot?.textContent
-        || "",
-      creditsLabel: creditsRoot?.querySelector?.("[data-codey-credits-label]")?.textContent
-        || creditsRoot?.textContent
         || "",
       cacheRemaining: usagePopover?.querySelector?.("[data-codey-cache-remaining]")?.textContent
         || "",
@@ -1845,21 +1407,19 @@
       threadCount: usageByThread.size,
     }),
     scan,
-    refreshCredits: checkAccountUsage,
     applyNotification: (message) => applyTokenUsage(message, { live: true }),
     dispose: () => {
       disposed = true;
       window.removeEventListener?.(configChangedEvent, onConfigChanged);
       window.removeEventListener?.("focus", onFocus);
-      document.removeEventListener?.("visibilitychange", onVisibilityChanged);
       document.removeEventListener?.("keydown", onDocumentKeyDown, true);
       document.removeEventListener?.("click", onDocumentClick, true);
       observer?.disconnect();
       unsubscribeNotifications?.();
-      for (const timer of [scanTimer, creditsTimer, usageCloseTimer, creditsCloseTimer, cacheTimer]) {
+      for (const timer of [scanTimer, usageCloseTimer, cacheTimer]) {
         window.clearTimeout(timer);
       }
-      for (const element of [usageRoot, creditsRoot, usagePopover, creditsPopover]) element?.remove();
+      for (const element of [usageRoot, usagePopover]) element?.remove();
     },
   };
 
