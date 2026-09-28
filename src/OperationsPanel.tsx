@@ -151,12 +151,15 @@ function OperationsPanelComponent({
               tone: "success" as const,
               description: "主进程已通过 Inspector evaluate 加载补丁。",
             }
-          : startupInjectionMode === "cli"
+          : startupInjectionMode === "cli" ||
+              startupInjectionMode === "cli_fuses_disabled"
             ? {
                 label: "CLI",
                 tone: "warning" as const,
                 description:
-                  "仅 CLI 包装器确认了 app-server 参数；主进程补丁未应用。",
+                  startupInjectionMode === "cli_fuses_disabled"
+                    ? "当前 Codex 已关闭主进程补丁入口，已通过 CLI 兼容方式启动；主进程补丁未应用。"
+                    : "仅 CLI 包装器确认了 app-server 参数；主进程补丁未应用。",
               }
             : {
                 label: "未应用",

@@ -169,8 +169,8 @@ pub(crate) fn read_fuse_wire(path: &Path) -> Result<Option<FuseWire>> {
     }
 }
 
-/// Locates the binary that carries the fuse wire: the main executable on
-/// Windows and Linux, the renamed Electron framework inside a macOS bundle.
+/// Locates the first fuse candidate: the main executable on Windows and Linux,
+/// or the renamed Electron framework inside a macOS bundle.
 pub(crate) fn electron_binary_path(app_dir: &Path) -> Option<PathBuf> {
     if app_dir
         .extension()
@@ -280,7 +280,10 @@ pub(crate) fn cached_fuse_wire(binary: &Path, cache: &Path) -> Result<(Option<Fu
         return Ok((wire, true));
     }
     let wire = read_fuse_wire(binary)?;
-    if let Err(error) = store_cached_wire(cache, binary, signature, wire.as_ref()) {
+    // An empty executable must not replace the cached wire from chrome.dll.
+    if let Some(wire) = wire.as_ref()
+        && let Err(error) = store_cached_wire(cache, binary, signature, Some(wire))
+    {
         crate::error_log::record_failure(
             "compatibility_fallback",
             "store_electron_fuse_cache",
@@ -291,32 +294,62 @@ pub(crate) fn cached_fuse_wire(binary: &Path, cache: &Path) -> Result<(Option<Fu
     Ok((wire, false))
 }
 
+fn cached_app_fuse_wire(app_dir: &Path, cache: &Path) -> Result<Option<(PathBuf, FuseWire, bool)>> {
+    let dll = app_dir.join("chrome.dll");
+    let dll = ((cfg!(windows) || cfg!(test))
+        && app_dir
+            .extension()
+            .is_none_or(|extension| extension != "app")
+        && dll.is_file())
+    .then_some(dll);
+    let mut last_error = None;
+    for binary in electron_binary_path(app_dir).into_iter().chain(dll) {
+        match cached_fuse_wire(&binary, cache) {
+            Ok((Some(wire), cached)) => return Ok(Some((binary, wire, cached))),
+            Ok((None, _)) => {}
+            Err(error) => {
+                crate::error_log::record_failure(
+                    "compatibility_fallback",
+                    "read_electron_fuse_candidate",
+                    format!("{error:#}"),
+                    serde_json::json!({ "binary": binary }),
+                );
+                last_error = Some(error);
+            }
+        }
+    }
+    match last_error {
+        Some(error) => Err(error),
+        None => Ok(None),
+    }
+}
+
 /// Resolves the Inspector and `NODE_OPTIONS` fuses for the Codex desktop app.
 #[cfg(any(windows, target_os = "macos"))]
 pub(crate) fn read_electron_fuses(app_dir: &Path) -> ElectronFuses {
     let started = Instant::now();
-    let Some(binary) = electron_binary_path(app_dir) else {
-        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
-            "launcher.electron_fuses",
-            serde_json::json!({
-                "appPath": app_dir,
-                "nodeCliInspect": FuseState::Unknown.as_str(),
-                "nodeOptions": FuseState::Unknown.as_str(),
-                "error": "electron binary not found",
-            }),
-        );
-        return ElectronFuses::unknown();
-    };
-    match cached_fuse_wire(&binary, &cache_path()) {
-        Ok((wire, cached)) => {
-            let fuses = ElectronFuses::from_wire(wire.as_ref());
+    match cached_app_fuse_wire(app_dir, &cache_path()) {
+        Ok(None) => {
+            let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                "launcher.electron_fuses",
+                serde_json::json!({
+                    "appPath": app_dir,
+                    "nodeCliInspect": FuseState::Unknown.as_str(),
+                    "nodeOptions": FuseState::Unknown.as_str(),
+                    "error": "electron fuse wire not found",
+                }),
+            );
+            ElectronFuses::unknown()
+        }
+        Ok(Some((binary, wire, cached))) => {
+            let fuses = ElectronFuses::from_wire(Some(&wire));
             let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
                 "launcher.electron_fuses",
                 serde_json::json!({
                     "binary": binary,
                     "cached": cached,
-                    "version": wire.as_ref().map(|wire| wire.version),
-                    "states": wire.as_ref().map(|wire| wire.states.as_str()),
+                    "version": wire.version,
+                    "states": wire.states,
                     "nodeCliInspect": fuses.node_cli_inspect.as_str(),
                     "nodeOptions": fuses.node_options.as_str(),
                     "scanMs": started.elapsed().as_millis(),
@@ -329,12 +362,12 @@ pub(crate) fn read_electron_fuses(app_dir: &Path) -> ElectronFuses {
                 "compatibility_fallback",
                 "read_electron_fuses",
                 format!("{error:#}"),
-                serde_json::json!({ "binary": binary }),
+                serde_json::json!({ "appPath": app_dir }),
             );
             let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
                 "launcher.electron_fuses",
                 serde_json::json!({
-                    "binary": binary,
+                    "appPath": app_dir,
                     "nodeCliInspect": FuseState::Unknown.as_str(),
                     "nodeOptions": FuseState::Unknown.as_str(),
                     "error": format!("{error:#}"),
@@ -465,11 +498,141 @@ mod tests {
         assert!(!cached);
         assert_eq!(wire.unwrap().states, "0101110011");
 
-        // Binaries without a wire are cached as such too.
+        // An absent wire must not evict another candidate's cached wire.
         let plain = temp.path().join("plain.exe");
         std::fs::write(&plain, b"not electron").unwrap();
         assert_eq!(cached_fuse_wire(&plain, &cache).unwrap(), (None, false));
-        assert_eq!(cached_fuse_wire(&plain, &cache).unwrap(), (None, true));
+        assert_eq!(cached_fuse_wire(&plain, &cache).unwrap(), (None, false));
+        assert!(cached_fuse_wire(&binary, &cache).unwrap().1);
+    }
+
+    #[test]
+    fn app_scan_falls_back_to_chrome_dll_despite_an_old_empty_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path();
+        let executable = app.join("Codex.exe");
+        let dll = app.join("chrome.dll");
+        let cache = app.join(CACHE_FILE);
+        std::fs::write(&executable, b"no wire").unwrap();
+        store_cached_wire(
+            &cache,
+            &executable,
+            binary_signature(&executable).unwrap(),
+            None,
+        )
+        .unwrap();
+        std::fs::write(&dll, wire_bytes("010011001")).unwrap();
+        let (binary, wire, cached) = cached_app_fuse_wire(app, &cache).unwrap().unwrap();
+        assert_eq!(binary, dll);
+        assert_eq!(wire.states, "010011001");
+        assert!(!cached);
+        assert!(cached_app_fuse_wire(app, &cache).unwrap().unwrap().2);
+        let entry: FuseCacheEntry =
+            serde_json::from_slice(&std::fs::read(&cache).unwrap()).unwrap();
+        assert_eq!(entry.path, dll.to_string_lossy());
+    }
+
+    #[test]
+    fn app_scan_prefers_a_valid_executable_and_falls_back_after_invalid_data() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("Codex.exe");
+        let dll = temp.path().join("chrome.dll");
+        let cache = temp.path().join(CACHE_FILE);
+        std::fs::write(&executable, wire_bytes("011111001")).unwrap();
+        std::fs::write(&dll, wire_bytes("010011001")).unwrap();
+        let (binary, wire, _) = cached_app_fuse_wire(temp.path(), &cache).unwrap().unwrap();
+        assert_eq!(binary, executable);
+        assert_eq!(wire.states, "011111001");
+        std::fs::write(&executable, wire_bytes("01x")).unwrap();
+        let (binary, wire, _) = cached_app_fuse_wire(temp.path(), &cache).unwrap().unwrap();
+        assert_eq!(binary, dll);
+        assert_eq!(wire.states, "010011001");
+    }
+
+    #[test]
+    fn app_scan_keeps_missing_or_invalid_fuses_unknown() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("Codex.exe");
+        let dll = temp.path().join("chrome.dll");
+        let cache = temp.path().join(CACHE_FILE);
+        std::fs::write(&executable, b"no wire").unwrap();
+        std::fs::write(&dll, b"also no wire").unwrap();
+        assert!(cached_app_fuse_wire(temp.path(), &cache).unwrap().is_none());
+        let fuses = ElectronFuses::from_wire(None);
+        assert!(fuses.node_options.node_options_possible());
+        assert!(fuses.node_cli_inspect.inspector_possible());
+        std::fs::write(&dll, wire_bytes("01x")).unwrap();
+        assert!(cached_app_fuse_wire(temp.path(), &cache).is_err());
+    }
+
+    #[test]
+    fn app_scan_invalidates_dll_cache_on_size_time_and_path_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let dll = temp.path().join("chrome.dll");
+        let cache = temp.path().join(CACHE_FILE);
+        std::fs::write(&dll, wire_bytes("010011001")).unwrap();
+        assert!(
+            !cached_app_fuse_wire(temp.path(), &cache)
+                .unwrap()
+                .unwrap()
+                .2
+        );
+        let modified = std::fs::metadata(&dll).unwrap().modified().unwrap();
+        std::fs::write(&dll, wire_bytes("011111001")).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&dll)
+            .unwrap()
+            .set_modified(modified + std::time::Duration::from_secs(2))
+            .unwrap();
+        let (_, wire, cached) = cached_app_fuse_wire(temp.path(), &cache).unwrap().unwrap();
+        assert!(!cached);
+        assert_eq!(wire.states, "011111001");
+        std::fs::write(&dll, wire_bytes("0100110011")).unwrap();
+        let modified = modified + std::time::Duration::from_secs(2);
+        std::fs::File::options()
+            .write(true)
+            .open(&dll)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        assert!(
+            !cached_app_fuse_wire(temp.path(), &cache)
+                .unwrap()
+                .unwrap()
+                .2
+        );
+        let next = temp.path().join("updated-app");
+        std::fs::create_dir(&next).unwrap();
+        std::fs::copy(&dll, next.join("chrome.dll")).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(next.join("chrome.dll"))
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        let (binary, _, cached) = cached_app_fuse_wire(&next, &cache).unwrap().unwrap();
+        assert_eq!(binary, next.join("chrome.dll"));
+        assert!(!cached);
+    }
+
+    #[test]
+    #[ignore = "requires CODEY_TEST_CODEX_APP_DIR pointing to an installed desktop app"]
+    fn installed_app_resolves_the_actual_fuse_carrier() {
+        let app = PathBuf::from(std::env::var_os("CODEY_TEST_CODEX_APP_DIR").unwrap());
+        let temp = tempfile::tempdir().unwrap();
+        let (binary, wire, _) = cached_app_fuse_wire(&app, &temp.path().join(CACHE_FILE))
+            .unwrap()
+            .expect("installed app should have a fuse wire");
+        assert_eq!(wire.version, FUSE_WIRE_VERSION_V1);
+        assert_ne!(wire.state(NODE_OPTIONS_FUSE_INDEX), FuseState::Unknown);
+        assert_ne!(wire.state(NODE_CLI_INSPECT_FUSE_INDEX), FuseState::Unknown);
+        println!(
+            "binary={} version={} states={}",
+            binary.display(),
+            wire.version,
+            wire.states
+        );
     }
 
     #[test]

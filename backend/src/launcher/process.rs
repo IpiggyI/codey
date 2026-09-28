@@ -150,28 +150,41 @@ pub(super) struct SpawnedCodex {
     pub(super) inspector_argument: Option<String>,
     pub(super) performance_status: String,
     pub(super) performance_detail: String,
-    /// Confirmed main-process injection path: `inspector`, `node_options`, `cli`,
+    /// Confirmed injection path: `inspector`, `node_options`, `cli`, `cli_fuses_disabled`,
     /// or empty when none of those completed.
     pub(super) startup_injection_mode: String,
 }
 
 /// How the main-process patch actually landed. CLI confirmation alone is not
 /// Inspector / `--require`; those patches must not be claimed from a wrapper.
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", test))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StartupInjectionMode {
     Inspector,
     NodeRequire,
     CliWrapper,
+    CliWrapperFusesDisabled,
 }
 
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", test))]
 impl StartupInjectionMode {
+    fn with_fuses(self, fuses: crate::electron_fuses::ElectronFuses) -> Self {
+        if self == Self::CliWrapper
+            && !fuses.node_options.node_options_possible()
+            && !fuses.node_cli_inspect.inspector_possible()
+        {
+            Self::CliWrapperFusesDisabled
+        } else {
+            self
+        }
+    }
+
     fn as_str(self) -> &'static str {
         match self {
             Self::Inspector => "inspector",
             Self::NodeRequire => "node_options",
             Self::CliWrapper => "cli",
+            Self::CliWrapperFusesDisabled => "cli_fuses_disabled",
         }
     }
 }
@@ -389,6 +402,7 @@ pub(super) async fn spawn_codex(
                 },
             )
             .await
+            .map(|mode| mode.with_fuses(fuses))
             .map_err(|patch_error| {
                 let wrapper_error = wrapper_preparation_error.or_else(|| {
                     (!wrapper_environment_applied)
@@ -578,7 +592,8 @@ pub(super) async fn spawn_codex(
                 require_marker: require_patch.map(|prepared| prepared.marker_path),
             },
         )
-        .await;
+        .await
+        .map(|mode| mode.with_fuses(fuses));
 
         match startup_result {
             Ok(mode) => {
@@ -2235,6 +2250,48 @@ mod cli_wrapper_tests {
             Some(7)
         ));
         assert!(process_probe_confirms_exit(Ok(false), Some(7)));
+    }
+
+    #[test]
+    fn cli_mode_reports_closed_fuses_only_when_both_entries_are_blocked() {
+        use crate::electron_fuses::{ElectronFuses, FuseState};
+        for node_options in [
+            FuseState::Enabled,
+            FuseState::Disabled,
+            FuseState::Removed,
+            FuseState::Unknown,
+        ] {
+            for node_cli_inspect in [
+                FuseState::Enabled,
+                FuseState::Disabled,
+                FuseState::Removed,
+                FuseState::Unknown,
+            ] {
+                let fuses = ElectronFuses {
+                    node_options,
+                    node_cli_inspect,
+                };
+                let expected = if matches!(node_options, FuseState::Disabled | FuseState::Removed)
+                    && matches!(node_cli_inspect, FuseState::Disabled | FuseState::Removed)
+                {
+                    "cli_fuses_disabled"
+                } else {
+                    "cli"
+                };
+                assert_eq!(
+                    StartupInjectionMode::CliWrapper.with_fuses(fuses).as_str(),
+                    expected
+                );
+                assert_eq!(
+                    StartupInjectionMode::Inspector.with_fuses(fuses),
+                    StartupInjectionMode::Inspector
+                );
+                assert_eq!(
+                    StartupInjectionMode::NodeRequire.with_fuses(fuses),
+                    StartupInjectionMode::NodeRequire
+                );
+            }
+        }
     }
 
     #[test]
