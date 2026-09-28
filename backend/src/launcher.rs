@@ -137,8 +137,8 @@ pub struct CodeyRuntime {
     pub codex_app_path: PathBuf,
     pub maintenance: MaintenanceStatus,
     pub applied_config: CodeyConfig,
-    applied_model_config: RwLock<RuntimeModelConfig>,
-    applied_subagent_config: RwLock<RuntimeSubagentConfig>,
+    applied_model_config: RwLock<Arc<RuntimeModelConfig>>,
+    applied_subagent_config: RwLock<Arc<RuntimeSubagentConfig>>,
     pub injection_statuses: Arc<RwLock<Arc<[cdp::InjectionScriptStatus]>>>,
     injection_scripts: cdp::PreparedInjectionScripts,
     injection_websocket_url: Arc<RwLock<Arc<str>>>,
@@ -1461,20 +1461,22 @@ impl CodeyRuntime {
         self.injection_websocket_url.read().await.clone()
     }
 
-    pub async fn applied_model_config(&self) -> RuntimeModelConfig {
-        self.applied_model_config.read().await.clone()
+    pub async fn applied_model_config(&self) -> Arc<RuntimeModelConfig> {
+        Arc::clone(&*self.applied_model_config.read().await)
     }
 
     pub async fn mark_model_config_applied(&self, config: &CodeyConfig) {
-        *self.applied_model_config.write().await = RuntimeModelConfig::from_config(config);
+        *self.applied_model_config.write().await =
+            Arc::new(RuntimeModelConfig::from_config(config));
     }
 
-    pub async fn applied_subagent_config(&self) -> RuntimeSubagentConfig {
-        self.applied_subagent_config.read().await.clone()
+    pub async fn applied_subagent_config(&self) -> Arc<RuntimeSubagentConfig> {
+        Arc::clone(&*self.applied_subagent_config.read().await)
     }
 
     pub async fn mark_subagent_config_applied(&self, config: &CodeyConfig) {
-        *self.applied_subagent_config.write().await = RuntimeSubagentConfig::from_config(config);
+        *self.applied_subagent_config.write().await =
+            Arc::new(RuntimeSubagentConfig::from_config(config));
     }
 
     pub fn supports_subagent_config_hot_reload(&self, config: &CodeyConfig) -> bool {
@@ -1607,10 +1609,12 @@ impl CodeyRuntime {
             Self {
                 codex_app_path: app_dir,
                 maintenance,
-                applied_model_config: RwLock::new(RuntimeModelConfig::from_config(&runtime_config)),
-                applied_subagent_config: RwLock::new(RuntimeSubagentConfig::from_config(
+                applied_model_config: RwLock::new(Arc::new(RuntimeModelConfig::from_config(
                     &runtime_config,
-                )),
+                ))),
+                applied_subagent_config: RwLock::new(Arc::new(RuntimeSubagentConfig::from_config(
+                    &runtime_config,
+                ))),
                 applied_config: runtime_config,
                 injection_statuses,
                 injection_scripts,

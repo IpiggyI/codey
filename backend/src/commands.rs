@@ -174,18 +174,41 @@ pub enum AppShutdownReason {
     CodexExited,
 }
 
+/// An unreadable config falls back to defaults for this launch. The broken
+/// files are copied aside first because saving the defaults rotates them
+/// through the backup chain.
+fn load_config_or_defaults(store: &ConfigStore) -> (CodeyConfig, Option<String>) {
+    let error = match store.load() {
+        Ok(config) => return (config, None),
+        Err(error) => error,
+    };
+    let preserved = store.preserve_unreadable();
+    let preserved = if preserved.is_empty() {
+        String::new()
+    } else {
+        let paths = preserved
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join("、");
+        format!("；原文件已另存为：{paths}")
+    };
+    let message = format!(
+        "Codey 配置无法读取，已使用安全默认值启动；请先检查或恢复配置文件：{error:#}{preserved}"
+    );
+    error_log::record_failure(
+        "config_load_failed",
+        "load_codey_config_at_startup",
+        message.clone(),
+        json!({ "path": store.path().display().to_string() }),
+    );
+    (CodeyConfig::default(), Some(message))
+}
+
 impl Default for AppState {
     fn default() -> Self {
         let store = ConfigStore::default();
-        let (config, config_load_error) = match store.load() {
-            Ok(config) => (config, None),
-            Err(error) => (
-                CodeyConfig::default(),
-                Some(format!(
-                    "Codey 配置无法读取，已使用安全默认值启动；请先检查或恢复配置文件：{error:#}"
-                )),
-            ),
-        };
+        let (config, config_load_error) = load_config_or_defaults(&store);
         let protect_crashpad_pending = config.protect_crashpad_pending;
         let persisted_waiting_notifications = initial_waiting_notifications(&store, &[]);
         let (shutdown_reason, _) = watch::channel(None);
@@ -2007,7 +2030,8 @@ pub(super) async fn hot_reload_runtime_subagent_config(
     if !runtime.supports_subagent_config_hot_reload(&current_config) {
         return SubagentHotReloadOutcome::default();
     }
-    let applied_config_changed = runtime.applied_subagent_config().await != desired_config;
+    let applied_config_changed =
+        runtime.applied_subagent_config().await.as_ref() != &desired_config;
     let runtime_generation = state.runtime_generation.load(Ordering::Acquire);
     let current_runtime = state.runtime.lock().await.clone();
     let same_runtime = current_runtime
