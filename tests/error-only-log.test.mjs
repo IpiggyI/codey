@@ -15,7 +15,10 @@ test("startup renders a loading state until config and provider are ready", asyn
   ]);
 
   assert.match(app, /if \(!config \|\| !provider\)/);
-  assert.match(app, /正在载入 Codey/);
+  assert.match(app, /CONFIG_LOAD_TIMEOUT_MS = 30_000/);
+  assert.match(app, /加载配置超时，请重新检查/);
+  assert.match(app, /loadFailed \? "Codey 加载失败" : "正在载入 Codey"/);
+  assert.match(app, /重新检查/);
   assert.match(
     app,
     /<p>\s*<NoticeLoadingText controller=\{noticeController\} \/>\s*<\/p>/,

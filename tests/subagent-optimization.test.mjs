@@ -5,11 +5,12 @@ import test from "node:test";
 const root = new URL("../", import.meta.url);
 
 test("subagent settings expose the five supported role controls", async () => {
-  const [featurePolicySource, modelHookSource, modelOptionsSource, comboboxSource] = await Promise.all([
+  const [featurePolicySource, modelHookSource, modelOptionsSource, comboboxSource, modelWhitelistSource] = await Promise.all([
     readFile(new URL("src/FeaturePolicyCard.tsx", root), "utf8"),
     readFile(new URL("src/useModelSelection.ts", root), "utf8"),
     readFile(new URL("src/subagentModels.ts", root), "utf8"),
     readFile(new URL("src/components/ModelCombobox.tsx", root), "utf8"),
+    readFile(new URL("public/model-whitelist-inject.js", root), "utf8"),
   ]);
 
   assert.match(featurePolicySource, /checked=\{config\.subagentOptimization\}/);
@@ -80,4 +81,7 @@ test("subagent settings expose the five supported role controls", async () => {
   assert.match(comboboxSource, /待重选/);
   assert.match(comboboxSource, /<ListBox\.Section/);
   assert.doesNotMatch(comboboxSource, /from "\.\/mantine"/);
+  assert.match(modelWhitelistSource, /replaceNativeModelDisplayText/);
+  assert.match(modelWhitelistSource, /modelPresentation\(modelName\)\.displayName/);
+  assert.match(modelWhitelistSource, /scheduleNativeModelDisplayText/);
 });

@@ -23,7 +23,11 @@ test("third-party model sync can fall back to manual model support configuration
 
   assert.match(dialogSource, /modelState\.officialModels\.length > 0/);
   assert.match(dialogSource, /本次官方账号登录可用的模型/);
-  assert.match(dialogSource, /modelState\.officialModels\.map/);
+  assert.match(dialogSource, /visibleOfficialModels\.map/);
+  assert.match(
+    dialogSource,
+    /visibleModelOptions\(\s*modelState\.officialModels,\s*visibleOfficialCount,?\s*\)/,
+  );
   assert.match(dialogSource, /placeholder="输入当前模型 ID/);
   assert.match(dialogSource, /当前 provider 支持 auto-review/);
   assert.match(dialogSource, /<Switch/);

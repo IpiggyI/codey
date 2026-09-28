@@ -29,4 +29,24 @@ test("model picker filters case-insensitively and pages bounded results", async 
   assert.equal(nextVisibleModelCount(firstPage.length, models.length), 400);
   assert.equal(nextVisibleModelCount(400, models.length), 450);
   assert.equal(nextVisibleModelCount(450, models.length), 450);
+
+  const officialModels = Array.from({ length: 3 }, (_, index) => ({ slug: `gpt-${index}` }));
+  assert.deepEqual(visibleModelOptions(officialModels, 2), officialModels.slice(0, 2));
+
+  const cachedModels = ["Alpha", "Beta"];
+  const originalToLowerCase = String.prototype.toLowerCase;
+  let lowerCalls = 0;
+  String.prototype.toLowerCase = function toLowerCase() {
+    lowerCalls += 1;
+    return originalToLowerCase.call(this);
+  };
+  try {
+    assert.deepEqual(filterModelOptions(cachedModels, "alp"), ["Alpha"]);
+    const afterFirstFilter = lowerCalls;
+    assert.deepEqual(filterModelOptions(cachedModels, "bet"), ["Beta"]);
+    assert.equal(lowerCalls, afterFirstFilter + 1);
+    assert.deepEqual(filterModelOptions(["Gamma"], "alp"), []);
+  } finally {
+    String.prototype.toLowerCase = originalToLowerCase;
+  }
 });

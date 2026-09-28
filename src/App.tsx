@@ -60,6 +60,7 @@ const UNKNOWN_FAST_CONTEXT_TOOLS_STATUS: FastContextToolsStatus = {
   userConfigured: false,
   detectionFailed: true,
 };
+const CONFIG_LOAD_TIMEOUT_MS = 30_000;
 
 function localDateCacheKey(date: Date) {
   return [
@@ -104,7 +105,9 @@ export function App({
   const feedbackGroupQrUrl =
     `${FEEDBACK_GROUP_QR_BASE_URL}?date=${localDateCacheKey(new Date())}`;
   const [config, setConfig] = useState<Config | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
   const persistedConfigRef = useRef<Config | null>(null);
+  const loadGenerationRef = useRef(0);
   const { status, setStatus, refreshStatus, refreshStatusForLoad,
     restartStatusError, setRestartStatusError } =
     useRuntimeStatus({
@@ -233,9 +236,20 @@ export function App({
 
   useEffect(() => {
     void load();
+    return () => {
+      loadGenerationRef.current += 1;
+    };
   }, []);
 
   async function load() {
+    const generation = ++loadGenerationRef.current;
+    const current = () => generation === loadGenerationRef.current;
+    setLoadFailed(false);
+    const timer = window.setTimeout(() => {
+      if (!current()) return;
+      setLoadFailed(true);
+      setNotice({ tone: "error", text: "加载配置超时，请重新检查" });
+    }, CONFIG_LOAD_TIMEOUT_MS);
     try {
       const result = await invoke<{
         config: Config;
@@ -246,12 +260,15 @@ export function App({
         currentProviderSnapshot?: CurrentProviderSnapshot | null;
         fastContextToolsStatus?: FastContextToolsStatus;
       }>("load_codey_config");
+      window.clearTimeout(timer);
+      if (!current()) return;
+      setLoadFailed(false);
       setPersistedConfig(result.config);
       setProviderStatus(result.providerStatus ?? null);
       setCurrentProviderSnapshot(result.currentProviderSnapshot ?? null);
       if (typeof result.officialAccountAvailable === "boolean") {
-        setStatus((current) => ({
-          ...current,
+        setStatus((currentStatus) => ({
+          ...currentStatus,
           officialAccountAvailable: result.officialAccountAvailable,
         }));
       }
@@ -264,6 +281,7 @@ export function App({
         refreshPluginMarketplaceStatus(),
         refreshRouterSessionDiagnosis(),
       ]);
+      if (!current()) return;
       const lastMigration = diagnosis?.lastMigration;
       const startupError = next.startupError || result.startupError;
       if (startupError) {
@@ -284,6 +302,9 @@ export function App({
         });
       }
     } catch (error) {
+      window.clearTimeout(timer);
+      if (!current()) return;
+      setLoadFailed(true);
       setNotice({ tone: "error", text: errorText(error) });
     }
   }
@@ -921,16 +942,30 @@ export function App({
           <GitBranch size={17} />
         </div>
         <div>
-          <strong>正在载入 Codey</strong>
+          <strong>{loadFailed ? "Codey 加载失败" : "正在载入 Codey"}</strong>
           <p>
             <NoticeLoadingText controller={noticeController} />
           </p>
+          {loadFailed && (
+            <div className="mt-3">
+              <Button
+                variant="secondary"
+                size="sm"
+                disabled={isBusy}
+                onPress={() => void runOperation("reload-config", load)}
+              >
+                重新检查
+              </Button>
+            </div>
+          )}
         </div>
-        <LoaderCircle
-          className="animate-spin loading-animate-spin"
-          size={16}
-          aria-hidden="true"
-        />
+        {!loadFailed && (
+          <LoaderCircle
+            className="animate-spin loading-animate-spin"
+            size={16}
+            aria-hidden="true"
+          />
+        )}
       </main>
     );
     return embedded ? (

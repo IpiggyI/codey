@@ -86,15 +86,23 @@ function ModelPickerDialogComponent({
   const [visibleThirdPartyCount, setVisibleThirdPartyCount] = useState(
     MODEL_PICKER_PAGE_SIZE,
   );
+  const [visibleOfficialCount, setVisibleOfficialCount] = useState(
+    MODEL_PICKER_PAGE_SIZE,
+  );
   useEffect(() => {
     if (!open) return;
     setModelQuery("");
     setVisibleThirdPartyCount(MODEL_PICKER_PAGE_SIZE);
+    setVisibleOfficialCount(MODEL_PICKER_PAGE_SIZE);
   }, [open]);
   const filteredThirdPartyModels = useMemo(() => {
     if (!open) return [];
     return filterModelOptions(thirdPartyModelOptions, modelQuery);
   }, [modelQuery, open, thirdPartyModelOptions]);
+  const visibleOfficialModels = visibleModelOptions(
+    modelState.officialModels,
+    visibleOfficialCount,
+  );
   const visibleThirdPartyModels = visibleModelOptions(
     filteredThirdPartyModels,
     visibleThirdPartyCount,
@@ -189,7 +197,7 @@ function ModelPickerDialogComponent({
                 </div>
                 <Badge variant="info">{modelState.officialModels.length} 个</Badge>
               </div>
-              {modelState.officialModels.map((model) => (
+              {visibleOfficialModels.map((model) => (
                 <div className="flex flex-wrap items-center gap-2.5 rounded-md bg-blue-500/[0.025] px-3 py-2 hover:bg-blue-500/[0.07]" key={model.slug}>
                   <Checkbox
                     checked={draftModelSet.has(modelKey(model.slug))}
@@ -214,6 +222,26 @@ function ModelPickerDialogComponent({
                     onChange={(policy) => onUpdateDraftModelContext(model.slug, policy)} />
                 </div>
               ))}
+              {visibleOfficialModels.length < modelState.officialModels.length && (
+                <div className="flex justify-center px-2 pb-1 pt-1.5">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={isBusy}
+                    onPress={() =>
+                      setVisibleOfficialCount((count) =>
+                        nextVisibleModelCount(count, modelState.officialModels.length)
+                      )}
+                  >
+                    再显示{" "}
+                    {Math.min(
+                      MODEL_PICKER_PAGE_SIZE,
+                      modelState.officialModels.length - visibleOfficialModels.length,
+                    )}{" "}
+                    个
+                  </Button>
+                </div>
+              )}
             </>
           )}
           <div className="mx-0.5 mb-0.5 mt-1.5 flex items-center justify-between gap-3 rounded-[7px] border-t border-black/6 bg-[#f5f5f7] px-2.5 py-2">
