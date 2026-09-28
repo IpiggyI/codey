@@ -1181,7 +1181,13 @@
   ]);
   const appServerRuntimeOverrideVerifiedResult =
     "codey-app-server-runtime-overrides-verified";
-  const appServerRuntimeOverrideTimeoutMs = 20_000;
+  // Paired with the Rust debug-session budget: this rejection carries a marker
+  // so the launcher retries instead of exiting. Codex spawns app-server after
+  // the window is shown, and a Windows Store cold start often takes more than
+  // a minute to reach that spawn.
+  const appServerRuntimeOverrideTimeoutMarker =
+    "codey-app-server-runtime-overrides-timeout";
+  const appServerRuntimeOverrideTimeoutMs = 150_000;
   const appServerRuntimeOverrideEvidence = {
     version: 1,
     observed: false,
@@ -1360,9 +1366,9 @@
           timeout = setTimeout(() => {
             reject(
               new Error(
-                formatAppServerRuntimeOverrideError(
+                `${appServerRuntimeOverrideTimeoutMarker} ${formatAppServerRuntimeOverrideError(
                   appServerRuntimeOverrideEvidence,
-                ),
+                )}`,
               ),
             );
           }, appServerRuntimeOverrideTimeoutMs);
@@ -1864,6 +1870,32 @@
   // official account, otherwise use the selected third-party route's Luna or
   // its default model. The native caller already preserves its provisional
   // local title when metadata generation fails.
+  const matchingBrace = (source, openIndex) => {
+    if (source[openIndex] !== "{") return -1;
+    let depth = 0;
+    let quote = "";
+    for (let index = openIndex; index < source.length; index += 1) {
+      const character = source[index];
+      if (quote) {
+        if (character === "\\") {
+          index += 1;
+          continue;
+        }
+        if (character === quote) quote = "";
+        continue;
+      }
+      if (character === "'" || character === "\"" || character === "`") {
+        quote = character;
+        continue;
+      }
+      if (character === "{") depth += 1;
+      else if (character === "}") {
+        depth -= 1;
+        if (depth === 0) return index;
+      }
+    }
+    return -1;
+  };
   const patchCodexMainThreadTitleModel = (source) => {
     const titleCalls = [...source.matchAll(
       /await\s+([$A-Z_a-z][$\w]*)\(\{[^{}]{0,1000}\bfeature:(`thread_title`|"thread_title"|'thread_title')/g,
@@ -1874,15 +1906,25 @@
     const helperName = titleCalls[0][1];
     const helperStart = source.indexOf(`async function ${helperName}({`);
     const signatureEnd = source.indexOf("}){", helperStart);
-    const helperEnd = source.indexOf("}function ", signatureEnd);
-    if (helperStart < 0 || signatureEnd < 0 || helperEnd < 0) {
+    // Codex 26.917 moved `model` into the parameter destructuring. Rewriting
+    // that binding is a syntax error and the main process never finishes
+    // startup. Match the function body by braces and replace only inside it.
+    // The match count only confirms this is still the metadata helper.
+    const bodyOpen = signatureEnd + 2;
+    const bodyClose = signatureEnd < 0 ? -1 : matchingBrace(source, bodyOpen);
+    if (
+      helperStart < 0 ||
+      signatureEnd < 0 ||
+      source[bodyOpen] !== "{" ||
+      bodyClose < 0
+    ) {
       throw new Error("Codey thread title metadata helper not found");
     }
-    const helper = source.slice(helperStart, helperEnd + 1);
+    const body = source.slice(bodyOpen, bodyClose + 1);
     const featureName = /\bfeature:([$A-Z_a-z][$\w]*)/.exec(
       source.slice(helperStart, signatureEnd),
     )?.[1];
-    const nativeModelName = /\bmodel:([$A-Z_a-z][$\w]*)/.exec(helper)?.[1];
+    const nativeModelName = /\bmodel:([$A-Z_a-z][$\w]*)/.exec(body)?.[1];
     if (!featureName || !nativeModelName) {
       throw new Error("Codey thread title metadata fields not found");
     }
@@ -1891,8 +1933,8 @@
       `\\bmodel:${escapedNativeModelName}\\b`,
       "g",
     );
-    const modelMatches = helper.match(nativeModelPattern)?.length ?? 0;
-    if (modelMatches !== 3) {
+    const modelMatches = body.match(nativeModelPattern)?.length ?? 0;
+    if (modelMatches < 3 || modelMatches > 6) {
       throw new Error(
         `Codey thread title metadata model matched ${modelMatches} times`,
       );
@@ -1901,11 +1943,11 @@
       `${featureName}===\`thread_title\`?` +
       `globalThis.__CODEY_THREAD_TITLE_MODEL__||${nativeModelName}:` +
       nativeModelName;
-    const patchedHelper = helper.replace(
+    const patchedBody = body.replace(
       nativeModelPattern,
       `model:${selectedModel}`,
     );
-    return source.slice(0, helperStart) + patchedHelper + source.slice(helperEnd + 1);
+    return source.slice(0, bodyOpen) + patchedBody + source.slice(bodyClose + 1);
   };
   Object.defineProperty(
     globalThis,
