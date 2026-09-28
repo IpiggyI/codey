@@ -220,6 +220,18 @@ async function loadPatch(
   if (bridgeReady) await patch.refresh();
   return {
     patch,
+    window,
+    async reinject() {
+      Function("window", "document", "globalThis", "console", source)(
+        window,
+        document,
+        window,
+        { warn() {} },
+      );
+      const next = window.__codeyModelWhitelistPatch;
+      if (typeof next?.refresh === "function") await next.refresh();
+      return next;
+    },
     dispatchWasWrapped() { return window.dispatchEvent !== originalDispatchEvent; },
     connectBridge() {
       window.__codexSessionDeleteBridge = bridge;
@@ -777,7 +789,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "54");
+  assert.equal(patch.version, "55");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],
@@ -4111,4 +4123,136 @@ test("thread list history is restored without an existing local binding", async 
     threadId: "history", model: "current/vendor/model", modelProvider: "codey_router",
   });
   runtime.patch.dispose();
+});
+
+test("model labels keep the GPT- prefix and only that Statsig gate changes", async () => {
+  const gptPrefixGateId = "3849065407";
+  const otherGateId = "1073599153";
+  const framesOf = () => (new Error().stack || "").split("\n").length;
+  const client = statsigClient();
+  const calls = [];
+  function getFeatureGate(name, options) {
+    calls.push({ name: String(name), options, frames: framesOf() });
+    return String(name) === otherGateId
+      ? otherGate
+      : targetGate;
+  }
+  const otherGate = {
+    value: "kept",
+    details: { reason: "Network:Recognized", ruleID: "default" },
+  };
+  const targetGate = {
+    value: false,
+    details: { reason: "Network:Recognized", ruleID: "default" },
+  };
+  client.getFeatureGate = getFeatureGate;
+  const dynamicConfig = client.getDynamicConfig;
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-6-astra"],
+    default_model: "gpt-6-astra",
+  }, [client], { bridgeReady: false });
+
+  assert.equal(runtime.patch.snapshot().loaded, false);
+  assert.equal(typeof runtime.window.__codeyKeepGptPrefix?.dispose, "function");
+  const userScriptRan = { value: false };
+  Function("window", "userScriptRan", `
+    if (window.__codeyKeepGptPrefix) return;
+    userScriptRan.value = true;
+  `)(runtime.window, userScriptRan);
+  assert.equal(userScriptRan.value, false);
+
+  getFeatureGate(otherGateId, {});
+  const unwrappedFrames = calls.at(-1).frames;
+  const forced = client.getFeatureGate(gptPrefixGateId, { disableExposureLog: false, keep: 1 });
+  assert.equal(forced.value, true);
+  assert.equal(forced.details.reason, "LocalOverride");
+  assert.equal(targetGate.value, false);
+  assert.equal(calls.at(-1).options.disableExposureLog, true);
+  assert.equal(calls.at(-1).options.keep, 1);
+  assert.equal(calls.at(-1).frames, unwrappedFrames + 1);
+
+  const other = client.getFeatureGate(otherGateId, { disableExposureLog: false, keep: 1 });
+  assert.equal(other, otherGate);
+  assert.equal(other.value, "kept");
+  assert.deepEqual(calls.at(-1).options, { disableExposureLog: false, keep: 1 });
+  assert.equal(calls.at(-1).frames, unwrappedFrames + 1);
+  assert.equal(client.getDynamicConfig, dynamicConfig);
+  assert.deepEqual(
+    client.getDynamicConfig(MODEL_CONFIG_ID).value.available_models,
+    ["gpt-5.6-sol", "gpt-5.3-codex"],
+  );
+
+  const wrapped = client.getFeatureGate;
+  const callsBeforeReinject = calls.length;
+  await runtime.reinject();
+  assert.equal(client.getFeatureGate, wrapped);
+  client.getFeatureGate(gptPrefixGateId, {});
+  assert.equal(calls.length, callsBeforeReinject + 1);
+  assert.equal(calls.at(-1).frames, unwrappedFrames + 1);
+
+  const replacementCalls = [];
+  const replacementResult = {
+    value: false,
+    details: { reason: "Network:Recognized", ruleID: "default" },
+  };
+  function replacement(name, options) {
+    replacementCalls.push({ name: String(name), options, frames: framesOf() });
+    return String(name) === otherGateId ? otherGate : replacementResult;
+  }
+  client.getFeatureGate = replacement;
+  const eventsBeforeReplace = client.events.length;
+  await runtime.patch.refresh();
+  assert.notEqual(client.getFeatureGate, replacement);
+  assert.equal(client.getFeatureGate(gptPrefixGateId).value, true);
+  assert.equal(replacementResult.value, false);
+  assert.equal(replacementCalls.length, 1);
+  assert.equal(replacementCalls[0].options.disableExposureLog, true);
+  assert.equal(replacementCalls[0].frames, unwrappedFrames + 1);
+  const replacedOther = client.getFeatureGate(otherGateId, { marker: true });
+  assert.equal(replacedOther, otherGate);
+  assert.equal(replacedOther.value, "kept");
+  assert.deepEqual(replacementCalls.at(-1).options, { marker: true });
+  assert.ok(client.events.length > eventsBeforeReplace);
+  assert.equal(client.events.at(-1).name, "values_updated");
+
+  const extra = statsigClient();
+  const extraCalls = [];
+  function extraGate(name, options) {
+    extraCalls.push({ name: String(name), options });
+    return {
+      value: false,
+      details: { reason: "Network:Recognized", ruleID: "default" },
+    };
+  }
+  extra.getFeatureGate = extraGate;
+  runtime.window.__STATSIG__.instances.later = extra;
+  await runtime.patch.refresh();
+  assert.equal(extra.getFeatureGate(gptPrefixGateId, {}).value, true);
+  assert.equal(extraCalls.length, 1);
+  assert.equal(extraCalls[0].options.disableExposureLog, true);
+  assert.equal(extra.getFeatureGate(otherGateId, { marker: 2 }).value, false);
+  assert.deepEqual(extraCalls.at(-1).options, { marker: 2 });
+
+  client.events.length = 0;
+  extra.events.length = 0;
+  runtime.window.__codeyKeepGptPrefix.dispose();
+  assert.equal(client.getFeatureGate, replacement);
+  assert.equal(extra.getFeatureGate, extraGate);
+  assert.equal(runtime.window.__codeyKeepGptPrefix, undefined);
+  assert.equal(client.events.at(-1)?.name, "values_updated");
+  assert.equal(extra.events.at(-1)?.name, "values_updated");
+  await runtime.patch.refresh();
+  assert.equal(client.getFeatureGate, replacement);
+  assert.equal(extra.getFeatureGate, extraGate);
+
+  await runtime.reinject();
+  assert.equal(typeof runtime.window.__codeyKeepGptPrefix?.dispose, "function");
+  assert.equal(client.getFeatureGate(gptPrefixGateId).value, true);
+  assert.notEqual(client.getFeatureGate, replacement);
+  runtime.patch.dispose();
+  assert.equal(client.getFeatureGate, replacement);
+  assert.equal(extra.getFeatureGate, extraGate);
+  assert.equal(runtime.window.__codeyKeepGptPrefix, undefined);
+  assert.equal(client.events.at(-1)?.name, "values_updated");
 });

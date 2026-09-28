@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "54";
+  const patchVersion = "55";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -15,6 +15,7 @@
   const existingPatch = window.__codeyModelWhitelistPatch;
   if (existingPatch?.version === patchVersion
     && existingPatch.nativeSelectionOnly === nativeSelectionOnly) {
+    existingPatch.installGptPrefixGate?.();
     void existingPatch.refresh();
     return;
   }
@@ -1077,6 +1078,105 @@
   };
 
   const statsigClients = window.__codeySharedRuntime.statsigClients;
+  // Codex omits a leading "GPT-" from model labels while this gate is false.
+  // The id is tied to one desktop build; re-check it before editing.
+  const gptPrefixDisplayGateId = "3849065407";
+  let gptPrefixGateActive = false;
+  let gptPrefixGateApi = null;
+  const gptPrefixGatePatches = new Map();
+
+  const notifyStatsigClient = (client) => {
+    if (typeof client?.$emt !== "function") return;
+    try {
+      client.$emt({ name: "values_updated" });
+    } catch {
+      // A later refresh retries transient Statsig subscription failures.
+    }
+  };
+
+  const publishGptPrefixGate = () => {
+    if (!gptPrefixGateApi) {
+      gptPrefixGateApi = {
+        dispose() {
+          disposeGptPrefixGate();
+        },
+      };
+    }
+    window.__codeyKeepGptPrefix = gptPrefixGateApi;
+  };
+
+  const restoreGptPrefixGate = () => {
+    for (const [client, patch] of gptPrefixGatePatches) {
+      try {
+        if (client.getFeatureGate === patch.wrapped) client.getFeatureGate = patch.original;
+      } catch {
+        // The client can already be gone; the next install wraps whatever remains.
+      }
+      notifyStatsigClient(client);
+    }
+    gptPrefixGatePatches.clear();
+    if (window.__codeyKeepGptPrefix === gptPrefixGateApi) delete window.__codeyKeepGptPrefix;
+  };
+
+  const disposeGptPrefixGate = () => {
+    gptPrefixGateActive = false;
+    restoreGptPrefixGate();
+  };
+
+  const forcedGptPrefixGate = (result) => {
+    const details = result?.details && typeof result.details === "object" ? result.details : {};
+    return {
+      ...(result && typeof result === "object" ? result : {}),
+      value: true,
+      details: { ...details, reason: "LocalOverride" },
+    };
+  };
+
+  const wrapGptPrefixGate = (client) => {
+    let currentGetter;
+    try {
+      currentGetter = client?.getFeatureGate;
+    } catch {
+      return false;
+    }
+    if (typeof currentGetter !== "function") return false;
+    if (currentGetter.__codeyGptPrefixGateVersion === patchVersion) return false;
+    const wrappedGetter = function codeyKeepGptPrefixGate(name, options) {
+      if (String(name) !== gptPrefixDisplayGateId) return currentGetter.call(this, name, options);
+      return forcedGptPrefixGate(currentGetter.call(this, name, {
+        ...options,
+        disableExposureLog: true,
+      }));
+    };
+    Object.defineProperty(wrappedGetter, "__codeyGptPrefixGateVersion", {
+      value: patchVersion,
+    });
+    try {
+      client.getFeatureGate = wrappedGetter;
+    } catch {
+      return false;
+    }
+    if (client.getFeatureGate !== wrappedGetter) return false;
+    gptPrefixGatePatches.set(client, { original: currentGetter, wrapped: wrappedGetter });
+    notifyStatsigClient(client);
+    return true;
+  };
+
+  const applyGptPrefixGate = () => {
+    if (disposed || !gptPrefixGateActive) return false;
+    publishGptPrefixGate();
+    let changed = false;
+    for (const client of statsigClients()) {
+      if (wrapGptPrefixGate(client)) changed = true;
+    }
+    return changed;
+  };
+
+  const installGptPrefixGate = () => {
+    if (disposed) return false;
+    gptPrefixGateActive = true;
+    return applyGptPrefixGate();
+  };
 
   const notifyStatsigClients = () => {
     let notified = 0;
@@ -1093,7 +1193,11 @@
   };
 
   const applyModelWhitelist = () => {
-    if (!catalog.loaded || disposed) return false;
+    if (disposed) return false;
+    // The display gate does not read the model catalog, so it is installed
+    // even when the catalog request has not returned.
+    applyGptPrefixGate();
+    if (!catalog.loaded) return false;
     let changed = false;
     statsigClients().forEach((client) => {
       if (patchStatsigClient(client)) changed = true;
@@ -1794,6 +1898,7 @@
         refreshTimer = 0;
         return;
       }
+      applyGptPrefixGate();
       if (catalog.loaded) {
         if (!refreshDeliveryInFlight) {
           refreshDeliveryInFlight = true;
@@ -1825,6 +1930,7 @@
   };
 
   const loadModelCatalog = () => {
+    applyGptPrefixGate();
     if (catalogLoadPromise) return catalogLoadPromise;
     const requestedRevision = catalogRevision;
     catalogLoadPromise = (async () => {
@@ -2727,6 +2833,7 @@
   let lastInteractionApply = 0;
   const interactionApplyIntervalMs = 2_000;
   const handleInteraction = (event) => {
+    applyGptPrefixGate();
     const pickerInteraction = Boolean(
       event?.target?.closest?.(`${groupedMenuSelector}, [aria-haspopup]`),
     );
@@ -2795,6 +2902,7 @@
     notifyBlockedOutgoingMessage: showBlockedProviderNotice,
     enhanceModelMenus: enhanceGroupedModelMenus,
     delivery: () => ({ ...deliveryState }),
+    installGptPrefixGate,
     snapshot: () => ({
       loaded: catalog.loaded,
       models: [...catalog.models],
@@ -2802,6 +2910,7 @@
     }),
     dispose() {
       disposed = true;
+      disposeGptPrefixGate();
       excludedNativeDescriptors.clear();
       restoreNativeFastPermissions();
       window.clearTimeout(refreshTimer);
@@ -2838,5 +2947,6 @@
     },
   };
   window.__codeyModelWhitelistPatch = api;
+  installGptPrefixGate();
   void loadModelCatalog();
 })();
