@@ -8,6 +8,8 @@ mod codey_router_session_migrate;
 mod commands;
 mod config;
 mod crashpad_pending_guard;
+#[cfg(windows)]
+mod desktop_instance;
 #[cfg(any(windows, target_os = "macos", test))]
 mod electron_fuses;
 mod error_log;
@@ -115,6 +117,10 @@ pub fn run_desktop_application() -> Result<()> {
 
     #[cfg(not(target_os = "macos"))]
     {
+        #[cfg(windows)]
+        let Some(_desktop_instance) = desktop_instance::claim() else {
+            return Ok(());
+        };
         build_async_runtime()?.block_on(run())
     }
 }
@@ -192,6 +198,7 @@ async fn run() -> Result<()> {
         }
     };
 
+    let shutdown_started_at = std::time::SystemTime::now();
     let cleanup = stop_runtime_with_retry(&state).await;
     if let Err(error) = &cleanup {
         error_log::record_failure(
@@ -205,7 +212,9 @@ async fn run() -> Result<()> {
         ShutdownReason::CodexExited => "Codex 已退出",
         ShutdownReason::Signal => "Codey 收到退出信号",
     };
-    match process_cleanup::terminate_other_codey_processes().await {
+    // The public no-argument helper remains available for callers without a shutdown boundary:
+    // terminate_other_codey_processes().await
+    match process_cleanup::terminate_other_codey_processes_since(shutdown_started_at).await {
         Ok(0) => {}
         Ok(count) => eprintln!("{shutdown_context}，已终止 {count} 个遗留 Codey 进程"),
         Err(error) => {

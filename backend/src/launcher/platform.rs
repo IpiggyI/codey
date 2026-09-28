@@ -110,6 +110,7 @@ pub(super) fn windows_startup_process_details(
                         "executableName": process.exe_file,
                         "executablePath": process.executable_path,
                         "creationTime": process.creation_time,
+                        "sessionId": process.session_id,
                     })
                 })
                 .collect(),
@@ -920,6 +921,126 @@ fn windows_path_is_within(path: &Path, directory: &Path) -> bool {
             .is_some_and(|rest| rest.starts_with('\\'))
 }
 
+/// Executable names shared by every Codex desktop build (Store and standalone).
+#[cfg(windows)]
+const WINDOWS_CODEX_EXECUTABLE_NAMES: &[&str] = &["codex.exe", "chatgpt.exe"];
+
+/// A Codex desktop process that holds, or would contend for, Electron's
+/// single-instance lock.
+#[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowsCodexInstance {
+    process_id: u32,
+    executable_path: std::path::PathBuf,
+}
+
+/// Every Codex desktop process in the snapshot, whichever install it came
+/// from. Electron's single-instance lock is keyed by the app, not by its
+/// path: a Store package left running, a standalone copy started by hand or a
+/// build that updated into a new directory while Codey's saved path still
+/// names the old one all make the next launch quit with exit code 0.
+///
+/// A name alone never qualifies. The launcher is `ChatGPT.exe` or `Codex.exe`
+/// inside a Codex directory, and that same directory shape also holds the
+/// bundled `resources\codex.exe` — a CLI child many unrelated tools ship a
+/// copy of, under that same name with that same relative path, so no rule can
+/// tell those apart. It cannot hold the single-instance lock and leaves with
+/// its desktop parent, so it is never an instance. Processes whose path cannot
+/// be read are skipped because they cannot be terminated with an identity
+/// check either.
+#[cfg(windows)]
+fn windows_codex_instances_from_snapshot<'a>(
+    app_dir: &Path,
+    processes: impl IntoIterator<Item = (u32, Option<&'a Path>)>,
+) -> Vec<WindowsCodexInstance> {
+    let current_process_id = std::process::id();
+    processes
+        .into_iter()
+        .filter(|(process_id, _)| *process_id != current_process_id)
+        .filter_map(|(process_id, executable_path)| {
+            let executable_path = executable_path?;
+            // Split on the normalized string rather than `Path::file_name` so
+            // the rule reads Windows paths the same way under test on any host.
+            let normalized = normalized_windows_path(executable_path);
+            let (directories, name) = normalized.rsplit_once('\\')?;
+            if !WINDOWS_CODEX_EXECUTABLE_NAMES.contains(&name) {
+                return None;
+            }
+            let codex_owned = windows_executable_sits_at_app_root(executable_path, app_dir)
+                || windows_executable_is_inside_codex_app(directories);
+            codex_owned.then(|| WindowsCodexInstance {
+                process_id,
+                executable_path: executable_path.to_path_buf(),
+            })
+        })
+        .collect()
+}
+
+/// True for a launcher directly inside the resolved Codex app directory. Only
+/// the directory itself counts, so a bundled CLI below it is not an instance.
+#[cfg(windows)]
+fn windows_executable_sits_at_app_root(executable_path: &Path, app_dir: &Path) -> bool {
+    executable_path
+        .parent()
+        .is_some_and(|parent| normalized_windows_path(parent) == normalized_windows_path(app_dir))
+}
+
+/// True when the launcher sits in an install directory named after Codex:
+/// `Codex\ChatGPT.exe` (standalone), `OpenAI\Codex\Codex.exe` (packaged
+/// standalone) or `OpenAI.Codex_<version>_<arch>__<publisher>\app\ChatGPT.exe`
+/// (Store). Only the two nearest directories are inspected, so a user account
+/// named `codex` deeper in the path does not match, and a CLI under
+/// `...\codex\bin\` is rejected because its parent is `bin`, not the install
+/// directory itself.
+#[cfg(windows)]
+fn windows_executable_is_inside_codex_app(normalized_directories: &str) -> bool {
+    let names_codex = |segment: &str| segment == "codex" || segment.starts_with("openai.codex");
+    let mut segments = normalized_directories.rsplit('\\');
+    match segments.next() {
+        Some(parent) if names_codex(parent) => true,
+        Some("app") => segments.next().is_some_and(names_codex),
+        _ => false,
+    }
+}
+
+/// Brings forward a visible Codex window, e.g. one owned by another Codey
+/// instance. Only standard install layouts are recognised because the
+/// configured app directory has not been loaded at this point.
+#[cfg(windows)]
+pub(crate) fn activate_visible_windows_codex_window() -> bool {
+    let Ok(processes) = codey_runtime_core::windows_enumerate_processes() else {
+        return false;
+    };
+    let current_session = codey_runtime_core::windows_process_session_id(std::process::id());
+    windows_codex_instances_from_snapshot(
+        Path::new(""),
+        processes
+            .iter()
+            .filter(|process| windows_process_in_session(process.session_id, current_session))
+            .map(|process| (process.process_id, process.executable_path.as_deref())),
+    )
+    .iter()
+    .any(|instance| {
+        codey_runtime_core::windows_activate_visible_process_window(instance.process_id)
+    })
+}
+
+/// Codey manages only its own logon session. Services shipped inside the Codex
+/// install (such as `codex-windows-sandbox-service.exe`) run in session 0 under
+/// another account: they hold no desktop single-instance lock and refuse
+/// termination. An unknown session stays in scope so an unreadable process is
+/// never assumed stopped.
+#[cfg(any(windows, test))]
+pub(crate) fn windows_process_in_session(
+    process_session: Option<u32>,
+    current_session: Option<u32>,
+) -> bool {
+    match (process_session, current_session) {
+        (Some(process_session), Some(current_session)) => process_session == current_session,
+        _ => true,
+    }
+}
+
 #[cfg(any(windows, test))]
 #[allow(dead_code)]
 pub(super) fn windows_owned_process_ids_from_snapshot<'a>(
@@ -991,7 +1112,12 @@ async fn terminate_windows_codex_processes_with_snapshot(
     stop_timeout: Duration,
     mut snapshot: impl FnMut() -> Result<Vec<codey_runtime_core::WindowsProcessInfo>>,
 ) -> Result<()> {
-    let processes = snapshot().context("检测待停止的 Windows Codex 进程失败")?;
+    let current_session = codey_runtime_core::windows_process_session_id(std::process::id());
+    let processes = snapshot()
+        .context("检测待停止的 Windows Codex 进程失败")?
+        .into_iter()
+        .filter(|process| windows_process_in_session(process.session_id, current_session))
+        .collect::<Vec<_>>();
     let mut process_ids = windows_owned_process_ids_from_snapshot(
         app_dir,
         process_id,
@@ -1180,6 +1306,16 @@ pub(super) fn windows_stop_failure_summary(remaining: &[(u32, String, Option<u64
 #[cfg(test)]
 mod compatibility_tests {
     use super::*;
+
+    // 【自动化测试】Windows 清理 - 会话 0 的系统服务不属于 Codey 可停止的 Codex 进程
+    #[test]
+    fn processes_outside_the_desktop_session_are_not_cleanup_targets() {
+        assert!(windows_process_in_session(Some(1), Some(1)));
+        assert!(!windows_process_in_session(Some(0), Some(1)));
+        assert!(!windows_process_in_session(Some(2), Some(1)));
+        assert!(windows_process_in_session(None, Some(1)));
+        assert!(windows_process_in_session(Some(0), None));
+    }
 
     #[test]
     fn package_cleanup_requires_confirmed_replacement_in_the_same_family() {
