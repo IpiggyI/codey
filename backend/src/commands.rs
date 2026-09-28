@@ -388,6 +388,7 @@ impl AppState {
                     Err(error) => api_error_message(error),
                 }
             }
+            "/session/last-model-request" => last_model_request(self, &payload).await,
             "/session/titles" => cache_session_titles(self, &payload).await,
             "/session/timestamps" => {
                 let session_ids =
@@ -2253,6 +2254,41 @@ async fn runtime_config_requires_restart(state: &Arc<AppState>, current: &CodeyC
 
 #[cfg(test)]
 mod restart_tests;
+
+/// The composer cache timer counts from the latest model response recorded in
+/// the thread's rollout, so a page refresh or a turn sent from another window
+/// still lands on the right time.
+async fn last_model_request(state: &Arc<AppState>, payload: &Value) -> Value {
+    let session_id = bridge_string(payload, "sessionId").trim().to_string();
+    if session_id.is_empty() {
+        return api_error_message("缺少会话 ID");
+    }
+    if session_id.len() > 256 {
+        return api_error_message("会话 ID 过长");
+    }
+    let home = codex_home();
+    let rollout = match with_session_metadata_cache(state, "查找会话记录", move |cache| {
+        cache.resolve_rollout_path(home, &session_id)
+    })
+    .await
+    {
+        Ok(rollout) => rollout,
+        Err(error) => return api_error_message(error),
+    };
+    // "no-rollout" is final for this thread; "no-usage" may be a line that is
+    // still being written, so the page retries only that case.
+    let Some(rollout) = rollout else {
+        return json!({"status":"ok", "found": false, "reason": "no-rollout"});
+    };
+    blocking_value("读取会话最近请求", move || {
+        let request = crate::rollout_last_request::last_model_request(&rollout)?;
+        Ok(match request {
+            Some(request) => json!({"status":"ok", "found": true, "request": request}),
+            None => json!({"status":"ok", "found": false, "reason": "no-usage"}),
+        })
+    })
+    .await
+}
 
 async fn cache_session_titles(state: &Arc<AppState>, payload: &Value) -> Value {
     let Some(titles) = payload.get("titles").and_then(Value::as_array) else {

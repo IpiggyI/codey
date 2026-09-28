@@ -210,7 +210,7 @@ const createEnvironment = (options = {}) => {
 
   const windowListeners = new Map();
   const testSetTimeout = (callback, delay, ...args) => {
-    const timer = setTimeout(callback, delay, ...args);
+    const timer = setTimeout(callback, delay * (options.timeoutScale ?? 1), ...args);
     timer.unref?.();
     return timer;
   };
@@ -274,10 +274,26 @@ const createEnvironment = (options = {}) => {
     clearTimeout,
     HTMLElement: FakeElement,
   };
-  sandbox.window.__codexSessionDeleteBridge = async (path) => {
+  const modelRequests = new Map();
+  const rolloutThreads = new Set(options.rolloutThreads || []);
+  let lastModelRequestFailures = options.lastModelRequestFailures ?? 0;
+  sandbox.window.__codexSessionDeleteBridge = async (path, payload) => {
     calls.push(path);
     if (path === "/settings/get") return settingsResult;
     if (path === "/account/usage") return accountUsageResult;
+    if (path === "/session/last-model-request") {
+      if (lastModelRequestFailures > 0) {
+        lastModelRequestFailures -= 1;
+        return { status: "failed", message: "读取失败" };
+      }
+      const request = modelRequests.get(payload?.sessionId);
+      if (request) return { status: "ok", found: true, request };
+      return {
+        status: "ok",
+        found: false,
+        reason: rolloutThreads.has(payload?.sessionId) ? "no-usage" : "no-rollout",
+      };
+    }
     return {};
   };
   if (options.fiberRequestClient) {
@@ -302,6 +318,7 @@ const createEnvironment = (options = {}) => {
     contextWrap,
     modelButton,
     notificationCallbacks,
+    scope,
     textarea,
     setConversationId: (id) => {
       anchor.setAttribute("data-above-composer-conversation-id", id);
@@ -309,14 +326,20 @@ const createEnvironment = (options = {}) => {
     },
     toolbar,
     sendButton,
-    submitComposer: (text = "在吗") => {
-      textarea.value = text;
-      document.dispatchEvent({ type: "keydown", key: "Enter", target: textarea });
-      textarea.value = "";
+    // Mirrors the rollout's latest token_count for a thread.
+    recordModelRequest: (threadId = "thread-1", message = tokenUsageMessage(threadId), at = nowMs) => {
+      const last = message.params.tokenUsage.last || {};
+      modelRequests.set(threadId, {
+        requestedAt: at,
+        lastTokenUsage: {
+          inputTokens: last.inputTokens ?? null,
+          cachedInputTokens: last.cachedInputTokens ?? null,
+          outputTokens: last.outputTokens ?? null,
+        },
+        threadTotalTokens: message.params.tokenUsage.total?.totalTokens ?? null,
+      });
     },
-    clickSend: () => {
-      document.dispatchEvent({ type: "click", target: sendButton });
-    },
+    now: () => nowMs,
     document,
     getElementById: (id) => findById(documentElement, id) || findById(body, id),
     setAccountUsage: (next) => {
@@ -410,7 +433,6 @@ test("reads history without a new notification and refreshes on thread re-entry"
   await flush();
   assert.equal(env.snapshot().usageLabel, "CH 99.6%");
   assert.equal(env.snapshot().cacheRingVisible, false);
-  assert.match(env.getElementById("codey-thread-usage-popover").innerHTML, /已过期/);
   env.window.__codeyComposerUsage.scan();
   await flush();
   assert.deepEqual(reads, ["thread-1"]);
@@ -427,207 +449,132 @@ test("reads history without a new notification and refreshes on thread re-entry"
   assert.equal(env.snapshot().usageVisible, false);
 });
 
-test("replaying stored token usage on thread enter does not start the cache ring", async () => {
+test("a replay on thread entry counts from the recorded request, not from its arrival", async () => {
   const rpc = rpcManager((id) => (
     id === "thread-1" ? tokenUsageMessage().params.tokenUsage : null
   ));
   const env = createEnvironment({
+    nowMs: Date.UTC(2026, 8, 28, 8, 0, 0),
     loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }),
   });
-  await flush();
-  assert.equal(env.snapshot().cacheRingVisible, false);
-  rpc.subscriptions[0].listener(tokenUsageMessage());
-  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
-  assert.equal(env.snapshot().cacheRingVisible, false);
-  assert.match(env.getElementById("codey-thread-usage-popover").innerHTML, /已过期/);
-  env.window.__codeyComposerUsage.dispose();
-});
-
-test("a notification during history hydration does not start the cache ring", async () => {
-  let resolve;
-  const rpc = rpcManager(() => new Promise((done) => { resolve = done; }));
-  const env = createEnvironment({
-    loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }),
-  });
+  env.recordModelRequest("thread-1", tokenUsageMessage(), env.now() - 25 * 60_000);
   await flush();
   rpc.subscriptions[0].listener(tokenUsageMessage());
-  assert.equal(env.snapshot().cacheRingVisible, false);
-  resolve(tokenUsageMessage().params.tokenUsage);
   await flush();
-  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
-  assert.equal(env.snapshot().cacheRingVisible, false);
-  env.window.__codeyComposerUsage.dispose();
-});
-
-test("a replay that arrives before history hydration does not start the cache ring", async () => {
-  const rpc = rpcManager((id) => (
-    id === "thread-1" ? tokenUsageMessage().params.tokenUsage : null
-  ));
-  const env = createEnvironment({
-    loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }),
-  });
-  env.emitNotification(tokenUsageMessage());
-  await flush();
-  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
-  assert.equal(env.snapshot().cacheRingVisible, false);
-  assert.match(env.getElementById("codey-thread-usage-popover").innerHTML, /已过期/);
-  env.window.__codeyComposerUsage.dispose();
-});
-
-test("a submitted turn starts the cache ring while the history read is still pending", async () => {
-  const rpc = rpcManager(() => new Promise(() => {}));
-  const env = createEnvironment({
-    loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }),
-  });
-  await flush();
-  env.submitComposer();
-  env.emitNotification(tokenUsageMessage());
-  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
+  assert.equal(env.snapshot().cacheAnchor, "ok");
   assert.equal(env.snapshot().cacheRingVisible, true);
+  assert.equal(env.snapshot().cacheTone, "warn");
+  assert.match(env.getElementById("codey-thread-usage-popover").innerHTML, /5:00/);
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("a request older than the TTL shows expired", async () => {
+  const env = createEnvironment();
+  env.recordModelRequest("thread-1", tokenUsageMessage(), env.now() - 31 * 60_000);
+  await flush();
+  env.emitNotification(tokenUsageMessage());
+  await flush();
+  assert.equal(env.snapshot().cacheRingVisible, false);
+  assert.match(env.getElementById("codey-thread-usage-popover").innerHTML, /已过期/);
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("waits for the rollout line that matches the live notification", async () => {
+  const env = createEnvironment();
+  const previous = tokenUsageMessage();
+  previous.params.tokenUsage.last.inputTokens = 900;
+  env.recordModelRequest("thread-1", previous, env.now() - 20 * 60_000);
+  await flush();
+  env.emitNotification(tokenUsageMessage());
+  await flush();
+  assert.notEqual(env.snapshot().cacheTone, "ok");
+  env.recordModelRequest("thread-1", tokenUsageMessage(), env.now());
+  await new Promise((resolve) => setTimeout(resolve, 600));
+  assert.equal(env.snapshot().cacheAnchor, "ok");
   assert.equal(env.snapshot().cacheTone, "ok");
-  assert.equal(env.snapshot().storedUsageRead, "");
+  assert.match(env.getElementById("codey-thread-usage-popover").innerHTML, /30:00|29:59/);
   env.window.__codeyComposerUsage.dispose();
 });
 
-test("clicking the send button also opens the cache timer", async () => {
+test("shows unknown at once, not expired, when the thread has no local rollout", async () => {
   const env = createEnvironment();
   await flush();
-  env.clickSend();
   env.emitNotification(tokenUsageMessage());
-  assert.equal(env.snapshot().cacheRingVisible, true);
-  assert.equal(env.snapshot().submittedThreadCount, 1);
-  env.window.__codeyComposerUsage.dispose();
-});
-
-test("a new conversation with no id yet still starts the cache ring", async () => {
-  const env = createEnvironment({ conversationId: "" });
   await flush();
-  env.submitComposer();
-  assert.equal(env.snapshot().pendingSubmit, true);
-  env.setConversationId("thread-9");
-  await flush();
-  env.emitNotification(tokenUsageMessage("thread-9"));
-  assert.equal(env.snapshot().cacheRingVisible, true);
-  assert.equal(env.snapshot().pendingSubmit, false);
-  env.window.__codeyComposerUsage.dispose();
-});
-
-test("a pending submit is not claimed by a thread this page already showed", async () => {
-  const env = createEnvironment();
-  await flush();
-  env.emitNotification(tokenUsageMessage("thread-1"));
+  assert.equal(env.snapshot().cacheAnchor, "unknown:no-rollout");
   assert.equal(env.snapshot().cacheRingVisible, false);
-  env.textarea.value = "在吗";
-  env.document.dispatchEvent({ type: "keydown", key: "Enter", target: env.textarea });
-  env.textarea.value = "";
-  const update = tokenUsageMessage("thread-1");
-  update.params.tokenUsage.last.cachedInputTokens = 400;
-  env.emitNotification(update);
-  assert.equal(env.snapshot().cacheRingVisible, true);
+  const popover = env.getElementById("codey-thread-usage-popover").innerHTML;
+  assert.match(popover, /未知/);
+  assert.doesNotMatch(popover, /已过期/);
   env.window.__codeyComposerUsage.dispose();
 });
 
-test("an empty composer Enter never opens the cache timer", async () => {
-  const env = createEnvironment();
+test("shows unknown after retries when the rollout never records usage", async () => {
+  const env = createEnvironment({ timeoutScale: 0, rolloutThreads: ["thread-1"] });
   await flush();
-  env.document.dispatchEvent({ type: "keydown", key: "Enter", target: env.textarea });
   env.emitNotification(tokenUsageMessage());
-  assert.equal(env.snapshot().cacheRingVisible, false);
-  assert.equal(env.snapshot().submittedThreadCount, 0);
+  await flush();
+  await flush();
+  assert.equal(env.snapshot().cacheAnchor, "unknown:no-usage");
+  assert.equal(
+    env.calls.filter((path) => path === "/session/last-model-request").length,
+    6,
+  );
   env.window.__codeyComposerUsage.dispose();
 });
 
-test("a keystroke that is not a send never opens the cache timer", async () => {
-  const env = createEnvironment();
+test("retries a failed rollout read, so a refresh still resumes the countdown", async () => {
+  const env = createEnvironment({ timeoutScale: 0, lastModelRequestFailures: 2 });
+  env.recordModelRequest("thread-1", tokenUsageMessage(), env.now() - 10 * 60_000);
   await flush();
-  env.textarea.value = "换行不算发送";
-  for (const event of [
-    { type: "keydown", key: "Enter", shiftKey: true, target: env.textarea },
-    { type: "keydown", key: "Enter", isComposing: true, target: env.textarea },
-    { type: "keydown", key: "a", target: env.textarea },
-    { type: "keydown", key: "Enter", target: env.toolbar },
-  ]) env.document.dispatchEvent(event);
-  env.textarea.value = "";
   env.emitNotification(tokenUsageMessage());
-  assert.equal(env.snapshot().cacheRingVisible, false);
-  assert.equal(env.snapshot().submittedThreadCount, 0);
-  assert.equal(env.snapshot().pendingSubmit, false);
+  await flush();
+  await flush();
+  assert.equal(env.snapshot().cacheAnchor, "ok");
+  assert.match(env.getElementById("codey-thread-usage-popover").innerHTML, /20:00|19:59/);
   env.window.__codeyComposerUsage.dispose();
 });
 
-test("entering a thread whose history read comes back empty does not start the cache ring", async () => {
-  const rpc = rpcManager(() => null);
-  const env = createEnvironment({
-    loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }),
-  });
+test("shows unknown when every rollout read fails", async () => {
+  const env = createEnvironment({ timeoutScale: 0, lastModelRequestFailures: 99 });
   await flush();
-  rpc.subscriptions[0].listener(tokenUsageMessage());
+  env.emitNotification(tokenUsageMessage());
   await flush();
-  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
-  assert.equal(env.snapshot().cacheRingVisible, false);
+  await flush();
+  assert.equal(env.snapshot().cacheAnchor, "unknown:failed");
+  assert.match(env.getElementById("codey-thread-usage-popover").innerHTML, /未知/);
   env.window.__codeyComposerUsage.dispose();
 });
 
-test("two differing replays on thread enter do not start the cache ring", async () => {
-  const rpc = rpcManager((id) => (
-    id === "thread-1" ? tokenUsageMessage().params.tokenUsage : null
-  ));
-  const env = createEnvironment({
-    loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }),
-  });
+test("a rollout already ahead of a stale notification counts from its own time", async () => {
+  const env = createEnvironment();
+  const newer = tokenUsageMessage();
+  newer.params.tokenUsage.last.inputTokens = 5_000;
+  newer.params.tokenUsage.total.totalTokens += 7_000;
+  env.recordModelRequest("thread-1", newer, env.now() - 60_000);
   await flush();
-  const partial = tokenUsageMessage();
-  delete partial.params.tokenUsage.last;
-  rpc.subscriptions[0].listener(partial);
-  rpc.subscriptions[0].listener(tokenUsageMessage());
+  env.emitNotification(tokenUsageMessage());
   await flush();
-  assert.equal(env.snapshot().usageLabel, "CH 99.6%");
-  assert.equal(env.snapshot().cacheRingVisible, false);
+  assert.equal(env.snapshot().cacheAnchor, "ok");
+  assert.match(env.getElementById("codey-thread-usage-popover").innerHTML, /29:00|28:59/);
   env.window.__codeyComposerUsage.dispose();
 });
 
-test("a later token usage change after hydration starts the cache ring", async () => {
-  const rpc = rpcManager((id) => (
-    id === "thread-1" ? tokenUsageMessage().params.tokenUsage : null
-  ));
+test("each thread keeps its own recorded request time", async () => {
+  const rpc = rpcManager((id) => tokenUsageMessage(id).params.tokenUsage);
   const env = createEnvironment({
     loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }),
   });
+  env.recordModelRequest("thread-1", tokenUsageMessage("thread-1"), env.now() - 60_000);
+  env.recordModelRequest("thread-2", tokenUsageMessage("thread-2"), env.now() - 40 * 60_000);
   await flush();
-  env.submitComposer();
-  const update = tokenUsageMessage();
-  update.params.tokenUsage.last.cachedInputTokens = 500;
-  rpc.subscriptions[0].listener(update);
-  assert.equal(env.snapshot().usageLabel, "CH 50%");
-  assert.equal(env.snapshot().cacheRingVisible, true);
-  assert.equal(env.snapshot().storedUsageRead, "ok");
-  env.window.__codeyComposerUsage.dispose();
-});
-
-test("switching to another thread with stored usage does not start a cache ring", async () => {
-  const usageFor = (id) => {
-    const message = tokenUsageMessage(id);
-    if (id === "thread-2") message.params.tokenUsage.last.cachedInputTokens = 400;
-    return message.params.tokenUsage;
-  };
-  const rpc = rpcManager((id) => usageFor(id));
-  const env = createEnvironment({
-    loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }),
-  });
   await flush();
-  env.submitComposer();
-  const live = tokenUsageMessage("thread-1");
-  live.params.tokenUsage.last.cachedInputTokens = 500;
-  rpc.subscriptions[0].listener(live);
   assert.equal(env.snapshot().cacheRingVisible, true);
   env.setConversationId("thread-2");
   await flush();
-  rpc.subscriptions[0].listener({
-    method: "thread/tokenUsage/updated",
-    params: { threadId: "thread-2", tokenUsage: usageFor("thread-2") },
-  });
-  assert.equal(env.snapshot().usageLabel, "CH 40%");
+  await flush();
   assert.equal(env.snapshot().cacheRingVisible, false);
+  assert.match(env.getElementById("codey-thread-usage-popover").innerHTML, /已过期/);
   env.window.__codeyComposerUsage.dispose();
 });
 
@@ -724,8 +671,10 @@ test("hides the usage chip until a matching thread token event arrives", async (
 
 test("usage popover lists screenshot fields and skips invented cost", async () => {
   const env = createEnvironment();
+  env.recordModelRequest();
   await flush();
   env.emitNotification(tokenUsageMessage());
+  await flush();
   const popover = env.getElementById("codey-thread-usage-popover");
   assert.match(popover.innerHTML, /用量/);
   assert.match(popover.innerHTML, /账号/);
@@ -1014,8 +963,9 @@ test("places the usage chip before a Luna light model picker", async () => {
 test("shows a remaining-time ring after a live usage notification", async () => {
   const env = createEnvironment();
   await flush();
-  env.submitComposer();
+  env.recordModelRequest();
   env.emitNotification(tokenUsageMessage());
+  await flush();
   assert.equal(env.snapshot().usageLabel, "CH 99.6%");
   assert.equal(env.snapshot().cacheRingVisible, true);
   assert.equal(env.snapshot().cacheTone, "ok");
@@ -1030,8 +980,9 @@ test("shows a remaining-time ring after a live usage notification", async () => 
 test("does not restart the cache ring when switching conversations", async () => {
   const env = createEnvironment();
   await flush();
-  env.submitComposer();
+  env.recordModelRequest("thread-1");
   env.emitNotification(tokenUsageMessage("thread-1"));
+  await flush();
   env.advanceMs(120_000);
   assert.equal(env.snapshot().cacheRingVisible, true);
   assert.match(env.getElementById("codey-thread-usage-popover").innerHTML, /28:00|27:59/);
@@ -1048,8 +999,9 @@ test("does not restart the cache ring when switching conversations", async () =>
 test("turns the cache ring yellow then red, and drops it after expiry", async () => {
   const env = createEnvironment();
   await flush();
-  env.submitComposer();
+  env.recordModelRequest();
   env.emitNotification(tokenUsageMessage());
+  await flush();
   env.advanceMs(22.5 * 60_000);
   assert.equal(env.snapshot().cacheTone, "warn");
   env.advanceMs(4.5 * 60_000);
@@ -1061,24 +1013,46 @@ test("turns the cache ring yellow then red, and drops it after expiry", async ()
   env.window.__codeyComposerUsage.dispose();
 });
 
-test("expires the live cache ring when the composer model changes", async () => {
+test("keeps the cache ring when the composer model changes without a new turn", async () => {
   const env = createEnvironment();
   await flush();
-  env.submitComposer();
+  env.recordModelRequest();
   env.emitNotification(tokenUsageMessage());
+  await flush();
   assert.equal(env.snapshot().cacheRingVisible, true);
-  env.modelButton.textContent = "Grok 4.6 高";
+  env.modelButton.textContent = "Grok 4.6 低";
   env.window.__codeyComposerUsage.scan();
-  assert.equal(env.snapshot().cacheRingVisible, false);
-  assert.match(env.getElementById("codey-thread-usage-popover").innerHTML, /已过期/);
+  assert.equal(env.snapshot().cacheRingVisible, true);
+  assert.doesNotMatch(env.getElementById("codey-thread-usage-popover").innerHTML, /已过期/);
   env.window.__codeyComposerUsage.dispose();
 });
 
-test("expires every live cache ring when the provider changes", async () => {
+test("keeps the cache ring when a composer popup item mentions a model", async () => {
   const env = createEnvironment();
   await flush();
-  env.submitComposer();
+  env.recordModelRequest();
   env.emitNotification(tokenUsageMessage());
+  await flush();
+  assert.equal(env.snapshot().cacheRingVisible, true);
+  const skillItem = new env.modelButton.constructor("button", {
+    rect: { bottom: 300, height: 28, left: 80, right: 900, top: 272, width: 820 },
+  });
+  skillItem.textContent = "Domain Modeling Build and sharpen a domain model";
+  env.scope.appendChild(skillItem);
+  env.window.__codeyComposerUsage.scan();
+  assert.equal(env.snapshot().cacheRingVisible, true);
+  skillItem.remove();
+  env.window.__codeyComposerUsage.scan();
+  assert.equal(env.snapshot().cacheRingVisible, true);
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("keeps live cache rings when the provider changes without a new turn", async () => {
+  const env = createEnvironment();
+  await flush();
+  env.recordModelRequest();
+  env.emitNotification(tokenUsageMessage());
+  await flush();
   assert.equal(env.snapshot().cacheRingVisible, true);
   env.window.dispatchEvent(new env.window.CustomEvent("codey:config-changed", {
     detail: {
@@ -1086,16 +1060,17 @@ test("expires every live cache ring when the provider changes", async () => {
       currentProviderSnapshot: { id: "other-provider" },
     },
   }));
-  assert.equal(env.snapshot().cacheRingVisible, false);
-  assert.match(env.getElementById("codey-thread-usage-popover").innerHTML, /已过期/);
+  assert.equal(env.snapshot().cacheRingVisible, true);
+  assert.doesNotMatch(env.getElementById("codey-thread-usage-popover").innerHTML, /已过期/);
   env.window.__codeyComposerUsage.dispose();
 });
 
 test("recomputes remaining time when the configured TTL changes", async () => {
   const env = createEnvironment();
   await flush();
-  env.submitComposer();
+  env.recordModelRequest();
   env.emitNotification(tokenUsageMessage());
+  await flush();
   env.advanceMs(10 * 60_000);
   env.setSettings({ cacheValidMinutes: 10 });
   env.window.dispatchEvent(new env.window.CustomEvent("codey:config-changed", {

@@ -555,7 +555,7 @@ fn find_rollout_path(home: &Path, session_id: &str) -> Result<Option<PathBuf>> {
     Ok(find_rollout_file_by_session_id(home, session_id))
 }
 
-fn find_rollout_file_by_session_id(home: &Path, session_id: &str) -> Option<PathBuf> {
+pub(crate) fn find_rollout_file_by_session_id(home: &Path, session_id: &str) -> Option<PathBuf> {
     for dirname in ROLLOUT_SEARCH_DIRS {
         let root = home.join(dirname);
         if !root.exists() {

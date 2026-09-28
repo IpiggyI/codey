@@ -11,6 +11,12 @@
   if (moduleLoaded && window.__codeyComposerUsage) return;
 
   const settingsPath = "/settings/get";
+  const lastModelRequestPath = "/session/last-model-request";
+  // The rollout line and the usage notification come from the same event; a
+  // few short retries cover the moment before the line is readable, and a
+  // bridge that is not ready yet right after a page refresh.
+  const cacheAnchorRetryMs = 500;
+  const cacheAnchorMaxAttempts = 6;
   const styleId = "codey-composer-usage-style";
   const usageRootId = "codey-thread-usage";
   const usagePopoverId = "codey-thread-usage-popover";
@@ -55,15 +61,10 @@
   let usageSelection = null;
   let usageError = null;
   let cacheValidMinutes = cacheValidMinutesDefault;
-  let liveCacheAtByThread = new Map();
-  let liveCacheModelByThread = new Map();
-  // Threads this page watched the user send a turn in. Nothing else may start
-  // the cache timer: entering a thread replays usage that looks just like a new
-  // turn, and the replay cannot be told apart by its numbers alone.
-  const submittedThreads = new Set();
-  // A new conversation has no conversation id until after the first send, so a
-  // submit with no thread yet waits for that thread's first usage to claim it.
-  let pendingSubmit = false;
+  // Per thread: { status: "ok", at } from the rollout's latest model request,
+  // or { status: "unknown", reason } when it cannot be read or matched.
+  const cacheAnchorByThread = new Map();
+  const cacheAnchorRequests = new Map();
   let storedUsageRead = "";
   let cacheTimer = 0;
 
@@ -153,25 +154,6 @@
     );
   };
 
-  const usageFingerprint = (usage) => {
-    if (!usage || usage.cacheHitRatePercent === undefined) return "";
-    return [
-      usage.cacheHitRatePercent,
-      usage.cachedInputTokens,
-      usage.cacheWriteInputTokens,
-      usage.inputTokens,
-      usage.outputTokens,
-      usage.totalTokens,
-      usage.contextUsedTokens,
-      usage.contextWindowTokens,
-    ].map((value) => (value === undefined ? "" : String(value))).join("|");
-  };
-
-  const startLiveCache = (threadId) => {
-    liveCacheAtByThread.set(threadId, Date.now());
-    liveCacheModelByThread.set(threadId, currentModelSignature());
-  };
-
   const formatCacheRemaining = (remainingMs) => {
     const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
     const minutes = Math.floor(totalSeconds / 60);
@@ -180,10 +162,11 @@
   };
 
   const cacheTimerState = (threadId, now = Date.now()) => {
-    const startedAt = threadId ? liveCacheAtByThread.get(threadId) : undefined;
-    if (!startedAt) return { kind: "expired" };
+    const anchor = threadId ? cacheAnchorByThread.get(threadId) : undefined;
+    if (!anchor) return { kind: "pending" };
+    if (anchor.status !== "ok") return { kind: "unknown" };
     const ttlMs = cacheValidMinutes * 60_000;
-    const remainingMs = ttlMs - (now - startedAt);
+    const remainingMs = ttlMs - (now - anchor.at);
     if (remainingMs <= 0) return { kind: "expired" };
     const elapsedRatio = 1 - remainingMs / ttlMs;
     let tone = "ok";
@@ -460,6 +443,19 @@
     }
     addBreakdown(usage, last);
     if (Object.keys(usage).length === 0) return null;
+    // Matched against the rollout's latest token_count before trusting its time.
+    if (inputTokens !== undefined) {
+      usage.lastRequest = {
+        inputTokens,
+        cachedInputTokens,
+        outputTokens: pickNumber(last, "outputTokens", "output_tokens"),
+        threadTotalTokens: pickNumber(
+          isRecord(tokenUsage.total) ? tokenUsage.total : tokenUsage.total_token_usage,
+          "totalTokens",
+          "total_tokens",
+        ),
+      };
+    }
     return { threadId, usage };
   };
 
@@ -633,12 +629,6 @@
       controlDescriptor(control),
     );
 
-  const controlLooksLikeSend = (control) =>
-    /(^|[^a-z])(send|submit)([^a-z]|$)|发送|提交/i.test(controlDescriptor(control));
-
-  const isButtonLike = (node) =>
-    node?.tagName === "BUTTON" || node?.getAttribute?.("role") === "button";
-
   const hasComposerActionContext = (element) => {
     if (!element?.parentElement) return false;
     const inputRect = element.getBoundingClientRect();
@@ -716,44 +706,6 @@
     ) || null;
   };
 
-  const composerTextOf = (node) => {
-    if (!node) return "";
-    const value = typeof node.value === "string" ? node.value : "";
-    const text = value || node.innerText || node.textContent || "";
-    return typeof text === "string" ? text.trim() : "";
-  };
-
-  const isComposerLike = (node) =>
-    node?.tagName === "TEXTAREA"
-    || node?.getAttribute?.("contenteditable") === "true"
-    || node?.getAttribute?.("role") === "textbox";
-
-  const markComposerSubmitted = () => {
-    const threadId = findComposerConversationId(inputElement);
-    if (threadId) submittedThreads.add(threadId);
-    else pendingSubmit = true;
-  };
-
-  // Bound on the document in the capture phase: the composer is replaced on
-  // every thread switch, and Codex keeps its own capture listeners on window and
-  // document, so an element-level listener is both stale-prone and preemptable.
-  const onDocumentKeyDown = (event) => {
-    if (event?.key !== "Enter" || event.shiftKey || event.altKey || event.isComposing) return;
-    if (!isComposerLike(event.target) || !composerTextOf(event.target)) return;
-    markComposerSubmitted();
-  };
-
-  const onDocumentClick = (event) => {
-    let node = event?.target;
-    for (let depth = 0; node && depth < 4; depth += 1) {
-      if (isButtonLike(node) && controlLooksLikeSend(node)) {
-        markComposerSubmitted();
-        return;
-      }
-      node = node.parentElement;
-    }
-  };
-
   const unwrapSingleton = (control) => {
     let anchor = control;
     let host = control.parentElement;
@@ -824,27 +776,6 @@
       depth += 1;
     }
     return bestControl ? unwrapSingleton(bestControl) : null;
-  };
-
-  const currentModelSignature = () => {
-    const control = findModelInsertionTarget()?.anchor;
-    if (!control) return "";
-    const visibleText = [control.textContent, control.innerText]
-      .filter((value) => typeof value === "string" && value.trim())
-      .join(" ")
-      .replace(/\s+/g, " ")
-      .trim();
-    return visibleText || controlDescriptor(control);
-  };
-
-  const expireLiveCacheIfModelChanged = (threadId) => {
-    if (!threadId || !liveCacheAtByThread.has(threadId)) return;
-    const previous = liveCacheModelByThread.get(threadId);
-    const current = currentModelSignature();
-    if (previous && current && previous !== current) {
-      liveCacheAtByThread.delete(threadId);
-      liveCacheModelByThread.delete(threadId);
-    }
   };
 
   const findContextInsertionTarget = () => {
@@ -1014,7 +945,6 @@
   const renderUsage = () => {
     if (!usageRoot || !usagePopover) return;
     const threadId = findComposerConversationId(inputElement);
-    expireLiveCacheIfModelChanged(threadId);
     const usage = currentUsage();
     if (!usageHasDisplayData(usage) || !inputElement) {
       usageRoot.style.display = "none";
@@ -1053,8 +983,10 @@
           value: formatCacheRemaining(timer.remainingMs),
           color: toneColor(timer.tone),
         });
-      } else {
+      } else if (timer.kind === "expired") {
         rows.push(["缓存剩余", "已过期"]);
+      } else if (timer.kind === "unknown") {
+        rows.push(["缓存剩余", "未知"]);
       }
     }
     if (usage.cachedInputTokens !== undefined) {
@@ -1101,11 +1033,6 @@
   const applyProviderId = (nextId) => {
     const nextProvider = typeof nextId === "string" && nextId.trim() ? nextId.trim() : "";
     if (!nextProvider) return;
-    if (providerId && providerId !== nextProvider) {
-      liveCacheAtByThread.clear();
-      liveCacheModelByThread.clear();
-      submittedThreads.clear();
-    }
     providerId = nextProvider;
   };
 
@@ -1120,28 +1047,74 @@
     }
   };
 
-  const applyTokenUsage = (message, options = {}) => {
+  // The rollout counts once it has caught up with the notification: the same
+  // latest request, or a thread total already past it (a turn sent elsewhere).
+  // Thread totals can reset, so they only ever prove "ahead", never "equal".
+  const requestMatchesUsage = (request, usage) => {
+    const expected = usage?.lastRequest;
+    if (!expected) return true;
+    const recorded = request?.lastTokenUsage || {};
+    const sameRequest = ["inputTokens", "cachedInputTokens", "outputTokens"].every((key) => (
+      expected[key] === undefined || recorded[key] === expected[key]
+    ));
+    const ahead = Number.isFinite(request?.threadTotalTokens)
+      && expected.threadTotalTokens !== undefined
+      && request.threadTotalTokens > expected.threadTotalTokens;
+    return sameRequest || ahead;
+  };
+
+  const setCacheAnchor = (threadId, anchor) => {
+    cacheAnchorByThread.set(threadId, anchor);
+    renderUsage();
+  };
+
+  // Every usage report, live or replayed, asks the rollout when the latest model
+  // request happened; a replay just resolves to its old time.
+  const refreshCacheAnchor = (threadId, usage, attempt = 0) => {
+    const token = {};
+    cacheAnchorRequests.set(threadId, token);
+    const current = () => !disposed && cacheAnchorRequests.get(threadId) === token;
+    const retryOr = (reason) => {
+      if (attempt + 1 < cacheAnchorMaxAttempts) {
+        window.setTimeout(() => {
+          if (current()) refreshCacheAnchor(threadId, usage, attempt + 1);
+        }, cacheAnchorRetryMs);
+        return;
+      }
+      setCacheAnchor(threadId, { status: "unknown", reason });
+    };
+    void Promise.resolve()
+      .then(() => callBridge(lastModelRequestPath, { sessionId: threadId }))
+      .then((result) => {
+        if (!current()) return;
+        if (result?.status !== "ok") throw new Error(result?.message || "读取会话最近请求失败");
+        if (!result.found && result.reason === "no-rollout") {
+          // A thread without a local rollout will not grow one on retry.
+          setCacheAnchor(threadId, { status: "unknown", reason: "no-rollout" });
+          return;
+        }
+        const request = result.found ? result.request : null;
+        if (request && Number.isFinite(request.requestedAt) && requestMatchesUsage(request, usage)) {
+          setCacheAnchor(threadId, { status: "ok", at: request.requestedAt });
+          return;
+        }
+        retryOr(request ? "mismatch" : "no-usage");
+      })
+      .catch((error) => {
+        if (!current()) return;
+        if (attempt + 1 >= cacheAnchorMaxAttempts) {
+          console.warn("[Codey] cache timer rollout read failed", error);
+        }
+        retryOr("failed");
+      });
+  };
+
+  const applyTokenUsage = (message) => {
     if (disposed) return false;
     const observed = observeTokenUsage(message);
     if (!observed) return false;
-    const previousFingerprint = usageFingerprint(usageByThread.get(observed.threadId));
-    const nextFingerprint = usageFingerprint(observed.usage);
     usageByThread.set(observed.threadId, observed.usage);
-    // A submit made before the thread existed belongs to the first thread that
-    // reports usage this page has never seen.
-    const claimsPendingSubmit = pendingSubmit && !previousFingerprint;
-    if (
-      options.live === true
-      && nextFingerprint
-      && nextFingerprint !== previousFingerprint
-      && (submittedThreads.has(observed.threadId) || claimsPendingSubmit)
-    ) {
-      if (claimsPendingSubmit) {
-        pendingSubmit = false;
-        submittedThreads.add(observed.threadId);
-      }
-      startLiveCache(observed.threadId);
-    }
+    refreshCacheAnchor(observed.threadId, observed.usage);
     renderUsage();
     return true;
   };
@@ -1181,7 +1154,7 @@
         type: "notification",
         key: { hostId },
         methods: tokenUsageNotificationMethod,
-        listener: (message) => { if (!stopped) applyTokenUsage(message, { live: true }); },
+        listener: (message) => { if (!stopped) applyTokenUsage(message); },
       });
       request.onRpcBroken?.(onBroken);
       await withTimeout(Promise.resolve(request).then((value) => {
@@ -1251,7 +1224,7 @@
       if (boundNotificationTargets.has(target)) continue;
       const unsubscribe = isRpcManager(target)
         ? await bindRpcNotifications(target)
-        : bindNotificationCallback(target, (message) => applyTokenUsage(message, { live: true }));
+        : bindNotificationCallback(target, (message) => applyTokenUsage(message));
       if (!unsubscribe) continue;
       if (disposed) { unsubscribe(); continue; }
       boundNotificationTargets.set(target, unsubscribe);
@@ -1380,8 +1353,6 @@
     renderUsage();
     window.addEventListener?.(configChangedEvent, onConfigChanged);
     window.addEventListener?.("focus", onFocus);
-    document.addEventListener?.("keydown", onDocumentKeyDown, true);
-    document.addEventListener?.("click", onDocumentClick, true);
   };
 
   window.__codeyComposerUsage = {
@@ -1402,18 +1373,20 @@
       cacheTone: usageRoot?.querySelector?.("[data-codey-usage-ring]")?.getAttribute?.("data-tone")
         || "",
       storedUsageRead,
-      pendingSubmit,
-      submittedThreadCount: submittedThreads.size,
+      cacheAnchor: (() => {
+        const threadId = findComposerConversationId(inputElement);
+        const anchor = threadId ? cacheAnchorByThread.get(threadId) : undefined;
+        if (!anchor) return "";
+        return anchor.status === "ok" ? "ok" : `unknown:${anchor.reason}`;
+      })(),
       threadCount: usageByThread.size,
     }),
     scan,
-    applyNotification: (message) => applyTokenUsage(message, { live: true }),
+    applyNotification: (message) => applyTokenUsage(message),
     dispose: () => {
       disposed = true;
       window.removeEventListener?.(configChangedEvent, onConfigChanged);
       window.removeEventListener?.("focus", onFocus);
-      document.removeEventListener?.("keydown", onDocumentKeyDown, true);
-      document.removeEventListener?.("click", onDocumentClick, true);
       observer?.disconnect();
       unsubscribeNotifications?.();
       for (const timer of [scanTimer, usageCloseTimer, cacheTimer]) {

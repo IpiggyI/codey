@@ -36,6 +36,7 @@ struct CachedConnection {
 pub(crate) struct SessionMetadataCache {
     connections: HashMap<PathBuf, CachedConnection>,
     discovery: CodexSessionDbDiscoveryCache,
+    rollout_paths: HashMap<String, PathBuf>,
 }
 
 /// 会话 ID 归一：允许 `local:` 前缀与两侧空白。此前 5 处各自实现，trim
@@ -168,6 +169,61 @@ impl SessionMetadataCache {
             }
         }
         timestamps
+    }
+
+    /// 按会话 ID 找会话记录文件：先查 `threads.rollout_path`，查不到再按文件名扫目录。
+    /// 找到的路径缓存起来，文件消失后重新查找。
+    pub(crate) fn resolve_rollout_path(
+        &mut self,
+        home: &Path,
+        session_id: &str,
+    ) -> Option<PathBuf> {
+        let session_id = normalize_session_id(session_id);
+        if session_id.is_empty() {
+            return None;
+        }
+        if let Some(path) = self.rollout_paths.get(session_id) {
+            if path.exists() {
+                return Some(path.clone());
+            }
+            self.rollout_paths.remove(session_id);
+        }
+        let mut resolved = None;
+        for path in self.active_database_paths(home) {
+            if !self.ensure_connection(&path) {
+                continue;
+            }
+            let row = {
+                let connection = &self
+                    .connections
+                    .get(&path)
+                    .expect("connection was inserted above")
+                    .connection;
+                session_rollout_path(connection, session_id)
+            };
+            match row {
+                Ok(Some(rollout_path)) => {
+                    let rollout_path = if rollout_path.is_absolute() {
+                        rollout_path
+                    } else {
+                        home.join(rollout_path)
+                    };
+                    if rollout_path.exists() {
+                        resolved = Some(rollout_path);
+                        break;
+                    }
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    self.connections.remove(&path);
+                }
+            }
+        }
+        let resolved = resolved
+            .or_else(|| crate::message_delete::find_rollout_file_by_session_id(home, session_id))?;
+        self.rollout_paths
+            .insert(session_id.to_string(), resolved.clone());
+        Some(resolved)
     }
 
     fn active_database_paths(&mut self, home: &Path) -> Vec<PathBuf> {
@@ -361,6 +417,22 @@ fn catalog_session_titles(connection: &Connection, session_id: &str) -> Result<V
         .query_map(params![session_id], |row| row.get::<_, Option<String>>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(titles.into_iter().flatten().collect())
+}
+
+fn session_rollout_path(connection: &Connection, session_id: &str) -> Result<Option<PathBuf>> {
+    let columns = table_columns(connection, "threads")?;
+    if !columns.contains("id") || !columns.contains("rollout_path") {
+        return Ok(None);
+    }
+    let path = connection
+        .query_row(
+            "SELECT rollout_path FROM threads \
+             WHERE id=?1 AND typeof(rollout_path)='text' AND rollout_path<>'' LIMIT 1",
+            params![session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    Ok(path.map(PathBuf::from))
 }
 
 fn session_timestamp_rows(
@@ -866,6 +938,43 @@ mod tests {
         assert_eq!(timestamps["thread-updated-ms"], 22_001);
         assert_eq!(timestamps["thread-updated"], 23_000);
         assert!(!timestamps.contains_key("missing"));
+    }
+
+    #[test]
+    fn resolves_rollout_paths_from_the_database_then_by_filename() {
+        let home = tempdir().unwrap();
+        let day = home.path().join("sessions/2026/09/28");
+        fs::create_dir_all(&day).unwrap();
+        let indexed_id = "01a0e6c1-dfbc-7743-8a1c-e83fe354026f";
+        let unindexed_id = "01a0e6fc-b7e5-7af3-8af1-240d0b42d32c";
+        let indexed = day.join("indexed.jsonl");
+        let unindexed = day.join(format!("rollout-2026-09-28T15-48-00-{unindexed_id}.jsonl"));
+        fs::write(&indexed, "").unwrap();
+        fs::write(&unindexed, "").unwrap();
+        let connection = Connection::open(home.path().join("state_5.sqlite")).unwrap();
+        connection
+            .execute_batch("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT)")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO threads VALUES (?1, ?2)",
+                params![indexed_id, "sessions/2026/09/28/indexed.jsonl"],
+            )
+            .unwrap();
+        drop(connection);
+
+        let mut cache = SessionMetadataCache::default();
+        assert_eq!(
+            cache.resolve_rollout_path(home.path(), &format!("local:{indexed_id}")),
+            Some(indexed)
+        );
+        assert_eq!(
+            cache.resolve_rollout_path(home.path(), unindexed_id),
+            Some(unindexed.clone())
+        );
+        fs::remove_file(&unindexed).unwrap();
+        assert_eq!(cache.resolve_rollout_path(home.path(), unindexed_id), None);
+        assert_eq!(cache.resolve_rollout_path(home.path(), "missing"), None);
     }
 
     #[test]
