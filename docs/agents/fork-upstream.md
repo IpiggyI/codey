@@ -17,8 +17,8 @@
 
 | 侧 | 标签 | 提交 | 日期 |
 |---|---|---|---|
-| 本分叉 | `v1.1.0` | `release: v1.1.0` 提交 | 2026-09-28 |
-| 上游 | `master`（包含 `v1.2.5`） | `ec0bf0e` | 2026-10-02 固定目标 |
+| 本分叉 | `1.2.0`（待发布） | `更新版本至 1.2.0 并刷新上游说明` 提交 | 2026-10-03 |
+| 上游 | [`master`（包含 `v1.2.5`）](https://github.com/SuperGness/codey/tree/ec0bf0ea31c847bbc5ad10a6e4674b21a7b238fe) | [`ec0bf0e`](https://github.com/SuperGness/codey/commit/ec0bf0ea31c847bbc5ad10a6e4674b21a7b238fe) | 2026-10-03 核实远端，与本次固定目标一致 |
 | 早期内容锚点 | 上游 `v0.10.7` | `bd03e13` | 上次整段同步 |
 | vendor | 上游 `master` | `ec0bf0e` | 2026-10-02 整目录替换 |
 
