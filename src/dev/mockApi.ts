@@ -46,6 +46,7 @@ if (import.meta.env.DEV) {
       supportsAutoReview: boolean;
     };
     let previewActiveProfileId = "primary";
+    let previewComputerUseReady = false;
     let previewRoutes: PreviewProfile[] = [
         {
           id: "primary",
@@ -345,6 +346,22 @@ if (import.meta.env.DEV) {
             userConfigured: false,
             detectionFailed: false,
           },
+        };
+      }
+      if (
+        command === "plugin_marketplace_status" ||
+        command === "repair_plugin_marketplace" ||
+        command === "prepare_computer_use"
+      ) {
+        if (command === "prepare_computer_use") previewComputerUseReady = true;
+        return {
+          status: "ready",
+          needsRepair: false,
+          officialMarketplace: true,
+          remoteMarketplace: true,
+          remoteRegistered: true,
+          managedConfigCompatible: true,
+          computerUse: { supported: true, ready: previewComputerUseReady },
         };
       }
       if (command === "runtime_status") {

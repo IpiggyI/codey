@@ -67,6 +67,28 @@ pub(super) async fn repair_plugin_marketplace() -> Result<Value, String> {
     Ok(status)
 }
 
+pub(super) async fn prepare_computer_use() -> Result<Value, String> {
+    let home = codex_home();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::computer_use::prepare(home, &crate::computer_use::data_root())?;
+        let mut status = plugin_marketplace::marketplaces_status(home);
+        decorate_plugin_marketplace_status(home, &mut status);
+        Ok::<_, anyhow::Error>(status)
+    })
+    .await
+    .map_err(|error| format!("桌面插件准备任务异常退出：{error}"))
+    .and_then(|result| result.map_err(|error| format!("准备桌面插件失败：{error:#}")));
+    if let Err(error) = &result {
+        error_log::record_failure(
+            "patch_failed",
+            "prepare_computer_use",
+            error.clone(),
+            json!({"codexHome": home}),
+        );
+    }
+    result
+}
+
 fn decorate_plugin_marketplace_status(home: &Path, status: &mut Value) {
     let needs_repair = status
         .get("needsRepair")

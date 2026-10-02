@@ -25,6 +25,7 @@ export const CODEY_API_COMMANDS = [
   "fetch_prompt_optimization_models",
   "plugin_marketplace_status",
   "repair_plugin_marketplace",
+  "prepare_computer_use",
 ] as const;
 
 export type CodeyApiCommand = (typeof CODEY_API_COMMANDS)[number];

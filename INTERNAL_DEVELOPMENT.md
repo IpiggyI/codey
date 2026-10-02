@@ -82,7 +82,7 @@ provider、模型和上游格式分别识别。控制台只读展示当前 Codex
 
 - 会话导入、导出和删除轮次先释放目标会话，再校验大小、并发变化和路径；无法稳定确认目标时拒绝删除。轮次删除只选择可见会话，先由原生管理器执行 `thread/unsubscribe`，再删除持久文件，成功后局部更新规范历史与流归属；运行任务、跟随窗口和不完整接口拒绝删除。数据库锁等待 5 秒，重试合并已删除标识，部分成功计数不会丢失；未知索引不报告完整成功。页面能力分项探测与退避，旧安装卸载后不发布迟到接口；侧栏整会话删除仍保留本地活跃会话保护。会话删除不保留用户可恢复的备份。
 - 会话索引及元数据读取已有 SQLite 和 rollout；启动期写入只在 Codex 停止后执行，且不改写历史会话的 provider。
-- 插件市场修复使用随包快照及可回滚替换，读取状态不触发修改；Computer Use 沿用官方统一插件和 `cua_repl`，不创建重复服务或改写开关。
+- 插件市场修复使用随包快照及可回滚替换，读取状态不触发修改；桌面操作插件仅由 `prepare_computer_use` 显式准备，资源位于 Codey 数据目录的 `marketplaces/codey-local`。运行期通过既有 `-c` 覆盖注册 `codey-local`；准备不写用户配置、不安装或启用插件，不另注册重复 MCP 服务。新注册需重启 Codex，安装、更新和启停由 Codex 插件页管理。用户自定义同名来源会明确报错并保留。读取状态不写资源；损坏清单、载荷或符号链接不会被报告为就绪。禁用插件仍报告已安装，启用状态单列。
 - 提示词优化可走官方账号、当前 provider 或独立配置，后端校验地址、认证和模型。成功响应只保留最终提示词正文，丢弃推理过程；日志不保存提示词正文或凭据。
 
 ## 子代理与 FastCtx
@@ -153,7 +153,9 @@ provider、模型和上游格式分别识别。控制台只读展示当前 Codex
 
 未设置 `CODEY_SKIP_OVERLAY_BUILD` 时，该命令先重建前端与注入脚本。该变量已为 `1` 时，要求 `dist-overlay/codey-overlay.js` 已经存在，不再重建。随后的 cargo 调用只编译 `codey` 包的 release 二进制（`cargo build --release -p codey --bins`），并带 `CODEY_SKIP_OVERLAY_BUILD=1`，`backend/build.rs` 据此跳过再跑一次 Vite，只校验 overlay 产物已存在。直接运行 cargo 时不设该变量，build.rs 仍会自动构建前端产物。macOS 会额外生成 `target/release/bundle/macos/Codey.app`。Windows 安装包由 `.github/workflows/build-desktop.yml` 用固定版本的 NSIS 压缩包生成，不经过 Chocolatey。桌面发布任务先执行一次 `pnpm run vite:build`，再以 `CODEY_SKIP_OVERLAY_BUILD=1` 调用上述构建，打包时不再重编前端。CI 的实际门禁以 `.github/workflows/ci.yml` 为准。
 
-本机 Windows 验证包（不推送）只走 `scripts/build-windows.sh`，流程见 `docs/agents/windows-pack.md`。GitHub 的 `v*` 标签仍由 `.github/workflows/build-desktop.yml` 打发布安装包。
+Windows 桌面工具由 Go 1.26 编译，支持 x64 和 arm64；可用 `CODEY_COMPUTER_USE_GO` 指定编译器。macOS 用 Xcode 的 Swift 编译器构建 macOS 14 及以上载荷，并生成本地临时签名；Linux 无原生载荷。原生源目录 `vendor/ComputerUse` 与上游固定目标逐字节一致，MIT 许可随插件和安装包分发。
+
+本机 Windows 验证包（不推送）只走 `scripts/build-windows.sh`，流程见 `docs/agents/windows-pack.md`。脚本会复制桌面工具源并校验本机 Go，可传 `-ComputerUseGo` 指定 Windows `go.exe`；加 `-RunComputerUseTests` 会先在 NTFS 副本中执行原生协议与资源隔离测试，不执行桌面动作。GitHub 的 `v*` 标签仍由 `.github/workflows/build-desktop.yml` 打发布安装包。
 
 Windows x64 与 macOS arm64 发布打包任务通过 `CARGO_PROFILE_RELEASE_LTO=thin` 和 `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16` 覆盖默认的 fat LTO 与单代码生成单元，以减少 release 优化和链接耗时。Windows 发布打包另用 `rust-lld` 链接。本地构建，以及与 macOS 打包并行的检查任务，沿用 Cargo.toml 默认配置。Windows 发布打包不再重复 Rust 测试、Clippy 和格式检查，这些留在 `.github/workflows/ci.yml` 的 Windows 任务。macOS 的 TypeScript、JavaScript 与 Rust 检查在独立任务里与打包并行，发布前都要通过。此调整可能影响二进制体积和运行性能。
 
@@ -188,6 +190,7 @@ macOS 本地调试未签名安装包时，确认来源后可用 `xattr -dr com.a
 - 只支持 Codex Electron 桌面客户端；页面和 bundle 大改时可能需要更新补丁与注入适配。不固定安装某一版 Codex。
 - 第三方 provider 只能使用目标服务可表达的能力；无法无损转换的请求会在发送前拒绝。
 - Codex 直连当前 provider，不在本机做跨 provider 容灾，也不会重放已发送请求。
+- 既有“手动修复插件市场”通过运行组件的配置管理器写入用户 `config.toml`，与 ADR 0002 有偏差。本轮桌面插件准备遵守只读边界，未改写该既有修复路径。
 - 子代理 Hook 用于本地协作约束，不等同于操作系统沙箱。
 - FastCtx 不提供 PDF、MCP Resources 或 shell 工具，这些任务继续使用 Codex 自带能力。
 - 进程内请求日志已随内置路由删除，控制台不再提供该页面。

@@ -216,6 +216,12 @@ jobs:
           shared-key: windows-release
           cache-on-failure: true
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: false
+
       - name: Install NSIS
         shell: pwsh
         run: |

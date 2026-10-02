@@ -64,6 +64,7 @@ for (const [source, destination] of [
   ["README.md", "README.md"],
   ["LICENSE", "LICENSE"],
   ["THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md"],
+  ["vendor/ComputerUse/LICENSE", "licenses/ComputerUse/LICENSE"],
   ["licenses/FastCtx/LICENSE-APACHE", "licenses/FastCtx/LICENSE-APACHE"],
   ["licenses/FastCtx/NOTICE", "licenses/FastCtx/NOTICE"],
 ]) {

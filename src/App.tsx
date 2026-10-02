@@ -117,6 +117,7 @@ export function App({
     });
   const [pluginMarketplaceStatus, setPluginMarketplaceStatus] =
     useState<PluginMarketplaceStatus | null>(null);
+  const [computerUseNotice, setComputerUseNotice] = useState("");
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(
     null,
   );
@@ -823,6 +824,24 @@ export function App({
     });
   }
 
+  async function prepareComputerUse() {
+    setComputerUseNotice("");
+    await runOperation("prepare-computer-use", async () => {
+      const result = await withTimeout(
+        invoke<PluginMarketplaceStatus>("prepare_computer_use"),
+        30_000,
+        "桌面操作插件准备超时，请稍后重试",
+      );
+      setPluginMarketplaceStatus(result);
+      if (!result.computerUse?.ready) {
+        throw new Error("桌面操作插件资源未就绪，请重试");
+      }
+      const text = "桌面操作插件已准备。请重启 Codex，再到插件页安装或更新；启用和停用也在插件页操作。";
+      setComputerUseNotice(text);
+      setNotice({ tone: "success", text });
+    });
+  }
+
   async function clearTraceLogs() {
     await runOperation("clear-trace-logs", async () => {
       const result = await invoke<{
@@ -903,6 +922,9 @@ export function App({
   const handleSaveCurrent = useStableEvent(() => void saveCurrent());
   const handleRepairPluginMarketplace = useStableEvent(
     () => void repairPluginMarketplace(),
+  );
+  const handlePrepareComputerUse = useStableEvent(
+    () => void prepareComputerUse(),
   );
   const handleRestartCodex = useStableEvent(askRestartCodex);
   const handleConfigChange = useStableEvent(editConfig);
@@ -1155,6 +1177,8 @@ export function App({
             isBusy={isBusy}
             pluginMarketplaceStatus={pluginMarketplaceStatus}
             onRepairPluginMarketplace={handleRepairPluginMarketplace}
+            computerUseNotice={computerUseNotice}
+            onPrepareComputerUse={handlePrepareComputerUse}
             onRestart={handleRestartCodex}
             restartStatusUnknown={Boolean(restartStatusError)}
             showRestartAction={!embedded}

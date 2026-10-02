@@ -79,6 +79,8 @@ type OperationsPanelProps = {
   isBusy: boolean;
   pluginMarketplaceStatus: PluginMarketplaceStatus | null;
   onRepairPluginMarketplace: () => void;
+  computerUseNotice: string;
+  onPrepareComputerUse: () => void;
   onRestart: () => void;
   showRestartAction?: boolean;
   restartStatusUnknown?: boolean;
@@ -92,6 +94,8 @@ function OperationsPanelComponent({
   isBusy,
   pluginMarketplaceStatus,
   onRepairPluginMarketplace,
+  computerUseNotice,
+  onPrepareComputerUse,
   onRestart,
   showRestartAction = true,
   restartStatusUnknown = false,
@@ -647,6 +651,44 @@ function OperationsPanelComponent({
                             : "Codex 启动后将在这里显示已生效功能"}
                         </div>
                       )}
+                    </section>
+                  )}
+
+                  {expandedStatusCard.title === "插件市场" && (
+                    <section
+                      className="injection-status-section"
+                      aria-labelledby="computer-use-title"
+                    >
+                      <div className="injection-status-header">
+                        <h4 id="computer-use-title">桌面操作插件</h4>
+                        <Badge
+                          variant={pluginMarketplaceStatus?.computerUse?.ready ? "success" : "info"}
+                        >
+                          {!pluginMarketplaceStatus?.computerUse
+                            ? "待检查"
+                            : !pluginMarketplaceStatus.computerUse.supported
+                              ? "当前平台不支持"
+                              : pluginMarketplaceStatus.computerUse.ready
+                                ? "已准备"
+                                : "未准备"}
+                        </Badge>
+                      </div>
+                      <p className="injection-script-detail">
+                        {computerUseNotice || "准备后请重启 Codex，再到插件页安装或更新。启用和停用由 Codex 管理。"}
+                      </p>
+                      <Button
+                        variant="outline"
+                        size="xs"
+                        disabled={isBusy || !pluginMarketplaceStatus?.computerUse?.supported}
+                        onPress={onPrepareComputerUse}
+                      >
+                        {busy === "prepare-computer-use" && (
+                          <LoaderCircle className="animate-spin" aria-hidden="true" />
+                        )}
+                        {pluginMarketplaceStatus?.computerUse?.ready
+                          ? "更新桌面操作插件"
+                          : "准备桌面操作插件"}
+                      </Button>
                     </section>
                   )}
 

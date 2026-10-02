@@ -27,7 +27,7 @@ test("plugin marketplace repair is explicit and status checks stay read-only", a
     /pub\(super\) async fn plugin_marketplace_status\(\)[\s\S]*?\n}\n\npub\(super\) async fn repair_plugin_marketplace/,
   )?.[0] || "";
   const repairFunction = pluginCommands.match(
-    /pub\(super\) async fn repair_plugin_marketplace\(\)[\s\S]*?\n}\n\nfn decorate_plugin_marketplace_status/,
+    /pub\(super\) async fn repair_plugin_marketplace\(\)[\s\S]*?\n}\n\npub\(super\) async fn prepare_computer_use/,
   )?.[0] || "";
 
   assert.match(marketplaceSource, /pub fn marketplaces_status\(home: &Path\) -> Value/);

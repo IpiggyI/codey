@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -61,6 +61,7 @@ pub fn marketplaces_status(home: &Path) -> Value {
         "remotePath": remote.marketplace_root,
         "managedConfigCompatible": managed_config_compatible,
         "needsRepair": needs_repair,
+        "computerUse": crate::computer_use::status(home, &crate::computer_use::data_root()),
     })
 }
 
@@ -150,7 +151,11 @@ pub fn list_plugins(home: &Path) -> Result<Value> {
                 "localPath".into(),
                 Value::String(plugin_root.to_string_lossy().to_string()),
             );
-            object.insert("installed".into(), Value::Bool(installed.contains(&id)));
+            object.insert("installed".into(), Value::Bool(installed.contains_key(&id)));
+            object.insert(
+                "enabled".into(),
+                Value::Bool(installed.get(&id).copied().unwrap_or(false)),
+            );
             merge_manifest(&mut object, &plugin_root);
             plugins.push(Value::Object(object));
         }
@@ -159,12 +164,13 @@ pub fn list_plugins(home: &Path) -> Result<Value> {
     Ok(json!({"plugins": plugins, "count": count}))
 }
 
-fn marketplace_paths(home: &Path) -> [PathBuf; 4] {
+fn marketplace_paths(home: &Path) -> [PathBuf; 5] {
     [
         home.join(".tmp/plugins/.agents/plugins/marketplace.json"),
         home.join(".tmp/plugins/.agents/plugins/api_marketplace.json"),
         home.join(".tmp/plugins-remote/.agents/plugins/marketplace.json"),
         home.join(".tmp/marketplaces/role-specific-plugins/.agents/plugins/marketplace.json"),
+        crate::computer_use::marketplace_path(&crate::computer_use::data_root()),
     ]
 }
 
@@ -195,33 +201,67 @@ fn merge_manifest(plugin: &mut Map<String, Value>, plugin_root: &Path) {
     }
 }
 
-fn installed_plugins(home: &Path) -> Result<HashSet<String>> {
-    let Ok(snapshot) = codey_runtime_core::config_manager::ConfigManager::for_home(home).load()
-    else {
-        return Ok(HashSet::new());
-    };
+fn installed_plugins(home: &Path) -> Result<HashMap<String, bool>> {
+    let snapshot = codey_runtime_core::config_manager::ConfigManager::for_home(home)
+        .load()
+        .context("读取插件安装配置失败")?;
     let Some(table) = snapshot
         .document()
         .get("plugins")
         .and_then(|item| item.as_table_like())
     else {
-        return Ok(HashSet::new());
+        return Ok(HashMap::new());
     };
     Ok(table
         .iter()
-        .filter(|(_, item)| {
-            item.as_table_like()
+        .map(|(key, item)| {
+            let enabled = item
+                .as_table_like()
                 .and_then(|table| table.get("enabled"))
                 .and_then(|value| value.as_bool())
-                .unwrap_or(true)
+                .unwrap_or(true);
+            (key.to_string(), enabled)
         })
-        .map(|(key, _)| key.to_string())
         .collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disabled_plugins_remain_installed_and_report_disabled() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        write_marketplace(home, "plugins-remote", "test-market", "test-plugin");
+        fs::write(
+            home.join("config.toml"),
+            "[plugins.\"test-plugin@test-market\"]\nenabled = false\n",
+        )
+        .unwrap();
+        let result = list_plugins(home).unwrap();
+        let plugin = result["plugins"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|plugin| plugin["id"] == "test-plugin@test-market")
+            .unwrap();
+        assert_eq!(plugin["installed"], true);
+        assert_eq!(plugin["enabled"], false);
+        fs::write(home.join("config.toml"), "").unwrap();
+        assert!(
+            !installed_plugins(home)
+                .unwrap()
+                .contains_key("test-plugin@test-market")
+        );
+    }
+
+    #[test]
+    fn invalid_installation_config_returns_error_instead_of_empty_plugins() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("config.toml"), "[broken").unwrap();
+        assert!(list_plugins(temp.path()).is_err());
+    }
 
     fn write_marketplace(home: &Path, directory: &str, name: &str, plugin: &str) {
         let root = home.join(".tmp").join(directory);

@@ -44,6 +44,16 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Setup Go for native protocol tests
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: false
+
+      - name: Native protocol tests
+        working-directory: vendor/ComputerUse/windows
+        run: go test ./...
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
 
@@ -93,6 +103,16 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.x"
+          cache: false
+
+      - name: Native protocol tests
+        working-directory: vendor/ComputerUse/windows
+        run: go test ./...
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2

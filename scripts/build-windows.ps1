@@ -10,14 +10,25 @@
 
     Does not install, start, or stop Codey.
 #>
+param(
+    [string]$ComputerUseGo = '',
+    [switch]$RunComputerUseTests
+)
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $ScriptDir 'windows-pack-workspace.ps1')
 $RepoRoot = [IO.Path]::GetFullPath((Join-Path $ScriptDir '..'))
 $WorkRoot = Join-Path $env:TEMP 'codey-windows-pack'
 $BuildStamp = Get-Date -Format 'yyyyMMdd-HHmmssfff'
-$AppCopy = Join-Path $WorkRoot "app-$BuildStamp"
+$AppCopy = Join-Path $WorkRoot "app-$BuildStamp-$([Guid]::NewGuid().ToString('N'))"
+$InitialLocation = Get-Location
+$AppCopyCreated = $false
+$BuildError = ''
+$CleanupError = ''
+$OutputPath = ''
 $WindowsCargoBin = Join-Path $env:USERPROFILE '.cargo\bin'
 $WindowsCargoHome = Join-Path $env:USERPROFILE '.cargo'
 $WindowsRustupHome = Join-Path $env:USERPROFILE '.rustup'
@@ -137,6 +148,9 @@ function Resolve-Makensis {
 }
 
 try {
+    if ($InitialLocation.Provider.Name -ne 'FileSystem') {
+        throw 'Windows packaging requires a filesystem working directory'
+    }
     $runningOnWindows = [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform(
         [System.Runtime.InteropServices.OSPlatform]::Windows
     )
@@ -146,12 +160,25 @@ try {
 
     Remove-WslPathEntries
     Use-WindowsRustEnv
+    Assert-WindowsPackPath -WorkRoot $WorkRoot -AppCopy $AppCopy
     New-Item -ItemType Directory -Force -Path $WorkRoot | Out-Null
     Set-Location -LiteralPath $WorkRoot
 
     $rustcVersion = Assert-WindowsRustc
+    $go = $ComputerUseGo
+    if ([string]::IsNullOrWhiteSpace($go)) { $go = Get-WindowsExePath 'go.exe' }
+    if ([string]::IsNullOrWhiteSpace($go) -or -not (Test-Path -LiteralPath $go)) {
+        throw 'Windows go.exe missing; add Go to PATH or pass -ComputerUseGo with its absolute path'
+    }
+    if ($go -match '(?i)wsl\.localhost|wsl\$' -or $go -notmatch '(?i)\.exe$') {
+        throw 'Computer Use requires native Windows go.exe'
+    }
+    $goVersion = & $go version
+    if ($LASTEXITCODE -ne 0) { throw 'go.exe version failed' }
+    $env:CODEY_COMPUTER_USE_GO = $go
     $makensis = Resolve-Makensis
     Write-NsisLog "rustc=$rustcVersion; makensis=$makensis"
+    Write-NsisLog "go=$goVersion"
     $null = Import-VcVars64
     $link = Get-WindowsExePath 'link.exe'
     if (-not $link) { throw "link.exe missing after vcvars64" }
@@ -163,6 +190,7 @@ try {
 
     Write-NsisLog "refresh app from $RepoRoot into $AppCopy"
     New-Item -ItemType Directory -Path $AppCopy | Out-Null
+    $AppCopyCreated = $true
     foreach ($name in @(
             'Cargo.toml', 'Cargo.lock', 'package.json', 'pnpm-lock.yaml',
             'pnpm-workspace.yaml', 'vite.overlay.config.ts', 'tsconfig.json',
@@ -173,6 +201,7 @@ try {
     Copy-SmallTree -Source (Join-Path $RepoRoot '.cargo') -Destination (Join-Path $AppCopy '.cargo')
     Copy-SmallTree -Source (Join-Path $RepoRoot 'backend') -Destination (Join-Path $AppCopy 'backend') -ExcludeDirNames @('target')
     Copy-SmallTree -Source (Join-Path $RepoRoot 'vendor\CodeyRuntime') -Destination (Join-Path $AppCopy 'vendor\CodeyRuntime') -ExcludeDirNames @('target')
+    Copy-SmallTree -Source (Join-Path $RepoRoot 'vendor\ComputerUse') -Destination (Join-Path $AppCopy 'vendor\ComputerUse')
     Copy-SmallTree -Source (Join-Path $RepoRoot 'src') -Destination (Join-Path $AppCopy 'src')
     Copy-SmallTree -Source (Join-Path $RepoRoot 'public') -Destination (Join-Path $AppCopy 'public')
     Copy-SmallTree -Source (Join-Path $RepoRoot 'dist-overlay') -Destination (Join-Path $AppCopy 'dist-overlay')
@@ -199,6 +228,19 @@ try {
     Write-NsisLog "cargo build --release in $AppCopy"
     Push-Location $AppCopy
     try {
+        if ($RunComputerUseTests) {
+            $testDebug = $env:CARGO_PROFILE_TEST_DEBUG
+            $testIncremental = $env:CARGO_PROFILE_TEST_INCREMENTAL
+            try {
+                $env:CARGO_PROFILE_TEST_DEBUG = '0'
+                $env:CARGO_PROFILE_TEST_INCREMENTAL = 'false'
+                & (Join-Path $WindowsCargoBin 'cargo.exe') test -p codey computer_use::tests --locked
+                if ($LASTEXITCODE -ne 0) { throw "Computer Use native tests failed: $LASTEXITCODE" }
+            } finally {
+                $env:CARGO_PROFILE_TEST_DEBUG = $testDebug
+                $env:CARGO_PROFILE_TEST_INCREMENTAL = $testIncremental
+            }
+        }
         & (Join-Path $WindowsCargoBin 'cargo.exe') build --release --manifest-path (Join-Path $AppCopy 'Cargo.toml')
         if ($LASTEXITCODE -ne 0) { throw "cargo build --release failed: $LASTEXITCODE" }
     } finally {
@@ -234,8 +276,31 @@ try {
     $written = Get-Item -LiteralPath $OutputPath
     if ($written.Length -le 1MB) { throw "copied installer too small: $($written.Length) bytes" }
 
-    Write-Output "NSIS_OK: $OutputPath"
-    exit 0
 } catch {
-    Fail-Nsis $_.Exception.Message
+    $BuildError = $_.Exception.Message
+} finally {
+    try {
+        if ($InitialLocation.Provider.Name -eq 'FileSystem') {
+            Set-Location -LiteralPath $InitialLocation.ProviderPath
+        }
+        if ($AppCopyCreated) {
+            Remove-WindowsPackDirectory -WorkRoot $WorkRoot -AppCopy $AppCopy
+        }
+    } catch {
+        $CleanupError = $_.Exception.Message
+        Write-Warning "[nsis] cleanup failed: $CleanupError; retained workspace: $AppCopy"
+    }
+    try {
+        if (Test-Path -LiteralPath $WorkRoot) {
+            $summary = "workspace=$AppCopy`ninstaller=$OutputPath`nbuild_error=$BuildError`ncleanup_error=$CleanupError"
+            Write-WindowsPackSummary -WorkRoot $WorkRoot -AppCopy $AppCopy -Message $summary
+        }
+    } catch {
+        Write-Warning "[nsis] build summary failed: $($_.Exception.Message)"
+    }
 }
+
+if ($BuildError) { Fail-Nsis $BuildError }
+if ($CleanupError) { Fail-Nsis "workspace cleanup failed: $CleanupError; installer retained at: $OutputPath" }
+Write-Output "NSIS_OK: $OutputPath"
+exit 0

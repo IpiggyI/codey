@@ -171,6 +171,7 @@ export type PluginMarketplaceStatus = {
   configuredRemote?: boolean;
   configChanged?: boolean;
   managedConfigCompatible?: boolean;
+  computerUse?: { supported: boolean; ready: boolean };
   message?: string;
 };
 

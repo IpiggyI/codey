@@ -495,7 +495,7 @@ fn apply_isolated_runtime_router_config(
     } else {
         (None, Vec::new())
     };
-    let runtime_config_overrides = build_isolated_runtime_overrides(
+    let mut runtime_config_overrides = build_isolated_runtime_overrides(
         &effective_document,
         root_instructions.as_deref(),
         &runtime_agents,
@@ -503,6 +503,10 @@ fn apply_isolated_runtime_router_config(
         fastctx_namespace,
         &hook_trust_entries,
     )?;
+    runtime_config_overrides.extend(crate::computer_use::runtime_overrides(
+        home,
+        marker.parent().context("Codey 运行租约缺少父目录")?,
+    )?);
 
     create_private_dir_all(backup_root)?;
     prune_stale_backup_dirs(backup_root, marker);

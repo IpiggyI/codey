@@ -13,6 +13,11 @@ those lockfiles. Upstream package metadata and license files are authoritative.
 `vendor/CodeyRuntime` is distributed as source under `AGPL-3.0-only`. Its
 license text is also preserved at `vendor/CodeyRuntime/LICENSE`.
 
+`vendor/ComputerUse` contains the native desktop tool sources from
+[SuperGness/codey](https://github.com/SuperGness/codey), under the MIT license.
+Copyright (c) 2026 Leo. The license is preserved at
+`vendor/ComputerUse/LICENSE` and bundled at `licenses/ComputerUse/LICENSE`.
+
 ## Bundled context tool
 
 Codey's optional built-in context tool sidecar includes FastCtx.

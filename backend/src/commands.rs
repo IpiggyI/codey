@@ -46,7 +46,7 @@ pub use models::{
     sync_current_provider_command,
 };
 pub(crate) use models::{native_subagent_model_state, renderer_model_catalog_value};
-use plugins::{plugin_marketplace_status, repair_plugin_marketplace};
+use plugins::{plugin_marketplace_status, prepare_computer_use, repair_plugin_marketplace};
 use prompt_optimization::{
     fetch_prompt_optimization_models_command, optimize_prompt_command,
     test_prompt_optimization_command,
@@ -1119,6 +1119,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         }
         "plugin_marketplace_status" => plugin_marketplace_status().await,
         "repair_plugin_marketplace" => repair_plugin_marketplace().await,
+        "prepare_computer_use" => prepare_computer_use().await,
         _ => Err(format!("未知 Codey API 命令：{command}")),
     };
     result.unwrap_or_else(api_error_message)
