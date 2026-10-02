@@ -150,7 +150,7 @@ pub(super) struct SpawnedCodex {
     pub(super) inspector_argument: Option<String>,
     pub(super) performance_status: String,
     pub(super) performance_detail: String,
-    /// Confirmed injection path: `inspector`, `node_options`, `cli`, `cli_fuses_disabled`,
+    /// Confirmed main-process injection path: `inspector`, `node_options`, `cli`,
     /// or empty when none of those completed.
     pub(super) startup_injection_mode: String,
 }
@@ -170,8 +170,16 @@ enum StartupInjectionMode {
 impl StartupInjectionMode {
     fn with_fuses(self, fuses: crate::electron_fuses::ElectronFuses) -> Self {
         if self == Self::CliWrapper
-            && !fuses.node_options.node_options_possible()
-            && !fuses.node_cli_inspect.inspector_possible()
+            && matches!(
+                fuses.node_options,
+                crate::electron_fuses::FuseState::Disabled
+                    | crate::electron_fuses::FuseState::Removed
+            )
+            && matches!(
+                fuses.node_cli_inspect,
+                crate::electron_fuses::FuseState::Disabled
+                    | crate::electron_fuses::FuseState::Removed
+            )
         {
             Self::CliWrapperFusesDisabled
         } else {
@@ -189,9 +197,57 @@ impl StartupInjectionMode {
     }
 }
 
-#[allow(
-    clippy::ptr_arg,
-    reason = "Windows 会整体替换 app_dir 的 PathBuf，`&mut Path` 无法赋值；该赋值在 cfg(windows) 内，Linux 上 clippy 看不到因而误报。"
+/// A packaged Electron runtime may drop the inherited `NODE_OPTIONS`, which
+/// leaves the `--require` patch unloaded and its marker file missing while the
+/// fuse scan still reports the flag as enabled. A live renderer debug port is
+/// the counterpart of the Inspector probe's early exit: the main script already
+/// started, so the patch can no longer load and waiting out the readiness
+/// budget only delays the switch to Inspector.
+#[cfg(any(windows, target_os = "macos"))]
+const RENDERER_READY_REQUIRE_GRACE_PERIOD: Duration = Duration::from_secs(5);
+
+/// First delay between renderer debug-port probes of a `--require` attempt;
+/// later probes back off up to 500ms.
+#[cfg(any(windows, target_os = "macos"))]
+const RENDERER_READY_PROBE_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Whether this app directory is launched through Microsoft Store activation.
+///
+/// Such a launch is activated over COM rather than started as a child process,
+/// so the runtime may drop the environment Codey would otherwise inherit, and
+/// its package files are protected against fuse repair. `NODE_OPTIONS` is
+/// therefore not a usable main-process entry there, while Inspector arrives
+/// with the activation arguments.
+///
+/// Windows only: macOS starts a `.app` through `open -n`, which passes the
+/// launch environment explicitly, so a Mac App Store copy needs no separate
+/// channel decision. Never call this from the macOS branch.
+#[cfg(any(windows, test))]
+fn windows_app_dir_supports_packaged_activation(app_dir: &std::path::Path) -> bool {
+    codey_runtime_core::app_paths::packaged_app_user_model_id(app_dir).is_some()
+}
+
+/// Whether this attempt should prepare the `NODE_OPTIONS --require` payload.
+///
+/// A Store activation cannot observe Codey's environment, so `NODE_OPTIONS` is
+/// dropped and its marker never arrives. Standalone installs keep the existing
+/// preference; Store installs never prepare an environment-dependent payload.
+#[cfg(any(windows, test))]
+fn windows_should_prepare_require_patch(
+    packaged_activation: bool,
+    _inspect_fuse: crate::electron_fuses::FuseState,
+    options_fuse: crate::electron_fuses::FuseState,
+    retry_without_require: bool,
+) -> bool {
+    if retry_without_require || !options_fuse.node_options_possible() {
+        return false;
+    }
+    !packaged_activation
+}
+
+#[cfg_attr(
+    not(windows),
+    allow(clippy::ptr_arg, reason = "Windows 启动重试需要替换调用方的应用目录")
 )]
 pub(super) async fn spawn_codex(
     app_dir: &mut PathBuf,
@@ -220,14 +276,28 @@ pub(super) async fn spawn_codex(
         // Prefer NODE_OPTIONS `--require` whenever that fuse is on. Inspector
         // evaluate is the fallback. Never combine the two: both wrap Module._load.
         let mut retry_without_inspector = false;
+        // Electron drops every NODE_OPTIONS flag except --max-http-header-size
+        // and --http-parser in packaged apps, so `--require` may never write
+        // its marker. A retry then gives Inspector its turn.
+        let mut retry_without_require = false;
         let mut attempt = 0;
         loop {
             attempt += 1;
             *app_dir = refresh_windows_packaged_app_dir(app_dir)?;
+            codey_runtime_core::app_paths::validate_codex_app_dir(app_dir)?;
             error_log::refresh_codex_app_version(Some(app_dir), None);
+            // Store uses native activation with a scoped CLI environment.
+            // Inspector still requires the shipped fuse; do not rely on
+            // NODE_OPTIONS in a packaged Electron runtime.
+            let packaged_activation = windows_app_dir_supports_packaged_activation(app_dir);
             let fuses = crate::electron_fuses::detect_electron_fuses(app_dir.to_path_buf()).await;
             let inspect_fuse = fuses.node_cli_inspect;
-            let require_wanted = fuses.node_options.node_options_possible();
+            let require_wanted = windows_should_prepare_require_patch(
+                packaged_activation,
+                inspect_fuse,
+                fuses.node_options,
+                retry_without_require,
+            );
             let require_patch = prepare_startup_require_launch(
                 require_wanted,
                 patch_options,
@@ -270,7 +340,7 @@ pub(super) async fn spawn_codex(
                                 "platform": "windows",
                             }),
                         );
-                        error
+                        recovery::recoverable(error)
                     })?,
                 )
             } else {
@@ -307,15 +377,16 @@ pub(super) async fn spawn_codex(
             // Inspector the wrapper is otherwise the only entry, so a constrained
             // launch must not proceed unless Store accepts it.
             let constrained = !runtime_config_overrides.is_empty() || subagent_gate_active;
+            let wrapper_environment_required = use_require || (!use_inspector && constrained);
             let launch = spawn_windows_codex(
                 app_dir,
                 debug_port,
                 &launch_arguments,
                 &launch_environment,
-                use_require || (!use_inspector && constrained),
+                wrapper_environment_required,
             )
             .await;
-            let (mut spawned, package_debug_session, wrapper_environment_applied) = match launch {
+            let (mut spawned, wrapper_environment_applied) = match launch {
                 Ok(launch) => launch,
                 Err(error) => {
                     let retry = should_retry_startup(&error, attempt);
@@ -323,7 +394,25 @@ pub(super) async fn spawn_codex(
                         "launch_failed",
                         "spawn_windows_codex",
                         format!("启动尝试 {attempt}/2：{error:#}"),
-                        serde_json::json!({ "startupAttempt": attempt, "retryable": retry }),
+                        serde_json::json!({
+                            "startupAttempt": attempt,
+                            "retryable": retry,
+                            "packagedActivation": packaged_activation,
+                            "useInspector": use_inspector,
+                            "useRequire": use_require,
+                            "inspectorFuse": inspect_fuse.as_str(),
+                            "nodeOptionsFuse": fuses.node_options.as_str(),
+                            "wrapperPrepared": wrapper.is_some(),
+                            "wrapperEnvironmentRequired": wrapper_environment_required,
+                            // The other half of the Store launch decision: a
+                            // configured home forces the environment even when
+                            // an injection channel needs none.
+                            "codexHomeEnvironmentRequired": requires_codex_home_environment(
+                                std::env::var_os("CODEX_HOME").as_deref(),
+                            ),
+                            "runtimeOverrideCount": runtime_config_overrides.len(),
+                            "subagentGateActive": subagent_gate_active,
+                        }),
                     );
                     if retry {
                         if !error.is::<WindowsPackageChanged>() {
@@ -344,6 +433,7 @@ pub(super) async fn spawn_codex(
                     "attempt": attempt,
                     "useInspector": use_inspector,
                     "useRequire": use_require,
+                    "packagedActivation": packaged_activation,
                     "inspectorFuse": inspect_fuse.as_str(),
                     "nodeOptionsFuse": fuses.node_options.as_str(),
                     "requirePrepared": require_patch.is_some(),
@@ -363,11 +453,6 @@ pub(super) async fn spawn_codex(
                 // The process is already running without any compatibility
                 // entry. It carries no constraints (see above), so keep it
                 // instead of stopping and relaunching the same configuration.
-                if let Some(session) = package_debug_session {
-                    session
-                        .finish()
-                        .context("Windows Store Codex 兼容环境清理失败")?;
-                }
                 let startup_error = format!(
                     "启动尝试 {attempt}/2：未能应用主进程注入环境（Inspector {}，NODE_OPTIONS {}），且 Windows 未能应用 CLI 兼容环境，详见启动错误日志",
                     inspect_fuse.as_str(),
@@ -413,20 +498,6 @@ pub(super) async fn spawn_codex(
                     None => patch_error,
                 }
             });
-            let package_cleanup = package_debug_session
-                .map(WindowsPackageDebugSession::finish)
-                .transpose()
-                .map(|_| ());
-            let package_cleanup_succeeded = package_cleanup.is_ok();
-            let startup_result = match (startup_result, package_cleanup) {
-                (mode, Ok(())) => mode,
-                (Ok(_), Err(cleanup_error)) => {
-                    Err(cleanup_error.context("Windows Store Codex 兼容环境清理失败"))
-                }
-                (Err(startup_error), Err(cleanup_error)) => Err(anyhow::anyhow!(
-                    "{startup_error:#}；Windows Store Codex 兼容环境清理失败：{cleanup_error:#}"
-                )),
-            };
 
             match startup_result {
                 Ok(mode) => {
@@ -437,7 +508,12 @@ pub(super) async fn spawn_codex(
                 }
                 Err(error) => {
                     let retryable = startup_error_allows_retry(&error);
-                    let startup_error = format!("启动尝试 {attempt}/2：{error:#}");
+                    // Exit code 0 during the wait is Electron's single-instance
+                    // handoff: a Codex that Codey did not launch holds the lock.
+                    let single_instance_exit = error
+                        .downcast_ref::<crate::codex_startup_patch::StartupProcessExited>()
+                        .is_some_and(|exited| exited.exit_code == Some(0));
+                    let mut startup_error = format!("启动尝试 {attempt}/2：{error:#}");
                     error_log::record_failure(
                         "patch_failed",
                         "install_startup_patch_or_cli_wrapper",
@@ -453,6 +529,7 @@ pub(super) async fn spawn_codex(
                             "useInspector": use_inspector,
                             "useRequire": use_require,
                             "retryable": retryable,
+                            "singleInstanceExitSuspected": single_instance_exit,
                             "remainingBudgetMs": deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis(),
                             "disablePet": patch_options.disable_pet,
                             "runtimeConfigOverrideCount": runtime_config_overrides.len(),
@@ -465,32 +542,49 @@ pub(super) async fn spawn_codex(
                             "Codex 启动兼容方案未能安装，且无法安全清理启动进程：{startup_error}；{cleanup_error:#}"
                         );
                     }
-                    if !package_cleanup_succeeded {
-                        anyhow::bail!(
-                            "Codex 启动兼容环境未能安全清理，已停止重试：{startup_error}"
-                        );
+                    if single_instance_exit {
+                        // Report other installations without stopping them;
+                        // only the selected installation may be restarted.
+                        match stop_running_windows_codex_instances(app_dir).await {
+                            Ok(instances) if instances.is_empty() => startup_error.push_str(
+                                "；退出码 0 通常表示已有 Codex 实例占用了单实例锁，请确认其他客户端已正常退出后重试",
+                            ),
+                            Ok(instances) => startup_error.push_str(&format!(
+                                "；已停止所选安装目录的 Codex 实例：{}",
+                                windows_codex_instances_summary(&instances)
+                            )),
+                            Err(sweep_error) => anyhow::bail!(
+                                "{startup_error}；无法确认所选客户端可以重新启动：{sweep_error:#}"
+                            ),
+                        }
                     }
                     // A main process paused at an unreachable `--inspect-brk`,
                     // a lost handshake or an early exit all get one more attempt
-                    // without the breakpoint; the wrapper is prepared again.
+                    // through the other main-process entry (or the wrapper
+                    // alone); the wrapper is prepared again.
                     if should_retry_startup(&error, attempt) {
-                        retry_without_inspector = true;
+                        if use_inspector {
+                            retry_without_inspector = true;
+                        }
+                        if use_require {
+                            retry_without_require = true;
+                        }
                         continue;
                     }
                     if !runtime_config_overrides.is_empty() {
-                        anyhow::bail!(
-                            "Codex 启动兼容方案未能确认 app-server 运行时覆盖；为避免丢失 Codey 运行时约束，已停止 Codex：{startup_error}"
-                        );
+                        return Err(recovery::recoverable(format!(
+                            "Codex 启动兼容方案未能确认 app-server 运行时覆盖；Codey 集成未启用：{startup_error}"
+                        )));
                     }
                     if subagent_gate_active {
-                        anyhow::bail!(
-                            "Codex 启动兼容方案未能安装；为避免丢失 Codey 运行时约束，已停止 Codex：{startup_error}"
-                        );
+                        return Err(recovery::recoverable(format!(
+                            "Codex 启动兼容方案未能安装；Codey 集成未启用：{startup_error}"
+                        )));
                     }
                     match spawn_windows_codex(app_dir, debug_port, &runtime_arguments, &[], false)
                         .await
                     {
-                        Ok((mut fallback, _, _)) => {
+                        Ok((mut fallback, _)) => {
                             fallback.performance_status = "degraded".to_string();
                             fallback.performance_detail =
                             "Codex 已启动，但部分启动设置未能应用；页面功能以检测结果为准，下次启动将重试"
@@ -530,10 +624,9 @@ pub(super) async fn spawn_codex(
         .await;
         let use_require = require_patch.is_some();
         let use_inspector = !use_require && inspect_fuse.inspector_possible();
-        // Pass `--inspect-brk` when using Inspector, or as a cleanup marker that
-        // Electron drops when the inspect fuse is off. Never pass it together
-        // with NODE_OPTIONS `--require` while inspect is on: both wrap Module._load.
-        let pass_inspect_brk = use_inspector || !inspect_fuse.inspector_possible();
+        // Only request a breakpoint when the runtime explicitly allows it.
+        // Never combine Inspector and NODE_OPTIONS: both wrap Module._load.
+        let pass_inspect_brk = use_inspector;
         let inspector_port = if pass_inspect_brk {
             Some(
                 crate::codex_startup_patch::reserve_loopback_port().map_err(|error| {
@@ -546,7 +639,7 @@ pub(super) async fn spawn_codex(
                             "platform": "macos",
                         }),
                     );
-                    error
+                    recovery::recoverable(error)
                 })?,
             )
         } else {
@@ -566,10 +659,13 @@ pub(super) async fn spawn_codex(
                 runtime_config_overrides,
                 use_inspector || require_patch.is_some(),
             )
-            .await?;
-            add_macos_cli_wrapper(&mut command, &wrapper.environment)?;
+            .await
+            .map_err(recovery::recoverable)?;
+            add_macos_cli_wrapper(&mut command, &wrapper.environment)
+                .map_err(recovery::recoverable)?;
             if let Some(require) = &require_patch {
-                add_macos_cli_wrapper(&mut command, &require.environment)?;
+                add_macos_cli_wrapper(&mut command, &require.environment)
+                    .map_err(recovery::recoverable)?;
             }
             Some(wrapper)
         } else {
@@ -657,7 +753,9 @@ pub(super) async fn spawn_codex(
                         "Codex 启动兼容方案未能安装，且无法安全清理旧进程：{error:#}；{stop_error:#}"
                     );
                 }
-                Err(error).context("Codex 启动兼容方案未能安装；已停止 Codex")
+                Err(recovery::recoverable(format!(
+                    "Codex 启动兼容方案未能安装：{error:#}"
+                )))
             }
         }
     }
@@ -1185,13 +1283,26 @@ fn windows_local_app_data(value: Option<std::ffi::OsString>) -> Result<PathBuf> 
 
 #[cfg(any(windows, test))]
 pub(crate) fn windows_cli_wrapper_target(app_dir: &std::path::Path) -> Result<PathBuf> {
-    let target = codey_runtime_core::app_paths::codex_runtime_executable(app_dir)
-        .ok_or_else(|| anyhow::anyhow!("Codex App 内未找到内置 CLI"))?;
+    let target =
+        codey_runtime_core::app_paths::codex_runtime_executable(app_dir).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{}",
+                codey_runtime_core::app_paths::codex_runtime_executable_missing(app_dir)
+            )
+        })?;
+    windows_cli_wrapper_target_from_source(app_dir, &target)
+}
+
+#[cfg(any(windows, test))]
+fn windows_cli_wrapper_target_from_source(
+    app_dir: &std::path::Path,
+    target: &std::path::Path,
+) -> Result<PathBuf> {
     if codey_runtime_core::app_paths::packaged_app_user_model_id(app_dir).is_none() {
-        return Ok(target);
+        return Ok(target.to_path_buf());
     }
     let local_app_data = windows_local_app_data(std::env::var_os("LOCALAPPDATA"))?;
-    stage_windows_cli_runtime(&target, &local_app_data)
+    stage_windows_cli_runtime(target, &local_app_data)
 }
 
 #[cfg(any(windows, target_os = "macos"))]
@@ -1240,16 +1351,25 @@ async fn prepare_cli_wrapper(
     handshake_optional: bool,
 ) -> Result<CliWrapperLaunch> {
     let codey = std::env::current_exe().context("定位 Codey 兼容执行器失败")?;
+    let source =
+        codey_runtime_core::app_paths::codex_runtime_executable(app_dir).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{}",
+                codey_runtime_core::app_paths::codex_runtime_executable_missing(app_dir)
+            )
+        })?;
     #[cfg(windows)]
     let target = {
         let app_dir = app_dir.to_path_buf();
-        tokio::task::spawn_blocking(move || windows_cli_wrapper_target(&app_dir))
-            .await
-            .context("准备 Windows Codex 用户运行文件的任务异常退出")??
+        let source = source.clone();
+        tokio::task::spawn_blocking(move || {
+            windows_cli_wrapper_target_from_source(&app_dir, &source)
+        })
+        .await
+        .context("准备 Windows Codex 用户运行文件的任务异常退出")??
     };
     #[cfg(target_os = "macos")]
-    let target = codey_runtime_core::app_paths::codex_runtime_executable(app_dir)
-        .ok_or_else(|| anyhow::anyhow!("Codex App 内未找到内置 CLI"))?;
+    let target = source.clone();
     validate_code_mode_host(&target)?;
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -1291,22 +1411,20 @@ async fn prepare_cli_wrapper(
             "1".to_string(),
         ));
     }
-    if crate::codex_startup_patch::local_router_runtime_enabled(runtime_config_overrides) {
-        // Applies before Desktop chooses a transport, including CLI fallback
-        // launches where the inspector patch cannot set this environment.
-        environment.push(("CODEX_APP_SERVER_FORCE_CLI".to_string(), "1".to_string()));
-        environment.extend(local_router_proxy_bypass_environment(
-            runtime_config_overrides,
-            std::env::var("NO_PROXY").ok().as_deref(),
-            std::env::var("no_proxy").ok().as_deref(),
-        ));
-    }
     #[cfg(windows)]
     let wrapper = codey;
     #[cfg(target_os = "macos")]
     let wrapper = {
         let path = crate::config::default_config_path().with_file_name("codex-cli-wrapper");
-        write_macos_cli_wrapper(&path, &codey, &environment)?;
+        // The wrapper write fsyncs; keep it off the two-worker async runtime.
+        let write_path = path.clone();
+        let write_codey = codey.clone();
+        let write_environment = environment.clone();
+        tokio::task::spawn_blocking(move || {
+            write_macos_cli_wrapper(&write_path, &write_codey, &write_environment)
+        })
+        .await
+        .context("写入 macOS Codex CLI 兼容入口的任务异常退出")??;
         path
     };
     environment.insert(
@@ -1322,64 +1440,6 @@ async fn prepare_cli_wrapper(
         marker_path,
         environment,
     })
-}
-
-/// Local routing terminates at Codey's loopback listener. Keep that hop out of
-/// the user's system proxy while preserving every existing bypass rule. Windows
-/// treats environment keys case-insensitively, so it receives one canonical key.
-#[cfg(any(windows, target_os = "macos", test))]
-fn local_router_proxy_bypass_environment(
-    runtime_config_overrides: &[String],
-    no_proxy: Option<&str>,
-    lowercase_no_proxy: Option<&str>,
-) -> Vec<(String, String)> {
-    if !crate::codex_startup_patch::local_router_runtime_enabled(runtime_config_overrides) {
-        return Vec::new();
-    }
-    #[cfg(windows)]
-    {
-        vec![(
-            "NO_PROXY".to_string(),
-            merge_loopback_no_proxy(no_proxy.or(lowercase_no_proxy)),
-        )]
-    }
-    #[cfg(target_os = "macos")]
-    {
-        vec![
-            ("NO_PROXY".to_string(), merge_loopback_no_proxy(no_proxy)),
-            (
-                "no_proxy".to_string(),
-                merge_loopback_no_proxy(lowercase_no_proxy.or(no_proxy)),
-            ),
-        ]
-    }
-    #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        let _ = (no_proxy, lowercase_no_proxy);
-        Vec::new()
-    }
-}
-
-#[cfg(any(windows, target_os = "macos", test))]
-fn merge_loopback_no_proxy(existing: Option<&str>) -> String {
-    const LOOPBACK: [&str; 3] = ["127.0.0.1", "localhost", "::1"];
-    let mut entries = existing
-        .into_iter()
-        .flat_map(|value| value.split(','))
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    for required in LOOPBACK {
-        if !entries.iter().any(|entry| {
-            entry
-                .trim_matches(['[', ']'])
-                .eq_ignore_ascii_case(required)
-        }) {
-            entries.push(required.to_string());
-        }
-    }
-    entries.join(",")
 }
 
 #[cfg(any(windows, target_os = "macos", test))]
@@ -1520,19 +1580,18 @@ async fn launch_windows_codex_without_compatibility(
     startup_error: String,
 ) -> Result<SpawnedCodex> {
     if !runtime_config_overrides.is_empty() {
-        anyhow::bail!(
-            "Codex 启动兼容入口不可用，无法应用 app-server 运行时覆盖；为避免丢失 Codey 运行时约束，已停止启动：{startup_error}"
-        );
+        return Err(recovery::recoverable(format!(
+            "Codex 启动兼容入口不可用，无法应用 app-server 运行时覆盖；Codey 集成未启用：{startup_error}"
+        )));
     }
     if subagent_gate_active {
-        anyhow::bail!(
-            "Codex 启动兼容入口不可用；为避免丢失 Codey 运行时约束，已停止启动：{startup_error}"
-        );
+        return Err(recovery::recoverable(format!(
+            "Codex 启动兼容入口不可用；Codey 集成未启用：{startup_error}"
+        )));
     }
-    let (mut spawned, _, _) =
-        spawn_windows_codex(app_dir, debug_port, runtime_arguments, &[], false)
-            .await
-            .with_context(|| format!("Codex 启动设置未能应用，且启动失败：{startup_error}"))?;
+    let (mut spawned, _) = spawn_windows_codex(app_dir, debug_port, runtime_arguments, &[], false)
+        .await
+        .with_context(|| format!("Codex 启动设置未能应用，且启动失败：{startup_error}"))?;
     spawned.performance_status = "degraded".to_string();
     spawned.performance_detail =
         "Codex 已启动，但部分启动设置未能应用；页面功能以检测结果为准，下次启动将重试".to_string();
@@ -1652,11 +1711,24 @@ async fn wait_for_require_patch_with_cli_fallback(
         CliWrapperFailure, CliWrapperMarker, CliWrapperMarkerStatus, loopback_port_accepts,
     };
 
+    // Races the patch marker and the wrapper against the renderer becoming
+    // observable. A live renderer without a marker proves the runtime dropped
+    // `NODE_OPTIONS`, so the attempt must end at the grace period's end instead
+    // of exhausting the whole readiness budget.
     let watch_path = marker_path.clone();
     let mut require_ready = Box::pin(async move {
         tokio::time::timeout_at(deadline, watch_cli_wrapper_marker(&watch_path))
             .await
             .context("等待 Codex 主进程启动补丁确认超时")?
+    });
+    // A launch without a renderer debug port keeps the original two-way wait:
+    // the probe must never resolve on its own, or it would short-circuit the
+    // marker and wrapper channels it is only meant to back up.
+    let mut renderer_ready = Box::pin(async move {
+        match renderer_debug_port {
+            Some(debug_port) => renderer_ready_watch(debug_port, deadline).await,
+            None => std::future::pending().await,
+        }
     });
     let result = if let Some(handshake) = wrapper_handshake {
         let mut wrapper_ready = Box::pin(wait_for_cli_wrapper(handshake, deadline));
@@ -1708,27 +1780,38 @@ async fn wait_for_require_patch_with_cli_fallback(
                     Err(require_error) => Err(combined_startup_error(require_error, wrapper_error)),
                 }
             },
+            _ = &mut renderer_ready => {
+                // The grace period covers the marker write of a runtime that
+                // does honour `NODE_OPTIONS`; the marker future above wins that
+                // race by being polled first.
+                Err(require_renderer_ready_error(&marker_path, platform))
+            },
         }
     } else {
-        match require_ready.as_mut().await {
-            Ok(()) => Ok(StartupInjectionMode::NodeRequire),
-            Err(require_error) => {
-                let renderer_ready = match renderer_debug_port {
-                    Some(debug_port) => loopback_port_accepts(debug_port).await,
-                    None => false,
-                };
-                if renderer_ready {
-                    Err(anyhow::anyhow!(
-                        "Codex 主进程启动补丁未确认：渲染进程已就绪，但 NODE_OPTIONS --require 未写入执行记录：{require_error:#}"
-                    ))
-                } else {
-                    Err(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        format!("主进程启动补丁未确认，渲染进程调试端口未就绪：{require_error:#}"),
-                    )
-                    .into())
+        tokio::select! {
+            require = &mut require_ready => match require {
+                Ok(()) => Ok(StartupInjectionMode::NodeRequire),
+                Err(require_error) => {
+                    let renderer_ready = match renderer_debug_port {
+                        Some(debug_port) => loopback_port_accepts(debug_port).await,
+                        None => false,
+                    };
+                    if renderer_ready {
+                        Err(anyhow::anyhow!(
+                            "Codex 主进程启动补丁未确认：渲染进程已就绪，但 NODE_OPTIONS --require 未写入执行记录：{require_error:#}"
+                        ))
+                    } else {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            format!("主进程启动补丁未确认，渲染进程调试端口未就绪：{require_error:#}"),
+                        )
+                        .into())
+                    }
                 }
-            }
+            },
+            _ = &mut renderer_ready => {
+                Err(require_renderer_ready_error(&marker_path, platform))
+            },
         }
     };
     let remove_script = CliWrapperMarker::read(&marker_path)
@@ -1737,6 +1820,60 @@ async fn wait_for_require_patch_with_cli_fallback(
         .is_some_and(|marker| marker.status == CliWrapperMarkerStatus::Executed);
     cleanup_startup_require_files(&marker_path, remove_script);
     result
+}
+
+/// Watches the renderer debug port of a `NODE_OPTIONS --require` attempt.
+///
+/// Resolves once the port has answered and the grace period passed without the
+/// patch marker. The failure is deliberately retryable: the caller switches to
+/// Inspector instead of waiting out the readiness budget.
+#[cfg(any(windows, target_os = "macos"))]
+async fn renderer_ready_watch(debug_port: u16, deadline: tokio::time::Instant) {
+    let mut delay = RENDERER_READY_PROBE_INTERVAL;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return;
+        }
+        let probe = tokio::time::timeout(
+            remaining,
+            crate::codex_startup_patch::loopback_port_accepts(debug_port),
+        );
+        let ready = match probe.await {
+            Ok(ready) => ready,
+            // Out of budget: the marker future reports the timeout instead.
+            Err(_) => return,
+        };
+        if ready {
+            let grace = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if !grace.is_zero() {
+                tokio::time::sleep(grace.min(RENDERER_READY_REQUIRE_GRACE_PERIOD)).await;
+            }
+            return;
+        }
+        tokio::time::sleep(delay).await;
+        delay = std::cmp::min(delay.saturating_mul(2), Duration::from_millis(500));
+    }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn require_renderer_ready_error(
+    marker_path: &std::path::Path,
+    platform: &'static str,
+) -> anyhow::Error {
+    let detail = format!(
+        "渲染进程已可观测，但 {} 未写入执行记录；该运行时丢弃了 NODE_OPTIONS，本轮按失败处理并切换主进程注入通道",
+        marker_path.display()
+    );
+    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+        "launcher.require_patch_renderer_ready",
+        serde_json::json!({ "platform": platform, "markerPath": marker_path }),
+    );
+    std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!("等待 Codex 主进程启动补丁确认超时: {detail}"),
+    )
+    .into()
 }
 
 #[cfg(any(windows, target_os = "macos"))]
@@ -2144,26 +2281,16 @@ pub(super) async fn prepare_codex_for_launch(app_dir: &std::path::Path) -> Resul
     // relaunch it under Codey instead of leaving the user to quit it manually.
     #[cfg(windows)]
     {
-        let app_dir = app_dir.to_path_buf();
-        let process_scan_app_dir = app_dir.clone();
-        let already_running = tokio::task::spawn_blocking(move || -> Result<bool> {
-            let executable =
-                codey_runtime_core::app_paths::build_codex_executable(&process_scan_app_dir);
-            let executable = std::fs::canonicalize(&executable).unwrap_or(executable);
-            let executable = normalized_windows_path(&executable);
-            Ok(codey_runtime_core::windows_enumerate_processes()?
-                .into_iter()
-                .filter_map(|process| process.executable_path)
-                .map(|path| std::fs::canonicalize(&path).unwrap_or(path))
-                .any(|path| normalized_windows_path(&path) == executable))
-        })
-        .await
-        .context("检测正在运行的 Codex 任务异常退出")?
-        .context("检测正在运行的 Windows Codex 失败")?;
-        if already_running {
-            terminate_windows_codex_processes(&app_dir, None)
-                .await
-                .context("停止正在运行的 Codex 失败")?;
+        // A different installation may own the shared single-instance lock.
+        // The helper refuses that conflict before stopping the selected app.
+        let stopped = stop_running_windows_codex_instances(app_dir)
+            .await
+            .context("停止正在运行的 Codex 失败")?;
+        if !stopped.is_empty() {
+            let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                "launcher.windows_codex_instances_stopped",
+                serde_json::json!({ "phase": "prepare_codex_for_launch", "count": stopped.len() }),
+            );
         }
     }
     #[cfg(not(windows))]
@@ -2206,40 +2333,6 @@ fn spawn_command(command: Vec<String>) -> Result<SpawnedCodex> {
 #[cfg(test)]
 mod cli_wrapper_tests {
     use super::*;
-
-    #[test]
-    fn merge_loopback_no_proxy_appends_missing_entries() {
-        assert_eq!(
-            merge_loopback_no_proxy(Some("corp.internal,127.0.0.1")),
-            "corp.internal,127.0.0.1,localhost,::1"
-        );
-        assert_eq!(merge_loopback_no_proxy(None), "127.0.0.1,localhost,::1");
-    }
-
-    #[test]
-    fn local_router_proxy_bypass_is_empty_in_direct_mode() {
-        let inherited = Some("corp.internal,127.0.0.1");
-        let direct = vec!["model_provider=openai".to_string()];
-        assert!(local_router_proxy_bypass_environment(&direct, inherited, None).is_empty());
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn local_router_proxy_bypass_merges_loopback_entries_without_changing_direct_mode() {
-        let inherited = Some("corp.internal,127.0.0.1");
-        let router = vec!["model_provider=codey_router".to_string()];
-        let direct = vec!["model_provider=openai".to_string()];
-
-        let enabled = local_router_proxy_bypass_environment(&router, inherited, None);
-        assert_eq!(
-            enabled.len(),
-            1,
-            "Windows must not receive case-conflicting proxy variables"
-        );
-        assert_eq!(enabled[0].0, "NO_PROXY");
-        assert_eq!(enabled[0].1, "corp.internal,127.0.0.1,localhost,::1");
-        assert!(local_router_proxy_bypass_environment(&direct, inherited, None).is_empty());
-    }
 
     // 【自动化测试】启动 - 查询失败不报告退出，真实退出仍立即识别
     #[test]
@@ -2386,17 +2479,22 @@ mod cli_wrapper_tests {
     }
 
     #[cfg(any(windows, target_os = "macos"))]
-    const TEST_PATCH_OPTIONS: crate::codex_startup_patch::PatchOptions =
+    fn test_patch_options() -> crate::codex_startup_patch::PatchOptions {
         crate::codex_startup_patch::PatchOptions {
             disable_pet: false,
             subagent_gate_active: true,
-        };
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn startup_retry_requires_a_transient_error_and_is_limited_to_two_attempts() {
         let updated = || anyhow::Error::new(WindowsPackageChanged);
         assert!(should_retry_startup(&updated(), 1));
         assert!(!should_retry_startup(&updated(), 2));
+        let cleaned = startup_activation_error_after_cleanup(updated(), Ok(()), Ok(()));
+        assert!(should_retry_startup(&cleaned, 1));
+        assert!(!should_retry_startup(&cleaned, 2));
+        assert!(cleaned.is::<recovery::IntegrationFailure>());
         for (stopped, cleared) in [
             (Err(anyhow::anyhow!("process still running")), Ok(())),
             (Ok(()), Err(anyhow::anyhow!("cleanup failed"))),
@@ -2487,7 +2585,7 @@ mod cli_wrapper_tests {
             Duration::from_millis(500),
             install_startup_patch_with_cli_fallback(
                 Some(port),
-                TEST_PATCH_OPTIONS,
+                test_patch_options(),
                 &["analytics.enabled=false".to_string()],
                 Some(handshake),
                 test_context(deadline),
@@ -2516,7 +2614,7 @@ mod cli_wrapper_tests {
         let overrides = ["model_provider=\"codey_router\"".to_string()];
         let error = install_startup_patch_with_cli_fallback(
             Some(port),
-            TEST_PATCH_OPTIONS,
+            test_patch_options(),
             &overrides,
             Some(first_handshake),
             test_context(tokio::time::Instant::now() + Duration::from_millis(40)),
@@ -2542,7 +2640,7 @@ mod cli_wrapper_tests {
         });
         install_startup_patch_with_cli_fallback(
             None,
-            TEST_PATCH_OPTIONS,
+            test_patch_options(),
             &overrides,
             Some(handshake),
             test_context(
@@ -2554,7 +2652,7 @@ mod cli_wrapper_tests {
         sender.await.unwrap();
         let error = install_startup_patch_with_cli_fallback(
             None,
-            TEST_PATCH_OPTIONS,
+            test_patch_options(),
             &overrides,
             None,
             test_context(tokio::time::Instant::now() + Duration::from_secs(1)),
@@ -2595,7 +2693,7 @@ mod cli_wrapper_tests {
                 Duration::from_secs(5),
                 install_startup_patch_with_cli_fallback(
                     Some(port),
-                    TEST_PATCH_OPTIONS,
+                    test_patch_options(),
                     &[],
                     Some(handshake),
                     test_context(
@@ -2717,7 +2815,7 @@ mod cli_wrapper_tests {
         });
         let mode = install_startup_patch_with_cli_fallback(
             None,
-            TEST_PATCH_OPTIONS,
+            test_patch_options(),
             &[],
             None,
             StartupWaitContext {
@@ -2751,7 +2849,7 @@ mod cli_wrapper_tests {
         ));
         let error = install_startup_patch_with_cli_fallback(
             None,
-            TEST_PATCH_OPTIONS,
+            test_patch_options(),
             &[],
             None,
             StartupWaitContext {
@@ -2765,6 +2863,150 @@ mod cli_wrapper_tests {
         .await
         .unwrap_err();
         assert!(startup_error_allows_retry(&error), "{error:#}");
+        let _ = std::fs::remove_file(marker_path);
+    }
+
+    /// A runtime that drops `NODE_OPTIONS` renders normally while the `--require`
+    /// marker never appears. The attempt must end shortly after the renderer
+    /// becomes observable so the launcher can switch to Inspector inside the
+    /// same startup instead of burning the whole budget.
+    #[cfg(any(windows, target_os = "macos"))]
+    #[tokio::test]
+    async fn renderer_ready_without_require_marker_ends_the_attempt_early() {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let renderer_port = listener.local_addr().unwrap().port();
+        let marker_path = std::env::temp_dir().join(format!(
+            "codey-startup-require-renderer-ready-{}.json",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let started = tokio::time::Instant::now();
+        let error = install_startup_patch_with_cli_fallback(
+            None,
+            test_patch_options(),
+            &[],
+            None,
+            StartupWaitContext {
+                platform: "windows",
+                deadline: started + crate::codex_startup_patch::STARTUP_CLI_READY_TIMEOUT,
+                renderer_debug_port: Some(renderer_port),
+                spawned: None,
+                require_marker: Some(marker_path.clone()),
+            },
+        )
+        .await
+        .unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < crate::codex_startup_patch::STARTUP_CLI_READY_TIMEOUT / 2,
+            "the attempt must not wait out the readiness budget: {elapsed:?}"
+        );
+        assert!(startup_error_allows_retry(&error), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("等待 Codex 主进程启动补丁确认超时"),
+            "{error:#}"
+        );
+        let _ = std::fs::remove_file(marker_path);
+    }
+
+    /// Store packages are activated over COM instead of started as a child
+    /// process, which is what makes their `NODE_OPTIONS` unusable: the entry
+    /// must go straight to Inspector rather than spend a whole round on it.
+    #[test]
+    fn packaged_activation_decides_the_main_process_entry() {
+        use crate::electron_fuses::FuseState;
+
+        assert!(windows_app_dir_supports_packaged_activation(
+            std::path::Path::new(
+                r"C:\Program Files\WindowsApps\OpenAI.Codex_26.915.4065.0_x64__2p2nqsd0c76g0\app"
+            )
+        ));
+        assert!(!windows_app_dir_supports_packaged_activation(
+            std::path::Path::new(r"C:\Users\tester\AppData\Local\Programs\Codex")
+        ));
+        assert!(!windows_should_prepare_require_patch(
+            true,
+            FuseState::Enabled,
+            FuseState::Enabled,
+            false
+        ));
+    }
+
+    /// Store activation never inherits NODE_OPTIONS, even without Inspector.
+    #[test]
+    fn packaged_activation_refuses_require_when_inspector_is_gone() {
+        use crate::electron_fuses::FuseState;
+
+        assert!(!windows_should_prepare_require_patch(
+            true,
+            FuseState::Disabled,
+            FuseState::Enabled,
+            false
+        ));
+        assert!(!windows_should_prepare_require_patch(
+            true,
+            FuseState::Removed,
+            FuseState::Unknown,
+            false
+        ));
+        assert!(!windows_should_prepare_require_patch(
+            true,
+            FuseState::Disabled,
+            FuseState::Disabled,
+            false
+        ));
+        assert!(windows_should_prepare_require_patch(
+            false,
+            FuseState::Enabled,
+            FuseState::Enabled,
+            false
+        ));
+        assert!(!windows_should_prepare_require_patch(
+            false,
+            FuseState::Enabled,
+            FuseState::Enabled,
+            true
+        ));
+    }
+
+    /// A require marker that lands in time still wins over the renderer probe.
+    #[cfg(any(windows, target_os = "macos"))]
+    #[tokio::test]
+    async fn require_marker_wins_the_race_against_the_renderer_probe() {
+        use crate::codex_startup_patch::{CliWrapperMarker, CliWrapperMarkerStatus};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let renderer_port = listener.local_addr().unwrap().port();
+        let marker_path = std::env::temp_dir().join(format!(
+            "codey-startup-require-renderer-race-{}.json",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let writer = marker_path.clone();
+        let sender = tokio::spawn(async move {
+            let marker = CliWrapperMarker::new(CliWrapperMarkerStatus::Executed);
+            let _ = marker.write(&writer);
+        });
+        let mode = install_startup_patch_with_cli_fallback(
+            None,
+            test_patch_options(),
+            &[],
+            None,
+            StartupWaitContext {
+                platform: "windows",
+                deadline: tokio::time::Instant::now()
+                    + crate::codex_startup_patch::STARTUP_CLI_READY_TIMEOUT,
+                renderer_debug_port: Some(renderer_port),
+                spawned: None,
+                require_marker: Some(marker_path.clone()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(mode, StartupInjectionMode::NodeRequire);
+        sender.await.unwrap();
         let _ = std::fs::remove_file(marker_path);
     }
 
@@ -2790,7 +3032,7 @@ mod cli_wrapper_tests {
         });
         let mode = install_startup_patch_with_cli_fallback(
             None,
-            TEST_PATCH_OPTIONS,
+            test_patch_options(),
             &[],
             Some(handshake),
             StartupWaitContext {
@@ -2848,7 +3090,7 @@ mod cli_wrapper_tests {
         let started = std::time::Instant::now();
         let error = install_startup_patch_with_cli_fallback(
             None,
-            TEST_PATCH_OPTIONS,
+            test_patch_options(),
             &[],
             Some(handshake),
             StartupWaitContext {
@@ -2936,7 +3178,7 @@ mod cli_wrapper_tests {
         });
         install_startup_patch_with_cli_fallback(
             Some(inspector_port),
-            TEST_PATCH_OPTIONS,
+            test_patch_options(),
             &["analytics.enabled=false".to_string()],
             Some(handshake),
             test_context(

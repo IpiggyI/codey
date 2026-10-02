@@ -745,7 +745,7 @@ test("starting or restarting Codex replaces the old runtime with one managed by 
   );
   assert.match(
     prepareLaunchFlow,
-    /tokio::task::spawn_blocking[\s\S]*?if already_running \{[\s\S]*?terminate_windows_codex_processes\(&app_dir, None\)[\s\S]*?\.await/,
+    /stop_running_windows_codex_instances\(app_dir\)[\s\S]*?\.await[\s\S]*?if !stopped\.is_empty\(\)/,
   );
   assert.match(
     prepareLaunchFlow,

@@ -71,7 +71,7 @@ test("Windows skips the Inspector when the Electron fuse is off and retries with
   const launch = windowsSpawn.indexOf("spawn_windows_codex(", noEntry);
   const budget = windowsSpawn.indexOf("let deadline =");
   const cleanup = windowsSpawn.indexOf("if let Err(cleanup_error) =");
-  const packageGuard = windowsSpawn.indexOf("if !package_cleanup_succeeded {");
+  const packageGuard = windowsSpawn.indexOf("if single_instance_exit {");
   const retry = windowsSpawn.indexOf("if should_retry_startup(&error, attempt) {");
   const requiredConfigGuard = windowsSpawn.indexOf("if !runtime_config_overrides.is_empty() {");
 
@@ -112,7 +112,7 @@ test("Windows skips the Inspector when the Electron fuse is off and retries with
   assert.match(windowsSpawn.slice(packageGuard, retry), /anyhow::bail!/);
   assert.match(
     windowsSpawn.slice(retry, requiredConfigGuard),
-    /if should_retry_startup\(&error, attempt\) \{\s*retry_without_inspector = true;\s*continue;\s*\}/,
+    /if should_retry_startup\(&error, attempt\) \{\s*if use_inspector \{\s*retry_without_inspector = true;\s*\}\s*if use_require \{\s*retry_without_require = true;\s*\}\s*continue;\s*\}/,
   );
   assert.match(windowsSpawn, /return Ok\(spawned\);/);
 
@@ -185,12 +185,12 @@ test("Windows startup patch requires app-server runtime override validation", as
     windowsSpawn,
     /match startup_result \{\s*Ok\(mode\) => \{\s*spawned\.startup_injection_mode = mode\.as_str\(\)\.to_string\(\);\s*spawned\.performance_status = "ready"/,
   );
-  assert.match(windowsSpawn, /WindowsPackageDebugSession::finish/);
+  const packaged = await readFile(new URL("../backend/src/launcher/windows_packaged.rs", import.meta.url), "utf8");
+  assert.match(launcherPlatform, /package_debug_session\.finish\(\)/);
   assert.match(launcherPlatform, /WindowsPackageDebugSession::start\(app_dir, environment\)/);
-  assert.match(launcherPlatform, /settings\.EnableDebugging\(/);
-  assert.match(launcherPlatform, /settings\.DisableDebugging\(/);
+  assert.match(packaged, /settings\.EnableDebugging\(/);
+  assert.match(packaged, /settings\s*\.DisableDebugging\(/);
   assert.match(launcherPlatform, /child_command\.envs\(environment/);
-  const packageSetup = launcherPlatform.indexOf("match WindowsPackageDebugSession::start(app_dir, environment)");
-  const activation = launcherPlatform.indexOf("codey_runtime_core::launcher::activate_packaged_app", packageSetup);
-  assert.match(launcherPlatform.slice(packageSetup, activation), /if require_wrapper_environment \{\s*return Err\(error\)/);
+  assert.match(launcherPlatform, /!environment_required && error\.is::<recovery::IntegrationFailure>\(\)/);
+
 });

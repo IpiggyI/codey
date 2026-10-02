@@ -35,6 +35,14 @@ use crate::trace_log_guard;
 
 mod platform;
 mod process;
+mod recovery;
+#[cfg(any(windows, test))]
+mod windows_activation;
+#[cfg(any(windows, test))]
+mod windows_packaged;
+
+#[cfg(windows)]
+pub(crate) use windows_packaged::resume_windows_packaged_thread;
 
 use platform::*;
 #[cfg(windows)]
@@ -256,13 +264,31 @@ async fn resolve_configured_codex_app_dir(config: &CodeyConfig) -> Result<PathBu
     let configured_app_path =
         (!configured_app_path_is_empty).then(|| PathBuf::from(configured_app_path));
     tokio::task::spawn_blocking(move || {
-        resolve_codex_app_dir_with_saved(configured_app_path.as_deref(), None)
+        // A Store update can remove the saved version directory entirely.
+        // Resolve that registered family before requiring the old path to exist.
+        #[cfg(windows)]
+        let configured_app_path = configured_app_path
+            .map(|path| refresh_windows_packaged_app_dir(&path))
+            .transpose()?;
+        let app_dir = resolve_codex_app_dir_with_saved(configured_app_path.as_deref(), None);
+        if let Some(app_dir) = app_dir.as_deref() {
+            error_log::refresh_codex_app_version(Some(app_dir), None);
+        }
+        let app_dir = app_dir
+            .map(|path| -> Result<PathBuf> {
+                #[cfg(windows)]
+                let path = refresh_windows_packaged_app_dir(&path)?;
+                codey_runtime_core::app_paths::validate_codex_app_dir(&path)?;
+                Ok(path)
+            })
+            .transpose()?;
+        Ok::<_, anyhow::Error>(app_dir)
     })
     .await
-    .map_err(|error| anyhow::Error::new(error).context("定位 Codex App 任务异常退出"))?
+    .map_err(|error| anyhow::Error::new(error).context("定位 Codex App 任务异常退出"))??
     .ok_or_else(|| {
         if configured_app_path_is_empty {
-            anyhow::anyhow!(CODEX_APP_NOT_FOUND_ERROR)
+            anyhow::anyhow!("{CODEX_APP_NOT_FOUND_ERROR}；若安装了多个版本，请明确选择安装路径")
         } else {
             anyhow::anyhow!(CODEX_APP_PATH_INVALID_ERROR)
         }
@@ -824,7 +850,7 @@ async fn inject_initial_renderer(
         stage: Some("startup.renderer_injection".to_string()),
         recoverable: Some(false),
     };
-    let mut error = failure.into_error();
+    let mut error = recovery::recoverable(failure.into_error());
     error_log::record_failure_with_metadata(
         "injection_failed",
         "inject_cdp_bridge",
@@ -1562,16 +1588,22 @@ impl CodeyRuntime {
         let patch = match prepare_startup_patches(home, config).await {
             Ok(patch) => patch,
             Err(error) => {
-                return Err(restore_runtime_config_after_error(home, error).await);
+                return Err(recovery::after_integration_failure(
+                    home,
+                    &storage.app_dir,
+                    recovery::recoverable(error),
+                )
+                .await);
             }
         };
+        let recovery_app_dir = storage.app_dir.clone();
         let SpawnedRenderer {
             app_dir,
             spawned,
             child,
             maintenance,
             injected_target,
-        } = spawn_and_inject_runtime(
+        } = match spawn_and_inject_runtime(
             home,
             config,
             &handler,
@@ -1580,7 +1612,15 @@ impl CodeyRuntime {
             &patch,
             &runtime_config_overrides,
         )
-        .await?;
+        .await
+        {
+            Ok(renderer) => renderer,
+            Err(error) => {
+                return Err(
+                    recovery::after_integration_failure(home, &recovery_app_dir, error).await,
+                );
+            }
+        };
         #[cfg(target_os = "macos")]
         let inspector_argument = spawned.inspector_argument.clone();
         let process_id = spawned.process_id;
