@@ -84,6 +84,7 @@ type ModelSectionProps = {
     models: string[],
     showAccountUsageInHeader: boolean,
     knownOfficialModels: string[],
+    modelContexts: Record<string, ModelContextConfig>,
   ) => Promise<boolean>;
   onSetDefaultModel: (model: string) => void;
   routerSessionDiagnosis: RouterSessionDiagnosis | null;
@@ -121,6 +122,7 @@ function ModelSectionComponent({
   const getAuxiliaryPopupContainer = useCallback(() => popupContainer ?? document.body, [popupContainer]);
   const [officialEditorOpen, setOfficialEditorOpen] = useState(false);
   const [officialModelDraft, setOfficialModelDraft] = useState<string[]>([]);
+  const [officialModelContextDraft, setOfficialModelContextDraft] = useState<Record<string, ModelContextConfig>>({});
   const [officialCatalogDraft, setOfficialCatalogDraft] = useState<string[]>([]);
   const [migrateTargetProvider, setMigrateTargetProvider] = useState<string>("");
   const migrateTargets = routerSessionDiagnosis?.targetProviders ?? [];
@@ -188,6 +190,7 @@ function ModelSectionComponent({
       modelState.officialModels.filter((model) => model.supported).map((model) => model.slug),
     );
     setOfficialCatalogDraft(officialCatalog);
+    setOfficialModelContextDraft(config.modelContextByProvider?.[currentProviderSnapshot.id] || {});
     setOfficialEditorOpen(true);
   };
 
@@ -198,6 +201,7 @@ function ModelSectionComponent({
           officialModelDraft,
           showAccountUsageInHeader,
           officialCatalogDraft,
+          officialModelContextDraft,
         )
       : true;
     if (saved) {
@@ -553,7 +557,7 @@ function ModelSectionComponent({
                   {officialCatalogDraft.map((model) => {
                     const checked = officialModelDraftKeys.has(modelKey(model));
                     return (
-                      <label className="official-model-option" key={model}>
+                      <div className="official-model-option flex-wrap" key={model}>
                         <Checkbox
                           checked={checked}
                           disabled={isBusy || (checked && officialModelDraft.length <= 1)}
@@ -574,7 +578,14 @@ function ModelSectionComponent({
                           </strong>
                           <small>{model}</small>
                         </span>
-                      </label>
+                        <ModelContextFields model={model} disabled={isBusy}
+                          policy={Object.entries(officialModelContextDraft).find(([candidate]) => modelIdsEqual(candidate, model))?.[1]}
+                          onChange={(policy) => setOfficialModelContextDraft((current) => {
+                            const next = Object.fromEntries(Object.entries(current).filter(([candidate]) => !modelIdsEqual(candidate, model)));
+                            if (policy) next[model] = policy;
+                            return next;
+                          })} />
+                      </div>
                     );
                   })}
                 </div>

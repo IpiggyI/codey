@@ -175,7 +175,7 @@ export function useModelSelection({
       currentProviderSnapshot?.id ||
       "";
     setDraft1MModels(config?.supports1MContextByProvider?.[providerId] || []);
-    setDraftModelContexts(config?.modelContextByProvider?.[providerId] || {});
+    setDraftModelContexts(config?.modelContextByProvider?.[currentProviderSnapshot?.id || providerId] || {});
     setDraftManualThirdPartyModels(state.manualThirdPartyModels);
     setDeletedThirdPartyModels([]);
     setCustomModelInput("");

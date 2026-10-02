@@ -15,6 +15,14 @@ pub(crate) fn refresh_model_catalog_or_fallback(
     config: &CodeyConfig,
 ) -> Result<ModelCatalogRefresh, String> {
     let catalog_dir = crate::codex_config::codey_model_catalog_dir();
+    let contexts = config.runtime_enabled_model_contexts();
+    if let Some(source) =
+        crate::codex_config::configured_user_model_catalog_path(codex_home(), &catalog_dir)
+            .map_err(|error| error.to_string())?
+    {
+        model_catalog::render_context_catalog_overlay(&source, &contexts)
+            .map_err(|error| format!("{error:#}"))?;
+    }
     let snapshot = model_catalog::snapshot(&catalog_dir).map_err(|error| error.to_string())?;
     let native_web_search_models = config.runtime_native_web_search_model_aliases();
     let context_1m_models = config.runtime_1m_context_model_aliases();
@@ -26,10 +34,17 @@ pub(crate) fn refresh_model_catalog_or_fallback(
     );
     match result {
         Ok(fallback) => {
+            if !contexts.is_empty() && !model_catalog::is_available(&catalog_dir) {
+                return Err(rollback_model_catalog_snapshot(
+                    snapshot,
+                    "无法生成带有自定义上下文预算的模型目录，请恢复默认预算或重新同步模型".into(),
+                ));
+            }
             if model_catalog::is_available(&catalog_dir)
                 && let Err(error) = model_catalog::apply_catalog_contexts(
                     &catalog_dir,
-                    &config.runtime_model_contexts(),
+                    &contexts,
+                    &context_1m_models,
                 )
             {
                 return Err(rollback_model_catalog_snapshot(snapshot, error.to_string()));
@@ -41,7 +56,7 @@ pub(crate) fn refresh_model_catalog_or_fallback(
 }
 
 pub(crate) async fn refreshed_model_state_async(
-    config: &CodeyConfig,
+    config: &mut CodeyConfig,
     refresh_only_when_populated: bool,
 ) -> Result<
     (
@@ -50,7 +65,62 @@ pub(crate) async fn refreshed_model_state_async(
     ),
     String,
 > {
-    let config = config.clone();
+    let contexts = config.runtime_enabled_model_contexts();
+    let validation = crate::codex_config::configured_user_model_catalog_path(
+        codex_home(),
+        &crate::codex_config::codey_model_catalog_dir(),
+    )
+    .and_then(|source| match source {
+        Some(source) => {
+            model_catalog::render_context_catalog_overlay(&source, &contexts).map(|_| ())
+        }
+        None => Ok(()),
+    });
+    if let Err(error) = validation {
+        let reason = format!("{error:#}");
+        if !error.is::<model_catalog::ContextBudgetCatalogError>() {
+            return Err(reason);
+        }
+        if !crate::context_recovery::confirm(crate::context_recovery::Purpose::ModelSync, &reason)
+            .await
+            .map_err(|prompt| format!("{reason}；{prompt}"))?
+        {
+            return Err(reason);
+        }
+        config.model_context_by_provider.clear();
+        error_log::record_failure(
+            "context_recovery",
+            "restore_default_context_budgets_for_model_save",
+            reason,
+            json!({}),
+        );
+    }
+    let result = refreshed_model_state_once(config.clone(), refresh_only_when_populated).await;
+    if let Err(reason) = &result
+        && reason == "无法生成带有自定义上下文预算的模型目录，请恢复默认预算或重新同步模型"
+    {
+        if !crate::context_recovery::confirm(crate::context_recovery::Purpose::ModelSync, reason)
+            .await
+            .map_err(|prompt| format!("{reason}；{prompt}"))?
+        {
+            return result;
+        }
+        config.model_context_by_provider.clear();
+        return refreshed_model_state_once(config.clone(), refresh_only_when_populated).await;
+    }
+    result
+}
+
+async fn refreshed_model_state_once(
+    config: CodeyConfig,
+    refresh_only_when_populated: bool,
+) -> Result<
+    (
+        Option<ModelCatalogRefresh>,
+        model_catalog::ModelSelectionState,
+    ),
+    String,
+> {
     tokio::task::spawn_blocking(move || {
         let should_refresh = if refresh_only_when_populated {
             should_refresh_model_catalog(&current_model_state(&config)?)

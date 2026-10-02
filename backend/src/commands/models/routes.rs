@@ -16,7 +16,7 @@ pub async fn delete_route(
     *state.config.write().await = config.clone();
     let model_state = current_model_state_async(&config).await?;
     drop(_config_write_guard);
-    let hot_reload = hot_reload_runtime_models(state, &config, &model_state).await;
+    let hot_reload = hot_reload_runtime_models(state).await;
     let subagent_hot_reload = hot_reload_runtime_subagent_config(state, &config).await;
     let restart_required = runtime_config_requires_restart(state, &config).await;
     Ok(add_subagent_hot_reload_to_response(
@@ -128,7 +128,7 @@ pub async fn fetch_route_models(
         .map_err(|error| error.to_string())?;
     let visible_fetched_models = regular_route_models(fetched_models.clone());
     let _config_write_guard = state.config_write_lock.lock().await;
-    let latest = apply_fetched_current_provider_models(
+    let mut latest = apply_fetched_current_provider_models(
         state.config.read().await.clone(),
         sync.snapshot.clone(),
         fetched_models.clone(),
@@ -142,13 +142,13 @@ pub async fn fetch_route_models(
     } else {
         current_model_state_async(&latest).await?
     };
-    let (catalog_refresh, model_state) = refreshed_model_state_async(&latest, true).await?;
+    let (catalog_refresh, model_state) = refreshed_model_state_async(&mut latest, true).await?;
     if let Err(error) = save_config_to_store(state, &latest).await {
         return Err(rollback_model_catalog_after_config_save_async(catalog_refresh, error).await);
     }
     *state.config.write().await = latest.clone();
     drop(_config_write_guard);
-    let hot_reload = hot_reload_runtime_models(state, &latest, &model_state).await;
+    let hot_reload = hot_reload_runtime_models(state).await;
     let subagent_hot_reload = hot_reload_runtime_subagent_config(state, &latest).await;
     let restart_required = runtime_config_requires_restart(state, &latest).await;
     Ok(add_subagent_hot_reload_to_response(

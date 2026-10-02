@@ -1152,6 +1152,46 @@ impl CodeyConfig {
             .collect()
     }
 
+    /// Only enabled models require a runtime budget; inactive choices remain saved.
+    pub(crate) fn runtime_enabled_model_contexts(&self) -> BTreeMap<String, ModelContextConfig> {
+        if !self.local_router_enabled
+            && let Some(snapshot) = &self.current_provider_snapshot
+        {
+            let enabled = if snapshot.uses_official_account_auth {
+                self.enabled_official_route_models(&snapshot.ownership_key)
+            } else {
+                self.enabled_route_models(&snapshot.ownership_key)
+            };
+            return self
+                .model_context_by_provider
+                .get(&snapshot.id)
+                .into_iter()
+                .flat_map(|models| models.iter())
+                .filter(|(model, _)| {
+                    enabled
+                        .iter()
+                        .any(|candidate| model_id::equal(candidate, model))
+                })
+                .map(|(model, policy)| (model.clone(), policy.clone()))
+                .collect();
+        }
+        let policies = self
+            .runtime_model_contexts()
+            .into_iter()
+            .map(|(model, policy)| (model_id::key(&model), policy))
+            .collect::<BTreeMap<_, _>>();
+        self.runtime_catalog_models()
+            .1
+            .into_iter()
+            .filter_map(|model| {
+                policies
+                    .get(&model_id::key(&model))
+                    .cloned()
+                    .map(|policy| (model, policy))
+            })
+            .collect()
+    }
+
     pub(crate) fn provider_is_disabled(&self, provider_id: &str) -> bool {
         self.profiles
             .iter()
@@ -4231,4 +4271,49 @@ mod tests {
         config.misc_model.clear();
         assert!(config.misc_model_catalog_id().is_none());
     }
+}
+
+#[cfg(test)]
+#[test]
+fn native_context_validation_uses_provider_budgets_and_current_model_ownership() {
+    let snapshot = crate::model_ownership::CurrentProviderSnapshot::from_parts(
+        "relay",
+        "https://relay.example/v1",
+        "responses",
+        false,
+    );
+    let mut config = CodeyConfig {
+        local_router_enabled: false,
+        ..Default::default()
+    };
+    config
+        .selected_models_by_provider
+        .insert(snapshot.ownership_key.clone(), vec!["enabled".into()]);
+    let policy = ModelContextConfig {
+        context_window_tokens: 128_000,
+        auto_compact_token_limit: Some(100_000),
+        reserve_output_tokens: None,
+    };
+    config.model_context_by_provider.insert(
+        "relay".into(),
+        BTreeMap::from([
+            ("enabled".into(), policy.clone()),
+            ("disabled".into(), policy),
+        ]),
+    );
+    config.attach_current_provider_snapshot(snapshot);
+    assert_eq!(
+        config
+            .runtime_enabled_model_contexts()
+            .keys()
+            .collect::<Vec<_>>(),
+        vec!["enabled"]
+    );
+    assert_eq!(config.model_context_by_provider["relay"].len(), 2);
+    config
+        .current_provider_snapshot
+        .as_mut()
+        .unwrap()
+        .ownership_key = "another-owner".into();
+    assert!(config.runtime_enabled_model_contexts().is_empty());
 }

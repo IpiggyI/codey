@@ -773,9 +773,10 @@ fn model_whitelist_refresh_script(expected_catalog: &serde_json::Value) -> Strin
   // deferred delivery, not a failure. Only a missing response patch is.
   const catalogAccepted = (delivery) => (
     delivery?.responsePatchInstalled === true
+    && delivery?.pendingQueryEntries === 0
   );
   const deliverySummary = (delivery) => delivery
-    ? `（responsePatchInstalled=${{Boolean(delivery.responsePatchInstalled)}}）`
+    ? `（responsePatchInstalled=${{Boolean(delivery.responsePatchInstalled)}}, pendingQueryEntries=${{delivery.pendingQueryEntries}}）`
     : "";
   let snapshot = null;
   let delivery = null;
@@ -805,7 +806,9 @@ fn model_whitelist_refresh_script(expected_catalog: &serde_json::Value) -> Strin
       }} else if (catalogAccepted(delivery)) {{
         return JSON.stringify({{ ok: true, delivered: "deferred", snapshot, delivery }});
       }} else {{
-        lastError = "模型响应补丁未安装";
+        lastError = delivery?.responsePatchInstalled === true
+          ? "模型查询缓存尚未更新"
+          : "模型响应补丁未安装";
       }}
     }} catch (error) {{
       lastError = error instanceof Error ? error.message : String(error);

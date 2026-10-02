@@ -346,18 +346,58 @@ async fn launch_codey_inner_locked(state: &Arc<AppState>) -> Result<Value, Strin
         return Err(error);
     }
     let handler = make_bridge_handler(state);
-    let (runtime, codex_exit) = match CodeyRuntime::start(
+    let mut config = config;
+    let mut started = CodeyRuntime::start(
         &config,
-        handler,
+        handler.clone(),
         &state.trace_log_write_protection_active,
         state.crashpad_pending_stats.clone(),
     )
-    .await
+    .await;
+    if let Err(error) = &started
+        && error.is::<crate::model_catalog::ContextBudgetCatalogError>()
+        && !config.model_context_by_provider.is_empty()
     {
+        let reason = format!("{error:#}");
+        match crate::context_recovery::confirm(crate::context_recovery::Purpose::Launch, &reason)
+            .await
+        {
+            Ok(true) => {
+                let _write = state.config_write_lock.lock().await;
+                let mut next = state.config.read().await.clone();
+                next.model_context_by_provider.clear();
+                next.settings_revision = next.settings_revision.saturating_add(1);
+                if let Err(error) = super::save_config_to_store(state, &next).await {
+                    reclaim_initial_session_scan(state, initial_scan_task).await;
+                    return Err(error);
+                }
+                *state.config.write().await = next.clone();
+                config = next;
+                drop(_write);
+                error_log::record_failure(
+                    "context_recovery",
+                    "restore_default_context_budgets",
+                    reason,
+                    json!({}),
+                );
+                ensure_runtime_can_start(state)?;
+                started = CodeyRuntime::start(
+                    &config,
+                    handler,
+                    &state.trace_log_write_protection_active,
+                    state.crashpad_pending_stats.clone(),
+                )
+                .await;
+            }
+            Ok(false) => {}
+            Err(error) => eprintln!("预算恢复确认失败，已保留预算：{error}"),
+        }
+    }
+    let (runtime, codex_exit) = match started {
         Ok(started) => started,
         Err(error) => {
             reclaim_initial_session_scan(state, initial_scan_task).await;
-            return Err(error.to_string());
+            return Err(format!("{error:#}"));
         }
     };
     if state.is_shutting_down() {

@@ -1,27 +1,5 @@
 use super::*;
 
-#[derive(Default)]
-pub(crate) struct ModelHotReloadOutcome {
-    pub(crate) reloaded: bool,
-    pub(crate) deferred: bool,
-    pub(crate) error: Option<String>,
-}
-
-impl ModelHotReloadOutcome {
-    pub(crate) fn add_to_response(self, mut response: Value) -> Value {
-        if let Some(object) = response.as_object_mut() {
-            object.insert("modelHotReloaded".into(), Value::Bool(self.reloaded));
-            if self.deferred {
-                object.insert("modelHotReloadDeferred".into(), Value::Bool(true));
-            }
-            if let Some(error) = self.error {
-                object.insert("modelHotReloadError".into(), Value::String(error));
-            }
-        }
-        response
-    }
-}
-
 pub(crate) fn add_subagent_hot_reload_to_response(
     mut response: Value,
     outcome: SubagentHotReloadOutcome,
@@ -80,14 +58,15 @@ pub async fn sync_current_provider_command(state: &Arc<AppState>) -> Result<Valu
     let restart_required = runtime_config_requires_restart(state, &config).await;
     let model_state = current_model_state_async(&config).await?;
     let public_config = redacted_config(&config);
-    Ok(json!({
+    let delivery = hot_reload_runtime_models(state).await;
+    Ok(delivery.add_to_response(json!({
         "status":"ok",
         "config":public_config,
         "providerStatus":provider_status,
         "currentProviderSnapshot": super::super::json_current_provider_snapshot(&config),
         "modelState":model_state,
         "restartRequired":restart_required,
-    }))
+    })))
 }
 
 pub(crate) async fn current_codex_provider() -> Result<codex_provider::CurrentProvider, String> {

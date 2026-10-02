@@ -27,6 +27,7 @@ use crate::subagent_policy;
 
 mod catalog_refresh;
 mod defaults;
+mod delivery;
 mod native;
 mod routes;
 mod selection;
@@ -37,6 +38,7 @@ mod tests;
 
 pub(crate) use catalog_refresh::*;
 pub use defaults::*;
+pub(crate) use delivery::*;
 pub(crate) use native::*;
 pub use routes::*;
 pub use selection::*;

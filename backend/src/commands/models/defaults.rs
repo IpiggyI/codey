@@ -72,7 +72,7 @@ pub async fn save_default_model(
     *state.config.write().await = config.clone();
     let public_config = redacted_config(&config);
     drop(_config_write_guard);
-    let hot_reload = hot_reload_runtime_models(state, &config, &model_state).await;
+    let hot_reload = hot_reload_runtime_models(state).await;
     let restart_required = runtime_config_requires_restart(state, &config).await;
     Ok(hot_reload.add_to_response(json!({
         "status":"ok",
@@ -109,6 +109,7 @@ pub async fn save_official_route_models(
     if !profile.official_account || !config.official_account_available_this_launch {
         return Err("当前线路不是本次登录可用的官方账号线路".to_string());
     }
+    let provider_id = profile.provider_id().to_string();
     let list_key = config.model_list_key_for_profile(profile);
     if let Some(enabled) = requested_enabled {
         config.profiles[profile_index].enabled = enabled;
@@ -137,7 +138,7 @@ pub async fn save_official_route_models(
     )?;
     set_model_contexts(
         &mut config,
-        &list_key,
+        &provider_id,
         requested_model_contexts.as_ref(),
         &official_models,
     )?;
@@ -149,7 +150,7 @@ pub async fn save_official_route_models(
         known_official_models.as_deref(),
     )?;
     config = config.normalize();
-    let (catalog_refresh, model_state) = refreshed_model_state_async(&config, false).await?;
+    let (catalog_refresh, model_state) = refreshed_model_state_async(&mut config, false).await?;
     subagent_policy::reconcile_with_model_state(&mut config, Some(&model_state));
     config = config.normalize();
     config.settings_revision = config.settings_revision.saturating_add(1);
@@ -159,7 +160,7 @@ pub async fn save_official_route_models(
     *state.config.write().await = config.clone();
     let public_config = redacted_config(&config);
     drop(_config_write_guard);
-    let hot_reload = hot_reload_runtime_models(state, &config, &model_state).await;
+    let hot_reload = hot_reload_runtime_models(state).await;
     let subagent_hot_reload = hot_reload_runtime_subagent_config(state, &config).await;
     let restart_required = runtime_config_requires_restart(state, &config).await;
     Ok(add_subagent_hot_reload_to_response(
@@ -242,54 +243,6 @@ pub(crate) fn apply_official_model_selection(
         .selected_models_by_provider
         .insert(list_key.to_string(), selected_models);
     Ok(())
-}
-
-pub(crate) async fn hot_reload_runtime_models(
-    state: &Arc<AppState>,
-    config: &CodeyConfig,
-    model_state: &model_catalog::ModelSelectionState,
-) -> ModelHotReloadOutcome {
-    let runtime = state.runtime.lock().await.clone();
-    let Some(runtime) = runtime else {
-        return ModelHotReloadOutcome::default();
-    };
-    if !runtime_supports_current_routes_for_hot_reload(&runtime.applied_config, config) {
-        return ModelHotReloadOutcome::default();
-    }
-    let expected_catalog = renderer_model_catalog_value(config, model_state);
-    let expected_models = expected_catalog
-        .get("models")
-        .and_then(Value::as_array)
-        .map(Vec::len)
-        .unwrap_or_default();
-    let websocket_url = runtime.renderer_websocket_url().await;
-    match cdp::refresh_model_whitelist(&websocket_url, &expected_catalog).await {
-        Ok(refresh) => {
-            runtime.mark_model_config_applied(config).await;
-            ModelHotReloadOutcome {
-                reloaded: true,
-                deferred: refresh.deferred,
-                error: None,
-            }
-        }
-        Err(error) => {
-            let error = format!("{error:#}");
-            error_log::record_failure(
-                "patch_verification_failed",
-                "refresh_model_whitelist",
-                error.clone(),
-                json!({
-                    "modelCount": expected_models,
-                    "websocketUrl": websocket_url,
-                }),
-            );
-            ModelHotReloadOutcome {
-                reloaded: false,
-                deferred: false,
-                error: Some(error),
-            }
-        }
-    }
 }
 
 pub(crate) fn current_model_state(

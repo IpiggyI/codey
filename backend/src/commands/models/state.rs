@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(test)]
 pub(crate) fn provider_route_requires_restart(
     applied: &CodeyConfig,
     current: &CodeyConfig,
@@ -163,7 +164,25 @@ pub(crate) fn renderer_model_catalog_value(
             user_catalog_configured,
         );
         if let Some(metadata) = catalog["model_metadata"].as_array_mut() {
+            let contexts = config.runtime_enabled_model_contexts();
             for entry in metadata {
+                let policy = contexts
+                    .iter()
+                    .find(|(model, _)| {
+                        model_id::equal(model, entry["model"].as_str().unwrap_or_default())
+                    })
+                    .map(|(_, policy)| policy);
+                if let Some(policy) = policy {
+                    if let Err(error) = model_catalog::apply_model_context(entry, Some(policy)) {
+                        error_log::record_failure(
+                            "patch_verification_failed",
+                            "renderer_context_metadata",
+                            format!("{error:#}"),
+                            json!({"model": entry["model"]}),
+                        );
+                    }
+                    continue;
+                }
                 let supported = config.model_supports_1m_context(
                     &provider_id,
                     entry["model"].as_str().unwrap_or_default(),

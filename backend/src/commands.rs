@@ -27,25 +27,25 @@ use tokio::sync::{Mutex, Notify, RwLock, oneshot, watch};
 use diagnostics::{
     clear_diagnostic_storage, refresh_diagnostic_storage_stats, refresh_trace_log_stats,
 };
-pub(crate) use models::native_subagent_model_state;
 #[cfg(test)]
 use models::{
     config_with_current_provider_models, preserve_selected_third_party_models,
-    preserve_selected_third_party_models_except, renderer_model_catalog_value,
+    preserve_selected_third_party_models_except, provider_route_requires_restart,
     should_refresh_model_catalog, startup_model_sync_models_or_fallback, sync_provider_state_with,
     validate_deleted_third_party_models, validate_manual_model_selection,
 };
 use models::{
-    current_model_state_async, current_renderer_model_catalog_async, hot_reload_runtime_models,
+    current_model_state_async, hot_reload_runtime_models,
     native_web_search_capability_requires_restart, official_route_snapshots,
-    provider_route_requires_restart, remote_compaction_transport_requires_restart,
-    runtime_supports_current_routes_for_hot_reload, sync_current_third_party_provider_state,
-    sync_provider_models_for_launch, websocket_transport_requires_restart,
+    remote_compaction_transport_requires_restart, runtime_supports_current_routes_for_hot_reload,
+    sync_current_third_party_provider_state, sync_provider_models_for_launch,
+    websocket_transport_requires_restart,
 };
 pub use models::{
     fetch_route_models, save_default_model, save_official_route_models, save_selected_models,
     sync_current_provider_command,
 };
+pub(crate) use models::{native_subagent_model_state, renderer_model_catalog_value};
 use plugins::{plugin_marketplace_status, repair_plugin_marketplace};
 use prompt_optimization::{
     fetch_prompt_optimization_models_command, optimize_prompt_command,
@@ -118,6 +118,7 @@ pub struct AppState {
     account_usage_cache: Mutex<account_usage::AccountUsageCache>,
     pub runtime: Mutex<Option<Arc<CodeyRuntime>>>,
     runtime_operation: Mutex<()>,
+    model_delivery_lock: Mutex<()>,
     diagnostic_storage_operation: Mutex<()>,
     pub trace_log_stats: TraceLogStatsHandle,
     trace_log_write_protection_active: AtomicBool,
@@ -230,6 +231,7 @@ impl Default for AppState {
             account_usage_cache: Mutex::new(account_usage::AccountUsageCache::default()),
             runtime: Mutex::new(None),
             runtime_operation: Mutex::new(()),
+            model_delivery_lock: Mutex::new(()),
             diagnostic_storage_operation: Mutex::new(()),
             trace_log_stats: TraceLogStatsHandle::idle(),
             trace_log_write_protection_active: AtomicBool::new(false),
@@ -348,19 +350,9 @@ impl AppState {
                 }
                 value
             }
-            "/codex-model-catalog" => {
-                let current_config = self.config.read().await.clone();
-                let runtime = self.runtime.lock().await.clone();
-                let catalog_config = runtime
-                    .as_ref()
-                    .map(|runtime| &runtime.applied_config)
-                    .filter(|applied| provider_route_requires_restart(applied, &current_config))
-                    .cloned()
-                    .unwrap_or(current_config);
-                current_renderer_model_catalog_async(catalog_config)
-                    .await
-                    .unwrap_or_else(api_error_message)
-            }
+            "/codex-model-catalog" => models::runtime_renderer_model_catalog(self)
+                .await
+                .unwrap_or_else(api_error_message),
             "/backend/status" => {
                 let mut value = runtime_status(self).await.unwrap_or_else(api_error_message);
                 if let Some(object) = value.as_object_mut() {
@@ -1692,7 +1684,7 @@ async fn finish_codey_config_save(
     }
     schedule_crashpad_pending_refresh(state, saved.config.protect_crashpad_pending);
     let model_state = current_model_state_async(&saved.config).await?;
-    let model_hot_reload = hot_reload_runtime_models(state, &saved.config, &model_state).await;
+    let model_hot_reload = hot_reload_runtime_models(state).await;
     let subagent_hot_reload = if saved.reconcile_subagent_config {
         hot_reload_runtime_subagent_config(state, &saved.config).await
     } else {

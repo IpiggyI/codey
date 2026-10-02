@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use codey_runtime_core::app_paths::resolve_codex_app_dir_with_saved;
 use codey_runtime_core::launcher::build_codex_command;
 use serde::Serialize;
+use serde_json::Value;
 use tokio::process::Child;
 #[cfg(not(windows))]
 use tokio::process::Command;
@@ -146,6 +147,7 @@ pub struct CodeyRuntime {
     pub maintenance: MaintenanceStatus,
     pub applied_config: CodeyConfig,
     applied_model_config: RwLock<Arc<RuntimeModelConfig>>,
+    delivered_model_catalog: RwLock<Option<Value>>,
     applied_subagent_config: RwLock<Arc<RuntimeSubagentConfig>>,
     pub injection_statuses: Arc<RwLock<Arc<[cdp::InjectionScriptStatus]>>>,
     injection_scripts: cdp::PreparedInjectionScripts,
@@ -332,26 +334,6 @@ fn model_context_explicit_official_budget_requires_generated_catalog() {
     assert!(should_install_codey_model_catalog(false, true, false));
 }
 
-/// An official-account launch honours a custom context budget only through the
-/// generated catalog. When that catalog is unavailable the budget cannot be
-/// applied, and the launch continues on Codex's built-in capacities instead of
-/// failing, so the drop has to be reported rather than left silent.
-fn custom_context_budget_dropped(
-    official_only: bool,
-    catalog_available: bool,
-    custom_context: bool,
-) -> bool {
-    official_only && custom_context && !catalog_available
-}
-
-#[test]
-fn a_dropped_custom_context_budget_is_detected_only_when_the_catalog_is_missing() {
-    assert!(custom_context_budget_dropped(true, false, true));
-    assert!(!custom_context_budget_dropped(true, true, true));
-    assert!(!custom_context_budget_dropped(true, false, false));
-    assert!(!custom_context_budget_dropped(false, false, true));
-}
-
 fn should_inject_runtime_model_catalog(
     user_catalog_configured: bool,
     leftover_codey_catalog: bool,
@@ -382,6 +364,12 @@ async fn prepare_startup_model_catalog(
         ConfiguredModelCatalog::User(path) => Some(path),
         ConfiguredModelCatalog::Unset | ConfiguredModelCatalog::CodeyOwned => None,
     };
+    let contexts = config.runtime_enabled_model_contexts();
+    let user_catalog = user_catalog
+        .map(|source| {
+            model_catalog::prepare_context_catalog_overlay(&catalog_dir, &source, &contexts)
+        })
+        .transpose()?;
     let user_catalog_configured = user_catalog.is_some();
     let available_official_models = model_catalog::available_official_models(
         &catalog_home,
@@ -404,6 +392,7 @@ async fn prepare_startup_model_catalog(
     let runtime_websocket_models = config.runtime_websocket_model_aliases();
     let runtime_native_web_search_models = config.runtime_native_web_search_model_aliases();
     let runtime_1m_context_models = config.runtime_1m_context_model_aliases();
+    let budget_1m_models = runtime_1m_context_models.clone();
     let refresh_official_provider =
         config.official_account_available_this_launch && !current_provider_is_third_party;
     let include_official_models = config.official_account_available_this_launch
@@ -450,6 +439,14 @@ async fn prepare_startup_model_catalog(
                 native_web_search_models: Some(&runtime_native_web_search_models),
                 context_1m_models: Some(&runtime_1m_context_models),
                 user_catalog: user_catalog_for_refresh.as_deref(),
+            })
+            .and_then(|count| {
+                model_catalog::apply_catalog_contexts(
+                    &catalog_dir_for_refresh,
+                    &contexts,
+                    &budget_1m_models,
+                )?;
+                Ok(count)
             });
             let catalog_available =
                 refresh.is_err() && model_catalog::is_available(&catalog_dir_for_refresh);
@@ -539,7 +536,7 @@ async fn prepare_startup_model_catalog(
     // synthetic model entries. A user-supplied model_catalog_json always
     // installs the derived copy so Codex never reads the user file.
     let official_only = !current_provider_is_third_party;
-    let custom_context = !config.runtime_model_contexts().is_empty();
+    let custom_context = !config.runtime_enabled_model_contexts().is_empty();
     let install_codey_catalog = should_inject_runtime_model_catalog(
         user_catalog_configured,
         leftover_codey_catalog,
@@ -547,23 +544,11 @@ async fn prepare_startup_model_catalog(
         catalog_available_for_runtime,
         custom_context,
     );
-    if !install_codey_catalog
-        && custom_context_budget_dropped(
-            official_only,
-            catalog_available_for_runtime,
-            custom_context,
-        )
-    {
-        error_log::record_failure(
-            "patch_degraded",
-            "apply_custom_model_context",
-            "生成的模型目录不可用，本次启动未应用自定义上下文预算".to_string(),
-            serde_json::json!({
-                "fallback": "codex_builtin_context",
-                "officialProvider": official_provider,
-            }),
-        );
-        eprintln!("模型目录不可用，本次启动未应用自定义上下文预算，Codex 使用内置容量。");
+    if custom_context && !catalog_available_for_runtime {
+        return Err(model_catalog::ContextBudgetCatalogError(anyhow::anyhow!(
+            "无法生成带有自定义上下文预算的模型目录，请恢复默认预算或重新同步模型"
+        ))
+        .into());
     }
     let model_catalog_path = install_codey_catalog
         .then(|| crate::model_catalog_store::derived_catalog_path(&catalog_dir));
@@ -1497,6 +1482,15 @@ impl CodeyRuntime {
             Arc::new(RuntimeModelConfig::from_config(config));
     }
 
+    pub(crate) async fn delivered_model_catalog(&self) -> Option<Value> {
+        self.delivered_model_catalog.read().await.clone()
+    }
+
+    pub(crate) async fn mark_model_catalog_applied(&self, config: &CodeyConfig, catalog: Value) {
+        *self.delivered_model_catalog.write().await = Some(catalog);
+        self.mark_model_config_applied(config).await;
+    }
+
     pub async fn applied_subagent_config(&self) -> Arc<RuntimeSubagentConfig> {
         Arc::clone(&*self.applied_subagent_config.read().await)
     }
@@ -1568,7 +1562,7 @@ impl CodeyRuntime {
         );
         resolve_startup_provider(config)?;
         let initial_storage_guards = spawn_initial_storage_guards(home, config);
-        let (storage, _startup_catalog) = prepare_startup_storage(
+        let (storage, startup_catalog) = prepare_startup_storage(
             home,
             config,
             None,
@@ -1586,6 +1580,9 @@ impl CodeyRuntime {
                 return Err(restore_runtime_config_after_error(home, error).await);
             }
         };
+        let delivered_catalog = startup_catalog.as_ref().map(|catalog| {
+            crate::commands::renderer_model_catalog_value(&runtime_config, &catalog.model_state)
+        });
         let patch = match prepare_startup_patches(home, config).await {
             Ok(patch) => patch,
             Err(error) => {
@@ -1656,6 +1653,7 @@ impl CodeyRuntime {
                 applied_subagent_config: RwLock::new(Arc::new(RuntimeSubagentConfig::from_config(
                     &runtime_config,
                 ))),
+                delivered_model_catalog: RwLock::new(delivered_catalog),
                 applied_config: runtime_config,
                 injection_statuses,
                 injection_scripts,
@@ -1898,3 +1896,6 @@ mod watchdog_tests;
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(test)]
+mod model_delivery_test_support;

@@ -175,7 +175,7 @@ pub async fn save_selected_models(
         }
     }
     config = config.normalize();
-    let (catalog_refresh, model_state) = refreshed_model_state_async(&config, false).await?;
+    let (catalog_refresh, model_state) = refreshed_model_state_async(&mut config, false).await?;
     subagent_policy::reconcile_with_model_state(&mut config, Some(&model_state));
     config = config.normalize();
     config.settings_revision = config.settings_revision.saturating_add(1);
@@ -188,7 +188,7 @@ pub async fn save_selected_models(
     *state.config.write().await = config.clone();
     let public_config = redacted_config(&config);
     drop(_config_write_guard);
-    let hot_reload = hot_reload_runtime_models(state, &config, &model_state).await;
+    let hot_reload = hot_reload_runtime_models(state).await;
     let subagent_hot_reload = hot_reload_runtime_subagent_config(state, &config).await;
     let restart_required = runtime_config_requires_restart(state, &config).await;
     Ok(add_subagent_hot_reload_to_response(

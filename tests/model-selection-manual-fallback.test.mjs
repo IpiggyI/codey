@@ -64,7 +64,7 @@ test("third-party model sync can fall back to manual model support configuration
   assert.match(modelCommandSource, /preserve_selected_third_party_models_except/);
   assert.match(
     modelCommandSource,
-    /refreshed_model_state_async\(&config, false\)\.await\?/,
+    /refreshed_model_state_async\(&mut config, false\)\.await\?/,
   );
   assert.match(modelCommandSource, /tokio::task::spawn_blocking/);
   assert.match(modelCommandSource, /rollback_model_catalog_after_config_save/);

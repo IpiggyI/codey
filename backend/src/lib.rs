@@ -7,6 +7,7 @@ mod codex_startup_patch;
 mod codey_router_session_migrate;
 mod commands;
 mod config;
+mod context_recovery;
 mod crashpad_pending_guard;
 #[cfg(windows)]
 mod desktop_instance;

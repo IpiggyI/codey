@@ -43,6 +43,7 @@ import type {
   CurrentProviderSnapshot,
   ProviderStatus,
   Config,
+  ModelContextConfig,
   CrashpadCleanup,
   FastContextToolsStatus,
   ModelState,
@@ -584,6 +585,7 @@ export function App({
     models: string[],
     showAccountUsageInHeader: boolean,
     knownOfficialModels: string[],
+    modelContexts: Record<string, ModelContextConfig>,
   ) {
     if (!config) return false;
     if (!currentProviderSnapshot?.usesOfficialAccountAuth) return false;
@@ -605,7 +607,7 @@ export function App({
         supports1MContextModels: [],
         enabled: true,
         showAccountUsageInHeader,
-        modelContexts: {},
+        modelContexts,
       });
       applyRouteResult(modelResult);
       saved = true;
