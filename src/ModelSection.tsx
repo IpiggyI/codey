@@ -1,4 +1,4 @@
-import { memo, useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
 import {
   IconCheck as Check,
   IconCpu,
@@ -28,6 +28,8 @@ import {
   Input,
   Switch,
 } from "./components/ui";
+import { ModelCombobox } from "./components/ModelCombobox";
+import type { SubagentModelOption } from "./subagentModels";
 import { modelIdsEqual, modelKey, uniqueModelIds } from "./modelIds";
 import { globalDefaultForProvider } from "./modelRoutes";
 import { SETTINGS_OVERLAY_Z_INDEX } from "./overlay.constants";
@@ -64,6 +66,8 @@ export function ModelContextFields({ model, policy, disabled, onChange }: {
 
 type ModelSectionProps = {
   config: Config;
+  onConfigChange: (config: Config) => void;
+  subagentModelOptions: SubagentModelOption[];
   currentProviderSnapshot: CurrentProviderSnapshot | null;
   officialAccountAvailable: boolean;
   popupContainer: HTMLElement | null;
@@ -95,6 +99,8 @@ type RouteModelGroup = {
 
 function ModelSectionComponent({
   config,
+  onConfigChange,
+  subagentModelOptions,
   currentProviderSnapshot,
   officialAccountAvailable,
   popupContainer,
@@ -112,6 +118,7 @@ function ModelSectionComponent({
   routerSessionDiagnosis,
   onMigrateRouterSessions,
 }: ModelSectionProps) {
+  const getAuxiliaryPopupContainer = useCallback(() => popupContainer ?? document.body, [popupContainer]);
   const [officialEditorOpen, setOfficialEditorOpen] = useState(false);
   const [officialModelDraft, setOfficialModelDraft] = useState<string[]>([]);
   const [officialCatalogDraft, setOfficialCatalogDraft] = useState<string[]>([]);
@@ -593,6 +600,18 @@ function ModelSectionComponent({
           </DialogContent>
         )}
       </Dialog>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <label className="text-xs font-medium">辅助模型</label>
+        <div className="min-w-48 flex-1">
+          <ModelCombobox aria-label="辅助模型" value={config.miscModel ?? ""}
+            getPopupContainer={getAuxiliaryPopupContainer}
+            zIndex={SETTINGS_OVERLAY_Z_INDEX} options={subagentModelOptions} disabled={isBusy || subagentModelOptions.length === 0}
+            placeholder="默认选择" onChange={(miscModel) => onConfigChange({ ...config, miscModel })} />
+        </div>
+        <Button variant="ghost" size="sm" disabled={isBusy || !config.miscModel}
+          onClick={() => onConfigChange({ ...config, miscModel: "" })}>恢复默认</Button>
+        <p className="w-full text-xs text-[#6e6e73]">用于会话命名、Git 提交消息和环境建议。留空沿用默认选择；保存后重启 Codex 生效。</p>
+      </div>
     </section>
   );
 }

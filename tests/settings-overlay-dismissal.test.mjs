@@ -17,7 +17,7 @@ test("settings modal keeps dismissal and stacking inside the overlay", async () 
 
   assert.match(
     appSource,
-    /function closeSettings\(\) \{[\s\S]*setConfig\(persistedConfigRef\.current\)[\s\S]*setDirty\(false\)[\s\S]*onClose\?\.\(\)/,
+    /function discardSettings\(\) \{[\s\S]*setConfig\(persistedConfigRef\.current\)[\s\S]*setDirty\(false\)[\s\S]*onClose\?\.\(\)/,
   );
   assert.match(appSource, /function closeSettings\(\) \{\s*if \(isBusy\) return;/);
   assert.match(

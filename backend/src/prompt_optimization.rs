@@ -742,11 +742,22 @@ async fn parse_optimized_response(
 }
 
 fn extract_responses_stream_optimized_text(body: &[u8]) -> Result<String, String> {
-    let body = body.strip_prefix(b"\xef\xbb\xbf").unwrap_or(body);
+    let body = body.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(body);
     let mut cursor = 0;
     let mut text = String::new();
     let mut final_text = None;
-    while let Some(frame) = take_next_sse_frame(body, &mut cursor) {
+    while cursor < body.len() {
+        let (frame, trailing) = match take_next_sse_frame(body, &mut cursor) {
+            Some(frame) => (frame, false),
+            None => {
+                let frame = &body[cursor..];
+                cursor = body.len();
+                (frame, true)
+            }
+        };
+        if frame.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
         let Some(data) = sse_frame_data(frame)? else {
             continue;
         };
@@ -754,8 +765,10 @@ fn extract_responses_stream_optimized_text(body: &[u8]) -> Result<String, String
         if data.is_empty() || data == "[DONE]" {
             continue;
         }
-        let event: Value = serde_json::from_str(data)
-            .map_err(|error| format!("Responses SSE data 不是有效 JSON：{error}"))?;
+        let event: Value = serde_json::from_str(data).map_err(|error| {
+            let position = if trailing { "末尾 data" } else { "data" };
+            format!("Responses SSE {position} 不是有效 JSON：{error}")
+        })?;
         if let Some(message) = responses_stream_error_message(&event) {
             return Err(message);
         }
@@ -780,23 +793,6 @@ fn extract_responses_stream_optimized_text(body: &[u8]) -> Result<String, String
                 }
             }
             _ => {}
-        }
-    }
-    if !body[cursor..].iter().all(u8::is_ascii_whitespace)
-        && let Some(data) = sse_frame_data(&body[cursor..])?
-    {
-        let data = data.trim();
-        if !data.is_empty() && data != "[DONE]" {
-            let event: Value = serde_json::from_str(data)
-                .map_err(|error| format!("Responses SSE 末尾 data 不是有效 JSON：{error}"))?;
-            if let Some(message) = responses_stream_error_message(&event) {
-                return Err(message);
-            }
-            if event.get("type").and_then(Value::as_str) == Some("response.output_text.delta")
-                && let Some(delta) = event.get("delta").and_then(Value::as_str)
-            {
-                text.push_str(delta);
-            }
         }
     }
     if text.is_empty() {

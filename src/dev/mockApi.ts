@@ -165,6 +165,7 @@ if (import.meta.env.DEV) {
       gpuLaunchMode: "off" as const,
       fastContextTools: false,
       subagentOptimization: false,
+      miscModel: "",
       subagentModel: "gpt-5.6-terra",
       subagentReasoningEffort: "medium",
       subagentRoles: {

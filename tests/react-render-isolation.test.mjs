@@ -66,7 +66,7 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
   assert.doesNotMatch(sections, /第三方 Responses 兼容/);
   assert.doesNotMatch(sections, /route-auth-mode-label/);
   assert.equal(sections.match(/<Select\s/g)?.length, 1);
-  assert.equal(sections.match(/<ModelCombobox\s/g)?.length, 1);
+  assert.equal(sections.match(/<ModelCombobox\s/g)?.length, 2);
   assert.doesNotMatch(sections, /<select|route-native-select/);
   assert.match(sections, /className="route-manager route-manager-single"/);
   assert.match(sections, /className="provider-model-groups"/);

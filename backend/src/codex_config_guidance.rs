@@ -6,6 +6,33 @@ pub(crate) const SUBAGENT_GUIDANCE: &str = r#"## 子代理使用
 
 ### 派发
 
+- 按当前客户端声明的准确接口调用 `agents.spawn_agent`；原生接口直接调用，客户端明确提供工具目录与专用转发入口时按目录调用。按任务选择 `codey_quick_scan`、`codey_deep_research`、`codey_visual_analysis`、`codey_worker` 或 `codey_visual_worker`；`default` 仅兼容旧配置。`task_name` 只含小写字母、数字和下划线。
+- `message` 是唯一任务胶囊：写清目标、范围、允许操作、交付格式和必要背景，不复制整段对话，不附加 V1/V2 契约、sidecar、checks 或其他尾行协议。
+- 只读角色获得 `files.read`；写入角色获得 `command.execute`、`files.read` 和 `workspace.write`。写入角色暂按当前工作区建立互斥锁；实际文件与网络权限仍由 Codex 原生 sandbox、approval policy、permission profile 和 writable roots 决定。
+
+### 返回与验收
+
+- 每个子代理只执行一轮且不得继续派生。返回首行使用 `status: completed | partial | blocked`，正文只保留影响决策的结论、最多 5 条带 `file:line`/符号/链接的证据和明确 gaps；多代理证据冲突时比较出处。
+- 子代理结果是候选产物，不是验收结论。所有代理结算后，由根代理结合用户要求、变更差异和必要的确定性检查统一验收；Codey 不再创建逐任务机械验收债或强制验收命令。
+
+### 生命周期
+
+- 先派发不超过当前并发上限的独立任务，再进入 wait/list。任一 attempt 终态或被成功中断并 fence 后，按下一个计划任务的角色重新计算并发上限；存在空余槽位时立即使用新 `task_name` 补位，否则继续等待。所有计划任务均已派发后，继续等待剩余活动 attempt 结算。活动 attempt 期间只使用必要的 `agents.*` 协作工具，普通本地工作和 Stop 仍受生命周期门禁限制。
+- `MESSAGE` 只保存证据并继续等待。`completed`、`errored`、`error`、`failed`、`shutdown`、`not_found`、`FINAL_ANSWER` 和 `task_complete` 为终态；`pending_init`、`running`、`interrupted` 仍是非终态，除非根代理成功中断并永久放弃该 attempt。
+- 成功的 `agents.interrupt_agent` 会永久 fence 该 attempt；不要再等待或追派。重复 task ID 时只做一次无筛选 `agents.list_agents` 对账：原代理存在则等待或消费结果，不存在则由根代理接管。只有任务范围实质改变时才用全新 task ID 最多重派一次。
+- 不得仅因运行时长、状态不变或没有新消息中断子代理。协作工具明确未注册时核对其他状态入口；故障持续且没有子代理工具在执行时才恢复，失联任务不代表完成。
+"#;
+
+mod legacy;
+
+const PREVIOUS_SUBAGENT_GUIDANCE: &str = r#"## 子代理使用
+
+默认由主代理直接处理短而明确、步骤互相依赖或即将修改关键代码/文档的任务；不要为了形式分工而派生。只在独立并行工作、宽范围检索、上下文隔离或独立高风险证据确有收益时使用子代理。不超过 2 个小文件和 3 次本地工具调用的精确任务通常由主代理完成。
+
+纯只读工作最多同时运行 3 个子代理；存在写入型或身份未确认的代理时最多同时运行 2 个。并发限制只约束同时运行数量，不限制后续派发次数。
+
+### 派发
+
 - 直接调用 `agents.spawn_agent`，按任务选择 `codey_quick_scan`、`codey_deep_research`、`codey_visual_analysis`、`codey_worker` 或 `codey_visual_worker`；`default` 仅兼容旧配置。`task_name` 只含小写字母、数字和下划线。
 - `message` 是唯一任务胶囊：写清目标、范围、允许操作、交付格式和必要背景，不复制整段对话，不附加 V1/V2 契约、sidecar、checks 或其他尾行协议。
 - 只读角色获得 `files.read`；写入角色获得 `command.execute`、`files.read` 和 `workspace.write`。写入角色暂按当前工作区建立互斥锁；实际文件与网络权限仍由 Codex 原生 sandbox、approval policy、permission profile 和 writable roots 决定。
@@ -23,14 +50,20 @@ pub(crate) const SUBAGENT_GUIDANCE: &str = r#"## 子代理使用
 - 协作工具不可用时不要循环调用；依赖有界的 pending-init、超时和 Stop 恢复路径收敛。
 "#;
 
-/// Only the current text is recognised. Codey supports upgrades from the
-/// previous two releases only, and both shipped this exact text; older
-/// guidance is left untouched instead of being migrated.
-pub(crate) const SUBAGENT_GUIDANCE_VERSIONS: &[&str] = &[SUBAGENT_GUIDANCE];
+pub(crate) const SUBAGENT_GUIDANCE_VERSIONS: &[&str] = &[
+    SUBAGENT_GUIDANCE,
+    PREVIOUS_SUBAGENT_GUIDANCE,
+    legacy::DIRECT_SUBAGENT_GUIDANCE,
+    legacy::DELEGATION_V2_GUIDANCE,
+];
 
 pub(crate) const ROOT_AGENT_COLLABORATION_USAGE_HINT: &str = "\
-`agents.spawn_agent`, `agents.wait_agent`, and other `agents.*` collaboration tools are direct commentary \
-tools; never call them through `functions.exec`. Dispatch up to the current concurrency limit from the \
+`agents.spawn_agent`, `agents.wait_agent`, and other `agents.*` collaboration tools use the current \
+client's declared tool interface. Native clients expose direct commentary tools; never call them through \
+`functions.exec` as a JavaScript aggregate. If a client explicitly exposes a tool catalog through a \
+transport-only endpoint, use that documented endpoint with the exact catalog name and argument schema. \
+A catalog-listed collaboration tool is available even without a same-named direct schema. Do not invent \
+wrappers or bypass lifecycle and permission checks. Dispatch up to the current concurrency limit from the \
 planned independent work before the first wait. While any attempt is active, use only the relevant \
 `agents.spawn_agent`, `agents.send_message`, `agents.followup_task`, `agents.interrupt_agent`, \
 `agents.list_agents`, or `agents.wait_agent`. After a terminal or successfully fenced update, recompute the \
@@ -41,8 +74,9 @@ completion. Use `followup_task` only for a bound nonterminal attempt. If \
 `CODEY_SUBAGENT_FOLLOWUP_REQUIRES_ACTIVE_ATTEMPT` is denied, do not retry or wait for that target; take \
 over or use a fresh `task_name` for a materially changed task. Treat `FINAL_ANSWER`, `task_complete`, \
 `completed`, `errored`, `error`, `failed`, `shutdown`, and `not_found` as terminal. A successful root \
-interrupt permanently abandons and fences that attempt, settles it for the lifecycle ledger, and makes \
-later active-looking provider state stale; do not wait for or follow up that target. If a wait times out or \
+interrupt permanently abandons and fences that attempt and settles it for the lifecycle ledger; \
+do not wait for or follow up that target. A failed interrupt does not release the reservation. Match evidence and write reports to the exact task and attempt; never transfer another \
+attempt's no-change claim or infer a transport stall from elapsed time alone. If a wait times out or \
 lacks per-agent terminal details, call unfiltered `agents.list_agents` before waiting again. Continue until \
 all planned work has been spawned and every attempt is terminal or fenced. Then the root agent validates \
 the combined result and either continues the work or finishes. While an attempt is active, Codey's gate \
@@ -71,11 +105,35 @@ unfiltered `agents.list_agents` once: wait for the original if present, otherwis
 materially changed task may retry once with a fresh `task_name`. This \
 mode remains active until a later multi-agent mode developer message changes it.";
 
-/// Only the current text is recognised. Codey supports upgrades from the
-/// previous two releases only, and both shipped this exact text; older
-/// guidance is left untouched instead of being migrated.
-pub(crate) const ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS: &[&str] =
-    &[ROOT_AGENT_COLLABORATION_USAGE_HINT];
+/// Recognise only exact Codey-owned historical blocks during migration.
+const PREVIOUS_ROOT_USAGE_HINT: &str = "\
+`agents.spawn_agent`, `agents.wait_agent`, and other `agents.*` collaboration tools are direct commentary \
+tools; never call them through `functions.exec`. Dispatch up to the current concurrency limit from the \
+planned independent work before the first wait. While any attempt is active, use only the relevant \
+`agents.spawn_agent`, `agents.send_message`, `agents.followup_task`, `agents.interrupt_agent`, \
+`agents.list_agents`, or `agents.wait_agent`. After a terminal or successfully fenced update, recompute the \
+role-aware concurrency limit; if it exposes a slot, immediately use `agents.spawn_agent` with a new \
+`task_name` for the next planned, unspawned task; \
+otherwise return to `agents.wait_agent` with `timeout_ms: 30000`. `MESSAGE` and mailbox updates are not \
+completion. Use `followup_task` only for a bound nonterminal attempt. If \
+`CODEY_SUBAGENT_FOLLOWUP_REQUIRES_ACTIVE_ATTEMPT` is denied, do not retry or wait for that target; take \
+over or use a fresh `task_name` for a materially changed task. Treat `FINAL_ANSWER`, `task_complete`, \
+`completed`, `errored`, `error`, `failed`, `shutdown`, and `not_found` as terminal. A successful root \
+interrupt permanently abandons and fences that attempt, settles it for the lifecycle ledger, and makes \
+later active-looking provider state stale; do not wait for or follow up that target. If a wait times out or \
+lacks per-agent terminal details, call unfiltered `agents.list_agents` before waiting again. Continue until \
+all planned work has been spawned and every attempt is terminal or fenced. Then the root agent validates \
+the combined result and either continues the work or finishes. While an attempt is active, Codey's gate \
+blocks non-collaboration tools and Stop. If collaboration tools are unavailable, do not loop on an \
+unregistered tool.";
+
+pub(crate) const ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS: &[&str] = &[
+    ROOT_AGENT_COLLABORATION_USAGE_HINT,
+    PREVIOUS_ROOT_USAGE_HINT,
+    legacy::DIRECT_COLLABORATION_USAGE_HINT,
+    legacy::BATCH_RESOLUTION_USAGE_HINT,
+    legacy::DIRECT_SCHEMA_USAGE_HINT,
+];
 
 pub(crate) const DEFAULT_AGENT_CONFIG: &str = r#####"name = "default"
 
@@ -208,7 +266,7 @@ pub(crate) fn subagent_source_config(role: &str) -> Option<&'static str> {
 }
 
 pub(crate) const CODEY_FASTCTX_GUIDANCE: &str = "Codey FastCtx context tools are enabled as direct \
-tools. Use `mcp__codey_fastctx__inspect_local_file` for focused inspection, \
+tools in native clients. Prefer FastCtx for supported local file operations. Use `mcp__codey_fastctx__inspect_local_file` for focused inspection, \
 `mcp__codey_fastctx__grep` for search, `mcp__codey_fastctx__glob` for discovery, and \
 `mcp__codey_fastctx__replace` only for deterministic replacement. Batch 2-32 known text files or ranges \
 per inspect call; limit large files to needed ranges. A top-level `limit` applies to entries without one. \
@@ -217,16 +275,22 @@ Pass plain absolute filesystem paths; convert local URIs and Windows paths to a 
 or count only for totals. Glob with `filter_mode=ignore`, stable sorting, and `output_mode=details` only \
 when metadata matters. Run replace as dry-run first with `max_replacements`, then inspect and test; never \
 transparently retry a write after transport failure. Follow every Complete or Partial continuation without \
-parallel page speculation. FastCtx is a direct-only tool namespace, not an MCP Resources server or \
-code-mode aggregate; call tools directly and use `tool_search` when deferred. Use terminal commands for \
+parallel page speculation. In native clients FastCtx is a direct-only tool namespace, not an MCP Resources \
+server or code-mode aggregate; call tools directly and use `tool_search` when deferred and available. \
+If a client explicitly provides a tool catalog through a transport-only endpoint, use that documented \
+endpoint with the exact catalog name and argument schema, preserving the full result and continuation \
+metadata. A catalog-listed FastCtx tool is available even without a same-named direct schema. Never \
+invent wrappers or treat an execution aggregate as a transport-only endpoint. Use terminal commands for \
 builds, tests, Git, package managers, advanced shell/streaming operations, unsupported metadata, or after \
 the applicable FastCtx tool is unavailable or fails. Use CodeGraph only for semantic symbols and call \
 paths. Every tool call must advance the task; put progress and corrections in commentary.";
 
-/// Only the current text is recognised. Codey supports upgrades from the
-/// previous two releases only, and both shipped this exact text; older
-/// guidance is left untouched instead of being migrated.
-pub(crate) const CODEY_FASTCTX_GUIDANCE_VERSIONS: &[&str] = &[CODEY_FASTCTX_GUIDANCE];
+/// Recognise only exact Codey-owned historical blocks during migration.
+pub(crate) const CODEY_FASTCTX_GUIDANCE_VERSIONS: &[&str] = &[
+    CODEY_FASTCTX_GUIDANCE,
+    legacy::TASK_ROUTED_FASTCTX_GUIDANCE,
+    legacy::DIRECT_FASTCTX_GUIDANCE,
+];
 
 const DEFAULT_FASTCTX_TOOL_NAMESPACE: &str = "mcp__codey_fastctx";
 
@@ -488,7 +552,7 @@ mod tests {
         assert!(combined.contains("successful root interrupt permanently abandons and fences"));
         assert!(combined.contains("settles it for the lifecycle ledger"));
         assert!(combined.contains("do not wait for or follow up that target"));
-        assert!(combined.contains("active-looking provider state stale"));
+        assert!(combined.contains("A failed interrupt does not release the reservation"));
         assert!(combined.contains("terminal or fenced"));
         assert!(combined.contains("unfiltered `agents.list_agents`"));
         assert!(combined.contains("recompute the role-aware concurrency limit"));
@@ -542,7 +606,7 @@ mod tests {
     fn subagent_guidance_prefers_direct_work_until_delegation_has_clear_value() {
         assert!(SUBAGENT_GUIDANCE.contains("默认由主代理直接处理"));
         assert!(SUBAGENT_GUIDANCE.contains("不超过 2 个小文件和 3 次本地工具调用"));
-        assert!(SUBAGENT_GUIDANCE.contains("直接调用 `agents.spawn_agent`"));
+        assert!(SUBAGENT_GUIDANCE.contains("客户端声明的准确接口"));
         assert!(SUBAGENT_GUIDANCE.contains("唯一任务胶囊"));
         assert!(SUBAGENT_GUIDANCE.contains("纯只读工作最多同时运行 3 个子代理"));
         assert!(SUBAGENT_GUIDANCE.contains("最多同时运行 2 个"));

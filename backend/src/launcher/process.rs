@@ -252,6 +252,7 @@ fn windows_should_prepare_require_patch(
 pub(super) async fn spawn_codex(
     app_dir: &mut PathBuf,
     debug_port: u16,
+    misc_model: Option<String>,
     disable_codex_pet: bool,
     subagent_gate_active: bool,
     gpu_launch_mode: GpuLaunchMode,
@@ -259,11 +260,13 @@ pub(super) async fn spawn_codex(
 ) -> Result<SpawnedCodex> {
     #[cfg(any(windows, target_os = "macos"))]
     let patch_options = crate::codex_startup_patch::PatchOptions {
+        misc_model,
         disable_pet: disable_codex_pet,
         subagent_gate_active,
     };
     #[cfg(not(any(windows, target_os = "macos")))]
     let _ = (
+        misc_model,
         disable_codex_pet,
         subagent_gate_active,
         runtime_config_overrides,
@@ -300,7 +303,7 @@ pub(super) async fn spawn_codex(
             );
             let require_patch = prepare_startup_require_launch(
                 require_wanted,
-                patch_options,
+                patch_options.clone(),
                 runtime_config_overrides,
                 "windows",
             )
@@ -475,7 +478,7 @@ pub(super) async fn spawn_codex(
             }
             let startup_result = install_startup_patch_with_cli_fallback(
                 inspector_port,
-                patch_options,
+                patch_options.clone(),
                 runtime_config_overrides,
                 wrapper_handshake,
                 StartupWaitContext {
@@ -617,7 +620,7 @@ pub(super) async fn spawn_codex(
         let require_wanted = is_app_bundle && fuses.node_options.node_options_possible();
         let require_patch = prepare_startup_require_launch(
             require_wanted,
-            patch_options,
+            patch_options.clone(),
             runtime_config_overrides,
             "macos",
         )
@@ -676,7 +679,7 @@ pub(super) async fn spawn_codex(
         let wait_inspector_port = if use_inspector { inspector_port } else { None };
         let startup_result = install_startup_patch_with_cli_fallback(
             wait_inspector_port,
-            patch_options,
+            patch_options.clone(),
             runtime_config_overrides,
             wrapper.map(CliWrapperLaunch::into_handshake),
             StartupWaitContext {
@@ -1947,7 +1950,7 @@ async fn wait_for_startup_compatibility(
             deadline,
             crate::codex_startup_patch::install(
                 inspector_port,
-                patch_options,
+                patch_options.clone(),
                 runtime_config_overrides,
                 !runtime_config_overrides.is_empty(),
                 renderer_debug_port,
@@ -2481,6 +2484,7 @@ mod cli_wrapper_tests {
     #[cfg(any(windows, target_os = "macos"))]
     fn test_patch_options() -> crate::codex_startup_patch::PatchOptions {
         crate::codex_startup_patch::PatchOptions {
+            misc_model: None,
             disable_pet: false,
             subagent_gate_active: true,
         }

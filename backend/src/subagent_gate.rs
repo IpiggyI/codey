@@ -50,13 +50,11 @@ const RUNTIME_SUBAGENT_ATTESTATION_PREFIX: &str = "runtime-attestation-";
 const MAX_RUNTIME_ATTESTATION_TRANSCRIPT_BYTES: u64 = 2 * 1024 * 1024;
 const LEGACY_RUNTIME_ID: &str = "legacy-runtime";
 const PENDING_INIT_GRACE_MILLIS: u64 = 10 * 60 * 1000;
-const STOP_STALL_GRACE_MILLIS: u64 = 10 * 60 * 1000;
-const STOP_ABSOLUTE_GRACE_MILLIS: u64 = 60 * 60 * 1000;
+const STATE_ERROR_GRACE_MILLIS: u64 = 10 * 60 * 1000;
+const UNAVAILABLE_STATUS_GRACE_MILLIS: u64 = 30 * 1000;
+const UNAVAILABLE_STATUS_SINCE_FILE: &str = "unavailable-status-since.state";
 const PENDING_INIT_OBSERVED_FILE: &str = "pending-init-observed.state";
-const STOP_BLOCKED_SINCE_FILE: &str = "stop-blocked-since.state";
-const STOP_ABSOLUTE_SINCE_FILE: &str = "stop-absolute-since.state";
 const CHILD_TOOL_IN_FLIGHT_PREFIX: &str = "child-tool-in-flight-";
-const STATUS_PROGRESS_FINGERPRINT_FILE: &str = "status-progress.state";
 const STATE_ERROR_SINCE_FILE: &str = "state-error-since.state";
 const PROTOCOL_HEALTH_FILE: &str = "protocol-health.json";
 const PROTOCOL_HEALTH_SCHEMA_VERSION: u32 = 1;
@@ -497,16 +495,6 @@ fn record_hook_evaluation(
     if sampled_allow {
         event.attributes.insert("sampled".into(), json!(true));
     }
-    if input.hook_event_name == "Stop" {
-        let session_dir = session_state_dir(state_root, &input.session_id);
-        let path = session_auxiliary_path(&session_dir, runtime_id, STOP_ABSOLUTE_SINCE_FILE);
-        if let Ok(Some(started_at_ms)) = read_observation_timestamp(&path) {
-            event.attributes.insert(
-                "root_barrier.duration_ms".into(),
-                json!(now_ms.saturating_sub(started_at_ms)),
-            );
-        }
-    }
     if result.is_err() {
         event.error_code = Some("hook_error".into());
         event
@@ -587,7 +575,7 @@ fn user_prompt_submit_output(
     if input_has_subagent_context(input) {
         return Ok(json!({}));
     }
-    let active = active_agent_count_for_runtime(state_root, runtime_id, &input.session_id)?;
+    let active = recover_root_active_state(input, state_root, runtime_id, now_ms)?;
     if active == 0 {
         if let Some(reason) = protocol_issue_reason(state_root, runtime_id, &input.session_id)? {
             return Ok(json!({
@@ -962,11 +950,9 @@ fn pre_tool_use_output(
             tool_name,
             input.tool_input.as_ref(),
         ) {
-            refresh_stop_stall_clock_if_running(state_root, runtime_id, &input.session_id, now_ms)?;
             return Ok(json!({}));
         }
         if let Some(reason) = runtime_subagent_attestation_denial(input, state_root, runtime_id)? {
-            refresh_stop_stall_clock_if_running(state_root, runtime_id, &input.session_id, now_ms)?;
             return Ok(pre_tool_reason_denial(&reason));
         }
         if let Some(agent_id) = child_agent_id {
@@ -983,12 +969,6 @@ fn pre_tool_use_output(
                 },
                 now_ms,
             )? {
-                refresh_stop_stall_clock_if_running(
-                    state_root,
-                    runtime_id,
-                    &input.session_id,
-                    now_ms,
-                )?;
                 return Ok(pre_tool_reason_denial(&reason));
             }
             note_allowed_child_tool(state_root, runtime_id, &input.session_id, agent_id, now_ms)?;
@@ -996,7 +976,7 @@ fn pre_tool_use_output(
         }
         return Ok(subagent_identity_missing_denial());
     }
-    let active = active_agent_count_for_runtime(state_root, runtime_id, &input.session_id)?;
+    let active = recover_root_active_state(input, state_root, runtime_id, now_ms)?;
     let trusted_root_turn =
         active > 0 && trusted_root_turn_matches(input, state_root, runtime_id, now_ms)?;
     if active > 0 && !trusted_root_turn {
@@ -1163,11 +1143,10 @@ fn post_tool_use_output(
     now_ms: u64,
 ) -> Result<Value> {
     if input_has_subagent_context(input) {
-        if input.tool_name.is_some() {
-            refresh_stop_stall_clock_if_running(state_root, runtime_id, &input.session_id, now_ms)?;
-            if let Some(agent_id) = nonempty(input.agent_id.as_deref()) {
-                clear_child_tool_in_flight(state_root, runtime_id, &input.session_id, agent_id)?;
-            }
+        if input.tool_name.is_some()
+            && let Some(agent_id) = nonempty(input.agent_id.as_deref())
+        {
+            clear_child_tool_in_flight(state_root, runtime_id, &input.session_id, agent_id)?;
         }
         return Ok(json!({}));
     }
@@ -1209,6 +1188,16 @@ fn post_tool_use_output(
         return Ok(json!({}));
     }
 
+    if status_tool_is_unavailable(tool_name, input.tool_response.as_ref()) {
+        observe_and_check_elapsed(
+            state_root,
+            runtime_id,
+            &input.session_id,
+            UNAVAILABLE_STATUS_SINCE_FILE,
+            now_ms,
+            UNAVAILABLE_STATUS_GRACE_MILLIS,
+        )?;
+    }
     let response_is_usable = if is_wait_agent_tool(tool_name) {
         wait_agent_response_is_usable(input.tool_response.as_ref())
     } else {
@@ -1216,19 +1205,12 @@ fn post_tool_use_output(
             != AgentListSnapshotState::Unknown
     };
     if response_is_usable {
-        if record_status_progress(
+        remove_session_auxiliary_file(
             state_root,
             runtime_id,
             &input.session_id,
-            input.tool_response.as_ref(),
-        )? {
-            remove_session_auxiliary_file(
-                state_root,
-                runtime_id,
-                &input.session_id,
-                STOP_BLOCKED_SINCE_FILE,
-            )?;
-        }
+            UNAVAILABLE_STATUS_SINCE_FILE,
+        )?;
         clear_unknown_status_protocol_issue(state_root, runtime_id, &input.session_id, now_ms)?;
     } else {
         record_protocol_issue(
@@ -1319,6 +1301,10 @@ fn post_tool_use_output(
         remove_session_state(state_root, runtime_id, &input.session_id)?;
         return Ok(json!({}));
     }
+    let active = recover_root_active_state(input, state_root, runtime_id, now_ms)?;
+    if active == 0 {
+        return Ok(json!({}));
+    }
     let root_local_reads_allowed =
         trusted_root_turn_matches(input, state_root, runtime_id, now_ms)?
             && verified_local_read_only_active_count(
@@ -1376,123 +1362,12 @@ fn stop_output(
     if input_has_subagent_context(input) {
         return Ok(json!({}));
     }
-    let Some(mut active) = active_agent_count_or_recover_corrupt_state(
-        state_root,
-        runtime_id,
-        &input.session_id,
-        now_ms,
-    )?
-    else {
-        return Ok(json!({}));
-    };
+    let active = recover_root_active_state(input, state_root, runtime_id, now_ms)?;
     if active == 0 {
-        return finalize_root_turn(state_root, runtime_id, &input.session_id, now_ms);
-    }
-    let ledger_pending_recovery =
-        crate::subagent_orchestrator::recover_expired_pending_init_reservations(
-            state_root,
-            runtime_id,
-            &input.session_id,
-            now_ms,
-            PENDING_INIT_GRACE_MILLIS,
-        )?;
-    if let Some(recovery) = &ledger_pending_recovery {
-        remove_session_auxiliary_file(
-            state_root,
-            runtime_id,
-            &input.session_id,
-            PENDING_INIT_OBSERVED_FILE,
-        )?;
-        for agent_id_hash in recovery {
-            remove_active_marker_by_hash(state_root, runtime_id, &input.session_id, agent_id_hash)?;
-        }
-        active = active_agent_count_for_runtime(state_root, runtime_id, &input.session_id)?;
-        if active == 0 {
-            remove_session_state(state_root, runtime_id, &input.session_id)?;
-            return finalize_root_turn(state_root, runtime_id, &input.session_id, now_ms);
-        }
-    }
-    // 先检查可重置的停滞窗口，确保绝对放行后如果协作路径不再推进，遗留
-    // 活跃标记仍能在后续 10 分钟内回收，而不会被已到期的绝对计时永久短路。
-    let legacy_pending_init_elapsed = ledger_pending_recovery.is_none()
-        && observation_elapsed_if_present(
-            state_root,
-            runtime_id,
-            &input.session_id,
-            PENDING_INIT_OBSERVED_FILE,
-            now_ms,
-            PENDING_INIT_GRACE_MILLIS,
-        )?;
-    let stall_elapsed = observe_and_check_elapsed(
-        state_root,
-        runtime_id,
-        &input.session_id,
-        STOP_BLOCKED_SINCE_FILE,
-        now_ms,
-        STOP_STALL_GRACE_MILLIS,
-    )?;
-    // 已放行、尚未结束的 child 工具说明子代理仍在工作。根代理状态快照
-    // 不变不能据此做 10 分钟回收；60 分钟绝对上限不看这个标记。
-    let child_tool_running = any_child_tool_in_flight(state_root, runtime_id, &input.session_id)?;
-    if legacy_pending_init_elapsed || (stall_elapsed && !child_tool_running) {
-        crate::subagent_orchestrator::recover_active_reservations(
-            state_root,
-            runtime_id,
-            &input.session_id,
-            "gate recovery grace elapsed before an authoritative terminal outcome",
-            now_ms,
-        )?;
-        remove_session_state(state_root, runtime_id, &input.session_id)?;
-        return finalize_root_turn(state_root, runtime_id, &input.session_id, now_ms);
-    }
-    // 绝对上限自首次受阻起算，不被有效 wait/list 响应重置；到期后 fence
-    // 遗留 attempt，并保留诊断，要求下一轮派发前先对账。
-    if observe_and_check_elapsed(
-        state_root,
-        runtime_id,
-        &input.session_id,
-        STOP_ABSOLUTE_SINCE_FILE,
-        now_ms,
-        STOP_ABSOLUTE_GRACE_MILLIS,
-    )? {
-        crate::subagent_orchestrator::recover_active_reservations(
-            state_root,
-            runtime_id,
-            &input.session_id,
-            "absolute Stop grace elapsed before an authoritative terminal outcome",
-            now_ms,
-        )?;
-        remove_session_state(state_root, runtime_id, &input.session_id)?;
-        record_protocol_issue(
-            state_root,
-            runtime_id,
-            &input.session_id,
-            ProtocolIssueKind::AbsoluteStopTimeout,
-            "根代理 Stop 受阻累计超过 60 分钟，已 fence 活动 attempt 并按绝对上限放行",
-            now_ms,
-        )?;
         return finalize_root_turn(state_root, runtime_id, &input.session_id, now_ms);
     }
     let protocol_issue = protocol_issue_reason(state_root, runtime_id, &input.session_id)?;
     Ok(stop_continuation(active, protocol_issue.as_deref()))
-}
-
-// Child tool calls are progress even when the root status snapshot stays on the
-// same "running" value. Only an already-started stall clock moves; the absolute
-// cap is untouched. An allowed call also stays in flight until PostToolUse or
-// SubagentStop, so one long command is not fenced at the 10-minute mark.
-fn refresh_stop_stall_clock_if_running(
-    state_root: &Path,
-    runtime_id: &str,
-    session_id: &str,
-    now_ms: u64,
-) -> Result<()> {
-    let session_dir = session_state_dir(state_root, session_id);
-    let path = session_auxiliary_path(&session_dir, runtime_id, STOP_BLOCKED_SINCE_FILE);
-    if read_observation_timestamp(&path)?.is_some() {
-        write_observation_timestamp(&session_dir, &path, now_ms)?;
-    }
-    Ok(())
 }
 
 fn note_allowed_child_tool(
@@ -1508,8 +1383,7 @@ fn note_allowed_child_tool(
         runtime_id,
         &child_tool_in_flight_file_name(agent_id),
     );
-    write_observation_timestamp(&session_dir, &path, now_ms)?;
-    refresh_stop_stall_clock_if_running(state_root, runtime_id, session_id, now_ms)
+    write_observation_timestamp(&session_dir, &path, now_ms)
 }
 
 fn clear_child_tool_in_flight(
@@ -1565,6 +1439,81 @@ fn any_child_tool_in_flight(state_root: &Path, runtime_id: &str, session_id: &st
     Ok(false)
 }
 
+fn recover_root_active_state(
+    input: &HookInput,
+    state_root: &Path,
+    runtime_id: &str,
+    now_ms: u64,
+) -> Result<usize> {
+    let Some(mut active) = active_agent_count_or_recover_corrupt_state(
+        state_root,
+        runtime_id,
+        &input.session_id,
+        now_ms,
+    )?
+    else {
+        return Ok(0);
+    };
+    if active == 0 {
+        return Ok(0);
+    }
+    let ledger_pending_recovery =
+        crate::subagent_orchestrator::recover_expired_pending_init_reservations(
+            state_root,
+            runtime_id,
+            &input.session_id,
+            now_ms,
+            PENDING_INIT_GRACE_MILLIS,
+        )?;
+    if let Some(recovery) = &ledger_pending_recovery {
+        remove_session_auxiliary_file(
+            state_root,
+            runtime_id,
+            &input.session_id,
+            PENDING_INIT_OBSERVED_FILE,
+        )?;
+        for agent_id_hash in recovery {
+            remove_active_marker_by_hash(state_root, runtime_id, &input.session_id, agent_id_hash)?;
+        }
+        active = active_agent_count_for_runtime(state_root, runtime_id, &input.session_id)?;
+        if active == 0 {
+            remove_session_state(state_root, runtime_id, &input.session_id)?;
+            return Ok(0);
+        }
+    }
+    let legacy_pending_init_elapsed = ledger_pending_recovery.is_none()
+        && observation_elapsed_if_present(
+            state_root,
+            runtime_id,
+            &input.session_id,
+            PENDING_INIT_OBSERVED_FILE,
+            now_ms,
+            PENDING_INIT_GRACE_MILLIS,
+        )?;
+    // An unavailable status tool does not stop an already-running child tool.
+    let child_tool_running = any_child_tool_in_flight(state_root, runtime_id, &input.session_id)?;
+    let status_unavailable = observation_elapsed_if_present(
+        state_root,
+        runtime_id,
+        &input.session_id,
+        UNAVAILABLE_STATUS_SINCE_FILE,
+        now_ms,
+        UNAVAILABLE_STATUS_GRACE_MILLIS,
+    )?;
+    if !child_tool_running && (status_unavailable || legacy_pending_init_elapsed) {
+        crate::subagent_orchestrator::recover_active_reservations(
+            state_root,
+            runtime_id,
+            &input.session_id,
+            "initialization or status-tool failure persisted through its recovery grace",
+            now_ms,
+        )?;
+        remove_session_state(state_root, runtime_id, &input.session_id)?;
+        return Ok(0);
+    }
+    Ok(active)
+}
+
 fn finalize_root_turn(
     state_root: &Path,
     runtime_id: &str,
@@ -1598,7 +1547,7 @@ fn active_agent_count_or_recover_corrupt_state(
                 session_id,
                 STATE_ERROR_SINCE_FILE,
                 now_ms,
-                STOP_STALL_GRACE_MILLIS,
+                STATE_ERROR_GRACE_MILLIS,
             )? {
                 remove_session_state(state_root, runtime_id, session_id)?;
                 Ok(None)
@@ -1729,7 +1678,7 @@ fn post_wait_continuation(
     json!({
         "decision": "block",
         "reason": format!(
-            "Codey 子代理汇合门禁：本次 agents.wait_agent 返回后仍有 {active} 个子代理活动标记尚未核销。保留下方内容；可继续使用 agents.wait_agent 或不带筛选的 agents.list_agents 对账。只有当前调用仍携带并匹配本批首个根派生调用的 turn_id 时，才可使用 agents.spawn_agent、agents.send_message、agents.followup_task 或 agents.interrupt_agent 协调；缺少该绑定时按匿名主体 fail-closed。completed、errored、shutdown、not_found、FINAL_ANSWER 和 task_complete 都视为终态；任一 attempt 终态或被根成功中断并 fence 后，如仍有计划内未派发的独立任务，按该任务角色重新计算并发上限，存在空余槽位时立即用新 task_name 调用 agents.spawn_agent 补位；否则只对仍活动的 running、pending_init 或 interrupted 代理继续等待。后来仍显示已 fence target 为活动的上游快照不得触发再次等待。不得自动重派已结束或已放弃的旧任务；若持续没有可信终态，Stop 恢复路径会在受控宽限期后 fence 遗留 attempt。{local_read_guidance}{task_body_recovery}{compatibility}\n\n本次 wait_agent 已返回内容：\n{returned_update}"
+            "Codey 子代理汇合门禁：本次 agents.wait_agent 返回后仍有 {active} 个子代理活动标记尚未核销。保留下方内容；可继续使用 agents.wait_agent 或不带筛选的 agents.list_agents 对账。只有当前调用仍携带并匹配本批首个根派生调用的 turn_id 时，才可使用 agents.spawn_agent、agents.send_message、agents.followup_task 或 agents.interrupt_agent 协调；缺少该绑定时按匿名主体 fail-closed。completed、errored、shutdown、not_found、FINAL_ANSWER 和 task_complete 都视为终态；任一 attempt 终态或被根成功中断并 fence 后，如仍有计划内未派发的独立任务，按该任务角色重新计算并发上限，存在空余槽位时立即用新 task_name 调用 agents.spawn_agent 补位；否则只对仍活动的 running、pending_init 或 interrupted 代理继续等待。后来仍显示已 fence target 为活动的上游快照不得触发再次等待。不得自动重派已结束或已放弃的旧任务；不得仅因运行时长、状态不变或没有新消息回收子代理；明确的初始化或状态工具故障才触发恢复。{local_read_guidance}{task_body_recovery}{compatibility}\n\n本次 wait_agent 已返回内容：\n{returned_update}"
         ),
     })
 }
@@ -1752,7 +1701,7 @@ fn post_list_continuation(
     json!({
         "decision": "block",
         "reason": format!(
-            "Codey 子代理汇合门禁：agents.list_agents 核对后仍有 {active} 个子代理尚未确认进入终态。任一 attempt 已终态或被成功中断并 fence 后，如仍有计划内未派发的独立任务，可信根代理应按该任务角色重新计算并发上限，存在空余槽位时立即用新 task_name 调用 agents.spawn_agent 补位；否则只对仍活动的 running、pending_init 或 interrupted 代理继续等待、转向或停止。completed、errored、shutdown 和 not_found 不再阻塞。累计 10 分钟仍无终态时只中断一次对应代理；中断获得结构化成功回执后立即接管，不再等待该 target 的上游状态变化，只有中断失败或目标无法匹配时才继续对账。不得无限 wait，也不得自动重派已结束或已放弃的旧任务。若 pending_init 实际已僵死，门禁会在持续 10 分钟无法进展后释放遗留状态。{local_read_guidance}{compatibility}\n\n本次 list_agents 已返回内容：\n{returned_update}"
+            "Codey 子代理汇合门禁：agents.list_agents 核对后仍有 {active} 个子代理尚未确认进入终态。任一 attempt 已终态或被成功中断并 fence 后，如仍有计划内未派发的独立任务，可信根代理应按该任务角色重新计算并发上限，存在空余槽位时立即用新 task_name 调用 agents.spawn_agent 补位；否则只对仍活动的 running、pending_init 或 interrupted 代理继续等待、转向或停止。completed、errored、shutdown 和 not_found 不再阻塞。不得仅因运行时长、状态未变化或缺少新消息中断子代理；中断获得结构化成功回执后立即接管，不再等待该 target 的上游状态变化，只有中断失败或目标无法匹配时才继续对账。不得无限 wait，也不得自动重派已结束或已放弃的旧任务。若 pending_init 实际已僵死，门禁会在持续 10 分钟无法进展后释放遗留状态。{local_read_guidance}{compatibility}\n\n本次 list_agents 已返回内容：\n{returned_update}"
         ),
     })
 }
@@ -1768,7 +1717,7 @@ fn stop_continuation(active: usize, protocol_issue: Option<&str>) -> Value {
     json!({
         "decision": "block",
         "reason": format!(
-            "Codey 子代理门禁：仍有 {active} 个子代理尚未确认进入终态，当前任务不能结束。请先调用不带筛选的 agents.list_agents 对账，再对仍活动且未被根成功中断的 running、pending_init 或 interrupted 代理调用 agents.wait_agent；累计 10 分钟仍无终态时只中断一次对应代理。中断获得结构化成功回执后立即接管，不再等待该 target；只有中断失败或目标无法匹配时才继续对账。不得无限重试或自动重派。若协作工具已经不可用，门禁会在持续 10 分钟无法进展后释放遗留状态。{compatibility}"
+            "Codey 子代理门禁：仍有 {active} 个子代理尚未确认进入终态，当前任务不能结束。请先调用不带筛选的 agents.list_agents 对账，再对仍活动且未被根成功中断的 running、pending_init 或 interrupted 代理调用 agents.wait_agent；不得仅因运行时长、状态不变或没有新消息中断子代理。中断获得结构化成功回执后立即接管，不再等待该 target；只有中断失败或目标无法匹配时才继续对账。不得无限重试或自动重派。只有工具明确未注册且 30 秒内没有可用状态回复，也没有子代理工具在执行时才恢复；失联任务不代表完成。{compatibility}"
         ),
     })
 }
@@ -1809,6 +1758,71 @@ fn render_untrusted_tool_result(tool_response: Option<&Value>, tool_name: &str) 
     )
 }
 
+const MAX_UNAVAILABLE_STATUS_TEXT_CHARS: usize = 200;
+
+fn status_tool_is_unavailable(tool_name: &str, tool_response: Option<&Value>) -> bool {
+    let Some(response) = tool_response else {
+        return false;
+    };
+    match response {
+        Value::String(text) => {
+            if let Ok(decoded) = serde_json::from_str::<Value>(text) {
+                return status_tool_is_unavailable(tool_name, Some(&decoded));
+            }
+            // 对象分支用身份字段排除子代理内容，文本形态没有字段可用，只能按
+            // 「错误消息的形状」判定：provider 错误既短又不会带正文换行，而承载
+            // 子代理产出的文本通常更长。判定取窄，宁可等兜底窗口也不误伤。
+            let trimmed = text.trim();
+            if trimmed.lines().count() > 1
+                || trimmed.chars().count() > MAX_UNAVAILABLE_STATUS_TEXT_CHARS
+            {
+                return false;
+            }
+            let text = text.to_ascii_lowercase();
+            text.contains(&normalized_collaboration_tool(tool_name))
+                && [
+                    "未在当前线程注册",
+                    "工具未注册",
+                    "not registered",
+                    "unregistered tool",
+                    "unknown tool",
+                    "tool not found",
+                    "no such tool",
+                ]
+                .iter()
+                .any(|phrase| text.contains(phrase))
+        }
+        Value::Object(values) => {
+            // Inspect only provider error fields. Text inside a child's result
+            // or a status collection cannot shorten the recovery window.
+            if object_value_any(
+                values,
+                &[
+                    "agentid",
+                    "agentname",
+                    "taskname",
+                    "agents",
+                    "updates",
+                    "children",
+                ],
+            )
+            .is_some()
+            {
+                return false;
+            }
+            let code = object_value(values, "code")
+                .and_then(Value::as_str)
+                .map(normalized_ascii_identifier);
+            matches!(
+                code.as_deref(),
+                Some("toolnotfound" | "toolnotregistered" | "unknowntool")
+            ) || object_value_any(values, &["error", "message"])
+                .is_some_and(|error| status_tool_is_unavailable(tool_name, Some(error)))
+        }
+        _ => false,
+    }
+}
+
 fn wait_agent_response_is_usable(tool_response: Option<&Value>) -> bool {
     let Some(tool_response) = tool_response else {
         return false;
@@ -1835,125 +1849,6 @@ fn wait_agent_response_is_usable(tool_response: Option<&Value>) -> bool {
 /// Records semantic collaboration progress instead of treating every usable
 /// poll as progress. Repeated `interrupted` or timeout snapshots therefore do
 /// not postpone the bounded Stop recovery window indefinitely.
-fn record_status_progress(
-    state_root: &Path,
-    runtime_id: &str,
-    session_id: &str,
-    tool_response: Option<&Value>,
-) -> Result<bool> {
-    let Some(fingerprint) = status_progress_fingerprint(tool_response) else {
-        return Ok(false);
-    };
-    let session_dir = session_state_dir(state_root, session_id);
-    fs::create_dir_all(&session_dir).with_context(|| {
-        format!(
-            "创建 Codex 子代理状态进展目录失败：{}",
-            session_dir.display()
-        )
-    })?;
-    let path = session_auxiliary_path(&session_dir, runtime_id, STATUS_PROGRESS_FINGERPRINT_FILE);
-    match fs::read_to_string(&path) {
-        Ok(previous) if previous.trim() == fingerprint => Ok(false),
-        Ok(_) => {
-            crate::fs_util::atomic_write_private(&path, format!("{fingerprint}\n").as_bytes())
-                .with_context(|| {
-                    format!("写入 Codex 子代理状态进展指纹失败：{}", path.display())
-                })?;
-            Ok(true)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            crate::fs_util::atomic_write_private(&path, format!("{fingerprint}\n").as_bytes())
-                .with_context(|| {
-                    format!("写入 Codex 子代理状态进展指纹失败：{}", path.display())
-                })?;
-            Ok(true)
-        }
-        Err(error) => Err(error)
-            .with_context(|| format!("读取 Codex 子代理状态进展指纹失败：{}", path.display())),
-    }
-}
-
-fn status_progress_fingerprint(tool_response: Option<&Value>) -> Option<String> {
-    let response = tool_response?;
-    let decoded;
-    let response = if let Value::String(encoded) = response {
-        decoded = serde_json::from_str::<Value>(encoded).ok();
-        decoded.as_ref().unwrap_or(response)
-    } else {
-        response
-    };
-    let mut tokens = Vec::new();
-    collect_status_progress_tokens(response, &mut tokens, 0);
-    tokens.sort();
-    tokens.dedup();
-    if tokens.is_empty() {
-        return None;
-    }
-    let encoded = serde_json::to_string(&tokens).ok()?;
-    Some(hash_component(&encoded))
-}
-
-fn collect_status_progress_tokens(value: &Value, tokens: &mut Vec<String>, depth: usize) {
-    if depth > 8 {
-        return;
-    }
-    match value {
-        Value::Array(values) => {
-            for value in values {
-                collect_status_progress_tokens(value, tokens, depth + 1);
-            }
-        }
-        Value::Object(values) => {
-            let identifier = object_value_any(
-                values,
-                &["agentid", "agentname", "subagentid", "taskname", "name"],
-            )
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(normalized_ascii_identifier)
-            .unwrap_or_else(|| "_".to_string());
-            let status = object_value_any(
-                values,
-                &["previousstatus", "agentstatus", "status", "state"],
-            )
-            .and_then(Value::as_str)
-            .map(normalized_ascii_identifier);
-            let is_root = identifier == "root";
-            if !is_root && let Some(status) = status.as_deref() {
-                tokens.push(format!("state:{identifier}:{status}"));
-                if matches!(status, "message" | "partial")
-                    && let Some(message) = object_value_any(values, &["message", "output", "text"])
-                {
-                    tokens.push(format!(
-                        "message:{identifier}:{}",
-                        hash_component(&canonical_json(message).to_string())
-                    ));
-                }
-            }
-            for (key, value) in values {
-                let key = normalized_ascii_identifier(key);
-                if !(is_root || identifier == "_" && matches!(key.as_str(), "timedout" | "timeout"))
-                    && protocol::is_terminal_marker_field(&key)
-                    && !matches!(value, Value::Bool(false) | Value::Null)
-                {
-                    tokens.push(format!("terminal:{identifier}:{key}"));
-                }
-                if protocol::is_agent_collection_field(&key)
-                    || protocol::is_provider_envelope_field(&key)
-                {
-                    collect_status_progress_tokens(value, tokens, depth + 1);
-                }
-            }
-        }
-        Value::String(encoded) => {
-            if let Ok(decoded) = serde_json::from_str::<Value>(encoded) {
-                collect_status_progress_tokens(&decoded, tokens, depth + 1);
-            }
-        }
-        _ => {}
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AgentListSnapshotState {
@@ -5639,7 +5534,7 @@ mod tests {
                 &unavailable_wait,
                 root,
                 runtime_id,
-                2_000 + STOP_STALL_GRACE_MILLIS - 1,
+                2_000,
             )
             .unwrap()["decision"]
                 .as_str(),
@@ -5650,7 +5545,7 @@ mod tests {
                 &input("Stop", "stalled-session"),
                 root,
                 runtime_id,
-                2_000 + STOP_STALL_GRACE_MILLIS,
+                2_000 + UNAVAILABLE_STATUS_GRACE_MILLIS,
             )
             .unwrap(),
             json!({})
@@ -5873,7 +5768,7 @@ mod tests {
     }
 
     #[test]
-    fn ledger_backed_stale_attempt_is_fenced_before_stop_recovery() {
+    fn pending_reservation_requires_initialization_failure_evidence_before_recovery() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         write_test_runtime_policy(root);
@@ -5915,13 +5810,13 @@ mod tests {
             &input("Stop", session_id),
             root,
             runtime_id,
-            2_000 + STOP_STALL_GRACE_MILLIS,
+            2_000 + STATE_ERROR_GRACE_MILLIS,
         )
         .unwrap();
-        assert_eq!(recovered, json!({}));
+        assert_eq!(recovered["decision"], "block");
         assert_eq!(
             active_agent_count_for_runtime(root, runtime_id, session_id).unwrap(),
-            0
+            1
         );
     }
 
@@ -5981,7 +5876,7 @@ mod tests {
             &input("Stop", session_id),
             root,
             runtime_id,
-            2_000 + STOP_STALL_GRACE_MILLIS,
+            2_000 + STATE_ERROR_GRACE_MILLIS,
         )
         .unwrap();
         assert_eq!(recovered, json!({}));
@@ -6007,7 +5902,7 @@ mod tests {
             &input("Stop", session_id),
             root,
             runtime_id,
-            1_000 + STOP_STALL_GRACE_MILLIS,
+            1_000 + STATE_ERROR_GRACE_MILLIS,
         )
         .unwrap();
         assert_eq!(blocked["decision"].as_str(), Some("block"));
@@ -6016,200 +5911,6 @@ mod tests {
             active_agent_count_for_runtime(root, runtime_id, session_id).unwrap(),
             1
         );
-    }
-
-    #[test]
-    fn repeated_interrupted_snapshots_do_not_extend_the_stall_grace() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        let runtime_id = "runtime-a";
-        let session_id = "unchanged-interrupt-session";
-        let mut start = input("SubagentStart", session_id);
-        start.agent_id = Some("agent-a".to_string());
-        handle_hook_for_runtime_at(&start, root, runtime_id, 1_000).unwrap();
-
-        assert_eq!(
-            handle_hook_for_runtime_at(&input("Stop", session_id), root, runtime_id, 2_000)
-                .unwrap()["decision"]
-                .as_str(),
-            Some("block")
-        );
-        let session_dir = session_state_dir(root, session_id);
-        let stalled = session_auxiliary_path(&session_dir, runtime_id, STOP_BLOCKED_SINCE_FILE);
-        assert_eq!(fs::read_to_string(&stalled).unwrap(), "2000\n");
-
-        let mut wait = input("PostToolUse", session_id);
-        wait.tool_name = Some("agents.wait_agent".to_string());
-        wait.tool_response = Some(json!({
-            "updates": [{ "agent_id": "agent-a", "status": "interrupted" }]
-        }));
-        handle_hook_for_runtime_at(&wait, root, runtime_id, 3_000).unwrap();
-        assert!(!stalled.exists());
-
-        handle_hook_for_runtime_at(&input("Stop", session_id), root, runtime_id, 4_000).unwrap();
-        assert_eq!(fs::read_to_string(&stalled).unwrap(), "4000\n");
-        handle_hook_for_runtime_at(&wait, root, runtime_id, 5_000).unwrap();
-        assert_eq!(fs::read_to_string(&stalled).unwrap(), "4000\n");
-
-        wait.tool_response = Some(json!({
-            "updates": [{ "agent_id": "agent-a", "status": "running" }]
-        }));
-        handle_hook_for_runtime_at(&wait, root, runtime_id, 6_000).unwrap();
-        assert!(!stalled.exists());
-        handle_hook_for_runtime_at(&input("Stop", session_id), root, runtime_id, 7_000).unwrap();
-        handle_hook_for_runtime_at(&wait, root, runtime_id, 8_000).unwrap();
-        assert_eq!(fs::read_to_string(&stalled).unwrap(), "7000\n");
-        let stop_trace = hook_trace_events(root)
-            .into_iter()
-            .find(|event| {
-                event.timestamp_ms == 7_000 && event.event == TraceEventKind::HookEvaluated
-            })
-            .unwrap();
-        assert_eq!(
-            stop_trace.attributes["root_barrier.duration_ms"],
-            json!(5_000)
-        );
-
-        assert_eq!(
-            handle_hook_for_runtime_at(
-                &input("Stop", session_id),
-                root,
-                runtime_id,
-                7_000 + STOP_STALL_GRACE_MILLIS,
-            )
-            .unwrap(),
-            json!({})
-        );
-    }
-
-    #[test]
-    fn timeout_and_root_only_snapshots_do_not_reset_the_stall_grace() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        let runtime_id = "runtime-a";
-        let session_id = "no-progress-session";
-        let mut start = input("SubagentStart", session_id);
-        start.agent_id = Some("agent-a".to_string());
-        handle_hook_for_runtime_at(&start, root, runtime_id, 1_000).unwrap();
-
-        handle_hook_for_runtime_at(&input("Stop", session_id), root, runtime_id, 2_000).unwrap();
-        let session_dir = session_state_dir(root, session_id);
-        let stalled = session_auxiliary_path(&session_dir, runtime_id, STOP_BLOCKED_SINCE_FILE);
-        assert_eq!(fs::read_to_string(&stalled).unwrap(), "2000\n");
-
-        let mut wait = input("PostToolUse", session_id);
-        wait.tool_name = Some("agents.wait_agent".to_string());
-        wait.tool_response = Some(json!({ "timed_out": true, "message": "Wait timed out." }));
-        handle_hook_for_runtime_at(&wait, root, runtime_id, 3_000).unwrap();
-        assert_eq!(fs::read_to_string(&stalled).unwrap(), "2000\n");
-
-        let mut list = input("PostToolUse", session_id);
-        list.tool_name = Some("agents.list_agents".to_string());
-        list.tool_input = Some(json!({}));
-        list.tool_response = Some(json!({
-            "agents": [{ "agent_name": "/root", "agent_status": "running" }]
-        }));
-        handle_hook_for_runtime_at(&list, root, runtime_id, 4_000).unwrap();
-        assert_eq!(fs::read_to_string(&stalled).unwrap(), "2000\n");
-
-        assert_eq!(
-            handle_hook_for_runtime_at(
-                &input("Stop", session_id),
-                root,
-                runtime_id,
-                2_000 + STOP_STALL_GRACE_MILLIS,
-            )
-            .unwrap(),
-            json!({})
-        );
-    }
-
-    #[test]
-    fn stop_absolute_release_still_allows_later_stall_cleanup() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        let runtime_id = "runtime-a";
-        let session_id = "absolute-stop-session";
-        let mut start = input("SubagentStart", session_id);
-        start.agent_id = Some("agent-a".to_string());
-        handle_hook_for_runtime_at(&start, root, runtime_id, 1_000).unwrap();
-
-        let first_blocked =
-            handle_hook_for_runtime_at(&input("Stop", session_id), root, runtime_id, 2_000)
-                .unwrap();
-        assert_eq!(first_blocked["decision"].as_str(), Some("block"));
-        let session_dir = session_state_dir(root, session_id);
-        let absolute = session_auxiliary_path(&session_dir, runtime_id, STOP_ABSOLUTE_SINCE_FILE);
-        assert_eq!(fs::read_to_string(&absolute).unwrap(), "2000\n");
-
-        // 带具体代理状态的 wait 进展只重置 10 分钟停滞计时，绝对计时保持不变。
-        let mut wait = input("PostToolUse", session_id);
-        wait.tool_name = Some("agents.wait_agent".to_string());
-        wait.tool_response = Some(json!({
-            "updates": [{ "agent_id": "agent-a", "status": "running" }]
-        }));
-        handle_hook_for_runtime_at(&wait, root, runtime_id, 3_000).unwrap();
-        assert_eq!(fs::read_to_string(&absolute).unwrap(), "2000\n");
-
-        // 持续到绝对上限前仍有有效等待结果，避免 10 分钟停滞窗口提前回收。
-        let absolute_deadline = 2_000 + STOP_ABSOLUTE_GRACE_MILLIS;
-        handle_hook_for_runtime_at(&wait, root, runtime_id, absolute_deadline - 1).unwrap();
-
-        let released = handle_hook_for_runtime_at(
-            &input("Stop", session_id),
-            root,
-            runtime_id,
-            absolute_deadline,
-        )
-        .unwrap();
-        assert_eq!(released, json!({}));
-        // 绝对放行先在账本中 fence 活动 attempt，再清理旧 marker，避免
-        // ledger-backed active count 在后续 Stop 中反复复活。
-        assert_eq!(
-            active_agent_count_for_runtime(root, runtime_id, session_id).unwrap(),
-            0
-        );
-        let issue = protocol_issue_reason(root, runtime_id, session_id)
-            .unwrap()
-            .unwrap();
-        assert!(issue.contains("绝对上限"), "{issue}");
-
-        let next_turn = handle_hook_for_runtime_at(
-            &input("UserPromptSubmit", session_id),
-            root,
-            runtime_id,
-            absolute_deadline + 1,
-        )
-        .unwrap();
-        let context = next_turn["hookSpecificOutput"]["additionalContext"]
-            .as_str()
-            .unwrap();
-        assert!(context.contains("绝对上限"));
-        assert!(context.contains("首次派发前先调用不带筛选的 agents.list_agents"));
-        let mut spawn = input("PreToolUse", session_id);
-        spawn.tool_name = Some("agents.spawn_agent".to_string());
-        let denied =
-            handle_hook_for_runtime_at(&spawn, root, runtime_id, absolute_deadline + 2).unwrap();
-        let reason = denied["hookSpecificOutput"]["permissionDecisionReason"]
-            .as_str()
-            .unwrap();
-        assert!(reason.contains("绝对上限"));
-        assert!(!reason.contains("无法可靠区分根代理和子代理"));
-
-        // 后续 Stop 保持幂等，不会重新建立停滞窗口或恢复旧 attempt。
-        let recovered = handle_hook_for_runtime_at(
-            &input("Stop", session_id),
-            root,
-            runtime_id,
-            absolute_deadline + STOP_STALL_GRACE_MILLIS,
-        )
-        .unwrap();
-        assert_eq!(recovered, json!({}));
-        assert_eq!(
-            active_agent_count_for_runtime(root, runtime_id, session_id).unwrap(),
-            0
-        );
-        assert!(!absolute.exists());
     }
 
     #[test]
@@ -6347,7 +6048,7 @@ mod tests {
                 root,
                 "runtime-a",
                 "clock-session",
-                STOP_BLOCKED_SINCE_FILE,
+                STATE_ERROR_SINCE_FILE,
                 100_000,
                 grace,
             )
@@ -6358,7 +6059,7 @@ mod tests {
                 root,
                 "runtime-a",
                 "clock-session",
-                STOP_BLOCKED_SINCE_FILE,
+                STATE_ERROR_SINCE_FILE,
                 90_000,
                 grace,
             )
@@ -6369,7 +6070,7 @@ mod tests {
                 root,
                 "runtime-a",
                 "clock-session",
-                STOP_BLOCKED_SINCE_FILE,
+                STATE_ERROR_SINCE_FILE,
                 90_000 + grace + 60_001,
                 grace,
             )
@@ -6839,18 +6540,6 @@ mod tests {
         child
     }
 
-    fn child_tool_in_flight_exists(root: &Path, session: &str) -> bool {
-        fs::read_dir(session_state_dir(root, session))
-            .unwrap()
-            .filter_map(Result::ok)
-            .any(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .contains("child-tool-in-flight-")
-            })
-    }
-
     fn assert_stop_blocked(root: &Path, session: &str, now_ms: u64) {
         assert_eq!(
             handle_hook_for_runtime_at(&root_stop(session), root, "runtime-a", now_ms).unwrap()
@@ -6861,196 +6550,45 @@ mod tests {
     }
 
     #[test]
-    fn child_tool_activity_postpones_stall_recovery_without_moving_the_absolute_deadline() {
+    fn running_children_are_not_reclaimed_by_elapsed_time_or_unchanged_status() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
-        let session = "child-still-working";
+        let session = "healthy-long-task";
         start_recovery_child(root, session);
-        let session_dir = session_state_dir(root, session);
-        let stalled = session_auxiliary_path(&session_dir, "runtime-a", STOP_BLOCKED_SINCE_FILE);
-        let absolute = session_auxiliary_path(&session_dir, "runtime-a", STOP_ABSOLUTE_SINCE_FILE);
+        let mut wait = input("PostToolUse", session);
+        wait.tool_name = Some("agents.wait_agent".into());
+        wait.tool_response = Some(json!({"timed_out": true, "message": "still running"}));
+        for now in [1_000, 601_000, 3_601_000, 7_201_000] {
+            assert_eq!(
+                handle_hook_for_runtime_at(&wait, root, "runtime-a", now).unwrap()["decision"],
+                "block"
+            );
+            assert_stop_blocked(root, session, now);
+            assert_eq!(
+                active_agent_count_for_runtime(root, "runtime-a", session).unwrap(),
+                1
+            );
+        }
+    }
 
-        // 根代理还没受阻时，child 工具不能自己打开停滞计时。
+    #[test]
+    fn status_tool_failure_recovers_only_after_observation_without_running_child_tools() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let session = "status-failure";
+        start_recovery_child(root, session);
         let mut child = reader_tool(session, "PreToolUse");
         attest_test_child(&child, root, "runtime-a");
-        assert_eq!(
-            handle_hook_for_runtime_at(&child, root, "runtime-a", 500).unwrap(),
-            json!({})
-        );
+        handle_hook_for_runtime_at(&child, root, "runtime-a", 900).unwrap();
+        let mut wait = input("PostToolUse", session);
+        wait.tool_name = Some("agents.wait_agent".into());
+        wait.tool_response = Some(json!("该工具未在当前线程注册，无法执行 agents.wait_agent"));
+        handle_hook_for_runtime_at(&wait, root, "runtime-a", 1_000).unwrap();
+        assert_stop_blocked(root, session, 1_000 + UNAVAILABLE_STATUS_GRACE_MILLIS);
         child.hook_event_name = "PostToolUse".into();
-        handle_hook_for_runtime_at(&child, root, "runtime-a", 600).unwrap();
-        assert!(!stalled.exists());
-        assert!(!child_tool_in_flight_exists(root, session));
-
-        assert_stop_blocked(root, session, 1_000);
-        assert_eq!(fs::read_to_string(&absolute).unwrap(), "1000\n");
-        assert_eq!(fs::read_to_string(&stalled).unwrap(), "1000\n");
-
-        let activity_at = 1_000 + STOP_STALL_GRACE_MILLIS - 1;
-        child.hook_event_name = "PreToolUse".into();
+        handle_hook_for_runtime_at(&child, root, "runtime-a", 31_001).unwrap();
         assert_eq!(
-            handle_hook_for_runtime_at(&child, root, "runtime-a", activity_at).unwrap(),
-            json!({})
-        );
-        assert_eq!(
-            fs::read_to_string(&stalled).unwrap(),
-            format!("{activity_at}\n")
-        );
-        assert_eq!(fs::read_to_string(&absolute).unwrap(), "1000\n");
-        assert_stop_blocked(root, session, 1_000 + STOP_STALL_GRACE_MILLIS);
-        assert_eq!(
-            active_agent_count_for_runtime(root, "runtime-a", session).unwrap(),
-            1
-        );
-
-        child.hook_event_name = "PostToolUse".into();
-        let finished_at = activity_at + 1_000;
-        handle_hook_for_runtime_at(&child, root, "runtime-a", finished_at).unwrap();
-        assert_eq!(
-            fs::read_to_string(&stalled).unwrap(),
-            format!("{finished_at}\n")
-        );
-        assert_eq!(fs::read_to_string(&absolute).unwrap(), "1000\n");
-        assert!(!child_tool_in_flight_exists(root, session));
-        assert_stop_blocked(root, session, finished_at + STOP_STALL_GRACE_MILLIS - 1);
-        assert_eq!(
-            handle_hook_for_runtime_at(
-                &root_stop(session),
-                root,
-                "runtime-a",
-                finished_at + STOP_STALL_GRACE_MILLIS
-            )
-            .unwrap(),
-            json!({})
-        );
-        assert_eq!(
-            active_agent_count_for_runtime(root, "runtime-a", session).unwrap(),
-            0
-        );
-    }
-
-    #[test]
-    fn in_flight_child_tool_holds_past_the_stall_grace_until_the_absolute_cap() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        let session = "long-child-tool";
-        start_recovery_child(root, session);
-        assert_stop_blocked(root, session, 1_000);
-
-        let child = reader_tool(session, "PreToolUse");
-        attest_test_child(&child, root, "runtime-a");
-        assert_eq!(
-            handle_hook_for_runtime_at(&child, root, "runtime-a", 2_000).unwrap(),
-            json!({})
-        );
-        assert!(child_tool_in_flight_exists(root, session));
-
-        let past_stall = 2_000 + STOP_STALL_GRACE_MILLIS;
-        assert_stop_blocked(root, session, past_stall);
-        assert_eq!(
-            active_agent_count_for_runtime(root, "runtime-a", session).unwrap(),
-            1
-        );
-        let session_dir = session_state_dir(root, session);
-        let absolute = session_auxiliary_path(&session_dir, "runtime-a", STOP_ABSOLUTE_SINCE_FILE);
-        assert_eq!(fs::read_to_string(&absolute).unwrap(), "1000\n");
-
-        assert_eq!(
-            handle_hook_for_runtime_at(
-                &root_stop(session),
-                root,
-                "runtime-a",
-                1_000 + STOP_ABSOLUTE_GRACE_MILLIS
-            )
-            .unwrap(),
-            json!({})
-        );
-        assert_eq!(
-            active_agent_count_for_runtime(root, "runtime-a", session).unwrap(),
-            0
-        );
-    }
-
-    #[test]
-    fn denied_child_tool_postpones_stall_without_holding_an_in_flight_marker() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        let session = "denied-child-tool";
-        start_recovery_child(root, session);
-        assert_stop_blocked(root, session, 1_000);
-
-        let mut child = input("PreToolUse", session);
-        child.agent_id = Some("/root/reader".into());
-        child.agent_type = Some("codey_quick_scan".into());
-        child.tool_name = Some("functions.exec_command".into());
-        child.tool_input = Some(json!({ "cmd": "git status --short" }));
-        attest_test_child(&child, root, "runtime-a");
-        let denied_at = 1_000 + STOP_STALL_GRACE_MILLIS - 1;
-        assert_eq!(
-            handle_hook_for_runtime_at(&child, root, "runtime-a", denied_at).unwrap()
-                ["hookSpecificOutput"]["permissionDecision"]
-                .as_str(),
-            Some("deny")
-        );
-        assert!(!child_tool_in_flight_exists(root, session));
-        let stalled = session_auxiliary_path(
-            &session_state_dir(root, session),
-            "runtime-a",
-            STOP_BLOCKED_SINCE_FILE,
-        );
-        assert_eq!(
-            fs::read_to_string(&stalled).unwrap(),
-            format!("{denied_at}\n")
-        );
-        assert_stop_blocked(root, session, 1_000 + STOP_STALL_GRACE_MILLIS);
-        assert_eq!(
-            handle_hook_for_runtime_at(
-                &root_stop(session),
-                root,
-                "runtime-a",
-                denied_at + STOP_STALL_GRACE_MILLIS
-            )
-            .unwrap(),
-            json!({})
-        );
-        assert_eq!(
-            active_agent_count_for_runtime(root, "runtime-a", session).unwrap(),
-            0
-        );
-    }
-
-    #[test]
-    fn stopping_a_child_clears_its_in_flight_tool_so_stall_recovery_can_continue() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        let session = "stop-clears-in-flight";
-        start_recovery_child(root, session);
-        start_recovery_child_named(root, session, "sibling");
-        assert_stop_blocked(root, session, 1_000);
-
-        let child = reader_tool(session, "PreToolUse");
-        attest_test_child(&child, root, "runtime-a");
-        handle_hook_for_runtime_at(&child, root, "runtime-a", 2_000).unwrap();
-        assert!(child_tool_in_flight_exists(root, session));
-
-        let mut stopped = input("SubagentStop", session);
-        stopped.agent_id = Some("/root/reader".into());
-        stopped.agent_type = Some("codey_quick_scan".into());
-        handle_hook_for_runtime_at(&stopped, root, "runtime-a", 3_000).unwrap();
-        assert!(!child_tool_in_flight_exists(root, session));
-        assert_eq!(
-            active_agent_count_for_runtime(root, "runtime-a", session).unwrap(),
-            1
-        );
-        assert_stop_blocked(root, session, 2_000 + STOP_STALL_GRACE_MILLIS - 1);
-        assert_eq!(
-            handle_hook_for_runtime_at(
-                &root_stop(session),
-                root,
-                "runtime-a",
-                2_000 + STOP_STALL_GRACE_MILLIS
-            )
-            .unwrap(),
+            handle_hook_for_runtime_at(&root_stop(session), root, "runtime-a", 31_002).unwrap(),
             json!({})
         );
         assert_eq!(

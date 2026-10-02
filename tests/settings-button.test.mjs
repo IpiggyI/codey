@@ -245,9 +245,10 @@ test("mounts above the native help entry in the navigation rail footer", () => {
   rail.remove();
   window.__codeyRendererInvalidateHeaderMount();
   window.__codeyRendererScan();
-  const fallback = document.getElementById("codey-settings-button");
-  assert.equal(fallback.parentElement, header);
-  assert.equal(fallback.dataset.codeyRailSlot, undefined);
+  assert.equal(document.getElementById("codey-settings-button"), null);
+  documentElement.appendChild(rail);
+  window.__codeyRendererScan();
+  assert.equal(document.getElementById("codey-settings-button").parentElement, replacement);
 });
 
 const createStartupUpdateFixture = (bridge) => {
@@ -697,4 +698,115 @@ test("repeated scans fast-path an already mounted button without layout reads", 
   assert.equal(codeyButton.__codeyHeaderAnchor, newRightRegion);
   assert.equal(codeyButton.dataset.codeyHeaderActions, "true");
   assert.deepEqual(visibleHeader.children, [rightRegion, codeyButton, newRightRegion]);
+});
+
+const createProfileRailFixture = ({ label = "打开个人资料菜单", attach = true, profileVisible = true } = {}) => {
+  const header = new FakeElement("header", { right: 1200 });
+  header.appendChild(new FakeElement("button", { right: 1192, width: 28 }));
+  const rail = new FakeElement("nav", { right: 52, width: 52, height: 846, top: 44 });
+  rail.setAttribute("data-app-navigation-rail", "true");
+  const cluster = new FakeElement("div", { right: 44, width: 36, height: 36, top: 850 });
+  const stack = new FakeElement("div", { right: 44, width: 36, height: 36, top: 850 });
+  const profileSlot = new FakeElement("span");
+  const profile = new FakeElement("button", { visible: profileVisible });
+  profile.setAttribute("aria-label", label);
+  profileSlot.appendChild(profile);
+  stack.appendChild(profileSlot);
+  cluster.appendChild(stack);
+  rail.appendChild(cluster);
+  const documentElement = new FakeElement("html");
+  documentElement.appendChild(header);
+  if (attach) documentElement.appendChild(rail);
+  const elementsById = new Map();
+  const document = {
+    body: new FakeElement("body"),
+    documentElement,
+    visibilityState: "visible",
+    addEventListener() {},
+    createElement: (tagName) => {
+      const element = new FakeElement(tagName);
+      let id = "";
+      Object.defineProperty(element, "id", {
+        configurable: true,
+        get: () => id,
+        set: (value) => {
+          if (id) elementsById.delete(id);
+          id = String(value || "");
+          if (id) elementsById.set(id, element);
+        },
+      });
+      return element;
+    },
+    getElementById: (id) => {
+      const element = elementsById.get(id);
+      return element?.isConnected ? element : null;
+    },
+    querySelector: (selector) =>
+      rail.isConnected === true && String(selector).includes("data-app-navigation-rail")
+        ? rail
+        : null,
+    querySelectorAll: (selector) => selector === "header" ? [header] : [],
+    removeEventListener() {},
+  };
+  const window = {
+    addEventListener() {},
+    clearTimeout() {},
+    dispatchEvent() {},
+    getComputedStyle: (element) => ({
+      display: element.visible ? "flex" : "none",
+      visibility: element.visible ? "visible" : "hidden",
+    }),
+    innerWidth: 1200,
+    localStorage: { getItem: () => null, key: () => null, length: 0, setItem() {} },
+    setTimeout: () => 1,
+  };
+  window.window = window;
+  runRenderer({
+    console,
+    document,
+    HTMLElement: FakeElement,
+    location: { pathname: "/", search: "" },
+    MutationObserver: class {
+      disconnect() {}
+      observe() {}
+    },
+    URLSearchParams,
+    window,
+  });
+
+  return { document, window, documentElement, header, rail, stack, profile, profileSlot };
+};
+
+test("mounts above the profile menu when the navigation rail has no help entry", () => {
+  for (const label of ["打开个人资料菜单", "Open profile menu"]) {
+    const { document, header, stack, profileSlot, window } = createProfileRailFixture({ label });
+    const button = document.getElementById("codey-settings-button");
+    assert.ok(button);
+    assert.equal(button.parentElement, stack);
+    assert.equal(button.nextElementSibling, profileSlot);
+    assert.equal(button.dataset.codeyRailSlot, "true");
+    assert.equal(header.querySelector("#codey-settings-button"), null);
+    window.__codeyRendererScan();
+    assert.equal(document.getElementById("codey-settings-button"), button);
+  }
+});
+
+test("moves a stable header entry into a navigation rail rendered later", () => {
+  const { document, documentElement, header, rail, stack, window } = createProfileRailFixture({ attach: false });
+  const button = document.getElementById("codey-settings-button");
+  assert.equal(button.parentElement, header);
+  documentElement.appendChild(rail);
+  window.__codeyRendererScan();
+  assert.equal(document.getElementById("codey-settings-button"), button);
+  assert.equal(button.parentElement, stack);
+  assert.equal(button.dataset.codeyRailSlot, "true");
+});
+
+test("waits for a visible footer entry instead of falling back to the header", () => {
+  const { document, header, profile, stack, window } = createProfileRailFixture({ profileVisible: false });
+  assert.equal(document.getElementById("codey-settings-button"), null);
+  assert.equal(header.querySelector("#codey-settings-button"), null);
+  profile.visible = true;
+  window.__codeyRendererScan();
+  assert.equal(document.getElementById("codey-settings-button").parentElement, stack);
 });

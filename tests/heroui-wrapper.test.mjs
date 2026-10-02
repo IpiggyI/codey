@@ -206,7 +206,7 @@ test("official model editor dialog stays inside the settings overlay", async () 
   );
   assert.equal(
     source.match(/zIndex=\{SETTINGS_OVERLAY_Z_INDEX\}/g)?.length,
-    1,
+    2,
   );
   assert.match(source, /<DialogContent[\s\S]{0,180}zIndex=\{SETTINGS_OVERLAY_Z_INDEX\}/);
 });

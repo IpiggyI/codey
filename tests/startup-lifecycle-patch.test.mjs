@@ -13,6 +13,7 @@ async function loadStartupPatchExpression() {
   ));
   assert.ok(template);
   return template
+    .replaceAll('"__CODEY_MISC_MODEL_ID__"', '""')
     .replaceAll("__DISABLE_PET__", "false")
     .replaceAll("__REQUIRE_APP_SERVER_RUNTIME_OVERRIDES__", "false");
 }

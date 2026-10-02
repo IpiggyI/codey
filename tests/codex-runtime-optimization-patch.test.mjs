@@ -19,6 +19,7 @@ async function loadPatchExpression(
   runtimeConfigOverrides = [],
   subagentGateActive = runtimeConfigOverrides.includes("features.hooks=true"),
   requireAppServerRuntimeOverrideValidation = false,
+  miscModel = "",
 ) {
   const template = normalizeLineEndings(await readFile(
     new URL("../backend/src/codex_startup_patch.js", import.meta.url),
@@ -30,6 +31,7 @@ async function loadPatchExpression(
       '"__CODEY_RUNTIME_CONFIG_OVERRIDES__"',
       JSON.stringify(runtimeConfigOverrides),
     )
+    .replaceAll('"__CODEY_MISC_MODEL_ID__"', JSON.stringify(miscModel))
     .replaceAll("__DISABLE_PET__", "false")
     .replaceAll(
       "__SUBAGENT_GATE_ACTIVE__",
@@ -41,7 +43,7 @@ async function loadPatchExpression(
     );
 }
 
-async function loadPatchInIsolatedContext(runtimeConfigOverrides, contextOverrides = {}, installMessagePatch = true) {
+async function loadPatchInIsolatedContext(runtimeConfigOverrides, contextOverrides = {}, installMessagePatch = true, miscModel = "") {
   const Module = process.getBuiltinModule("module");
   const originalLoad = Module._load;
   const originalJsExtension = Module._extensions[".js"];
@@ -77,6 +79,7 @@ async function loadPatchInIsolatedContext(runtimeConfigOverrides, contextOverrid
         runtimeConfigOverrides,
         runtimeConfigOverrides.includes("features.hooks=true"),
         true,
+        miscModel,
       ),
       context,
     );
@@ -1054,5 +1057,31 @@ test("startup patch validates runtime overrides injected into a WSL app-server c
     );
   } finally {
     runtime.restore();
+  }
+});
+
+
+test("auxiliary model overrides static and dynamic choices without changing automation", async () => {
+  for (const model of ["", "custom-helper"]) {
+    const runtime = await loadPatchInIsolatedContext([], {}, false, model);
+    try {
+      const api = runtime.context;
+      assert.equal(api.__CODEY_SELECT_MISC_MODEL__("native-helper"), model || "native-helper");
+      const routing = { automationModel: "main", ephemeralGenerationModel: "title", ambientSuggestionsModel: "ambient", ambientSuggestionsSafetyModel: "safety" };
+      const selected = api.__CODEY_SELECT_MISC_MODEL_ROUTING__(routing);
+      assert.equal(selected.automationModel, "main");
+      assert.equal(selected.ephemeralGenerationModel, model || "title");
+      assert.equal(selected.ambientSuggestionsModel, model || "ambient");
+      assert.equal(selected.ambientSuggestionsSafetyModel, model || "safety");
+      const dynamic = 'const keys=["codex_ephemeral_generation_model_slug","codex_ambient_suggestions_model_slug","codex_ambient_suggestions_safety_model_slug"];function pick(){return {automationModel:"main",ephemeralGenerationModel:"title",ambientSuggestionsModel:"ambient",ambientSuggestionsSafetyModel:"safety"}}';
+      const patchedDynamic = api.__CODEY_PATCH_CODEX_MISC_MODEL_CONSTANTS__(dynamic);
+      const values = vm.runInNewContext(`${patchedDynamic}pick()`, { globalThis: api });
+      assert.equal(values.automationModel, "main");
+      assert.equal(values.ephemeralGenerationModel, model || "title");
+      assert.equal(values.ambientSuggestionsModel, model || "ambient");
+      const source = 'let a="gpt-5.6-luna";';
+      const patched = api.__CODEY_PATCH_CODEX_MISC_MODEL_CONSTANTS__(source);
+      assert.equal(vm.runInNewContext(`${patched}a`, { globalThis: api }), model || "gpt-5.6-luna");
+    } finally { runtime.restore(); }
   }
 });

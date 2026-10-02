@@ -72,8 +72,9 @@ const CLI_WRAPPER_HANDSHAKE_RETRY_DELAY: std::time::Duration =
 #[cfg(any(windows, test))]
 pub(crate) const WINDOWS_PACKAGE_RESUME_ARGUMENT: &str = "--codey-resume-packaged-app";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatchOptions {
+    pub misc_model: Option<String>,
     pub disable_pet: bool,
     pub subagent_gate_active: bool,
 }
@@ -116,6 +117,10 @@ fn patch_expression_with_runtime_overrides_and_validation(
         }
     };
     STARTUP_PATCH_TEMPLATE
+        .replace(
+            "\"__CODEY_MISC_MODEL_ID__\"",
+            &serde_json::to_string(&options.misc_model).expect("auxiliary model should serialize"),
+        )
         .replace(
             "\"__CODEY_RUNTIME_CONFIG_OVERRIDES__\"",
             &serde_json::to_string(runtime_config_overrides)
@@ -1910,6 +1915,7 @@ mod tests {
     #[test]
     fn patch_expression_keeps_pet_slimming_voice_compatible() {
         let expression = patch_expression(PatchOptions {
+            misc_model: None,
             disable_pet: true,
             subagent_gate_active: true,
         });
@@ -1970,6 +1976,7 @@ mod tests {
         ];
         let expression = patch_expression_with_runtime_overrides(
             PatchOptions {
+                misc_model: None,
                 disable_pet: false,
                 subagent_gate_active: true,
             },
@@ -2114,6 +2121,7 @@ mod tests {
         });
 
         let expression = patch_expression(PatchOptions {
+            misc_model: None,
             disable_pet: true,
             subagent_gate_active: true,
         });
@@ -2255,6 +2263,7 @@ mod tests {
         });
 
         let expression = patch_expression(PatchOptions {
+            misc_model: None,
             disable_pet: true,
             subagent_gate_active: true,
         });
@@ -2315,6 +2324,7 @@ mod tests {
         });
 
         let expression = patch_expression(PatchOptions {
+            misc_model: None,
             disable_pet: true,
             subagent_gate_active: true,
         });
@@ -2485,6 +2495,7 @@ mod tests {
         let prepared = prepare_startup_require_in(
             temp.path(),
             PatchOptions {
+                misc_model: None,
                 disable_pet: false,
                 subagent_gate_active: true,
             },
@@ -2535,16 +2546,18 @@ mod tests {
     fn failed_path_preparation_removes_the_unused_patch() {
         let temp = tempfile::tempdir().unwrap();
         let options = PatchOptions {
+            misc_model: None,
             disable_pet: false,
             subagent_gate_active: false,
         };
-        let failure = prepare_startup_require_with_path(temp.path(), options, &[], |_| {
+        let failure = prepare_startup_require_with_path(temp.path(), options.clone(), &[], |_| {
             Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into())
         });
         assert!(failure.is_err());
-        let invalid_argument = prepare_startup_require_with_path(temp.path(), options, &[], |_| {
-            Ok(temp.path().join("missing patch.js"))
-        });
+        let invalid_argument =
+            prepare_startup_require_with_path(temp.path(), options.clone(), &[], |_| {
+                Ok(temp.path().join("missing patch.js"))
+            });
         assert!(invalid_argument.is_err());
         assert_eq!(
             std::fs::read_dir(temp.path().join(STARTUP_REQUIRE_DIR))
@@ -2552,8 +2565,8 @@ mod tests {
                 .count(),
             0
         );
-        let first = prepare_startup_require_in(temp.path(), options, &[]).unwrap();
-        let second = prepare_startup_require_in(temp.path(), options, &[]).unwrap();
+        let first = prepare_startup_require_in(temp.path(), options.clone(), &[]).unwrap();
+        let second = prepare_startup_require_in(temp.path(), options.clone(), &[]).unwrap();
         assert_ne!(first.marker_path, second.marker_path);
         assert!(first.marker_path.with_extension("js").is_file());
         assert!(second.marker_path.with_extension("js").is_file());

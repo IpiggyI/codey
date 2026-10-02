@@ -9,9 +9,10 @@ use std::time::{Duration, Instant};
 use std::os::unix::fs::OpenOptionsExt;
 
 use crate::codex_config_guidance::{
-    CODEY_FASTCTX_GUIDANCE, NO_WRITABLE_SUBAGENT_GUIDANCE, ROOT_AGENT_COLLABORATION_USAGE_HINT,
-    ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS, ROOT_AGENT_MULTI_AGENT_MODE_HINT,
-    SUBAGENT_GUIDANCE, append_root_agent_collaboration_usage_hint, remove_codey_fastctx_guidance,
+    CODEY_FASTCTX_GUIDANCE, CODEY_FASTCTX_GUIDANCE_VERSIONS, NO_WRITABLE_SUBAGENT_GUIDANCE,
+    ROOT_AGENT_COLLABORATION_USAGE_HINT, ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS,
+    ROOT_AGENT_MULTI_AGENT_MODE_HINT, SUBAGENT_GUIDANCE,
+    append_root_agent_collaboration_usage_hint, remove_codey_fastctx_guidance,
     remove_subagent_guidance, subagent_source_config,
 };
 use crate::config::{
@@ -423,9 +424,10 @@ fn apply_isolated_runtime_router_config(
     let constraints_dir = marker.with_file_name(CODEY_CONSTRAINTS_DIR);
     create_private_dir_all(&constraints_dir)?;
     let fastctx_instructions = if fastctx_namespace.is_some() {
-        Some(read_or_create_constraint_file(
+        Some(read_or_create_versioned_constraint_file(
             &constraints_dir.join(CODEY_FASTCTX_INSTRUCTIONS_FILE),
             CODEY_FASTCTX_GUIDANCE,
+            CODEY_FASTCTX_GUIDANCE_VERSIONS,
         )?)
     } else {
         None
@@ -645,6 +647,22 @@ fn runtime_root_instructions_for_roles(
         root_instructions.to_string()
     } else {
         append_constraint_text(root_instructions, NO_WRITABLE_SUBAGENT_GUIDANCE)
+    }
+}
+
+fn read_or_create_versioned_constraint_file(
+    path: &Path,
+    current: &str,
+    owned_versions: &[&str],
+) -> Result<String> {
+    let source = read_or_create_constraint_file(path, current)?;
+    if owned_versions
+        .iter()
+        .any(|version| source.trim() == version.trim())
+    {
+        Ok(current.to_string())
+    } else {
+        Ok(source)
     }
 }
 
@@ -1126,9 +1144,10 @@ fn runtime_fastctx_instructions(
     state: &RuntimeConfigLease,
 ) -> Result<Option<String>> {
     if state.fastctx_command.is_some() {
-        Ok(Some(read_or_create_constraint_file(
+        Ok(Some(read_or_create_versioned_constraint_file(
             &constraints_dir.join(CODEY_FASTCTX_INSTRUCTIONS_FILE),
             CODEY_FASTCTX_GUIDANCE,
+            CODEY_FASTCTX_GUIDANCE_VERSIONS,
         )?))
     } else {
         Ok(None)

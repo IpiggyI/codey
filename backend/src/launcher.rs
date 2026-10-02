@@ -1388,6 +1388,7 @@ async fn spawn_and_inject_runtime(
     let mut spawned = match spawn_codex(
         &mut storage.app_dir,
         patch.debug_port,
+        config.misc_model_catalog_id(),
         config.slim_codex_pet,
         config.subagent_optimization,
         config.gpu_launch_mode,

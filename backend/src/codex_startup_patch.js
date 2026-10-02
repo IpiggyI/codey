@@ -1,5 +1,6 @@
 (() => {
   const disablePet = __DISABLE_PET__;
+  const miscModelId = String("__CODEY_MISC_MODEL_ID__" ?? "").trim();
   const requireAppServerRuntimeOverrideValidation =
     __REQUIRE_APP_SERVER_RUNTIME_OVERRIDES__;
   const codeyErrorLoggerExecutable = "__CODEY_ERROR_LOGGER_EXECUTABLE__";
@@ -1148,6 +1149,7 @@
     configs = nativeRuntimeConfigOverrides,
     suppliedCatalogModels = null,
   ) => {
+    if (miscModelId) return miscModelId;
     const providerId = String(runtimeConfigValue(configs, "model_provider") ?? "").trim();
     const defaultModel = String(runtimeConfigValue(configs, "model") ?? "").trim();
     const officialAccountAvailable =
@@ -1191,6 +1193,27 @@
   Object.defineProperty(globalThis, "__CODEY_SELECT_THREAD_TITLE_MODEL__", {
     configurable: false,
     value: selectThreadTitleModel,
+    writable: false,
+  });
+  Object.defineProperty(globalThis, "__CODEY_MISC_MODEL__", {
+    configurable: false,
+    value: miscModelId,
+    writable: false,
+  });
+  Object.defineProperty(globalThis, "__CODEY_SELECT_MISC_MODEL__", {
+    configurable: false,
+    value: (nativeModel) =>
+      miscModelId || String(nativeModel ?? "").trim(),
+    writable: false,
+  });
+  Object.defineProperty(globalThis, "__CODEY_SELECT_MISC_MODEL_ROUTING__", {
+    configurable: false,
+    value: (routing) => miscModelId ? ({
+      ...routing,
+      ephemeralGenerationModel: miscModelId,
+      ambientSuggestionsModel: miscModelId,
+      ambientSuggestionsSafetyModel: miscModelId,
+    }) : routing,
     writable: false,
   });
   const appServerRuntimeConfigs = uniqueRuntimeConfigsByKey([
@@ -1979,6 +2002,52 @@
     },
   );
 
+  const patchCodexMiscModelConstants = (source) => {
+    if (!miscModelId) return source;
+    if (
+      source.includes("codex_ephemeral_generation_model_slug") &&
+      source.includes("codex_ambient_suggestions_model_slug") &&
+      source.includes("codex_ambient_suggestions_safety_model_slug")
+    ) {
+      // 只接受赋值、条件表达式或 return 后的完整配置对象；不改写参数解构。
+      const routingObject = /([=?]\s*|\breturn\s*)(\{[^{}]{0,2000}\})/g;
+      const routingField = /(?:\{|,)\s*(?:([A-Za-z_$][\w$]*)|["']([^"']+)["'])\s*:/g;
+      const requiredFields = [
+        "automationModel", "ephemeralGenerationModel",
+        "ambientSuggestionsModel", "ambientSuggestionsSafetyModel",
+      ];
+      source = source.replace(routingObject, (match, prefix, object) => {
+        const fields = new Set([...object.matchAll(routingField)].map((field) => field[1] || field[2]));
+        if (!requiredFields.every((field) => fields.has(field))) return match;
+        return `${prefix}globalThis.__CODEY_SELECT_MISC_MODEL_ROUTING__(${object})`;
+      });
+    }
+    // 按匹配位置切片；不同作用域可以复用同一个压缩变量名。
+    const declarationPattern =
+      /(?<![$\w.])([$A-Z_a-z][$\w]*)(\s*=\s*)(["'`])gpt-5\.6-luna\3/g;
+    const declarations = [...source.matchAll(declarationPattern)];
+    // 仅含模型目录引用的 chunk 保留原生行为。
+    if (declarations.length === 0) return source;
+    let patched = "";
+    let lastIndex = 0;
+    for (const declaration of declarations) {
+      patched +=
+        source.slice(lastIndex, declaration.index) +
+        `${declaration[1]}${declaration[2]}globalThis.__CODEY_SELECT_MISC_MODEL__(\`gpt-5.6-luna\`)`;
+      lastIndex = declaration.index + declaration[0].length;
+    }
+    return patched + source.slice(lastIndex);
+  };
+  Object.defineProperty(
+    globalThis,
+    "__CODEY_PATCH_CODEX_MISC_MODEL_CONSTANTS__",
+    {
+      configurable: false,
+      value: patchCodexMiscModelConstants,
+      writable: false,
+    },
+  );
+
   // Codex prewarms the shared avatar/voice overlay at startup by creating a
   // hidden BrowserWindow. In slim-pet mode the pet entry points are already
   // unavailable, so keep the manager and voice path intact but make prewarm a
@@ -2451,6 +2520,21 @@
         if (hasDesktopAnalyticsTransport) desktopAnalyticsTransportSourcePatched = patched;
         globalThis.__CODEY_DESKTOP_ANALYTICS_SOURCE_PATCHED__ =
           desktopAnalyticsWorkerSourcePatched && desktopAnalyticsTransportSourcePatched;
+      }
+      // 常量可由 Git 或环境建议的独立 chunk 导出，不要求同文件包含标题逻辑。
+      if (miscModelId && (source.includes(threadTitleModelId) ||
+          source.includes("codex_ephemeral_generation_model_slug"))) {
+        const original = source;
+        source = applyOptionalMainBundlePatch(
+          "miscModelConstants",
+          patchCodexMiscModelConstants,
+          source,
+          filename,
+        );
+        miscModelConstantsSourcePatched ||= source !== original;
+        globalThis.__CODEY_MISC_MODEL_CONSTANTS_SOURCE_PATCHED__ =
+          miscModelConstantsSourcePatched &&
+          !hasOptionalMainBundlePatchFailure("miscModelConstants");
       }
       if (hasThreadTitleModel) {
         source = applyOptionalMainBundlePatch(

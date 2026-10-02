@@ -678,7 +678,7 @@ export function App({
     });
   }
 
-  function closeSettings() {
+  function discardSettings() {
     if (isBusy) return;
     if (persistedConfigRef.current) {
       setConfig(persistedConfigRef.current);
@@ -687,6 +687,18 @@ export function App({
     setModelPickerVisible(false);
     confirmationController.clear();
     onClose?.();
+  }
+
+  function closeSettings() {
+    if (isBusy) return;
+    if (!dirty) { discardSettings(); return; }
+    setConfirmation({
+      action: "discard-settings",
+      title: "放弃未保存的设置？",
+      description: "关闭后将恢复上次保存的设置。",
+      confirmLabel: "放弃更改并关闭",
+      run: discardSettings,
+    });
   }
 
   function askClearTraceLogs() {
@@ -1151,6 +1163,8 @@ export function App({
             <ModelSection
               config={config}
               currentProviderSnapshot={currentProviderSnapshot}
+              onConfigChange={handleConfigChange}
+              subagentModelOptions={subagentModelOptions}
               officialAccountAvailable={status.officialAccountAvailable === true}
               popupContainer={popupContainer}
               modelState={modelState}

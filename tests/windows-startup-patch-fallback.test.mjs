@@ -169,11 +169,11 @@ test("Windows startup patch requires app-server runtime override validation", as
 
   assert.match(
     launcher,
-    /codex_startup_patch::install\(\s*inspector_port,\s*patch_options,\s*runtime_config_overrides,\s*!runtime_config_overrides\.is_empty\(\),\s*renderer_debug_port,\s*\)/,
+    /codex_startup_patch::install\(\s*inspector_port,\s*patch_options(?:\.clone\(\))?,\s*runtime_config_overrides,\s*!runtime_config_overrides\.is_empty\(\),\s*renderer_debug_port,\s*\)/,
   );
   assert.doesNotMatch(
     launcher,
-    /codex_startup_patch::install\(\s*inspector_port,\s*patch_options,\s*runtime_config_overrides,\s*false,/,
+    /codex_startup_patch::install\(\s*inspector_port,\s*patch_options(?:\.clone\(\))?,\s*runtime_config_overrides,\s*false,/,
   );
   assert.match(
     windowsSpawn,

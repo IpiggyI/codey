@@ -69,6 +69,7 @@ export type Config = {
   declaredOfficialModelsByProvider: Record<string, string[]>;
   upstreamModelsByProvider: Record<string, string[]>;
   defaultModel: string;
+  miscModel: string;
   disableTraceLogWrites: boolean;
   protectCrashpadPending: boolean;
   slimCodexPet: boolean;
@@ -210,6 +211,7 @@ export type RouterSessionDiagnosis = {
 
 export type Confirmation = {
   action:
+    | "discard-settings"
     | "clear"
     | "restart"
     | "delete-notification-channel"

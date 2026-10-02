@@ -15,7 +15,7 @@ async function loadStartupPatchExpression(
     ),
   );
   assert.ok(template);
-  const expression = template.replaceAll(
+  const expression = template.replaceAll('"__CODEY_MISC_MODEL_ID__"', '""').replaceAll(
     "__DISABLE_PET__",
     disablePet ? "true" : "false",
   ).replaceAll("__REQUIRE_APP_SERVER_RUNTIME_OVERRIDES__", "false");

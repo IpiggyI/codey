@@ -2505,3 +2505,20 @@ fn lifecycle_production_paths_do_not_write_user_config() {
         }
     }
 }
+
+#[test]
+fn historical_constraint_text_is_migrated_in_memory_without_overwriting_custom_source() {
+    let home = tempfile::tempdir().unwrap();
+    let source = home.path().join("instructions.md");
+    for (original, expected) in [
+        ("old", "current"),
+        ("old with user edits", "old with user edits"),
+    ] {
+        fs::write(&source, original).unwrap();
+        assert_eq!(
+            read_or_create_versioned_constraint_file(&source, "current", &["old"]).unwrap(),
+            expected
+        );
+        assert_eq!(fs::read_to_string(&source).unwrap(), original);
+    }
+}
