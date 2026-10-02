@@ -37,10 +37,10 @@ test("pointer handoff keeps conversation rich tooltips open while entering them"
   assert.match(source, /new PointerEvent\("pointerout", \{/);
   assert.match(
     source,
-    /document\.addEventListener\("pointerout", holdConversationRichTooltipOpen, true\)/,
+    /listen\(document, "pointerout", holdConversationRichTooltipOpen, true\)/,
   );
   assert.match(
     source,
-    /document\.addEventListener\("pointerover", continueConversationRichTooltipHandoff, true\)/,
+    /listen\(document, "pointerover", continueConversationRichTooltipHandoff, true\)/,
   );
 });

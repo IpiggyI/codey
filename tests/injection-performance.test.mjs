@@ -74,8 +74,8 @@ test("renderer core loads session tools after idle time or sidebar use", async (
   assert.match(sessionTools, /const sidebarTitleCache = new Map\(\)/);
   assert.match(sessionTools, /syncSidebarTitles\(root\)/);
   assert.match(sessionTools, /callBridge\("\/session\/wake-watcher"\)/);
-  assert.match(sessionTools, /document\.addEventListener\("pointerdown", wakeSessionWatcher/);
-  assert.match(sessionTools, /document\.addEventListener\("keydown", wakeSessionWatcherFromKey/);
+  assert.match(sessionTools, /listen\(document, "pointerdown", wakeSessionWatcher/);
+  assert.match(sessionTools, /listen\(document, "keydown", wakeSessionWatcherFromKey/);
   assert.doesNotMatch(sessionTools, /const mountedButtonIsUsable = \(button\) =>/);
   assert.doesNotMatch(sessionTools, /const isTopChromeMountTarget = \(element\) =>/);
   assert.doesNotMatch(sessionTools, /const mountButton = \(\) =>/);
@@ -100,10 +100,10 @@ test("renderer core loads session tools after idle time or sidebar use", async (
   assert.doesNotMatch(sessionTools, /mutation\.type === "characterData"/);
   assert.match(
     sessionTools,
-    /window\.setInterval\(\(\) => \{\s*void reconcileStaleCompletedTask\(\);\s*\}, completedTaskReconcileIntervalMs\)/,
+    /repeat\(\(\) => \{\s*void reconcileStaleCompletedTask\(\);\s*\}, completedTaskReconcileIntervalMs\)/,
   );
-  assert.match(sessionTools, /window\.addEventListener\("focus", reconcileStaleCompletedTask\)/);
-  assert.match(sessionTools, /window\.addEventListener\("pageshow", reconcileStaleCompletedTask\)/);
+  assert.match(sessionTools, /listen\(window, "focus", reconcileStaleCompletedTask\)/);
+  assert.match(sessionTools, /listen\(window, "pageshow", reconcileStaleCompletedTask\)/);
   const reconcileBody = sessionTools.match(
     /const reconcileStaleCompletedTask = async \(\) => \{([\s\S]*?)\n  \};/,
   )?.[1] ?? "";
@@ -160,7 +160,11 @@ test("renderer core loads session tools after idle time or sidebar use", async (
   assert.match(sessionObserverBody, /addPendingScanRoot\(threadRow\)/);
   assert.match(sessionObserverBody, /syncConversationRichTooltipOpen\(target\)/);
   assert.doesNotMatch(sessionObserverBody, /syncSidebarThreadTimeState\(threadRow\)/);
-  assert.doesNotMatch(sessionObserverBody, /reconcileStaleCompletedTask/);
+  assert.match(
+    sessionObserverBody,
+    /if \(!completionReconcileSessionId\) void reconcileStaleCompletedTask\(\);/,
+  );
+  assert.equal(sessionObserverBody.match(/reconcileStaleCompletedTask/g)?.length, 1);
   assert.match(sessionTools, /mutationDispatcher\.subscribe\(\s*handleSessionToolMutations/);
   assert.match(sessionTools, /new MutationObserver\(handleSessionToolMutations\)/);
   assert.match(promptOptimize, /mutationDispatcher\.subscribe\(\s*handleComposerMutations/);

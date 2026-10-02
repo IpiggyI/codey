@@ -84,6 +84,7 @@ function loadInjection({
     setTimeout: (callback, delayMs = 0) => {
       const timeoutId = nextTimeoutId;
       nextTimeoutId += 1;
+      if (delayMs === 5_000) return timeoutId;
       queueMicrotask(() => {
         if (canceledTimeouts.delete(timeoutId)) return;
         if (advanceTimeoutClock) nowMs += Math.max(0, Number(delayMs) || 0);
@@ -118,6 +119,7 @@ function loadInjection({
     },
     document,
     notifyMutations: (mutations) => mutationCallback?.(mutations),
+    reinstall: () => vm.runInNewContext(source, context),
     runIntervals: () => intervalCallbacks.forEach((callback) => callback()),
     window,
   };
@@ -833,6 +835,43 @@ test("loads visible thread timestamps through the Codey bridge", async () => {
   assert.equal(document.threadRowQueries, 1);
 });
 
+test("disposed timestamp responses cannot overwrite a reinstalled sidebar", async () => {
+  const now = Date.UTC(2026, 9, 3, 0);
+  const { row, content } = sidebarThreadEntry({ sessionId: "thread-1" });
+  let release;
+  const fixture = loadInjection({
+    now,
+    rows: [row],
+    bridgeHandler: timestampBridge(() => new Promise((resolve) => { release = resolve; })),
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(typeof release, "function");
+  fixture.window.__codeySessionToolsInstall.dispose();
+  fixture.window.__codexSessionDeleteBridge = timestampBridge(async () => ({ "thread-1": now - 60_000 }));
+  fixture.reinstall();
+  await new Promise((resolve) => setImmediate(resolve));
+  const label = () => content.querySelector("[data-codey-thread-updated-at]")?.textContent;
+  assert.equal(label(), "1 分");
+  release({ "thread-1": now - 600_000 });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(label(), "1 分");
+});
+
+test("disposing cancels a queued sidebar timestamp request", async () => {
+  const { row } = sidebarThreadEntry({ sessionId: "thread-1" });
+  let requests = 0;
+  const fixture = loadInjection({
+    rows: [row],
+    bridgeHandler: timestampBridge(async () => { requests += 1; return {}; }),
+  });
+  fixture.window.__codeyInstallThreadUpdatedTimes();
+  fixture.window.__codeySessionToolsInstall.dispose();
+  await new Promise((resolve) => setImmediate(resolve));
+  fixture.runIntervals();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests, 0);
+});
+
 test("reads a remote task timestamp from the official React row without a bridge request", async () => {
   const now = Date.UTC(2026, 7, 10, 12);
   const row = new FakeElement();
@@ -1161,10 +1200,7 @@ test("discovers app-shared when the build moves the AppServerManager resolver th
   const entryUrl = "app://-/assets/index-BZNttYfb.js";
   const appSharedUrl = "app://-/assets/app-shared-588591d226f4.js";
   const manager = {
-    discardConversationFromCache() {},
-    handleThreadDeletion() {},
     refreshRecentConversations() {},
-    resumeConversation() {},
     sendRequest() {
       return { rateLimits: { limitId: "codex" } };
     },
@@ -1198,11 +1234,12 @@ test("discovers app-shared when the build moves the AppServerManager resolver th
   });
 
   const controller = await window.__codeyLoadCodexSessionController({
-    feature: "deleteMessages",
+    feature: "refresh",
   });
 
   assert.equal(controller.kind, "manager");
   assert.equal(controller.manager, manager);
+  assert.equal(window.__codeyPageCapabilities.refresh.status, "available");
 });
 
 test("discovers the current app-initial asset and resolves AppServerManager from React scope", async () => {

@@ -175,6 +175,9 @@ function loadInjection({
       if (selector === "button, [role=button], a") {
         return body.querySelectorAll("button, [role=button], a");
       }
+      if (selector === "[data-codey-message-select], [data-codey-session-delete]") {
+        return body.querySelectorAll(selector);
+      }
       return [];
     },
     removeEventListener(type) {
@@ -230,7 +233,7 @@ function loadInjection({
     }
   }
 
-  vm.runInNewContext(source, {
+  const context = {
     Blob,
     CustomEvent,
     Date: FakeDate,
@@ -243,13 +246,15 @@ function loadInjection({
     document,
     location,
     window,
-  });
+  };
+  vm.runInNewContext(source, context);
   return {
     actionBar,
     archiveButton,
     archiveTooltip,
     bridgeCalls,
     dispatcherCalls,
+    reinstall: () => vm.runInNewContext(source, context),
     reloadCalls,
     location,
     fireTimers(delay) {
@@ -401,6 +406,56 @@ test("uses AppServerManager cache eviction and deletion notification on current 
     "manager:deleted:thread-1",
     "manager:refresh",
   ]);
+});
+
+test("disposed sidebar deletion cannot persist after a pending native release", async () => {
+  let release;
+  const runtime = loadInjection({
+    sessionController: {
+      kind: "manager",
+      discardConversation() { return new Promise((resolve) => { release = resolve; }); },
+      async notifyConversationDeleted() { assert.fail("must not notify after disposal"); },
+      async refreshRecentConversations() {},
+    },
+  });
+  runtime.thread.querySelector("[data-codey-session-delete]").click();
+  runtime.document.body.querySelector("[data-codey-session-delete-confirm]").click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(release);
+  runtime.window.__codeySessionToolsInstall.dispose();
+  release();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(runtime.bridgeCalls.some(({ path }) => path === "/session/delete"), false);
+  assert.notEqual(runtime.thread.getAttribute("data-codey-session-delete-state"), "deleted");
+});
+
+test("late sidebar persistence cannot notify or hide the replacement installation", async () => {
+  let release;
+  let notifications = 0;
+  const runtime = loadInjection({
+    bridge: (path) => path === "/session/delete"
+      ? new Promise((resolve) => { release = resolve; }) : { status: "ok" },
+    sessionController: {
+      kind: "manager",
+      async discardConversation() {},
+      async notifyConversationDeleted() { notifications += 1; },
+      async refreshRecentConversations() {},
+    },
+  });
+  const oldButton = runtime.thread.querySelector("[data-codey-session-delete]");
+  oldButton.click();
+  runtime.document.body.querySelector("[data-codey-session-delete-confirm]").click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(release);
+  runtime.window.__codeySessionToolsInstall.dispose();
+  runtime.reinstall();
+  const button = runtime.thread.querySelector("[data-codey-session-delete]");
+  assert.ok(button);
+  assert.notEqual(button, oldButton);
+  release({ status: "ok", deleted: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(notifications, 0);
+  assert.equal(runtime.thread.getAttribute("data-codey-session-delete-state"), null);
 });
 
 test("cancels deletion when a virtualized row changes identity during confirmation", async () => {
