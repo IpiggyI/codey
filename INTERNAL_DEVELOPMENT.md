@@ -20,6 +20,7 @@
 - 包装器调用应用内置 CLI，并检查配套工具宿主；通过认证握手或运行记录确认目标已执行。该确认不代表 app-server 已完成初始化。
 - 辅助进程过滤环境变量时，包装器从已保存应用位置恢复 CLI。独立工具调用原样转发；受控 app-server 必须携带本次配置，禁止误入桌面启动及进程清理流程。
 - Windows Store 按当前用户注册包定位，每次尝试按原 package family 刷新路径，激活后核验实际身份。包切换时先成功清理再重试，不跨正式版、Beta 或发布者切换。
+- 安装目录选择框的前置检查与启动共用目录解析：先按原包系列定位当前注册版本，再检查目录及应用身份。Store 更新删除旧版本目录后不要求重新选择；注册查询或身份校验失败时明确报错，不改选其他安装。Windows 回归检查 `configured_codex_app_dir_recovers_installed_store_update` 默认忽略；设置 `CODEY_TEST_PREVIOUS_APP_DIR` 为已删除的旧目录、`CODEY_TEST_CURRENT_APP_DIR` 为当前注册目录后，用 `cargo test -p codey --lib configured_codex_app_dir -- --include-ignored` 执行，只读检查目录，不启动应用。
 - Store 激活在独立任务中监督，临时环境设置先落清理记录；恢复助手核验包、进程和线程身份，再恢复线程并反馈确认。超时或失败先停止本次进程并清理环境，清理失败阻止自动重试和原生恢复。`CODEX_HOME` 有显式设置时必须传递成功。`scripts/diagnose-windows-store-launch.ps1` 提供启动诊断。
 - 集成失败只有带已确认清理的错误类型时才允许原生启动。恢复只处理 Codey 临时资产，不写用户配置；原生启动过滤 Codey 注入环境。其他安装目录占用单实例锁时提示用户退出，不停止其他客户端。
 - Windows 最多尝试两次，仅暂时性启动错误或已确认包切换允许重试。权限、配置、身份和清理失败直接报错；进程查询失败不能视为已退出或已清理。

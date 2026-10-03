@@ -17,9 +17,7 @@ mod webhooks;
 mod wechat_claw;
 
 #[cfg(windows)]
-use codey_runtime_core::app_paths::{
-    build_codex_executable, normalize_codex_app_path, resolve_codex_app_dir_with_saved,
-};
+use codey_runtime_core::app_paths::{build_codex_executable, normalize_codex_app_path};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify, RwLock, oneshot, watch};
@@ -1336,13 +1334,9 @@ fn validate_codex_app_path(path: &str) -> Result<PathBuf, String> {
 #[cfg(windows)]
 async fn ensure_windows_codex_app_path(state: &Arc<AppState>) -> Result<(), String> {
     let configured_app_path = state.config.read().await.codex_app_path.trim().to_string();
-    let configured_path =
-        (!configured_app_path.is_empty()).then(|| PathBuf::from(configured_app_path.as_str()));
-    let resolved = tokio::task::spawn_blocking(move || {
-        resolve_codex_app_dir_with_saved(configured_path.as_deref(), None)
-    })
-    .await
-    .map_err(|error| format!("检测 Codex 桌面应用目录的任务异常退出：{error}"))?;
+    let resolved = crate::launcher::find_configured_codex_app_dir(&configured_app_path)
+        .await
+        .map_err(|error| format!("检测 Codex 桌面应用目录失败：{error:#}"))?;
     if resolved.is_some() {
         return Ok(());
     }

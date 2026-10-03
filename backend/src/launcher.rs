@@ -260,11 +260,10 @@ async fn run_startup_session_maintenance(
     Ok(session_maintenance_summary(&index_cleanup))
 }
 
-async fn resolve_configured_codex_app_dir(config: &CodeyConfig) -> Result<PathBuf> {
-    let configured_app_path = config.codex_app_path.trim();
-    let configured_app_path_is_empty = configured_app_path.is_empty();
+pub(crate) async fn find_configured_codex_app_dir(configured_app_path: &str) -> Result<Option<PathBuf>> {
+    let configured_app_path = configured_app_path.trim();
     let configured_app_path =
-        (!configured_app_path_is_empty).then(|| PathBuf::from(configured_app_path));
+        (!configured_app_path.is_empty()).then(|| PathBuf::from(configured_app_path));
     tokio::task::spawn_blocking(move || {
         // A Store update can remove the saved version directory entirely.
         // Resolve that registered family before requiring the old path to exist.
@@ -287,14 +286,19 @@ async fn resolve_configured_codex_app_dir(config: &CodeyConfig) -> Result<PathBu
         Ok::<_, anyhow::Error>(app_dir)
     })
     .await
-    .map_err(|error| anyhow::Error::new(error).context("定位 Codex App 任务异常退出"))??
-    .ok_or_else(|| {
-        if configured_app_path_is_empty {
-            anyhow::anyhow!("{CODEX_APP_NOT_FOUND_ERROR}；若安装了多个版本，请明确选择安装路径")
-        } else {
-            anyhow::anyhow!(CODEX_APP_PATH_INVALID_ERROR)
-        }
-    })
+    .map_err(|error| anyhow::Error::new(error).context("定位 Codex App 任务异常退出"))?
+}
+
+async fn resolve_configured_codex_app_dir(config: &CodeyConfig) -> Result<PathBuf> {
+    find_configured_codex_app_dir(&config.codex_app_path)
+        .await?
+        .ok_or_else(|| {
+            if config.codex_app_path.trim().is_empty() {
+                anyhow::anyhow!("{CODEX_APP_NOT_FOUND_ERROR}；若安装了多个版本，请明确选择安装路径")
+            } else {
+                anyhow::anyhow!(CODEX_APP_PATH_INVALID_ERROR)
+            }
+        })
 }
 
 struct StartupModelCatalog {
@@ -1896,6 +1900,9 @@ mod watchdog_tests;
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(test)]
+mod app_path_tests;
 
 #[cfg(test)]
 mod model_delivery_test_support;
