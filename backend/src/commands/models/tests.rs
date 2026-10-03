@@ -948,7 +948,63 @@ fn provider_sync_reclassifies_old_selected_models_by_the_raw_upstream_list() {
 }
 
 #[test]
-fn current_provider_sync_follows_official_priority_only_after_order_mode_is_saved() {
+fn initial_model_order_is_persisted_without_sync_and_keeps_provider_ownership() {
+    let home = tempfile::tempdir().unwrap();
+    let snapshot = crate::model_ownership::CurrentProviderSnapshot::from_parts(
+        "relay",
+        "https://relay.example/v1",
+        "responses",
+        false,
+    );
+    let key = snapshot.ownership_key.clone();
+    let mut config = CodeyConfig::default();
+    config.attach_current_provider_snapshot(snapshot.clone());
+    config
+        .selected_models_by_provider
+        .insert(key.clone(), vec!["gpt-old".into(), "gpt-new".into()]);
+    config.selected_models_by_provider.insert(
+        "another-provider".into(),
+        vec!["gpt-old".into(), "gpt-new".into()],
+    );
+    let order = vec!["gpt-new".into(), "gpt-old".into()];
+    crate::model_order::apply_provider_order(&mut config, &key, &[]);
+    assert_eq!(
+        config.selected_models_by_provider[&key],
+        ["gpt-old", "gpt-new"]
+    );
+    crate::model_order::apply_provider_order(&mut config, &key, &order);
+    assert_eq!(
+        config.selected_models_by_provider["another-provider"],
+        ["gpt-old", "gpt-new"]
+    );
+    let mut persisted: CodeyConfig =
+        serde_json::from_slice(&serde_json::to_vec(&config).unwrap()).unwrap();
+    persisted.attach_current_provider_snapshot(snapshot);
+    let provider = codex_provider::CurrentProvider {
+        id: "relay".into(),
+        name: "relay".into(),
+        official: false,
+        supports_remote_compaction: false,
+        base_url: "https://relay.example/v1".into(),
+    };
+    let state = native_model_state_for_provider(&persisted, &provider, home.path()).unwrap();
+    assert_eq!(state.third_party_models, ["gpt-new", "gpt-old"]);
+    persisted
+        .model_order_mode_by_provider
+        .insert(key.clone(), crate::model_order::ModelOrderMode::Manual);
+    crate::model_order::apply_provider_order(
+        &mut persisted,
+        &key,
+        &["gpt-old".into(), "gpt-new".into()],
+    );
+    assert_eq!(
+        persisted.selected_models_by_provider[&key],
+        ["gpt-new", "gpt-old"]
+    );
+}
+
+#[test]
+fn current_provider_sync_defaults_to_official_priority_and_preserves_manual_order() {
     use crate::model_order::ModelOrderMode;
     let home = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -1013,7 +1069,7 @@ fn current_provider_sync_follows_official_priority_only_after_order_mode_is_save
             true,
             home.path(),
         );
-        let expected = if mode == Some(ModelOrderMode::Official) {
+        let expected = if mode != Some(ModelOrderMode::Manual) {
             vec![
                 "relay/gpt-new",
                 "gpt-tied",

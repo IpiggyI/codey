@@ -17,7 +17,7 @@ import {
   visibleModelOptions,
 } from "./modelPickerPagination";
 import { modelKey } from "./modelIds";
-import { ModelOrderControls } from "./components/ModelOrderControls";
+import { ModelOrderItem } from "./components/ModelOrderItem";
 import {
   Badge,
   Button,
@@ -57,7 +57,7 @@ type ModelPickerDialogProps = {
   onAutoReviewSupportedChange: (checked: boolean) => void;
   onSave: () => void;
   modelOrderMode: "official" | "manual";
-  onMoveModel: (model: string, direction: -1 | 1) => void;
+  onMoveModel: (model: string, target: string) => void;
   onRestoreModelOrder: () => void;
 };
 
@@ -265,7 +265,7 @@ function ModelPickerDialogComponent({
           {thirdPartyModelOptions.length > 0 && (
             <div className="px-2 pb-1.5 pt-1">
               <div className="flex items-center justify-between gap-2 text-xs">
-                <span>{modelOrderMode === "official" ? "跟随官方排序" : "手动排序"}</span>
+                <span>{modelOrderMode === "official" ? "跟随官方排序" : "手动排序"}，拖动模型调整顺序</span>
                 <Button variant="ghost" size="xs" disabled={isBusy || !modelState.officialModelOrder?.length}
                   onPress={onRestoreModelOrder}>恢复官方排序</Button>
               </div>
@@ -289,7 +289,8 @@ function ModelPickerDialogComponent({
               selectedThirdPartyModelKeys.has(modelKey(model));
             const manual = manualThirdPartyModelKeys.has(modelKey(model));
             return (
-              <div className="flex flex-wrap items-center gap-2.5 rounded-md px-3 py-2 hover:bg-blue-500/6" key={model}>
+              <ModelOrderItem className="flex-wrap rounded-md px-3 py-2 hover:bg-blue-500/6" key={model}
+                model={model} models={thirdPartyModelOptions} disabled={isBusy} onMove={onMoveModel}>
                 <Checkbox
                   checked={draftModelSet.has(modelKey(model))}
                   disabled={isBusy}
@@ -297,8 +298,6 @@ function ModelPickerDialogComponent({
                   aria-label={`当前 provider 支持 ${model}`}
                 />
                 <span className="min-w-0 flex-1 break-words text-xs font-semibold text-[#1d1d1f]">{model}</span>
-                <ModelOrderControls model={model} index={thirdPartyModelOptions.indexOf(model)}
-                  count={thirdPartyModelOptions.length} disabled={isBusy} onMove={onMoveModel} />
                 <Checkbox
                   checked={draft1MModelSet.has(modelKey(model))}
                   disabled={isBusy}
@@ -322,7 +321,7 @@ function ModelPickerDialogComponent({
                 )}
                 <ModelContextFields model={model} policy={draftModelContexts[model]} disabled={isBusy}
                   onChange={(policy) => onUpdateDraftModelContext(model, policy)} />
-              </div>
+              </ModelOrderItem>
             );
           })}
           {visibleThirdPartyModels.length < filteredThirdPartyModels.length && (

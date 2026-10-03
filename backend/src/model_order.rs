@@ -12,6 +12,27 @@ pub enum ModelOrderMode {
     Manual,
 }
 
+pub(crate) fn apply_provider_order(
+    config: &mut crate::config::CodeyConfig,
+    provider_key: &str,
+    order: &[String],
+) {
+    if order.is_empty()
+        || config.model_order_mode_by_provider.get(provider_key) == Some(&ModelOrderMode::Manual)
+    {
+        return;
+    }
+    let upstream = config
+        .upstream_models_by_provider
+        .get(provider_key)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if let Some(models) = config.selected_models_by_provider.get_mut(provider_key) {
+        sort_models(models, upstream, false);
+        sort_models(models, order, true);
+    }
+}
+
 pub fn official_order(models: &[Value]) -> Vec<String> {
     let mut visible = models
         .iter()

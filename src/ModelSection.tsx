@@ -451,8 +451,7 @@ function ModelSectionComponent({
                         sourceOrder={modelState.upstreamModels}
                         mode={config.modelOrderModeByProvider?.[currentProviderSnapshot?.ownershipKey ?? ""]}
                         disabled={isBusy || dirty} readOnly={group.official} onSave={onSaveModelOrder}>
-                      <div className="provider-model-tags">
-                        {group.models.map((model) => {
+                        {(model) => {
                           const isDefault = modelIdsEqual(group.defaultModel, model);
                           const displayName = group.official
                             ? officialDisplayNames.get(modelKey(model)) || model
@@ -462,8 +461,9 @@ function ModelSectionComponent({
                               type="button"
                               key={`${group.providerId}:${model}`}
                               className={`model-tag-pill${isDefault ? " is-default" : ""}`}
-                              disabled={isBusy || dirty || isDefault}
-                              onClick={() => onSetDefaultModel(model)}
+                              disabled={isBusy || dirty}
+                              aria-disabled={isDefault || undefined}
+                              onClick={() => { if (!isDefault) onSetDefaultModel(model); }}
                               title={
                                 isDefault
                                   ? `${displayName}（当前默认模型）`
@@ -488,8 +488,7 @@ function ModelSectionComponent({
                               )}
                             </button>
                           );
-                        })}
-                      </div>
+                        }}
                       </ModelOrderEditor>
                     ) : (
                       <div className="provider-model-empty">

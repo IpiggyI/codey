@@ -237,25 +237,11 @@ pub(crate) fn config_with_current_provider_model_sync(
             .insert(provider_id.clone(), manual_models);
     }
     next = next.normalize();
-    if next.model_order_mode_by_provider.get(&provider_id)
-        == Some(&crate::model_order::ModelOrderMode::Official)
-    {
-        let order = model_catalog::official_model_order(
-            codex_home,
-            &crate::codex_config::codey_model_catalog_dir(),
-        );
-        if !order.is_empty()
-            && let Some(models) = next.selected_models_by_provider.get_mut(&provider_id)
-        {
-            let upstream = next
-                .upstream_models_by_provider
-                .get(&provider_id)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            crate::model_order::sort_models(models, upstream, false);
-            crate::model_order::sort_models(models, &order, true);
-        }
-    }
+    let order = model_catalog::official_model_order(
+        codex_home,
+        &crate::codex_config::codey_model_catalog_dir(),
+    );
+    crate::model_order::apply_provider_order(&mut next, &provider_id, &order);
     subagent_policy::reconcile_for_current_provider(&mut next, codex_home, false);
     next
 }

@@ -200,8 +200,8 @@ export function useModelSelection({
     setModelPickerVisible(true);
   }, [config, currentProviderSnapshot]);
 
-  const moveDraftModel = useCallback((model: string, direction: -1 | 1) => {
-    setDraftModelOrder(moveModelId(thirdPartyModelOptions, model, direction));
+  const moveDraftModel = useCallback((model: string, target: string) => {
+    setDraftModelOrder(moveModelId(thirdPartyModelOptions, model, target));
     setDraftModelOrderMode("manual");
   }, [thirdPartyModelOptions]);
 

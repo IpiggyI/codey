@@ -3,6 +3,17 @@ import test from "node:test";
 
 import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
 
+test("dragging a model inserts it at the target and preserves intervening order", async () => {
+  const { moveModelId } = await loadModelIdHelpers();
+  const models = ["a", "b", "c", "d"];
+  assert.deepEqual(moveModelId(models, "a", "d"), ["b", "c", "d", "a"]);
+  assert.deepEqual(moveModelId(models, "d", "b"), ["a", "d", "b", "c"]);
+  assert.deepEqual(moveModelId(models, " A ", "C"), ["b", "c", "a", "d"]);
+  assert.deepEqual(moveModelId(models, "missing", "a"), models);
+  assert.deepEqual(moveModelId(models, "a", "a"), models);
+  assert.deepEqual(models, ["a", "b", "c", "d"]);
+});
+
 async function loadModelIdHelpers() {
   return loadTypeScriptModule(
     new URL("../src/modelIds.ts", import.meta.url),

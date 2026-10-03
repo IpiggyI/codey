@@ -2,6 +2,24 @@
    Route and model management
    ========================================================================== */
 
+.model-order-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-radius: 6px;
+}
+
+.model-order-item[data-drag-over] {
+  outline: 2px solid #007aff;
+  background: rgba(0, 122, 255, 0.06);
+}
+
+.model-order-item[draggable="true"],
+.model-order-item[draggable="true"] .model-tag-pill { cursor: grab; }
+.model-order-item[draggable="true"]:active,
+.model-order-item[draggable="true"] .model-tag-pill:active { cursor: grabbing; }
+.model-order-item:focus-visible { outline: 2px solid #007aff; }
+
 .route-manager {
   display: grid;
   grid-template-columns: minmax(280px, 320px) minmax(0, 1fr);

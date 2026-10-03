@@ -57,11 +57,11 @@ export function orderModelIds(models: readonly string[], order: readonly string[
   return uniqueModelIds(models).sort((left, right) => position(left) - position(right));
 }
 
-export function moveModelId(models: readonly string[], model: string, direction: -1 | 1) {
+export function moveModelId(models: readonly string[], model: string, targetModel: string) {
   const index = models.findIndex((item) => modelIdsEqual(item, model));
-  const target = index + direction;
-  if (index < 0 || target < 0 || target >= models.length) return [...models];
+  const target = models.findIndex((item) => modelIdsEqual(item, targetModel));
+  if (index < 0 || target < 0 || index === target) return [...models];
   const next = [...models];
-  [next[index], next[target]] = [next[target], next[index]];
+  next.splice(target, 0, next.splice(index, 1)[0]);
   return next;
 }

@@ -757,6 +757,18 @@ pub(super) async fn prepare_routes_for_current_launch(state: &Arc<AppState>) -> 
         Vec::new()
     };
 
+    let third_party_order = if snapshot.uses_official_account_auth {
+        Vec::new()
+    } else {
+        tokio::task::spawn_blocking(move || {
+            model_catalog::official_model_order(
+                codex_home(),
+                &crate::codex_config::codey_model_catalog_dir(),
+            )
+        })
+        .await
+        .map_err(|error| format!("读取模型排序的任务异常退出：{error}"))?
+    };
     let _config_write_guard = state.config_write_lock.lock().await;
     let previous = state.config.read().await.clone();
     let mut next = route_config_for_official_probe(&previous, official_status)?;
@@ -767,6 +779,12 @@ pub(super) async fn prepare_routes_for_current_launch(state: &Arc<AppState>) -> 
             &available_official_models,
         );
         next = next.normalize();
+    } else {
+        crate::model_order::apply_provider_order(
+            &mut next,
+            &snapshot.ownership_key,
+            &third_party_order,
+        );
     }
 
     if persisted_config_changed(&previous, &next) {

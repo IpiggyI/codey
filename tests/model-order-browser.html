@@ -6,11 +6,25 @@
 <script type="module">
   import React from 'react';
   import { createRoot } from 'react-dom/client';
-  import '../src/tailwind.css';
+  import { enableShadowDOM } from 'react-stately/private/flags/flags';
+  import tailwindStyles from '../src/tailwind.css?inline';
+  import coreStyles from '../src/styles.css?inline';
+  import modelStyles from '../src/styles.models.css?inline';
   import { UiProvider } from '../src/UiProvider.tsx';
   import { useModelSelection } from '../src/useModelSelection.ts';
   import { ModelPickerDialog } from '../src/AppDialogs.tsx';
   import { ModelSection } from '../src/ModelSection.tsx';
+  const host = document.getElementById('root');
+  const useShadow = new URLSearchParams(location.search).has('shadow');
+  if (useShadow) enableShadowDOM();
+  const surface = useShadow ? host.attachShadow({ mode: 'open' }) : host;
+  const styles = document.createElement('style');
+  styles.textContent = tailwindStyles + coreStyles + modelStyles;
+  const mount = document.createElement('div');
+  mount.dataset.theme = 'light';
+  const portalContainer = document.createElement('div');
+  portalContainer.dataset.theme = 'light';
+  surface.append(styles, mount, portalContainer);
   const key = 'provider-fingerprint';
   const snapshot = { id: 'relay', ownershipKey: key, baseUrl: 'https://example.test', wireApi: 'responses', usesOfficialAccountAuth: false };
   const initialState = { officialModels: [], officialModelIds: [], officialModelOrder: ['gpt-new', 'gpt-old'],
@@ -42,16 +56,16 @@
         modelOrderModeByProvider: { [key]: args.modelOrderMode } };
       return { config: nextConfig, modelState: { ...hook.modelState, thirdPartyModels: args.thirdPartyModels }, modelHotReloaded: true };
     };
-    return React.createElement(UiProvider, null,
+    return React.createElement(UiProvider, { container: portalContainer },
       React.createElement('button', { onClick: () => hook.openModelPicker(hook.modelState, '', 'relay') }, '打开同步弹窗'),
       React.createElement('output', { id: 'saved' }, JSON.stringify(config)),
       React.createElement('output', { id: 'notice' }, notice?.text),
       React.createElement(ModelSection, { config, onConfigChange: setConfig, currentProviderSnapshot: snapshot,
-        subagentModelOptions: [], officialAccountAvailable: false, popupContainer: null, modelState: hook.modelState,
+        subagentModelOptions: [], officialAccountAvailable: false, popupContainer: portalContainer, modelState: hook.modelState,
         dirty: false, isBusy: !!busy, busy, showAccountUsageInHeader: false, onSyncCurrentProvider() {},
         onFetchRouteModels: () => hook.openModelPicker(hook.modelState, '', 'relay'), onSetDefaultModel() {},
         onSaveModelOrder: hook.saveModelOrder, routerSessionDiagnosis: null, onMigrateRouterSessions() {} }),
-      React.createElement(ModelPickerDialog, { open: hook.modelPickerVisible, isBusy: !!busy, busy, container: null,
+      React.createElement(ModelPickerDialog, { open: hook.modelPickerVisible, isBusy: !!busy, busy, container: portalContainer,
         customModelInput: hook.customModelInput, modelInputError: hook.modelInputError, modelSyncWarning: hook.modelSyncWarning,
         autoReviewSupported: hook.draftAutoReviewSupported, thirdPartyModelOptions: hook.thirdPartyModelOptions,
         modelState: hook.modelEditorState, draftModelSet: hook.draftModelSet, draft1MModelSet: hook.draft1MModelSet,
@@ -64,6 +78,6 @@
         onSave: hook.saveModelSelection })
     );
   }
-  createRoot(document.getElementById('root')).render(React.createElement(Harness));
+  createRoot(mount).render(React.createElement(Harness));
 </script>
 </html>
