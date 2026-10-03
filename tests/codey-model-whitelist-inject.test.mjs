@@ -3704,6 +3704,43 @@ test("an unchanged model list repairs missing native Fast tiers", async () => {
   patch.dispose();
 });
 
+test("GPT-6.1 Sol receives six efforts and preserves max and ultra in outgoing requests", async () => {
+  const queryClient = activeModelQueryClient(["gpt-6.1-sol"]);
+  const catalog = { status: "ok", native_selection_only: true, models: ["gpt-6.1-sol"], default_model: "gpt-6.1-sol",
+    model_metadata: [{ model: "gpt-6.1-sol", supported_reasoning_efforts: ["low", "medium", "high", "xhigh", "max", "ultra"] }] };
+  const runtime = await loadPatch(catalog, [statsigClient()], { queryClient, nativeSelectionOnly: true });
+  assert.deepEqual(queryClient.model("gpt-6.1-sol").supportedReasoningEfforts.map(item => item.reasoningEffort),
+    ["low", "medium", "high", "xhigh", "max", "ultra"]);
+  for (const effort of ["max", "ultra"]) {
+    const request = { type: "mcp-request", request: { method: "turn/start", params: {
+      model: "gpt-6.1-sol", modelProvider: "relay", effort,
+    } } };
+    const expected = structuredClone(request);
+    runtime.patch.trackOutgoingMessage(request);
+    runtime.dispatchWindowEvent("codex-message-from-view", { detail: request });
+    assert.deepEqual(runtime.patch.rewriteOutgoingMessage(request), expected);
+  }
+  await runtime.patch.refresh();
+  assert.deepEqual(queryClient.model("gpt-6.1-sol").supportedReasoningEfforts.map(item => item.reasoningEffort),
+    ["low", "medium", "high", "xhigh", "max", "ultra"]);
+  runtime.patch.dispose();
+});
+
+test("saved model order reaches mounted and reopened pickers without moving the default", async () => {
+  const original = ["old", "new", "custom"];
+  const queryClient = activeModelQueryClient(original);
+  const runtime = await loadPatch({ status: "ok", native_selection_only: true, models: original, default_model: "old" },
+    [statsigClient()], { queryClient, nativeSelectionOnly: true });
+  await runtime.patch.setCatalog({ status: "ok", native_selection_only: true, models: ["custom", "new", "old"], default_model: "old" });
+  assert.deepEqual(queryClient.models(), ["custom", "new", "old"]);
+  const request = { type: "mcp-request", request: { id: "ordered-models", method: "model/list", params: {} } };
+  runtime.patch.trackOutgoingMessage(request);
+  const reply = { type: "mcp-response", message: { id: "ordered-models", result: { data: original.map(modelDescriptor) } } };
+  runtime.dispatchWindowEvent("message", { data: reply });
+  assert.deepEqual(reply.message.result.data.map(model => model.model), ["custom", "new", "old"]);
+  runtime.patch.dispose();
+});
+
 test("catalog model metadata overrides stale native reasoning efforts", async () => {
   const client = statsigClient();
   const queryClient = activeModelQueryClient(["gpt-5.6-sol"]);

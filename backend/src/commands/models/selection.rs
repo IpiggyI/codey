@@ -14,6 +14,7 @@ pub async fn save_selected_models(
     requested_route_id: Option<String>,
     requested_supports_1m_context_models: Option<Vec<String>>,
     requested_model_contexts: Option<BTreeMap<String, crate::config::ModelContextConfig>>,
+    requested_order_mode: Option<crate::model_order::ModelOrderMode>,
 ) -> Result<Value, String> {
     validate_requested_model_list_bounds("官方模型", &requested_official_models)?;
     validate_requested_model_list_bounds("其他模型", &requested_third_party_models)?;
@@ -108,10 +109,25 @@ pub async fn save_selected_models(
         route_official_model_ids,
         &requested_deleted_third_party_models,
     )?;
-    let selected = selected
+    let mut selected = selected
         .into_iter()
         .filter(|model| !deleted_third_party_model_keys.contains(&model_id::key(model)))
         .collect::<Vec<_>>();
+    if let Some(mode) = requested_order_mode {
+        if mode == crate::model_order::ModelOrderMode::Official {
+            let order = model_catalog::official_model_order(
+                codex_home(),
+                &crate::codex_config::codey_model_catalog_dir(),
+            );
+            if !order.is_empty() {
+                crate::model_order::sort_models(&mut selected, &upstream_models, false);
+                crate::model_order::sort_models(&mut selected, &order, true);
+            }
+        }
+        config
+            .model_order_mode_by_provider
+            .insert(list_key.clone(), mode);
+    }
     validate_deleted_models_are_manual(&existing_manual_models, &deleted_third_party_model_keys)?;
     let manual_third_party_models = validate_manual_third_party_model_sources(
         route_official_model_ids,

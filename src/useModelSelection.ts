@@ -19,6 +19,8 @@ import {
   AUTO_REVIEW_MODEL,
   includesModelId,
   modelKey,
+  moveModelId,
+  orderModelIds,
   partitionModelIdsByKey,
   uniqueModelIds,
   withoutModelId,
@@ -70,6 +72,8 @@ export function useModelSelection({
   const [modelPickerRouteId, setModelPickerRouteId] = useState<string | null>(null);
   const [modelPickerState, setModelPickerState] = useState<ModelState | null>(null);
   const [draftModels, setDraftModels] = useState<string[]>([]);
+  const [draftModelOrder, setDraftModelOrder] = useState<string[]>([]);
+  const [draftModelOrderMode, setDraftModelOrderMode] = useState<"official" | "manual">("official");
   const [draft1MModels, setDraft1MModels] = useState<string[]>([]);
   const [draftModelContexts, setDraftModelContexts] = useState<Record<string, ModelContextConfig>>({});
   const updateDraftModelContext = useCallback((model: string, policy: ModelContextConfig | undefined) => {
@@ -119,6 +123,7 @@ export function useModelSelection({
     () => {
       const seenKeys = new Set<string>();
       return [
+        ...draftModelOrder,
         ...modelEditorState.upstreamModels,
         ...modelEditorState.thirdPartyModels,
         ...draftModels,
@@ -140,6 +145,7 @@ export function useModelSelection({
     },
     [
       draftModels,
+      draftModelOrder,
       deletedThirdPartyModelKeys,
       modelEditorState.thirdPartyModels,
       modelEditorState.upstreamModels,
@@ -174,6 +180,13 @@ export function useModelSelection({
       routeId ||
       currentProviderSnapshot?.id ||
       "";
+    const mode = config?.modelOrderModeByProvider?.[providerId] ?? "official";
+    const order = mode === "manual" ? state.thirdPartyModels : (state.officialModelOrder ?? []);
+    const options = state.officialModelOrder?.length || mode === "manual"
+      ? [...state.upstreamModels, ...state.thirdPartyModels]
+      : [...state.thirdPartyModels, ...state.upstreamModels];
+    setDraftModelOrder(orderModelIds(options, order, mode === "official"));
+    setDraftModelOrderMode(mode);
     setDraft1MModels(config?.supports1MContextByProvider?.[providerId] || []);
     setDraftModelContexts(config?.modelContextByProvider?.[currentProviderSnapshot?.id || providerId] || {});
     setDraftManualThirdPartyModels(state.manualThirdPartyModels);
@@ -186,6 +199,19 @@ export function useModelSelection({
     setDraftAutoReviewSupported(autoReviewSupported);
     setModelPickerVisible(true);
   }, [config, currentProviderSnapshot]);
+
+  const moveDraftModel = useCallback((model: string, direction: -1 | 1) => {
+    setDraftModelOrder(moveModelId(thirdPartyModelOptions, model, direction));
+    setDraftModelOrderMode("manual");
+  }, [thirdPartyModelOptions]);
+
+  const restoreDraftModelOrder = useCallback(() => {
+    const order = modelEditorState.officialModelOrder ?? [];
+    if (!order.length) return;
+    const sourceOrder = orderModelIds(thirdPartyModelOptions, modelEditorState.upstreamModels);
+    setDraftModelOrder(orderModelIds(sourceOrder, order, true));
+    setDraftModelOrderMode("official");
+  }, [modelEditorState.officialModelOrder, modelEditorState.upstreamModels, thirdPartyModelOptions]);
 
   const toggleDraftModel = useCallback((model: string, checked: boolean) => {
     if (checked) {
@@ -322,6 +348,7 @@ export function useModelSelection({
       manualThirdPartyModels,
       deletedThirdPartyModels: deletedModels,
       supportsAutoReview,
+      modelOrderMode: draftModelOrderMode,
       modelContexts: Object.fromEntries(Object.entries(draftModelContexts).filter(([model]) =>
         includesModelId(modelEditorState.officialModelIds, model) || includesModelId(thirdPartyModelOptions, model))),
       supports1MContextModels: draft1MModels.filter(
@@ -349,6 +376,7 @@ export function useModelSelection({
     setStatus,
     modelPickerRouteId,
     draft1MModels,
+    draftModelOrderMode,
     draftModelContexts,
     modelEditorState.officialModelIds,
     thirdPartyModelOptions,
@@ -356,7 +384,10 @@ export function useModelSelection({
 
   const saveModelSelection = useCallback(async () => {
     await runOperation("save-models", async () => {
-      const normalizedDraftModels = uniqueModelIds(draftModels);
+      const normalizedDraftModels = uniqueModelIds([
+        ...modelEditorState.officialModels.map((model) => model.slug),
+        ...thirdPartyModelOptions,
+      ]).filter((model) => draftModelSet.has(modelKey(model)));
       const {
         matching: officialModels,
         remaining: thirdPartyModels,
@@ -379,11 +410,32 @@ export function useModelSelection({
     applyModelSelection,
     deletedThirdPartyModels,
     draftManualThirdPartyModels,
-    draftModels,
+    draftModelSet,
+    modelEditorState.officialModels,
+    thirdPartyModelOptions,
     draftAutoReviewSupported,
     officialSlugKeys,
     runOperation,
   ]);
+
+  const saveModelOrder = useCallback(async (models: string[], mode: "official" | "manual") => {
+    let saved = false;
+    await runOperation("save-model-order", async () => {
+      const key = currentProviderSnapshot?.ownershipKey;
+      if (!key || !config) throw new Error("当前没有可用的模型清单");
+      const result = await invoke<{ config: Config; modelState: ModelState } & ModelRuntimeUpdate>("save_selected_models", {
+        officialModels: [], thirdPartyModels: models,
+        manualThirdPartyModels: config.manualThirdPartyModelsByProvider[key] ?? [],
+        modelOrderMode: mode,
+      });
+      setPersistedConfig(result.config);
+      setModelState(result.modelState);
+      setStatus((current) => ({ ...current, restartRequired: result.restartRequired ?? current.restartRequired }));
+      setNotice(modelSelectionNotice(result, "已保存模型顺序"));
+      saved = true;
+    });
+    return saved;
+  }, [config, currentProviderSnapshot, runOperation, setNotice, setPersistedConfig, setStatus]);
 
   return {
     subagentModelOptions,
@@ -411,5 +463,9 @@ export function useModelSelection({
     updateCustomModelInput,
     addCustomModel,
     saveModelSelection,
+    draftModelOrderMode,
+    moveDraftModel,
+    restoreDraftModelOrder,
+    saveModelOrder,
   };
 }

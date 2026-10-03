@@ -17,6 +17,7 @@ import {
   visibleModelOptions,
 } from "./modelPickerPagination";
 import { modelKey } from "./modelIds";
+import { ModelOrderControls } from "./components/ModelOrderControls";
 import {
   Badge,
   Button,
@@ -55,6 +56,9 @@ type ModelPickerDialogProps = {
   onDeleteThirdPartyModel: (model: string) => void;
   onAutoReviewSupportedChange: (checked: boolean) => void;
   onSave: () => void;
+  modelOrderMode: "official" | "manual";
+  onMoveModel: (model: string, direction: -1 | 1) => void;
+  onRestoreModelOrder: () => void;
 };
 
 function ModelPickerDialogComponent({
@@ -81,6 +85,9 @@ function ModelPickerDialogComponent({
   onDeleteThirdPartyModel,
   onAutoReviewSupportedChange,
   onSave,
+  modelOrderMode,
+  onMoveModel,
+  onRestoreModelOrder,
 }: ModelPickerDialogProps) {
   const [modelQuery, setModelQuery] = useState("");
   const [visibleThirdPartyCount, setVisibleThirdPartyCount] = useState(
@@ -257,6 +264,12 @@ function ModelPickerDialogComponent({
           </div>
           {thirdPartyModelOptions.length > 0 && (
             <div className="px-2 pb-1.5 pt-1">
+              <div className="flex items-center justify-between gap-2 text-xs">
+                <span>{modelOrderMode === "official" ? "跟随官方排序" : "手动排序"}</span>
+                <Button variant="ghost" size="xs" disabled={isBusy || !modelState.officialModelOrder?.length}
+                  onPress={onRestoreModelOrder}>恢复官方排序</Button>
+              </div>
+              {!modelState.officialModelOrder?.length && <p className="text-xs">官方排序暂不可用，保留当前顺序。</p>}
               <Input
                 value={modelQuery}
                 onChange={(event) => {
@@ -284,6 +297,8 @@ function ModelPickerDialogComponent({
                   aria-label={`当前 provider 支持 ${model}`}
                 />
                 <span className="min-w-0 flex-1 break-words text-xs font-semibold text-[#1d1d1f]">{model}</span>
+                <ModelOrderControls model={model} index={thirdPartyModelOptions.indexOf(model)}
+                  count={thirdPartyModelOptions.length} disabled={isBusy} onMove={onMoveModel} />
                 <Checkbox
                   checked={draft1MModelSet.has(modelKey(model))}
                   disabled={isBusy}

@@ -166,6 +166,7 @@ fn renderer_model_catalog_keeps_supported_models_before_configured_models() {
             .map(|model| model.slug.clone())
             .collect(),
         official_models,
+        official_model_order: Vec::new(),
         third_party_models: vec!["provider-fast-coder".into()],
         third_party_model_metadata: Vec::new(),
         manual_third_party_models: vec!["provider-fast-coder".into()],

@@ -26,6 +26,7 @@ test("official settings use effective availability and save only the displayed c
     "@heroui/react": components,
     "./components/ui": components,
     "./components/ModelCombobox": components,
+    "./components/ModelOrderEditor": components,
     "./modelIds": await loadTypeScriptModule(new URL("../src/modelIds.ts", import.meta.url)),
     "./modelRoutes": { globalDefaultForProvider: (config) => config.defaultModel },
     "./overlay.constants": { SETTINGS_OVERLAY_Z_INDEX: 1 },

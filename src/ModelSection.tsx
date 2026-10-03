@@ -29,6 +29,7 @@ import {
   Switch,
 } from "./components/ui";
 import { ModelCombobox } from "./components/ModelCombobox";
+import { ModelOrderEditor } from "./components/ModelOrderEditor";
 import type { SubagentModelOption } from "./subagentModels";
 import { modelIdsEqual, modelKey, uniqueModelIds } from "./modelIds";
 import { globalDefaultForProvider } from "./modelRoutes";
@@ -87,6 +88,7 @@ type ModelSectionProps = {
     modelContexts: Record<string, ModelContextConfig>,
   ) => Promise<boolean>;
   onSetDefaultModel: (model: string) => void;
+  onSaveModelOrder: (models: string[], mode: "official" | "manual") => Promise<boolean>;
   routerSessionDiagnosis: RouterSessionDiagnosis | null;
   onMigrateRouterSessions: (targetProvider: string) => void;
 };
@@ -116,6 +118,7 @@ function ModelSectionComponent({
   onToggleAccountUsage,
   onSaveOfficialRouteSettings,
   onSetDefaultModel,
+  onSaveModelOrder,
   routerSessionDiagnosis,
   onMigrateRouterSessions,
 }: ModelSectionProps) {
@@ -443,6 +446,11 @@ function ModelSectionComponent({
                     </div>
 
                     {group.models.length > 0 ? (
+                      <ModelOrderEditor key={currentProviderSnapshot?.ownershipKey}
+                        models={group.models} officialOrder={modelState.officialModelOrder ?? []}
+                        sourceOrder={modelState.upstreamModels}
+                        mode={config.modelOrderModeByProvider?.[currentProviderSnapshot?.ownershipKey ?? ""]}
+                        disabled={isBusy || dirty} readOnly={group.official} onSave={onSaveModelOrder}>
                       <div className="provider-model-tags">
                         {group.models.map((model) => {
                           const isDefault = modelIdsEqual(group.defaultModel, model);
@@ -482,6 +490,7 @@ function ModelSectionComponent({
                           );
                         })}
                       </div>
+                      </ModelOrderEditor>
                     ) : (
                       <div className="provider-model-empty">
                         <div className="provider-empty-content">

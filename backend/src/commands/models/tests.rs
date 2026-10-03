@@ -948,6 +948,89 @@ fn provider_sync_reclassifies_old_selected_models_by_the_raw_upstream_list() {
 }
 
 #[test]
+fn current_provider_sync_follows_official_priority_only_after_order_mode_is_saved() {
+    use crate::model_order::ModelOrderMode;
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("models_cache.json"),
+        serde_json::to_vec(&json!({"models": [
+            {"slug":"gpt-old", "visibility":"list", "priority": 9},
+            {"slug":"gpt-new", "visibility":"list", "priority": 1},
+            {"slug":"gpt-tied", "visibility":"list", "priority": 1},
+            {"slug":"gpt-unranked", "visibility":"list"}
+        ]}))
+        .unwrap(),
+    )
+    .unwrap();
+    let snapshot = crate::model_ownership::CurrentProviderSnapshot::from_parts(
+        "relay",
+        "https://relay.example/v1",
+        "responses",
+        false,
+    );
+    let key = snapshot.ownership_key.clone();
+    let mut config = CodeyConfig::default();
+    config.attach_current_provider_snapshot(snapshot);
+    let original: Vec<String> = [
+        "custom-b",
+        "custom-a",
+        "gpt-old",
+        "relay/gpt-new",
+        "gpt-tied",
+        "gpt-unranked",
+    ]
+    .map(String::from)
+    .to_vec();
+    config
+        .selected_models_by_provider
+        .insert(key.clone(), original.clone());
+    for mode in [
+        None,
+        Some(ModelOrderMode::Manual),
+        Some(ModelOrderMode::Official),
+    ] {
+        if let Some(mode) = mode {
+            config
+                .model_order_mode_by_provider
+                .insert(key.clone(), mode);
+        }
+        let mut persisted: CodeyConfig =
+            serde_json::from_slice(&serde_json::to_vec(&config).unwrap()).unwrap();
+        persisted
+            .attach_current_provider_snapshot(config.current_provider_snapshot.clone().unwrap());
+        let synced = config_with_current_provider_model_sync(
+            &persisted,
+            [
+                "custom-a",
+                "custom-b",
+                "gpt-old",
+                "relay/gpt-new",
+                "gpt-tied",
+                "gpt-unranked",
+            ]
+            .map(String::from)
+            .to_vec(),
+            true,
+            home.path(),
+        );
+        let expected = if mode == Some(ModelOrderMode::Official) {
+            vec![
+                "relay/gpt-new",
+                "gpt-tied",
+                "gpt-old",
+                "gpt-unranked",
+                "custom-a",
+                "custom-b",
+            ]
+        } else {
+            original.iter().map(String::as_str).collect()
+        };
+        assert_eq!(synced.selected_models_by_provider[&key], expected);
+        assert_eq!(synced.model_order_mode_by_provider.get(&key).copied(), mode);
+    }
+}
+
+#[test]
 fn current_provider_sync_writes_the_fingerprint_key_and_keeps_manual_models() {
     let home = tempfile::tempdir().unwrap();
     let snapshot = crate::model_ownership::CurrentProviderSnapshot::from_parts(
@@ -1327,6 +1410,7 @@ fn renderer_catalog_routes_every_model_through_the_codey_router_carrier() {
             default_reasoning_effort: "medium".into(),
         }],
         official_model_ids: vec!["gpt-5.6-sol".into()],
+        official_model_order: Vec::new(),
         third_party_models: Vec::new(),
         third_party_model_metadata: Vec::new(),
         manual_third_party_models: Vec::new(),

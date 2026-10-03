@@ -27,6 +27,7 @@ mod model_catalog;
 mod model_catalog_store;
 mod model_id;
 mod model_list;
+mod model_order;
 mod model_ownership;
 #[cfg(target_os = "macos")]
 mod native_update_ui;

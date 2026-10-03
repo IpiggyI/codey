@@ -41,7 +41,7 @@ _Avoid_: 模型列表、模型池
 _Avoid_: catalog、模型元数据文件
 
 **思考强度**：
-单个模型可选的推理档位，取值 `minimal`、`low`、`medium`、`high`、`xhigh`。
+单个模型可选的推理档位，包括 `minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`ultra`，具体选项由模型能力决定。
 _Avoid_: 推理强度、effort
 
 **服务档位**：

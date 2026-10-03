@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8" />
+<title>模型排序交互验证</title>
+<div id="root"></div>
+<script type="module">
+  import React from 'react';
+  import { createRoot } from 'react-dom/client';
+  import '../src/tailwind.css';
+  import { UiProvider } from '../src/UiProvider.tsx';
+  import { useModelSelection } from '../src/useModelSelection.ts';
+  import { ModelPickerDialog } from '../src/AppDialogs.tsx';
+  import { ModelSection } from '../src/ModelSection.tsx';
+  const key = 'provider-fingerprint';
+  const snapshot = { id: 'relay', ownershipKey: key, baseUrl: 'https://example.test', wireApi: 'responses', usesOfficialAccountAuth: false };
+  const initialState = { officialModels: [], officialModelIds: [], officialModelOrder: ['gpt-new', 'gpt-old'],
+    thirdPartyModels: ['gpt-old', 'gpt-new'], upstreamModels: ['custom', 'gpt-old', 'gpt-new'],
+    manualThirdPartyModels: [], defaultModel: 'gpt-old' };
+  const initialConfig = { settingsRevision: 1, selectedModelsByProvider: { [key]: initialState.thirdPartyModels },
+    modelOrderModeByProvider: {}, supports1MContextByProvider: {}, modelContextByProvider: {},
+    manualThirdPartyModelsByProvider: {}, declaredOfficialModelsByProvider: {}, upstreamModelsByProvider: { [key]: initialState.upstreamModels },
+    defaultModel: 'gpt-old', miscModel: '' };
+  function Harness() {
+    const [config, setConfig] = React.useState(initialConfig);
+    const [status, setStatus] = React.useState({});
+    const [notice, setNotice] = React.useState(null);
+    const [busy, setBusy] = React.useState(null);
+    const runOperation = async (name, action) => {
+      setBusy(name);
+      try { await action(); } catch (error) { setNotice({ text: error.message }); }
+      finally { setBusy(null); }
+    };
+    const hook = useModelSelection({ config, currentProviderSnapshot: snapshot, officialAccountAvailable: false,
+      runOperation, setPersistedConfig: setConfig, setStatus, setNotice });
+    React.useEffect(() => { hook.setModelState(initialState); }, []);
+    window.updateModelState = (patch) => hook.setModelState(state => ({ ...state, ...patch }));
+    window.__codeyInvokeApi = async (command, args) => {
+      window.savedRequests ??= [];
+      window.savedRequests.push({ command, args });
+      if (window.failSave) throw new Error('保存失败');
+      const nextConfig = { ...config, selectedModelsByProvider: { [key]: args.thirdPartyModels },
+        modelOrderModeByProvider: { [key]: args.modelOrderMode } };
+      return { config: nextConfig, modelState: { ...hook.modelState, thirdPartyModels: args.thirdPartyModels }, modelHotReloaded: true };
+    };
+    return React.createElement(UiProvider, null,
+      React.createElement('button', { onClick: () => hook.openModelPicker(hook.modelState, '', 'relay') }, '打开同步弹窗'),
+      React.createElement('output', { id: 'saved' }, JSON.stringify(config)),
+      React.createElement('output', { id: 'notice' }, notice?.text),
+      React.createElement(ModelSection, { config, onConfigChange: setConfig, currentProviderSnapshot: snapshot,
+        subagentModelOptions: [], officialAccountAvailable: false, popupContainer: null, modelState: hook.modelState,
+        dirty: false, isBusy: !!busy, busy, showAccountUsageInHeader: false, onSyncCurrentProvider() {},
+        onFetchRouteModels: () => hook.openModelPicker(hook.modelState, '', 'relay'), onSetDefaultModel() {},
+        onSaveModelOrder: hook.saveModelOrder, routerSessionDiagnosis: null, onMigrateRouterSessions() {} }),
+      React.createElement(ModelPickerDialog, { open: hook.modelPickerVisible, isBusy: !!busy, busy, container: null,
+        customModelInput: hook.customModelInput, modelInputError: hook.modelInputError, modelSyncWarning: hook.modelSyncWarning,
+        autoReviewSupported: hook.draftAutoReviewSupported, thirdPartyModelOptions: hook.thirdPartyModelOptions,
+        modelState: hook.modelEditorState, draftModelSet: hook.draftModelSet, draft1MModelSet: hook.draft1MModelSet,
+        draftModelContexts: hook.draftModelContexts, onUpdateDraftModelContext: hook.updateDraftModelContext,
+        onToggleDraft1MModel: hook.toggleDraft1MModel, manualThirdPartyModelKeys: hook.draftManualThirdPartyModelKeys,
+        onOpenChange: hook.setModelPickerVisible, onCustomModelInputChange: hook.updateCustomModelInput,
+        onAddCustomModel: hook.addCustomModel, onToggleDraftModel: hook.toggleDraftModel,
+        onDeleteThirdPartyModel: hook.deleteDraftThirdPartyModel, onAutoReviewSupportedChange: hook.setDraftAutoReviewSupported,
+        modelOrderMode: hook.draftModelOrderMode, onMoveModel: hook.moveDraftModel, onRestoreModelOrder: hook.restoreDraftModelOrder,
+        onSave: hook.saveModelSelection })
+    );
+  }
+  createRoot(document.getElementById('root')).render(React.createElement(Harness));
+</script>
+</html>

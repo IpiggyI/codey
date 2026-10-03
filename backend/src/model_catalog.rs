@@ -105,6 +105,7 @@ pub struct ThirdPartyModelAvailability {
 pub struct ModelSelectionState {
     pub official_models: Vec<OfficialModelAvailability>,
     pub official_model_ids: Vec<String>,
+    pub official_model_order: Vec<String>,
     pub third_party_models: Vec<String>,
     pub third_party_model_metadata: Vec<ThirdPartyModelAvailability>,
     pub manual_third_party_models: Vec<String>,
@@ -275,6 +276,10 @@ fn refresh_for_provider_with_transport_preferences(args: CatalogRefreshArgs<'_>)
         // Codex 只发送模型目录里声明过的思考强度。目录没有 ultra 时，界面仍能
         // 选中它，请求会被静默改成该模型的默认档（luna 是 medium）。
         ensure_forwarded_ultra_level(model);
+        if !official_provider && model["slug"].as_str().is_some_and(is_gpt_61_sol) {
+            model["supported_reasoning_levels"] =
+                third_party_reasoning_levels("gpt-6.1-sol", model, true);
+        }
         expose_supported_model(model);
         if declares_fast_support {
             add_fast_speed_controls(model);
@@ -321,6 +326,9 @@ fn refresh_for_provider_with_transport_preferences(args: CatalogRefreshArgs<'_>)
                 preserve_source_runtime_metadata,
             ));
         }
+    }
+    if !official_provider {
+        crate::model_order::sort_catalog(&mut catalog_models, selected_models);
     }
     if let Some(websocket_models) = websocket_models {
         let websocket_model_keys = websocket_models
@@ -570,6 +578,7 @@ pub(crate) fn selection_state_with_catalog_options(
     Ok(ModelSelectionState {
         official_models,
         official_model_ids,
+        official_model_order: official_model_order(home, catalog_dir),
         third_party_models,
         third_party_model_metadata,
         manual_third_party_models,
@@ -986,6 +995,7 @@ type CatalogSignature = Vec<(PathBuf, u64, Option<std::time::SystemTime>)>;
 struct OfficialCatalogEntries {
     candidates: Vec<Value>,
     templates: Vec<Value>,
+    official_order: Vec<String>,
 }
 
 type OfficialEntriesCache =
@@ -1037,6 +1047,12 @@ fn read_official_entries(
     Ok(entries)
 }
 
+pub(crate) fn official_model_order(home: &Path, catalog_dir: &Path) -> Vec<String> {
+    read_official_entries(home, catalog_dir, None)
+        .map(|catalog| catalog.official_order.clone())
+        .unwrap_or_default()
+}
+
 fn read_official_entries_uncached(
     paths: &[PathBuf],
     complete_candidate_from_fallbacks: bool,
@@ -1044,6 +1060,7 @@ fn read_official_entries_uncached(
     let mut catalogs = Vec::new();
     let mut native_models = None;
     let mut bundled_fast_model_slugs = HashSet::new();
+    let mut bundled_official_order = Vec::new();
     let mut last_error = None;
     for (index, path) in paths.iter().enumerate() {
         let bytes = match fs::read(path) {
@@ -1070,6 +1087,7 @@ fn read_official_entries_uncached(
     }
     if let Some(value) = codey_runtime_core::model_suffix::bundled_model_catalog() {
         let models = official_models_from_value(&value);
+        bundled_official_order = crate::model_order::official_order(&models);
         if !models.is_empty() {
             bundled_fast_model_slugs.extend(models.iter().filter_map(|model| {
                 declares_fast_speed_support(model)
@@ -1082,6 +1100,7 @@ fn read_official_entries_uncached(
     }
 
     if let Some(native_models) = native_models {
+        let official_order = crate::model_order::official_order(&native_models);
         let templates = native_models
             .into_iter()
             .map(|mut model| {
@@ -1133,6 +1152,7 @@ fn read_official_entries_uncached(
         return Ok(OfficialCatalogEntries {
             candidates,
             templates,
+            official_order,
         });
     }
 
@@ -1168,6 +1188,7 @@ fn read_official_entries_uncached(
     Ok(OfficialCatalogEntries {
         candidates: templates.clone(),
         templates,
+        official_order: bundled_official_order,
     })
 }
 
@@ -1422,6 +1443,23 @@ fn fallback_third_party_reasoning_efforts() -> Vec<String> {
         .collect()
 }
 
+fn is_gpt_61_sol(model: &str) -> bool {
+    model_id::equal(route_scoped_upstream_model_id(model), "gpt-6.1-sol")
+}
+
+fn third_party_model_efforts(model: &str, template: Option<&Value>) -> Vec<String> {
+    if is_gpt_61_sol(model) {
+        // GPT-6.1 Sol 的官方能力声明包含六档；旧模板缺失时也保留该精确声明。
+        return THIRD_PARTY_REASONING_EFFORT_ALLOWLIST
+            .iter()
+            .map(|effort| (*effort).to_string())
+            .collect();
+    }
+    template
+        .map(third_party_reasoning_efforts_from_value)
+        .unwrap_or_else(fallback_third_party_reasoning_efforts)
+}
+
 fn route_scoped_upstream_model_id(model_id: &str) -> &str {
     let model_id = model_id.trim();
     crate::model_id::parse_alias(model_id)
@@ -1448,9 +1486,7 @@ fn third_party_model_metadata_from_entries(
     third_party_models: &[String],
 ) -> Vec<ThirdPartyModelAvailability> {
     let availability = |slug: String, entry: Option<&Value>| {
-        let supported_reasoning_efforts = entry
-            .map(third_party_reasoning_efforts_from_value)
-            .unwrap_or_else(fallback_third_party_reasoning_efforts);
+        let supported_reasoning_efforts = third_party_model_efforts(&slug, entry);
         ThirdPartyModelAvailability {
             slug,
             supported_reasoning_efforts,
@@ -1727,12 +1763,12 @@ fn remove_fast_speed_controls(model: &mut Value) {
     }
 }
 
-fn third_party_reasoning_levels(template: &Value, use_template_metadata: bool) -> Value {
-    let efforts = if use_template_metadata {
-        third_party_reasoning_efforts_from_value(template)
-    } else {
-        fallback_third_party_reasoning_efforts()
-    };
+fn third_party_reasoning_levels(
+    model_id: &str,
+    template: &Value,
+    use_template_metadata: bool,
+) -> Value {
+    let efforts = third_party_model_efforts(model_id, use_template_metadata.then_some(template));
     Value::Array(
         efforts
             .iter()
@@ -1760,7 +1796,7 @@ fn synthetic_model(
     model["codey_source"] = json!("third_party");
     model["default_reasoning_level"] = json!(THIRD_PARTY_DEFAULT_REASONING_EFFORT);
     model["supported_reasoning_levels"] =
-        third_party_reasoning_levels(template, preserve_source_runtime_metadata);
+        third_party_reasoning_levels(model_id, template, preserve_source_runtime_metadata);
     if let Some(object) = model.as_object_mut() {
         object.remove("availability_nux");
         object.remove("upgrade");
@@ -2065,6 +2101,128 @@ mod tests {
             serde_json::to_vec(&cache).unwrap(),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn official_order_fallback_keeps_bundled_source_order_for_equal_priorities() {
+        let home = tempfile::tempdir().unwrap();
+        let state = selection_state(home.path(), false, None, &[], None).unwrap();
+        let positions = state
+            .official_model_order
+            .iter()
+            .filter(|model| ["gpt-5.6-sol", "gpt-6-astra"].contains(&model.as_str()))
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(positions, ["gpt-5.6-sol", "gpt-6-astra"]);
+    }
+
+    #[test]
+    fn model_state_exposes_official_priority_without_changing_saved_provider_order() {
+        let home = tempfile::tempdir().unwrap();
+        let mut cache = official_cache();
+        let models = cache["models"].as_array_mut().unwrap();
+        for model in models.iter_mut() {
+            model["priority"] = json!(20);
+        }
+        models[0]["priority"] = json!(90);
+        models[1]["priority"] = json!(1);
+        fs::write(
+            home.path().join("models_cache.json"),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+        let selected = vec!["gpt-5.6-sol".to_string(), "custom".to_string()];
+        let state = selection_state(home.path(), false, Some(&selected), &selected, None).unwrap();
+        assert_eq!(state.third_party_models, selected);
+        assert_eq!(
+            state.official_model_order.first().map(String::as_str),
+            Some("gpt-5.5")
+        );
+        assert_eq!(
+            state.official_model_order.last().map(String::as_str),
+            Some("gpt-5.6-sol")
+        );
+    }
+
+    #[test]
+    fn provider_catalog_preserves_saved_order_across_native_and_synthetic_models() {
+        let home = tempfile::tempdir().unwrap();
+        write_cache(home.path());
+        let selected = vec![
+            "custom-model".to_string(),
+            "gpt-5.5".to_string(),
+            "gpt-5.6-sol".to_string(),
+        ];
+        refresh_for_provider(home.path(), false, Some(&selected), &selected).unwrap();
+        let catalog: Value =
+            serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
+                .unwrap();
+        let models = catalog["models"].as_array().unwrap();
+        assert_eq!(
+            models
+                .iter()
+                .filter_map(|m| m["slug"].as_str())
+                .collect::<Vec<_>>(),
+            selected
+        );
+        assert!(
+            models
+                .windows(2)
+                .all(|pair| pair[0]["priority"].as_u64() < pair[1]["priority"].as_u64())
+        );
+    }
+
+    #[test]
+    fn gpt_61_sol_keeps_six_efforts_in_provider_state_and_generated_catalog() {
+        for template_levels in [0, 4, 6] {
+            let home = tempfile::tempdir().unwrap();
+            let mut cache = official_cache();
+            if template_levels > 0 {
+                let mut model = cache["models"][0].clone();
+                model["slug"] = json!("gpt-6.1-sol");
+                model["supported_reasoning_levels"]
+                    .as_array_mut()
+                    .unwrap()
+                    .truncate(template_levels);
+                cache["models"].as_array_mut().unwrap().push(model);
+            }
+            fs::write(
+                home.path().join("models_cache.json"),
+                serde_json::to_vec(&cache).unwrap(),
+            )
+            .unwrap();
+            let selected = vec!["gpt-6.1-sol".to_string(), "unknown-model".to_string()];
+            let state =
+                selection_state(home.path(), false, Some(&selected), &selected, None).unwrap();
+            let metadata = state
+                .third_party_model_metadata
+                .iter()
+                .find(|m| m.slug == "gpt-6.1-sol")
+                .unwrap();
+            assert_eq!(
+                metadata.supported_reasoning_efforts,
+                ["low", "medium", "high", "xhigh", "max", "ultra"]
+            );
+            refresh_for_provider(home.path(), false, Some(&selected), &selected).unwrap();
+            let catalog: Value = serde_json::from_slice(
+                &fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap(),
+            )
+            .unwrap();
+            let models = catalog["models"].as_array().unwrap();
+            let sol = models.iter().find(|m| m["slug"] == "gpt-6.1-sol").unwrap();
+            assert_eq!(
+                reasoning_efforts_from_value(sol),
+                ["low", "medium", "high", "xhigh", "max", "ultra"]
+            );
+            let unknown = models
+                .iter()
+                .find(|m| m["slug"] == "unknown-model")
+                .unwrap();
+            assert_eq!(
+                reasoning_efforts_from_value(unknown),
+                ["low", "medium", "high", "xhigh"]
+            );
+        }
     }
 
     #[test]
@@ -2872,7 +3030,7 @@ mod tests {
     }
 
     #[test]
-    fn third_party_catalog_keeps_supported_official_models_before_configured_models() {
+    fn third_party_catalog_keeps_selected_order_for_official_and_configured_models() {
         let home = tempfile::tempdir().unwrap();
         write_cache_with_template_only(home.path());
         let upstream = vec![
@@ -2898,8 +3056,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 "gpt-5.6-sol",
-                "gpt-5.3-codex-spark",
                 "gpt-5.4",
+                "gpt-5.3-codex-spark",
                 "claude-sonnet",
             ]
         );
@@ -3262,7 +3420,7 @@ mod tests {
             serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
                 .unwrap();
         let models = catalog["models"].as_array().unwrap();
-        let model = models.last().unwrap();
+        let model = models.first().unwrap();
         assert_eq!(model["slug"], "provider-fast-coder");
         assert_eq!(model["codey_source"], "third_party");
         assert_eq!(model["visibility"], "list");

@@ -45,3 +45,23 @@ export const uniqueModelIds = (models: readonly string[]) => {
     return unique;
   }, []);
 };
+
+export function orderModelIds(models: readonly string[], order: readonly string[], matchAliases = false) {
+  const positions = new Map(order.map((model, index) => [modelKey(model), index]));
+  const position = (model: string) => {
+    const key = modelKey(model);
+    const separator = key.indexOf("/");
+    return positions.get(key) ?? (matchAliases && separator > 0
+      ? positions.get(key.slice(separator + 1).trim()) : undefined) ?? positions.size;
+  };
+  return uniqueModelIds(models).sort((left, right) => position(left) - position(right));
+}
+
+export function moveModelId(models: readonly string[], model: string, direction: -1 | 1) {
+  const index = models.findIndex((item) => modelIdsEqual(item, model));
+  const target = index + direction;
+  if (index < 0 || target < 0 || target >= models.length) return [...models];
+  const next = [...models];
+  [next[index], next[target]] = [next[target], next[index]];
+  return next;
+}

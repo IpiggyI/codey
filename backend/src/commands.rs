@@ -975,6 +975,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
                 &args,
                 "modelContexts",
             ),
+            optional_argument::<crate::model_order::ModelOrderMode>(&args, "modelOrderMode"),
         ) {
             (
                 Ok(official_models),
@@ -985,6 +986,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
                 Ok(route_id),
                 Ok(supports_1m_context_models),
                 Ok(model_contexts),
+                Ok(model_order_mode),
             ) => {
                 save_selected_models(
                     state,
@@ -996,17 +998,19 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
                     route_id,
                     supports_1m_context_models,
                     model_contexts,
+                    model_order_mode,
                 )
                 .await
             }
-            (Err(error), _, _, _, _, _, _, _)
-            | (_, Err(error), _, _, _, _, _, _)
-            | (_, _, Err(error), _, _, _, _, _)
-            | (_, _, _, Err(error), _, _, _, _)
-            | (_, _, _, _, Err(error), _, _, _)
-            | (_, _, _, _, _, Err(error), _, _)
-            | (_, _, _, _, _, _, Err(error), _)
-            | (_, _, _, _, _, _, _, Err(error)) => Err(error),
+            (Err(error), _, _, _, _, _, _, _, _)
+            | (_, Err(error), _, _, _, _, _, _, _)
+            | (_, _, Err(error), _, _, _, _, _, _)
+            | (_, _, _, Err(error), _, _, _, _, _)
+            | (_, _, _, _, Err(error), _, _, _, _)
+            | (_, _, _, _, _, Err(error), _, _, _)
+            | (_, _, _, _, _, _, Err(error), _, _)
+            | (_, _, _, _, _, _, _, Err(error), _)
+            | (_, _, _, _, _, _, _, _, Err(error)) => Err(error),
         },
         "save_default_model" => match (
             string_argument(&args, "model"),

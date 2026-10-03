@@ -608,6 +608,8 @@ pub struct CodeyConfig {
     /// the local Codex configuration.
     #[serde(default)]
     pub selected_models_by_provider: BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub model_order_mode_by_provider: BTreeMap<String, crate::model_order::ModelOrderMode>,
     /// Official native models explicitly hidden by the user. An empty entry is
     /// retained as the migration marker so later native models default to visible.
     #[serde(default)]
@@ -764,6 +766,7 @@ impl Default for CodeyConfig {
             codex_app_path: String::new(),
             user_scripts: Vec::new(),
             selected_models_by_provider: BTreeMap::new(),
+            model_order_mode_by_provider: BTreeMap::new(),
             excluded_official_models_by_provider: BTreeMap::new(),
             supports_1m_context_by_provider: BTreeMap::new(),
             model_context_by_provider: BTreeMap::new(),

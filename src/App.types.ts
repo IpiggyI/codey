@@ -63,6 +63,7 @@ export type Config = {
   codexAppPath: string;
   userScripts: string[];
   selectedModelsByProvider: Record<string, string[]>;
+  modelOrderModeByProvider?: Record<string, "official" | "manual">;
   supports1MContextByProvider: Record<string, string[]>;
   modelContextByProvider?: Record<string, Record<string, ModelContextConfig>>;
   manualThirdPartyModelsByProvider: Record<string, string[]>;
@@ -102,6 +103,7 @@ export type ThirdPartyModelState = {
 export type ModelState = {
   officialModels: OfficialModelState[];
   officialModelIds: string[];
+  officialModelOrder?: string[];
   thirdPartyModels: string[];
   thirdPartyModelMetadata?: ThirdPartyModelState[];
   manualThirdPartyModels: string[];

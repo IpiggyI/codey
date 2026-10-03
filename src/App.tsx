@@ -84,6 +84,7 @@ function currentProviderModelState(
   return {
     officialModels: [],
     officialModelIds: catalog.officialModelIds,
+    officialModelOrder: catalog.officialModelOrder,
     thirdPartyModels: selectedModels,
     thirdPartyModelMetadata: catalog.thirdPartyModelMetadata,
     manualThirdPartyModels:
@@ -226,6 +227,10 @@ export function App({
     updateCustomModelInput,
     addCustomModel,
     saveModelSelection,
+    draftModelOrderMode,
+    moveDraftModel,
+    restoreDraftModelOrder,
+    saveModelOrder,
   } = useModelSelection({
     config,
     currentProviderSnapshot,
@@ -1204,6 +1209,7 @@ export function App({
               onToggleAccountUsage={handleToggleAccountUsage}
               onSaveOfficialRouteSettings={handleSaveOfficialRouteSettings}
               onSetDefaultModel={handleSetRouteDefaultModel}
+              onSaveModelOrder={saveModelOrder}
               routerSessionDiagnosis={routerSessionDiagnosis}
               onMigrateRouterSessions={askMigrateRouterSessions}
             />
@@ -1312,6 +1318,9 @@ export function App({
         onDeleteThirdPartyModel={deleteDraftThirdPartyModel}
         onAutoReviewSupportedChange={setDraftAutoReviewSupported}
         onSave={saveModelSelection}
+        modelOrderMode={draftModelOrderMode}
+        onMoveModel={moveDraftModel}
+        onRestoreModelOrder={restoreDraftModelOrder}
       />
 
       <ConfirmationDialogHost
