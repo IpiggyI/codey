@@ -1,9 +1,5 @@
-import type { Config, CurrentProviderSnapshot } from "./App.types";
+import type { Config } from "./App.types";
 import { modelIdsEqual } from "./modelIds";
-
-export function modelListKey(snapshot: CurrentProviderSnapshot) {
-  return snapshot.ownershipKey;
-}
 
 export function stripRouteAlias(value: string) {
   const trimmed = value.trim();

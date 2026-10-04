@@ -553,6 +553,21 @@ async fn request_log_save_without_a_running_router_reports_not_applicable_withou
 }
 
 #[tokio::test]
+async fn request_log_hot_reload_reports_superseded_config() {
+    let state = Arc::new(AppState::default());
+    let previous = state.config.read().await.clone();
+    state.config.write().await.route_request_log.enabled = !previous.route_request_log.enabled;
+
+    let outcome = hot_reload_runtime_request_log(&state, &previous).await;
+
+    assert_eq!(outcome.health(), "superseded");
+    assert_eq!(
+        outcome.error(),
+        Some("Codey 设置在请求日志热更新前已被更新；已跳过过期配置")
+    );
+}
+
+#[tokio::test]
 async fn disabled_local_router_keeps_route_config_read_only_without_blocking_other_settings() {
     let directory = tempfile::tempdir().unwrap();
     let store = ConfigStore::new(directory.path().join("config.json"));

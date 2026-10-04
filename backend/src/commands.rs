@@ -93,7 +93,6 @@ use crate::notifications::NotificationChannelConfig;
 use crate::pending_approval;
 use crate::plugin_marketplace;
 use crate::route_request_log::RouteRequestLogQuery;
-use crate::route_request_log::RouteRequestLogReconfigure;
 use crate::session_delete;
 use crate::session_metadata;
 use crate::session_transfer;
@@ -658,56 +657,6 @@ async fn save_config_to_store(state: &AppState, config: &CodeyConfig) -> Result<
         .await
         .map_err(|error| format!("保存 Codey 配置任务异常退出：{error}"))?
         .map_err(|error| error.to_string())
-}
-
-#[allow(dead_code)]
-const LOCAL_ROUTE_CONFIG_READ_ONLY_ERROR: &str =
-    "本地路由已关闭，本地线路配置当前为只读；请先启用本地路由";
-
-#[allow(dead_code)]
-pub(super) fn ensure_local_route_config_writable(config: &CodeyConfig) -> Result<(), String> {
-    if config.local_router_enabled {
-        Ok(())
-    } else {
-        Err(LOCAL_ROUTE_CONFIG_READ_ONLY_ERROR.to_string())
-    }
-}
-
-#[allow(dead_code)]
-fn local_route_config_changed(previous: &CodeyConfig, next: &CodeyConfig) -> bool {
-    previous.active_profile_id != next.active_profile_id
-        || previous.profiles != next.profiles
-        || previous.selected_models_by_provider != next.selected_models_by_provider
-        || previous.manual_third_party_models_by_provider
-            != next.manual_third_party_models_by_provider
-        || previous.declared_official_models_by_provider
-            != next.declared_official_models_by_provider
-        || previous.upstream_models_by_provider != next.upstream_models_by_provider
-        || previous.supports_1m_context_by_provider != next.supports_1m_context_by_provider
-        || previous.model_context_by_provider != next.model_context_by_provider
-        || previous.default_model != next.default_model
-        || previous.initial_route_import_completed != next.initial_route_import_completed
-}
-
-#[allow(dead_code)]
-fn ensure_local_route_config_change_allowed(
-    previous: &CodeyConfig,
-    next: &CodeyConfig,
-) -> Result<(), String> {
-    if previous.local_router_enabled && next.local_router_enabled {
-        return Ok(());
-    }
-    if local_route_config_changed(previous, next) {
-        return Err(LOCAL_ROUTE_CONFIG_READ_ONLY_ERROR.to_string());
-    }
-    Ok(())
-}
-
-pub(super) fn validate_official_account_config_change(
-    _previous: &CodeyConfig,
-    _next: &CodeyConfig,
-) -> Result<(), String> {
-    Ok(())
 }
 
 pub(super) const USER_CONFIG_PARSE_ERROR_PREFIX: &str = "用户 Codex 配置无法解析，已拒绝启动";
@@ -1564,7 +1513,6 @@ async fn save_codey_config_locked(
     config.quota_unlock_enabled = config_input.quota_unlock_enabled;
     config.cache_valid_minutes = config_input.cache_valid_minutes;
     let mut config = config.normalize();
-    validate_official_account_config_change(&previous, &config)?;
     config.remember_current_provider_official_model_support(explicitly_configured_subagent_models);
     config = config.normalize();
     if config.subagent_optimization
@@ -1730,7 +1678,7 @@ async fn finish_codey_config_save(
         "subagentConfigHealth":subagent_config_health,
         "subagentConfigRepairReasons":subagent_config_repair_reasons,
         "subagentConfigHotReloadError":subagent_config_hot_reload_error,
-        "routeRequestLogHotReloaded":route_request_log_hot_reload.reloaded(),
+        "routeRequestLogHotReloaded":false,
         "routeRequestLogHealth":route_request_log_hot_reload.health(),
         "routeRequestLogHotReloadError":route_request_log_hot_reload.error(),
     })))
@@ -1811,11 +1759,7 @@ fn subagent_hot_reload_commit_is_current(
 enum RouteRequestLogHotReloadStatus {
     #[default]
     NotApplicable,
-    Unchanged,
-    Enabled,
-    Disabled,
     Superseded,
-    Failed,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1832,28 +1776,10 @@ impl RouteRequestLogHotReloadOutcome {
         }
     }
 
-    fn failed(error: impl Into<String>) -> Self {
-        Self {
-            status: RouteRequestLogHotReloadStatus::Failed,
-            error: Some(error.into()),
-        }
-    }
-
-    fn reloaded(&self) -> bool {
-        matches!(
-            self.status,
-            RouteRequestLogHotReloadStatus::Enabled | RouteRequestLogHotReloadStatus::Disabled
-        )
-    }
-
     fn health(&self) -> &'static str {
         match self.status {
             RouteRequestLogHotReloadStatus::NotApplicable => "not_applicable",
-            RouteRequestLogHotReloadStatus::Unchanged => "unchanged",
-            RouteRequestLogHotReloadStatus::Enabled => "enabled",
-            RouteRequestLogHotReloadStatus::Disabled => "disabled",
             RouteRequestLogHotReloadStatus::Superseded => "superseded",
-            RouteRequestLogHotReloadStatus::Failed => "failed",
         }
     }
 
@@ -1899,32 +1825,7 @@ async fn hot_reload_runtime_request_log(
         );
     }
 
-    let _ = (runtime, desired);
-    match Ok::<Option<RouteRequestLogReconfigure>, anyhow::Error>(None) {
-        Ok(Some(RouteRequestLogReconfigure::Unchanged)) => RouteRequestLogHotReloadOutcome {
-            status: RouteRequestLogHotReloadStatus::Unchanged,
-            error: None,
-        },
-        Ok(Some(RouteRequestLogReconfigure::Enabled)) => RouteRequestLogHotReloadOutcome {
-            status: RouteRequestLogHotReloadStatus::Enabled,
-            error: None,
-        },
-        Ok(Some(RouteRequestLogReconfigure::Disabled)) => RouteRequestLogHotReloadOutcome {
-            status: RouteRequestLogHotReloadStatus::Disabled,
-            error: None,
-        },
-        Ok(None) => RouteRequestLogHotReloadOutcome::default(),
-        Err(error) => {
-            let error = format!("请求日志热更新失败：{error:#}");
-            error_log::record_failure(
-                "route_request_log_hot_reload_failed",
-                "reconfigure_route_request_log",
-                error.clone(),
-                json!({}),
-            );
-            RouteRequestLogHotReloadOutcome::failed(error)
-        }
-    }
+    RouteRequestLogHotReloadOutcome::default()
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

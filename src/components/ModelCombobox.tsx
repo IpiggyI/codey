@@ -19,11 +19,10 @@ import {
   resolveCurrentProviderModelOption,
   resolveSubagentModelOption,
 } from "../subagentModels";
-import {
-  MODEL_GROUP_HEIGHT,
-  MODEL_LIST_HEIGHT,
-  MODEL_OPTION_HEIGHT,
-} from "../modelComboboxWindow";
+
+const MODEL_OPTION_HEIGHT = 48;
+const MODEL_GROUP_HEIGHT = 28;
+const MODEL_LIST_HEIGHT = 280;
 
 type ModelOption = {
   id: string;
