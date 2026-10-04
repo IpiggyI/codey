@@ -260,33 +260,40 @@ async fn run_startup_session_maintenance(
     Ok(session_maintenance_summary(&index_cleanup))
 }
 
-pub(crate) async fn find_configured_codex_app_dir(configured_app_path: &str) -> Result<Option<PathBuf>> {
+pub(crate) async fn find_configured_codex_app_dir(
+    configured_app_path: &str,
+) -> Result<Option<PathBuf>> {
+    let configured_app_path = configured_app_path.to_owned();
+    tokio::task::spawn_blocking(move || find_configured_codex_app_dir_sync(&configured_app_path))
+        .await
+        .map_err(|error| anyhow::Error::new(error).context("定位 Codex App 任务异常退出"))?
+}
+
+pub(crate) fn find_configured_codex_app_dir_sync(
+    configured_app_path: &str,
+) -> Result<Option<PathBuf>> {
     let configured_app_path = configured_app_path.trim();
     let configured_app_path =
         (!configured_app_path.is_empty()).then(|| PathBuf::from(configured_app_path));
-    tokio::task::spawn_blocking(move || {
-        // A Store update can remove the saved version directory entirely.
-        // Resolve that registered family before requiring the old path to exist.
-        #[cfg(windows)]
-        let configured_app_path = configured_app_path
-            .map(|path| refresh_windows_packaged_app_dir(&path))
-            .transpose()?;
-        let app_dir = resolve_codex_app_dir_with_saved(configured_app_path.as_deref(), None);
-        if let Some(app_dir) = app_dir.as_deref() {
-            error_log::refresh_codex_app_version(Some(app_dir), None);
-        }
-        let app_dir = app_dir
-            .map(|path| -> Result<PathBuf> {
-                #[cfg(windows)]
-                let path = refresh_windows_packaged_app_dir(&path)?;
-                codey_runtime_core::app_paths::validate_codex_app_dir(&path)?;
-                Ok(path)
-            })
-            .transpose()?;
-        Ok::<_, anyhow::Error>(app_dir)
-    })
-    .await
-    .map_err(|error| anyhow::Error::new(error).context("定位 Codex App 任务异常退出"))?
+    // A Store update can remove the saved version directory entirely.
+    // Resolve that registered family before requiring the old path to exist.
+    #[cfg(windows)]
+    let configured_app_path = configured_app_path
+        .map(|path| refresh_windows_packaged_app_dir(&path))
+        .transpose()?;
+    let app_dir = resolve_codex_app_dir_with_saved(configured_app_path.as_deref(), None);
+    if let Some(app_dir) = app_dir.as_deref() {
+        error_log::refresh_codex_app_version(Some(app_dir), None);
+    }
+    let app_dir = app_dir
+        .map(|path| -> Result<PathBuf> {
+            #[cfg(windows)]
+            let path = refresh_windows_packaged_app_dir(&path)?;
+            codey_runtime_core::app_paths::validate_codex_app_dir(&path)?;
+            Ok(path)
+        })
+        .transpose()?;
+    Ok(app_dir)
 }
 
 async fn resolve_configured_codex_app_dir(config: &CodeyConfig) -> Result<PathBuf> {

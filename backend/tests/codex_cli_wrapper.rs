@@ -46,6 +46,20 @@ async fn detached_browser_cli_uses_saved_target_without_wrapper_environment() {
     std::fs::create_dir_all(target.parent().unwrap()).unwrap();
     std::fs::write(&target, "#!/bin/sh\nprintf '%s\\n' \"$@\"\nexit 17\n").unwrap();
     std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+    std::fs::write(app.join("Contents/MacOS/Codex"), "test desktop").unwrap();
+    std::fs::write(
+        app.join("Contents/Info.plist"),
+        "<plist><dict><key>CFBundleIdentifier</key><string>com.openai.codex</string></dict></plist>",
+    )
+    .unwrap();
+    let package = app.join("Contents/Resources/app/package.json");
+    std::fs::create_dir_all(package.parent().unwrap()).unwrap();
+    std::fs::write(
+        package,
+        r#"{"name":"codex","productName":"Codex","version":"1.0.0"}"#,
+    )
+    .unwrap();
     let config = temp
         .path()
         .join("Library/Application Support/com.Codey.Codey/config.json");

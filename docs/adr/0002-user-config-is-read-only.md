@@ -9,3 +9,7 @@
 ## 后果
 
 放弃上游的 `codey_router` 恢复桩。v0.9.x 期间创建、`model_provider` 被标记为 `codey_router` 的旧会话，需要一次显式迁移——改写会话库与 rollout 记录，不碰用户配置。控制台提供该入口；启动时不再自动改写会话归属，这些旧会话在迁移前不能当普通会话继续使用。
+
+## 2026-10-05 描述修订
+
+原文“同样不落盘”不准确。运行期覆盖不会写入 Codex 的 `config.toml`，但同一份覆盖列表会保存在 Codey 自有目录的私有启动载体中，供本次启动使用：`startup-require` 脚本、macOS 包装脚本和 Windows 的 `codex-cli-launch.json`。脚本保留及租约失效规则见[内部开发文档](../../INTERNAL_DEVELOPMENT.md#启动与退出)。本修订只更正载体描述，不改变用户配置只读的决策。

@@ -1415,7 +1415,21 @@ async fn prepare_cli_wrapper(
         ));
     }
     #[cfg(windows)]
-    let wrapper = codey;
+    let wrapper = {
+        let write_target = target.clone();
+        let write_overrides = runtime_config_overrides.to_vec();
+        tokio::task::spawn_blocking(move || {
+            crate::codex_startup_patch::write_windows_cli_wrapper_launch(
+                &crate::config::default_config_path(),
+                &write_target,
+                &write_overrides,
+                subagent_gate_active,
+            )
+        })
+        .await
+        .context("保存 Windows Codex CLI 启动配置的任务异常退出")??;
+        codey
+    };
     #[cfg(target_os = "macos")]
     let wrapper = {
         let path = crate::config::default_config_path().with_file_name("codex-cli-wrapper");

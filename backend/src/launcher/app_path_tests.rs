@@ -11,6 +11,10 @@ async fn configured_codex_app_dir_recovers_installed_store_update() {
     assert!(!Path::new(&previous).exists());
     assert!(Path::new(&current).is_dir());
     let resolved = find_configured_codex_app_dir(&previous).await.unwrap();
+    assert_eq!(
+        find_configured_codex_app_dir_sync(&previous).unwrap(),
+        resolved
+    );
     assert_eq!(resolved, Some(PathBuf::from(current)));
 }
 
@@ -29,6 +33,10 @@ async fn configured_codex_app_dir_preserves_selected_directory() {
         .await
         .unwrap();
     assert_eq!(resolved.as_deref(), Some(directory.path()));
+    assert_eq!(
+        find_configured_codex_app_dir_sync(&directory.path().to_string_lossy()).unwrap(),
+        resolved
+    );
 }
 
 #[tokio::test]
@@ -39,4 +47,18 @@ async fn configured_codex_app_dir_reports_missing_directory() {
             .await
             .unwrap();
     assert_eq!(resolved, None);
+    assert_eq!(
+        find_configured_codex_app_dir_sync(&directory.path().join("missing").to_string_lossy())
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn configured_codex_app_dir_rejects_unverified_identity() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("Codex.exe"), []).unwrap();
+    let selected = directory.path().to_string_lossy();
+    assert!(find_configured_codex_app_dir_sync(&selected).is_err());
+    assert!(find_configured_codex_app_dir(&selected).await.is_err());
 }

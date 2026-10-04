@@ -9,7 +9,7 @@ Codex 桌面客户端的增强启动器。本分叉只做运行期增强，不�
 _Avoid_: Codex 配置、线路配置
 
 **运行期覆盖**：
-通过 `-c key=value` 传给单次 Codex 进程的配置值；主进程补丁把同一批覆盖打进 `NODE_OPTIONS=--require` 脚本。二者都随进程结束而消失，不落盘。
+通过 `-c key=value` 传给单次 Codex 进程的配置值，永不写入 Codex 的 `config.toml`。Codey 仅在自己的目录中，以私有启动载体保存同一份覆盖列表，供本次启动使用：`startup-require` 脚本、macOS 包装脚本和 Windows 的 `codex-cli-launch.json`。载体的保留与失效规则见 [内部开发文档](INTERNAL_DEVELOPMENT.md#启动与退出)。
 _Avoid_: 临时配置、注入配置
 
 **运行期产物**：

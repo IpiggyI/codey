@@ -75,6 +75,8 @@ const CODEY_WSL_ONLY_OVERRIDE_PREFIX: &str = "__CODEY_WSL_ONLY__:";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeConfigLease {
+    #[serde(default)]
+    launch_id: String,
     backup_dir: PathBuf,
     #[serde(default = "lease_default_true")]
     local_router_applied: bool,
@@ -131,6 +133,14 @@ fn codex_config_matches(path: &Path, expected: Option<&[u8]>) -> Result<bool> {
 
 fn lease_marker_path() -> PathBuf {
     default_config_path().with_file_name("codex-lease.json")
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn cli_wrapper_lease_id(config_path: &Path) -> Result<String> {
+    let state: RuntimeConfigLease =
+        serde_json::from_slice(&fs::read(config_path.with_file_name("codex-lease.json"))?)?;
+    anyhow::ensure!(!state.launch_id.is_empty(), "Codex 运行租约缺少启动标识");
+    Ok(state.launch_id)
 }
 
 pub(crate) fn codey_model_catalog_dir() -> PathBuf {
@@ -521,6 +531,7 @@ fn apply_isolated_runtime_router_config(
     let runtime_agent_hashes = runtime_agent_hashes(&runtime_agents);
 
     let state = RuntimeConfigLease {
+        launch_id: uuid::Uuid::new_v4().to_string(),
         backup_dir: backup_dir.clone(),
         local_router_applied: false,
         fastctx_command: fastctx_command.map(Path::to_path_buf),
@@ -2331,3 +2342,48 @@ fn prune_stale_backup_dirs(backup_root: &Path, marker: &Path) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod cli_wrapper_lease_tests {
+    use super::*;
+
+    #[test]
+    fn cli_wrapper_launch_source_restored_lease_rejects_stale_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.json");
+        let marker = config_path.with_file_name("codex-lease.json");
+        let state: RuntimeConfigLease = serde_json::from_value(serde_json::json!({
+            "launchId": "active", "backupDir": directory.path().join("backup")
+        }))
+        .unwrap();
+        write_lease(&marker, &state).unwrap();
+        crate::codex_startup_patch::write_windows_cli_wrapper_launch(
+            &config_path,
+            &directory.path().join("cli"),
+            &["model=\"first\"".into()],
+            true,
+        )
+        .unwrap();
+        crate::codex_startup_patch::write_windows_cli_wrapper_launch(
+            &config_path,
+            &directory.path().join("second-cli"),
+            &["model=\"second\"".into()],
+            false,
+        )
+        .unwrap();
+        let file = config_path.with_file_name("codex-cli-launch.json");
+        let bytes = fs::read(&file).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["overrides"], serde_json::json!(["model=\"second\""]));
+        assert_eq!(value["subagent"], false);
+        let read_source = || Some((bytes.clone(), cli_wrapper_lease_id(&config_path).ok()));
+        assert!(
+            crate::codex_startup_patch::cli_wrapper_launch_source(None, true, read_source).is_ok()
+        );
+        assert!(restore_runtime_config_at(directory.path(), &marker, true).unwrap());
+        assert!(file.exists());
+        let error = crate::codex_startup_patch::cli_wrapper_launch_source(None, true, read_source)
+            .unwrap_err();
+        assert!(error.to_string().contains("缺少本次启动配置"));
+    }
+}

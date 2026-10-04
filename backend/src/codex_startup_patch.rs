@@ -33,23 +33,23 @@ pub(crate) const STARTUP_CLI_READY_TIMEOUT: std::time::Duration =
 /// 回环端口连通性探测时限（渲染进程调试端口、Inspector 端口）。
 const LOOPBACK_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
 
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", test))]
 pub(crate) const CLI_WRAPPER_TARGET_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_TARGET";
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", test))]
 pub(crate) const CLI_WRAPPER_OVERRIDES_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_OVERRIDES";
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", test))]
 pub(crate) const CLI_WRAPPER_SUBAGENT_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_SUBAGENT";
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", test))]
 pub(crate) const CLI_WRAPPER_PORT_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_PORT";
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", test))]
 pub(crate) const CLI_WRAPPER_TOKEN_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_TOKEN";
 /// 包装器执行记录文件的绝对路径；回环握手丢失时启动器据此确认目标已执行。
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", test))]
 pub(crate) const CLI_WRAPPER_MARKER_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_MARKER";
 /// When Inspector installation may win the startup race, the wrapper records
 /// progress through its marker only and does not connect a listener that the
 /// launcher can drop after Inspector success.
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", test))]
 pub(crate) const CLI_WRAPPER_HANDSHAKE_OPTIONAL_ENV: &str =
     "CODEY_CODEX_CLI_WRAPPER_HANDSHAKE_OPTIONAL";
 /// Absolute JSON path the `--require` patch writes after it installs. Reuses
@@ -519,14 +519,133 @@ pub(crate) async fn loopback_port_accepts(port: u16) -> bool {
     .is_ok_and(|result| result.is_ok())
 }
 
+#[cfg(any(windows, target_os = "macos", test))]
+#[derive(Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PersistedCliWrapperLaunch {
+    version: u32,
+    lease_id: String,
+    target: std::path::PathBuf,
+    overrides: Vec<String>,
+    subagent: bool,
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+#[derive(Debug, PartialEq)]
+pub(crate) enum CliWrapperLaunchSource {
+    Environment(std::path::PathBuf),
+    Persisted(PersistedCliWrapperLaunch),
+    None,
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+struct ResolvedCliWrapperLaunch {
+    overrides: Result<Vec<String>>,
+    subagent: bool,
+    begin_readiness: bool,
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn resolve_cli_wrapper_launch(
+    source: &CliWrapperLaunchSource,
+    app_server: bool,
+    environment: impl Fn(&str) -> Option<OsString>,
+) -> ResolvedCliWrapperLaunch {
+    if let CliWrapperLaunchSource::Persisted(config) = source {
+        return ResolvedCliWrapperLaunch {
+            overrides: Ok(config.overrides.clone()),
+            subagent: config.subagent,
+            begin_readiness: false,
+        };
+    }
+    let overrides = (|| {
+        let overrides = environment(CLI_WRAPPER_OVERRIDES_ENV)
+            .and_then(|value| value.into_string().ok())
+            .map(|value| serde_json::from_str::<Vec<String>>(&value))
+            .transpose()
+            .context("解析 Codex CLI 兼容运行时配置失败")?;
+        anyhow::ensure!(
+            !app_server || overrides.is_some(),
+            "Codex app-server 缺少本次启动配置，已停止启动；请通过 Codey 重新启动 Codex"
+        );
+        Ok(overrides.unwrap_or_default())
+    })();
+    ResolvedCliWrapperLaunch {
+        overrides,
+        subagent: environment(CLI_WRAPPER_SUBAGENT_ENV).as_deref() == Some(OsStr::new("1")),
+        begin_readiness: app_server && matches!(source, CliWrapperLaunchSource::Environment(_)),
+    }
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) fn cli_wrapper_launch_source(
+    target: Option<OsString>,
+    app_server: bool,
+    read_persisted: impl FnOnce() -> Option<(Vec<u8>, Option<String>)>,
+) -> Result<CliWrapperLaunchSource> {
+    if let Some(target) = target {
+        return Ok(CliWrapperLaunchSource::Environment(target.into()));
+    }
+    if let Some((bytes, lease_id)) = read_persisted()
+        && let Ok(config) = serde_json::from_slice::<PersistedCliWrapperLaunch>(&bytes)
+        && config.version == 1
+        && !config.lease_id.is_empty()
+        && lease_id.as_deref() == Some(config.lease_id.as_str())
+    {
+        return Ok(CliWrapperLaunchSource::Persisted(config));
+    }
+    anyhow::ensure!(
+        !app_server,
+        "Codex app-server 缺少本次启动配置，已停止启动；请通过 Codey 重新启动 Codex"
+    );
+    Ok(CliWrapperLaunchSource::None)
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn write_windows_cli_wrapper_launch(
+    config_path: &std::path::Path,
+    target: &std::path::Path,
+    overrides: &[String],
+    subagent: bool,
+) -> Result<()> {
+    let config = PersistedCliWrapperLaunch {
+        version: 1,
+        lease_id: crate::codex_config::cli_wrapper_lease_id(config_path)
+            .context("读取 Codex CLI 启动租约失败")?,
+        target: target.to_path_buf(),
+        overrides: overrides.to_vec(),
+        subagent,
+    };
+    crate::fs_util::atomic_write_private_with_parent(
+        &config_path.with_file_name("codex-cli-launch.json"),
+        &serde_json::to_vec(&config)?,
+    )
+    .context("保存 Codex CLI 本次启动配置失败")
+}
+
+#[cfg(windows)]
+fn log_detached_cli_launch(app_server: bool, source: &str, outcome: &str) {
+    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+        "launcher.cli_wrapper_launch_source",
+        serde_json::json!({
+            "source": source,
+            "subcommand": if app_server { "app-server" } else { "other" },
+            "outcome": outcome,
+        }),
+    );
+}
+
 #[cfg(any(windows, target_os = "macos"))]
 fn cli_wrapper_target(
     arguments: &[OsString],
     target: Option<OsString>,
     config_store: &crate::config::ConfigStore,
-) -> Result<Option<std::path::PathBuf>> {
-    if let Some(target) = target {
-        return Ok(Some(target.into()));
+) -> Result<Option<(std::path::PathBuf, CliWrapperLaunchSource)>> {
+    if target.is_some() {
+        let source = cli_wrapper_launch_source(target, false, || None)?;
+        if let CliWrapperLaunchSource::Environment(target) = &source {
+            return Ok(Some((target.clone(), source)));
+        }
     }
     // Browser helpers keep CODEX_CLI_PATH but can discard Codey's environment.
     // CLI arguments must never fall through to the desktop startup/cleanup path.
@@ -541,19 +660,35 @@ fn cli_wrapper_target(
     {
         return Ok(None);
     }
+    #[cfg(windows)]
+    {
+        let app_server = arguments
+            .iter()
+            .filter(|arg| arg.as_os_str() == OsStr::new("app-server"))
+            .count()
+            == 1;
+        let source = cli_wrapper_launch_source(None, app_server, || {
+            let bytes =
+                std::fs::read(config_store.path().with_file_name("codex-cli-launch.json")).ok()?;
+            let lease_id = crate::codex_config::cli_wrapper_lease_id(config_store.path()).ok();
+            Some((bytes, lease_id))
+        })?;
+        if let CliWrapperLaunchSource::Persisted(config) = source {
+            return Ok(Some((
+                config.target.clone(),
+                CliWrapperLaunchSource::Persisted(config),
+            )));
+        }
+    }
     let config = config_store.load().context("读取 Codex CLI 应用位置失败")?;
-    let saved = config.codex_app_path.trim();
-    let app_dir = codey_runtime_core::app_paths::resolve_codex_app_dir_with_saved(
-        (!saved.is_empty()).then_some(std::path::Path::new(saved)),
-        None,
-    )
-    .context("找不到有效的 Codex 桌面应用，无法转发 CLI 调用")?;
+    let app_dir = crate::launcher::find_configured_codex_app_dir_sync(&config.codex_app_path)?
+        .context("找不到有效的 Codex 桌面应用，无法转发 CLI 调用")?;
     #[cfg(windows)]
     let target = crate::launcher::windows_cli_wrapper_target(&app_dir)?;
     #[cfg(target_os = "macos")]
     let target = codey_runtime_core::app_paths::codex_runtime_executable(&app_dir)
         .context("Codex App 内未找到内置 CLI")?;
-    Ok(Some(target))
+    Ok(Some((target, CliWrapperLaunchSource::None)))
 }
 
 #[cfg(any(windows, target_os = "macos"))]
@@ -574,22 +709,32 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
     }
 
     let original_args = std::env::args_os().skip(1).collect::<Vec<_>>();
-    let Some(target) = cli_wrapper_target(
-        &original_args,
-        std::env::var_os(CLI_WRAPPER_TARGET_ENV),
-        &crate::config::ConfigStore::default(),
-    )?
-    else {
-        return Ok(false);
-    };
     let app_server = original_args
         .iter()
         .filter(|argument| argument.as_os_str() == OsStr::new("app-server"))
         .count()
         == 1;
+    let environment_target = std::env::var_os(CLI_WRAPPER_TARGET_ENV);
+    #[cfg(windows)]
+    let detached = environment_target.is_none();
+    let Some((target, launch_source)) = cli_wrapper_target(
+        &original_args,
+        environment_target,
+        &crate::config::ConfigStore::default(),
+    )
+    .inspect_err(|_| {
+        #[cfg(windows)]
+        if detached {
+            log_detached_cli_launch(app_server, "none", "rejected");
+        }
+    })?
+    else {
+        return Ok(false);
+    };
     // 启动器只接收首次握手；之后 app-server 重启时仍必须能执行 CLI。
-    let readiness = (app_server && std::env::var_os(CLI_WRAPPER_TARGET_ENV).is_some())
-        .then(CliWrapperReadiness::begin);
+    let resolved =
+        resolve_cli_wrapper_launch(&launch_source, app_server, |name| std::env::var_os(name));
+    let readiness = resolved.begin_readiness.then(CliWrapperReadiness::begin);
     let mut input_router: Option<std::process::Child> = None;
     let launch = (|| -> Result<std::process::Child> {
         anyhow::ensure!(
@@ -609,16 +754,7 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
         {
             anyhow::bail!("Codex CLI 兼容目标不能指向 Codey 自身");
         }
-        let runtime_overrides = std::env::var(CLI_WRAPPER_OVERRIDES_ENV)
-            .ok()
-            .map(|value| serde_json::from_str::<Vec<String>>(&value))
-            .transpose()
-            .context("解析 Codex CLI 兼容运行时配置失败")?;
-        anyhow::ensure!(
-            !app_server || runtime_overrides.is_some(),
-            "Codex app-server 缺少本次启动配置，已停止启动；请通过 Codey 重新启动 Codex"
-        );
-        let runtime_overrides = runtime_overrides.unwrap_or_default();
+        let runtime_overrides = resolved.overrides?;
         let rewritten_args = rewrite_app_server_args(&original_args, &runtime_overrides)?;
         let mut command = std::process::Command::new(&target);
         command.args(rewritten_args);
@@ -636,9 +772,7 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
         ] {
             command.env_remove(name);
         }
-        if app_server
-            && std::env::var_os(CLI_WRAPPER_SUBAGENT_ENV).as_deref() == Some(OsStr::new("1"))
-        {
+        if app_server && resolved.subagent {
             command.env(crate::subagent_gate::RUNTIME_ACTIVE_ENV, "1");
             command.env(
                 crate::subagent_gate::RUNTIME_ID_ENV,
@@ -695,6 +829,18 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
                 .with_context(|| format!("启动 Codex CLI 失败：{}", target.display()))
         }
     })();
+    #[cfg(windows)]
+    if !matches!(launch_source, CliWrapperLaunchSource::Environment(_)) {
+        log_detached_cli_launch(
+            app_server,
+            if matches!(launch_source, CliWrapperLaunchSource::Persisted(_)) {
+                "persisted"
+            } else {
+                "none"
+            },
+            if launch.is_ok() { "spawned" } else { "failed" },
+        );
+    }
     let mut child = match launch {
         Ok(child) => child,
         Err(error) => {
@@ -1560,6 +1706,179 @@ fn ensure_protocol_success(payload: &serde_json::Value, method: &str) -> Result<
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cli_wrapper_launch_source_persisted_ignores_conflicting_environment() {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "version": 1, "lease_id": "active", "target": "persisted-cli",
+            "overrides": ["model=\"persisted\""], "subagent": true
+        }))
+        .unwrap();
+        let environment = [
+            (CLI_WRAPPER_OVERRIDES_ENV, "invalid environment overrides"),
+            (CLI_WRAPPER_SUBAGENT_ENV, "0"),
+            (CLI_WRAPPER_MARKER_ENV, "stray-marker"),
+            (CLI_WRAPPER_PORT_ENV, "1234"),
+            (CLI_WRAPPER_TOKEN_ENV, "stray-token"),
+            (CLI_WRAPPER_HANDSHAKE_OPTIONAL_ENV, "0"),
+        ];
+        let reads = std::cell::Cell::new(0);
+        let get_env = |name: &str| {
+            reads.set(reads.get() + 1);
+            environment
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| OsString::from(value))
+        };
+        let source = cli_wrapper_launch_source(get_env(CLI_WRAPPER_TARGET_ENV), true, || {
+            Some((bytes, Some("active".into())))
+        })
+        .unwrap();
+        reads.set(0);
+        let resolved = resolve_cli_wrapper_launch(&source, true, get_env);
+        assert_eq!(resolved.overrides.unwrap(), ["model=\"persisted\""]);
+        assert!(resolved.subagent);
+        assert!(!resolved.begin_readiness);
+        assert_eq!(reads.get(), 0);
+    }
+
+    #[test]
+    fn cli_wrapper_launch_source_environment_begins_readiness_for_app_server() {
+        let source = cli_wrapper_launch_source(Some("env-cli".into()), true, || {
+            panic!("must not read file")
+        })
+        .unwrap();
+        for app_server in [true, false] {
+            let resolved = resolve_cli_wrapper_launch(&source, app_server, |name| match name {
+                CLI_WRAPPER_OVERRIDES_ENV => Some(r#"["model=\"environment\""]"#.into()),
+                CLI_WRAPPER_SUBAGENT_ENV => Some("1".into()),
+                _ => panic!("must not read handshake values"),
+            });
+            assert_eq!(resolved.overrides.unwrap(), ["model=\"environment\""]);
+            assert!(resolved.subagent);
+            assert_eq!(resolved.begin_readiness, app_server);
+        }
+    }
+
+    #[test]
+    fn cli_wrapper_launch_source_environment_missing_overrides_still_refuses() {
+        let source = cli_wrapper_launch_source(Some("env-cli".into()), true, || {
+            panic!("must not read file")
+        })
+        .unwrap();
+        let resolved = resolve_cli_wrapper_launch(&source, true, |_| None);
+        assert!(resolved.begin_readiness);
+        assert!(
+            resolved
+                .overrides
+                .unwrap_err()
+                .to_string()
+                .contains("缺少本次启动配置")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cli_wrapper_launch_source_temp_store_requires_matching_lease() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::new(directory.path().join("config.json"));
+        let lease = directory.path().join("codex-lease.json");
+        std::fs::write(
+            &lease,
+            serde_json::json!({
+                "launchId": "active", "backupDir": directory.path().join("backup")
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let target = directory.path().join("codex.exe");
+        write_windows_cli_wrapper_launch(
+            store.path(),
+            &target,
+            &["model=\"persisted\"".into()],
+            true,
+        )
+        .unwrap();
+        let arguments = [OsString::from("app-server")];
+        let (actual_target, source) = cli_wrapper_target(&arguments, None, &store)
+            .unwrap()
+            .unwrap();
+        assert_eq!(actual_target, target);
+        let resolved =
+            resolve_cli_wrapper_launch(&source, true, |_| panic!("must not read environment"));
+        assert_eq!(resolved.overrides.unwrap(), ["model=\"persisted\""]);
+        assert!(resolved.subagent);
+        assert!(!resolved.begin_readiness);
+        std::fs::remove_file(lease).unwrap();
+        assert!(
+            cli_wrapper_target(&arguments, None, &store)
+                .unwrap_err()
+                .to_string()
+                .contains("缺少本次启动配置")
+        );
+    }
+
+    #[test]
+    fn cli_wrapper_launch_source_env_wins_without_reading_file() {
+        let source = super::cli_wrapper_launch_source(Some("env-cli".into()), true, || {
+            panic!("environment source must not consult the file")
+        })
+        .unwrap();
+        assert!(
+            matches!(source, super::CliWrapperLaunchSource::Environment(target) if target == std::path::Path::new("env-cli"))
+        );
+    }
+
+    #[test]
+    fn cli_wrapper_launch_source_file_supplies_all_three_values() {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "version": 1, "lease_id": "active", "target": "persisted-cli",
+            "overrides": ["model=\"persisted-model\""], "subagent": true
+        }))
+        .unwrap();
+        let source =
+            super::cli_wrapper_launch_source(None, true, || Some((bytes, Some("active".into()))))
+                .unwrap();
+        let super::CliWrapperLaunchSource::Persisted(config) = source else {
+            panic!("expected persisted launch")
+        };
+        assert_eq!(config.target, std::path::Path::new("persisted-cli"));
+        assert_eq!(config.overrides, ["model=\"persisted-model\""]);
+        assert!(config.subagent);
+    }
+
+    #[test]
+    fn cli_wrapper_launch_source_missing_corrupt_or_incomplete_file_refuses_app_server() {
+        for bytes in [
+            None,
+            Some(b"not json".to_vec()),
+            Some(br#"{"version":1,"lease_id":"active","target":"cli","subagent":false}"#.to_vec()),
+        ] {
+            let error = super::cli_wrapper_launch_source(None, true, || {
+                bytes.map(|bytes| (bytes, Some("active".into())))
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains("缺少本次启动配置"));
+        }
+        assert!(matches!(
+            super::cli_wrapper_launch_source(None, false, || None).unwrap(),
+            super::CliWrapperLaunchSource::None
+        ));
+    }
+
+    #[test]
+    fn cli_wrapper_launch_source_rejects_wrong_version_and_replaced_lease() {
+        for (version, lease_id) in [(2, Some("active")), (1, Some("replacement")), (1, None)] {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "version": version, "lease_id": "active", "target": "cli", "overrides": [], "subagent": false
+            })).unwrap();
+            let error = super::cli_wrapper_launch_source(None, true, || {
+                Some((bytes, lease_id.map(str::to_owned)))
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains("缺少本次启动配置"));
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -1639,6 +1958,23 @@ mod tests {
         std::fs::write(&target, "test CLI").unwrap();
         #[cfg(windows)]
         std::fs::write(app.join("Codex.exe"), "test desktop").unwrap();
+        #[cfg(target_os = "macos")]
+        {
+            std::fs::create_dir_all(app.join("Contents/MacOS")).unwrap();
+            std::fs::write(app.join("Contents/MacOS/Codex"), "test desktop").unwrap();
+            std::fs::write(
+                app.join("Contents/Info.plist"),
+                "<plist><dict><key>CFBundleIdentifier</key><string>com.openai.codex</string></dict></plist>",
+            )
+            .unwrap();
+        }
+        let package = target.parent().unwrap().join("app/package.json");
+        std::fs::create_dir_all(package.parent().unwrap()).unwrap();
+        std::fs::write(
+            package,
+            r#"{"name":"codex","productName":"Codex","version":"1.0.0"}"#,
+        )
+        .unwrap();
         store
             .save(&crate::config::CodeyConfig {
                 codex_app_path: app.to_string_lossy().into_owned(),
@@ -1647,6 +1983,7 @@ mod tests {
             .unwrap();
         for args in [
             vec!["sandbox", "windows", "--", "node.exe"],
+            #[cfg(target_os = "macos")]
             vec!["-c", "key=value", "app-server"],
             vec!["exec-server"],
             vec!["--version"],
@@ -1657,7 +1994,8 @@ mod tests {
                     None,
                     &store
                 )
-                .unwrap(),
+                .unwrap()
+                .map(|(target, _)| target),
                 Some(target.clone()),
             );
         }
@@ -1676,7 +2014,9 @@ mod tests {
         std::fs::write(store.path(), "invalid config").unwrap();
         assert!(cli_wrapper_target(&["sandbox".into()], None, &store).is_err());
         assert_eq!(
-            cli_wrapper_target(&[], Some(target.clone().into_os_string()), &store).unwrap(),
+            cli_wrapper_target(&[], Some(target.clone().into_os_string()), &store)
+                .unwrap()
+                .map(|(target, _)| target),
             Some(target),
         );
     }
