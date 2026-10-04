@@ -1,6 +1,6 @@
 # Codey
 
-本仓库是 [SuperGness/codey](https://github.com/SuperGness/codey) 的修改版。当前产品版本 1.2.0。版本号由本分叉独立维护。这一版按需纳入上游 [v1.2.5](https://github.com/SuperGness/codey/releases/tag/v1.2.5) 及其后的[主线更新](https://github.com/SuperGness/codey/tree/ec0bf0ea31c847bbc5ad10a6e4674b21a7b238fe)。
+本仓库是 [SuperGness/codey](https://github.com/SuperGness/codey) 的修改版。当前产品版本 1.2.1。版本号由本分叉独立维护。这一版按需纳入上游 [v1.2.5](https://github.com/SuperGness/codey/releases/tag/v1.2.5) 及其后的[主线更新](https://github.com/SuperGness/codey/tree/ec0bf0ea31c847bbc5ad10a6e4674b21a7b238fe)。
 
 Codey 是 Codex 桌面客户端的增强启动器。它会启动 Codex，并在 Codex 页面内提供统一控制台，用于查看当前 provider、管理模型清单、任务辅助能力、通知和诊断。请求发往哪里，完全由你自己写的用户配置决定；Codey 不接管请求去向。
 
