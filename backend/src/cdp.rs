@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error_log;
 
+mod service_tier;
+
 const SETTINGS_OVERLAY_LOAD_PATH: &str = "/internal/codey/settings-overlay/load";
 const SESSION_TOOLS_LOAD_PATH: &str = "/internal/codey/session-tools/load";
 const CDP_INJECTION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -196,6 +198,18 @@ pub fn prepare_injection_scripts(
                 : "";
             })()"#
                 .to_string(),
+            Internal,
+        ),
+        (
+            "service-tier",
+            "服务档位兼容",
+            service_tier::LOADER,
+            r#"(() => {
+              const state = window.__codeyServiceTierStatus;
+              if (state?.status === "ready") return "服务档位读取与模型校验已应用";
+              if (state?.status === "failed") throw new Error(state.error);
+              return "";
+            })()"#.to_string(),
             Internal,
         ),
         (
@@ -618,6 +632,14 @@ async fn inject_with_scripts(
     ensure_settings_overlay_ready(&websocket_url)
         .await
         .with_context(|| format!("验证 Codex renderer {} 的 Codey 浮层失败", target.id))?;
+    codey_runtime_core::bridge::evaluate_script_with_await_promise_timeout(
+        &websocket_url,
+        "window.__codeyServiceTierInstallation",
+        true,
+        Duration::from_secs(25),
+    )
+    .await
+    .context("等待服务档位兼容状态失败")?;
     // Status probing is diagnostic-only. Keep it out of the critical startup
     // path: the bridge and overlay checks above prove injection is usable, and
     // the existing refresh_injection_statuses command fills in the real state
@@ -969,7 +991,27 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 }
 
 fn with_lazy_loaders(handler: BridgeHandler, websocket_url: Arc<str>) -> BridgeHandler {
+    let tier_installation = Arc::new(tokio::sync::Mutex::new(()));
     Arc::new(move |path, payload| {
+        if path == service_tier::INSTALL_PATH {
+            let websocket_url = websocket_url.clone();
+            let tier_installation = tier_installation.clone();
+            return Box::pin(async move {
+                let _installation = tier_installation.lock().await;
+                match service_tier::install(&websocket_url).await {
+                    Ok(()) => Ok(serde_json::json!({"status": "ok"})),
+                    Err(error) => {
+                        error_log::record_failure(
+                            "compatibility_fallback",
+                            "service_tier_renderer",
+                            format!("{error:#}"),
+                            serde_json::json!({}),
+                        );
+                        Ok(serde_json::json!({"status": "failed", "message": format!("{error:#}")}))
+                    }
+                }
+            });
+        }
         if path == SETTINGS_OVERLAY_LOAD_PATH {
             let websocket_url = websocket_url.clone();
             return Box::pin(async move {
@@ -1508,20 +1550,22 @@ assert.equal(nextPage.window.attempts, 1);
         assert!(prepared.scripts[1].contains("window.userScriptRan = true;"));
         assert!(prepared.scripts[1].contains(r#"status = "executed""#));
         assert!(prepared.scripts[1].contains("用户脚本 1 injection failed"));
-        assert_eq!(prepared.descriptors.len(), 10);
-        assert_eq!(prepared.descriptors[9].id, "user-script-1");
-        assert_eq!(prepared.descriptors[9].source, "user");
+        assert_eq!(prepared.descriptors.len(), 11);
+        assert_eq!(prepared.descriptors[10].id, "user-script-1");
+        assert_eq!(prepared.descriptors[10].source, "user");
         assert_eq!(
             prepared.descriptors[0].visibility,
             InjectionScriptVisibility::Internal
         );
-        assert_eq!(prepared.descriptors[5].id, "renderer-controls");
+        assert_eq!(prepared.descriptors[2].id, "service-tier");
+        assert!(core.contains(service_tier::INSTALL_PATH));
+        assert_eq!(prepared.descriptors[6].id, "renderer-controls");
         assert_eq!(
-            prepared.descriptors[5].visibility,
+            prepared.descriptors[6].visibility,
             InjectionScriptVisibility::Internal
         );
         assert_eq!(
-            prepared.descriptors[9].visibility,
+            prepared.descriptors[10].visibility,
             InjectionScriptVisibility::Feature
         );
         let snapshot_script = injection_status_snapshot_script(&prepared.descriptors);
@@ -1635,8 +1679,8 @@ assert.equal(nextPage.window.attempts, 1);
         assert_eq!(statuses[0].detail.as_deref(), Some("桥接函数可调用"));
         assert_eq!(statuses[1].id, "model-whitelist");
         assert_eq!(statuses[1].status, "unknown");
-        assert_eq!(statuses[3].id, "security-warning-shield");
-        assert_eq!(statuses[3].status, "inactive");
+        assert_eq!(statuses[4].id, "security-warning-shield");
+        assert_eq!(statuses[4].status, "inactive");
         assert_eq!(
             statuses.last().map(|status| status.id.as_str()),
             Some("user-script-1")

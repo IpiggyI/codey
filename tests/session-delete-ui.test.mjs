@@ -6,6 +6,26 @@ import vm from "node:vm";
 import { FakeElementCore } from "./helpers/fake-element.mjs";
 
 const source = readFileSync(new URL("../public/codey-inject.js", import.meta.url), "utf8");
+const nativeDiscardSource = readFileSync(new URL("./fixtures/codex-session-discard.js", import.meta.url), "utf8");
+
+function nativeDeletionManager(events, release = async () => {}) {
+  const { discardConversationFromCache } = vm.runInNewContext(`${nativeDiscardSource}; codexSessionDiscard`, { gz: 5000 });
+  return {
+    discardConversationFromCache,
+    hostId: "local",
+    getHostId() { return "local"; },
+    getConversation() { return null; },
+    threadStore: { isEphemeralConversation: () => false },
+    runtime: { threadMode: () => "durable" },
+    async sendRequest(method, params) {
+      events.push(`${method}:${params.threadId}`);
+      await release();
+    },
+    conversationCacheEvictor: { evictConversation(id) { events.push(`evict:${id}`); } },
+    handleThreadDeletion(ids) { events.push(`notify:${ids.join(",")}`); },
+    refreshRecentConversations() { events.push("refresh"); },
+  };
+}
 
 class FakeElement extends FakeElementCore {
   constructor(tagName = "div", attributes = {}) {
@@ -65,12 +85,15 @@ class FakeElement extends FakeElementCore {
 function loadInjection({
   bridge,
   sessionController,
+  localManager,
   dispatcher = async () => {},
   now = () => Date.now(),
   tasksSectionHeading = "Tasks",
   tasksSectionLabel = "",
   tasksOptionsLabel = "任务侧边栏选项",
   newTaskLabel = "新建任务",
+  work = false,
+  archiveAction = () => {},
 } = {}) {
   const body = new FakeElement("body");
   const documentElement = new FakeElement("html");
@@ -85,6 +108,22 @@ function loadInjection({
     "aria-label": "归档任务",
     class: "native-thread-action",
   });
+  const menuWrapper = new FakeElement("div", { role: "presentation" });
+  const menuButton = new FakeElement("button", {
+    "aria-label": "聊天操作", "aria-haspopup": "menu", class: "native-thread-action",
+  });
+  const pinWrapper = new FakeElement("span", { class: "contents" });
+  const pinButton = new FakeElement("button", { "aria-label": "置顶聊天" });
+  const actionsFiber = { memoizedProps: {
+    archive: archiveAction, getMenuItems: () => [], retainArchiveAction: false,
+  } };
+  const rootFiber = { stateNode: {} };
+  rootFiber.stateNode.current = rootFiber;
+  let ancestors = rootFiber;
+  // The installed Codex sidebar has 312 ancestors from the menu to the root.
+  for (let depth = 0; depth < 309; depth += 1) ancestors = { return: ancestors };
+  actionsFiber.return = ancestors;
+  menuButton.__reactFiber$test = { return: actionsFiber };
   const project = new FakeElement("div", {
     "data-app-action-sidebar-project-id": "/Users/test/workspace",
     "data-app-action-sidebar-project-row": "",
@@ -117,7 +156,11 @@ function loadInjection({
   body.appendChild(project);
   body.appendChild(tasksSection);
   thread.appendChild(actionBar);
-  actionBar.appendChild(archiveTooltip);
+  if (work) {
+    actionBar.append(menuWrapper, pinWrapper);
+    menuWrapper.appendChild(menuButton);
+    pinWrapper.appendChild(pinButton);
+  } else actionBar.appendChild(archiveTooltip);
   archiveTooltip.appendChild(archiveButton);
   project.appendChild(projectActionButton);
   tasksSection.appendChild(tasksTitleRow);
@@ -137,6 +180,7 @@ function loadInjection({
   const document = {
     body,
     documentElement,
+    scripts: localManager ? [{ src: "app://-/assets/app-shared-session-delete.js" }] : [],
     addEventListener(type, listener) {
       documentListeners.set(type, listener);
     },
@@ -211,6 +255,14 @@ function loadInjection({
     },
   };
   if (sessionController) window.__codeyCodexSessionController = sessionController;
+  if (localManager) {
+    const scope = { query: null, get: () => localManager, set() {}, watch() {}, when() {} };
+    body.__reactFiber$manager = { memoizedState: { scope }, return: null };
+    window.__codeyImportCodexAsset = async () => ({ Registry: class {
+      getAll() { return this.scope.get("managers"); }
+      getForHostId(hostId) { return this.scope.get("manager", hostId); }
+    } });
+  }
   if (dispatcher) {
     window.__codeyCodexSignalDispatcher = async (signal, payload) => {
       dispatcherCalls.push({ signal, payload });
@@ -252,6 +304,12 @@ function loadInjection({
     actionBar,
     archiveButton,
     archiveTooltip,
+    actionsFiber,
+    menuButton,
+    menuWrapper,
+    pinButton,
+    pinWrapper,
+    rootFiber,
     bridgeCalls,
     dispatcherCalls,
     reinstall: () => vm.runInNewContext(source, context),
@@ -275,6 +333,84 @@ function loadInjection({
     window,
   };
 }
+
+test("adds Work actions using the current native archive callback and keeps the native menu", () => {
+  const calls = [];
+  const runtime = loadInjection({ work: true, archiveAction: () => calls.push("old") });
+  const { thread, window, actionBar, menuWrapper, pinWrapper, actionsFiber } = runtime;
+  const archive = thread.querySelector("[data-codey-session-archive]");
+  const exportButton = thread.querySelector("[data-codey-session-export]");
+  const deleteButton = thread.querySelector("[data-codey-session-delete]");
+  assert.ok(archive, "Work rows need an inline archive action before installing export/delete");
+  assert.ok(exportButton);
+  assert.ok(deleteButton);
+  assert.deepEqual(actionBar.children, [menuWrapper, pinWrapper, exportButton, archive.parentElement, deleteButton]);
+  assert.equal(menuWrapper.getAttribute("data-codey-session-menu"), "true");
+  assert.equal(runtime.menuButton.parentElement, menuWrapper);
+
+  // A recycled row must use the latest native confirmation callback.
+  actionsFiber.memoizedProps = { ...actionsFiber.memoizedProps, archive: () => calls.push("confirmation") };
+  archive.click();
+  assert.deepEqual(calls, ["confirmation"]);
+  window.__codeyInstallSessionActions();
+  window.__codeyInstallSessionActions();
+  assert.equal(thread.querySelectorAll("[data-codey-session-archive]").length, 1);
+  assert.equal(thread.querySelectorAll("[data-codey-session-export]").length, 1);
+  assert.equal(thread.querySelectorAll("[data-codey-session-delete]").length, 1);
+  deleteButton.click();
+  assert.ok(runtime.document.body.querySelector("[role=dialog]"));
+  assert.equal(runtime.bridgeCalls.some(({ path }) => path === "/session/delete"), false);
+});
+
+test("Work archive follows the committed React branch and stops when unavailable", () => {
+  const calls = [];
+  const runtime = loadInjection({ work: true, archiveAction: () => calls.push("stale") });
+  const { thread, window, menuButton, actionsFiber, rootFiber } = runtime;
+  const archive = thread.querySelector("[data-codey-session-archive]");
+  assert.ok(archive);
+  const currentRoot = { stateNode: rootFiber.stateNode };
+  rootFiber.stateNode.current = currentRoot;
+  const currentActions = { return: currentRoot, memoizedProps: {
+    ...actionsFiber.memoizedProps, archive: () => calls.push("current"),
+  } };
+  menuButton.__reactFiber$test.alternate = { return: currentActions };
+  archive.click();
+  assert.deepEqual(calls, ["current"]);
+  menuButton.setAttribute("aria-busy", "true");
+  archive.click();
+  assert.deepEqual(calls, ["current"]);
+  window.__codeyInstallSessionActions();
+  assert.equal(thread.querySelector("[data-codey-session-archive]"), null);
+  assert.equal(runtime.menuWrapper.hasAttribute("data-codey-session-menu"), false);
+  menuButton.removeAttribute("aria-busy");
+  currentActions.memoizedProps.archive = null;
+  window.__codeyInstallSessionActions();
+  assert.equal(thread.querySelector("[data-codey-session-archive]"), null);
+  actionsFiber.return = actionsFiber;
+  window.__codeyInstallSessionActions();
+  assert.equal(thread.querySelector("[data-codey-session-archive]"), null);
+});
+
+test("switching to native inline archive removes Work additions without moving native nodes", () => {
+  const runtime = loadInjection({ work: true });
+  const { thread, actionBar, archiveTooltip, window, menuWrapper, pinWrapper } = runtime;
+  assert.ok(thread.querySelector("[data-codey-session-archive]"));
+  actionBar.appendChild(archiveTooltip);
+  window.__codeyInstallSessionActions();
+  assert.equal(thread.querySelector("[data-codey-session-archive]"), null);
+  assert.equal(menuWrapper.hasAttribute("data-codey-session-menu"), false);
+  assert.deepEqual(actionBar.children, [menuWrapper, pinWrapper,
+    thread.querySelector("[data-codey-session-export]"), archiveTooltip,
+    thread.querySelector("[data-codey-session-delete]"),
+  ]);
+});
+
+test("does not add Work actions without a supported native archive callback", () => {
+  const runtime = loadInjection({ work: true, archiveAction: null });
+  assert.equal(runtime.thread.querySelector("[data-codey-session-export]"), null);
+  assert.equal(runtime.thread.querySelector("[data-codey-session-delete]"), null);
+  assert.equal(runtime.menuWrapper.hasAttribute("data-codey-session-menu"), false);
+});
 
 test("matches native sidebar actions and deletes after popover confirmation", async () => {
   const events = [];
@@ -406,6 +542,59 @@ test("uses AppServerManager cache eviction and deletion notification on current 
     "manager:deleted:thread-1",
     "manager:refresh",
   ]);
+});
+
+test("discovers the native registry and releases an unloaded persisted session before deletion", async () => {
+  const events = [];
+  const manager = nativeDeletionManager(events);
+  const runtime = loadInjection({
+    dispatcher: null, localManager: manager,
+    bridge: async (path) => {
+      if (path === "/session/delete") { events.push("persist"); return { status: "ok", deleted: true }; }
+      return { status: "ok" };
+    },
+  });
+  events.length = 0;
+  runtime.thread.querySelector("[data-codey-session-delete]").click();
+  runtime.document.body.querySelector("[data-codey-session-delete-confirm]").click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, ["thread/unsubscribe:thread-1", "evict:thread-1", "persist", "notify:thread-1", "refresh"]);
+  assert.equal(runtime.window.__codeyCodexSessionController.manager, manager);
+});
+
+test("native registry release rejection or timeout never evicts or deletes an old session", async (t) => {
+  for (const outcome of ["reject", "timeout"]) await t.test(outcome, async () => {
+    const events = [];
+    const manager = nativeDeletionManager(events, () => {
+      if (outcome === "reject") throw new Error("app-server unavailable");
+      return new Promise(() => {});
+    });
+    const runtime = loadInjection({ dispatcher: null, localManager: manager });
+    events.length = 0;
+    runtime.thread.querySelector("[data-codey-session-delete]").click();
+    runtime.document.body.querySelector("[data-codey-session-delete-confirm]").click();
+    await new Promise((resolve) => setImmediate(resolve));
+    if (outcome === "timeout") {
+      runtime.fireTimers(5000);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.deepEqual(events, ["thread/unsubscribe:thread-1"]);
+    assert.equal(runtime.bridgeCalls.some(({ path }) => path === "/session/delete"), false);
+    assert.equal(runtime.thread.getAttribute("data-codey-session-delete-state"), null);
+    assert.match(runtime.document.getElementById("codey-runtime-toast")?.textContent, /未执行删除/);
+    assert.match(runtime.document.getElementById("codey-runtime-toast")?.textContent,
+      outcome === "timeout" ? /释放会话超时/ : /释放会话失败/);
+  });
+});
+
+test("reports unavailable deletion support separately from native release failure", async () => {
+  const runtime = loadInjection({ dispatcher: null });
+  runtime.thread.querySelector("[data-codey-session-delete]").click();
+  runtime.document.body.querySelector("[data-codey-session-delete-confirm]").click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(runtime.bridgeCalls.some(({ path }) => path === "/session/delete"), false);
+  assert.match(runtime.document.getElementById("codey-runtime-toast")?.textContent, /会话删除接口不可用/);
+  assert.doesNotMatch(runtime.document.getElementById("codey-runtime-toast")?.textContent, /尚未释放/);
 });
 
 test("disposed sidebar deletion cannot persist after a pending native release", async () => {

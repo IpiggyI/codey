@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
+import { serviceTierEnvironment } from "./helpers/service-tier-environment.mjs";
 
 const normalizeLineEndings = (source) => source.replace(/\r\n/g, "\n");
 
@@ -14,6 +16,17 @@ async function loadPatchExpression() {
     .replaceAll('"__CODEY_MISC_MODEL_ID__"', '""')
     .replaceAll("__DISABLE_PET__", "false")
     .replaceAll("__REQUIRE_APP_SERVER_RUNTIME_OVERRIDES__", "false");
+}
+
+function nativeServiceTierRuntime(source) {
+  const environment = serviceTierEnvironment();
+  const runtime = runInNewContext(`${source};({
+    read: (tier) => Mq(scope, 'local', state.modelSettings.model, tier),
+    select: (conversationId, tier) => whi(conversationId, {
+      modelSettings: state.modelSettings, setModelAndReasoningEffort() {},
+    }, { value: tier }, false, { serviceTier: tier, isLoading: state.settingsLoading }).serviceTierSettings,
+  })`, environment);
+  return { ...runtime, state: environment.state, errors: environment.errors };
 }
 
 test("API and ChatGPT auth share model-aware native service-tier controls", async () => {
@@ -548,6 +561,64 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
       },
     );
     assert.equal(await serviceTierRequestAllowed({}, "host"), true);
+
+    const nativeServiceTierSource = await readFile(
+      new URL("./fixtures/codex-service-tier.js", import.meta.url), "utf8",
+    );
+    // These aliases belong to the two original renderer modules.
+    const nativeAliases = "\nconst mke=yjt,KGe=vjt;";
+    const originalRuntime = nativeServiceTierRuntime(nativeServiceTierSource + nativeAliases);
+    assert.equal(await originalRuntime.read("priority"), null);
+    const patchedNativeSource = await patchAsset(
+      nativeServiceTierSource,
+      "app://-/assets/app-initial-25361a10f2bf.js",
+    );
+    const nativeRuntime = nativeServiceTierRuntime(patchedNativeSource + nativeAliases);
+    for (const authMethod of [null, "apikey", "chatgpt", "personalAccessToken"]) {
+      nativeRuntime.state.authMethod = authMethod;
+      assert.equal(await nativeRuntime.read("priority"), "priority", String(authMethod));
+      assert.equal(await nativeRuntime.read("default"), null);
+      assert.equal(await nativeRuntime.read(null), null);
+    }
+    for (const conversationId of [null, "existing-thread"]) {
+      for (const tier of ["priority", "default"]) {
+        nativeRuntime.state.modelSettings.serviceTier = tier;
+        const selected = nativeRuntime.select(conversationId, tier);
+        const expected = tier === "priority" ? "priority" : null;
+        assert.equal(selected.selectedServiceTier, expected);
+        assert.equal(selected.serviceTierForRequest, expected);
+        assert.equal(await nativeRuntime.read(selected.serviceTierForRequest), expected);
+      }
+    }
+    for (const configTier of ["priority", "default", undefined]) {
+      nativeRuntime.state.config.service_tier = configTier;
+      assert.equal(await nativeRuntime.read(), configTier === "default" ? null : "priority");
+    }
+    nativeRuntime.state.selection = { type: "selected", value: "priority" };
+    assert.equal(await nativeRuntime.read(), "priority");
+    nativeRuntime.state.modelSettings = { model: "unsupported", serviceTier: "priority", isLoading: false };
+    for (const conversationId of [null, "existing-thread"]) {
+      const selected = nativeRuntime.select(conversationId, "priority");
+      assert.equal(selected.selectedServiceTier, null);
+      assert.equal(selected.serviceTierForRequest, null);
+      assert.equal(await nativeRuntime.read(selected.serviceTierForRequest), null);
+    }
+    nativeRuntime.state.selection = { type: "fromConfig" };
+    nativeRuntime.state.config.service_tier = undefined;
+    assert.equal(await nativeRuntime.read(), null);
+    nativeRuntime.state.requirementsPending = true;
+    assert.equal(nativeRuntime.select(null, null).isLoading, false);
+    nativeRuntime.state.settingsLoading = true;
+    assert.equal(nativeRuntime.select(null, null).isLoading, true);
+    assert.deepEqual(nativeRuntime.errors, []);
+
+    const rendererPlanner = await readFile(new URL("../backend/src/cdp/service_tier.js", import.meta.url), "utf8");
+    const rendererPatch = runInNewContext(`${rendererPlanner};codeyServiceTierExpression`)(patchedNativeSource);
+    const combined = runInNewContext(`${patchedNativeSource};${nativeAliases};${rendererPatch};({
+      read:(model,tier)=>Mq(scope,'local',model,tier)
+    })`, serviceTierEnvironment());
+    assert.equal(await combined.read("supported", "priority"), "priority");
+    assert.equal(await combined.read("unsupported", "priority"), null);
 
     // Third-party catalogs may not meet Codex's native power-selection threshold.
     // Codey still uses the modern trigger and preserves Codex's native Fast

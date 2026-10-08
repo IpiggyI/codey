@@ -391,14 +391,14 @@ async fn install_bridge_routes_binding_while_waiting_for_command_response() {
     let log_path = temp.path().join("codey.log");
     codey_runtime_core::diagnostic_log::set_diagnostic_log_path_for_tests(Some(log_path.clone()));
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
-        for expected_id in 1..=4 {
+        for expected_id in 1..=5 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
         }
 
         let evaluate = recv_json(&mut socket).await;
-        assert_eq!(evaluate["id"], 5);
+        assert_eq!(evaluate["id"], 6);
         assert_eq!(evaluate["method"], "Runtime.evaluate");
         send_json(
             &mut socket,
@@ -414,7 +414,7 @@ async fn install_bridge_routes_binding_while_waiting_for_command_response() {
             }),
         )
         .await;
-        send_json(&mut socket, json!({ "id": 5, "result": {} })).await;
+        send_json(&mut socket, json!({ "id": 6, "result": {} })).await;
 
         let response = recv_json(&mut socket).await;
         assert_eq!(response["method"], "Runtime.evaluate");
@@ -465,7 +465,7 @@ async fn install_bridge_routes_binding_while_waiting_for_command_response() {
 #[tokio::test]
 async fn install_bridge_immediately_evaluates_new_document_scripts() {
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
-        for expected_id in 1..=5 {
+        for expected_id in 1..=6 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
@@ -573,7 +573,7 @@ async fn install_bridge_rejects_javascript_exceptions_and_closes_failed_sessions
 #[tokio::test]
 async fn install_bridge_returns_after_installing_and_keeps_message_pump_alive() {
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
-        for expected_id in 1..=5 {
+        for expected_id in 1..=6 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
@@ -657,7 +657,7 @@ async fn install_bridge_returns_after_installing_and_keeps_message_pump_alive() 
 #[tokio::test]
 async fn bridge_pump_handle_close_stops_the_persistent_cdp_session() {
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
-        for expected_id in 1..=5 {
+        for expected_id in 1..=6 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
@@ -787,7 +787,7 @@ async fn install_bridge_command_error_mentions_method_and_id() {
 #[tokio::test]
 async fn install_bridge_rejects_bad_payload_with_id_and_continues_after_unparseable_payload() {
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
-        for expected_id in 1..=5 {
+        for expected_id in 1..=6 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
@@ -873,7 +873,7 @@ async fn install_bridge_rejects_bad_payload_with_id_and_continues_after_unparsea
 #[tokio::test]
 async fn install_bridge_queues_consecutive_bindings_without_recursive_dispatch() {
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
-        for expected_id in 1..=5 {
+        for expected_id in 1..=6 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
@@ -935,7 +935,7 @@ async fn install_bridge_queues_consecutive_bindings_without_recursive_dispatch()
 #[tokio::test]
 async fn install_bridge_does_not_wait_for_resolve_runtime_evaluate_ack() {
     let (url, request_rx) = spawn_cdp_server(|mut socket| async move {
-        for expected_id in 1..=5 {
+        for expected_id in 1..=6 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
@@ -1008,7 +1008,7 @@ async fn bridge_read_routes_bypass_a_slow_serial_handler() {
     let release_slow_handler = Arc::new(tokio::sync::Notify::new());
     let server_release = Arc::clone(&release_slow_handler);
     let (url, request_rx) = spawn_cdp_server(move |mut socket| async move {
-        for expected_id in 1..=5 {
+        for expected_id in 1..=6 {
             let command = recv_json(&mut socket).await;
             assert_eq!(command["id"], expected_id);
             send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
@@ -1076,14 +1076,17 @@ async fn accept_installed_bridge(listener: &TcpListener) -> (TestSocket, String)
         .await
         .expect("websocket should upgrade");
 
-    for expected_id in 1..=3 {
+    for expected_id in 1..=4 {
         let command = recv_json(&mut socket).await;
         assert_eq!(command["id"], expected_id);
+        if expected_id == 4 {
+            assert_eq!(command["method"], "Page.enable");
+        }
         send_json(&mut socket, json!({ "id": expected_id, "result": {} })).await;
     }
 
     let add_script = recv_json(&mut socket).await;
-    assert_eq!(add_script["id"], 4);
+    assert_eq!(add_script["id"], 5);
     assert_eq!(
         add_script["method"],
         "Page.addScriptToEvaluateOnNewDocument"
@@ -1093,12 +1096,12 @@ async fn accept_installed_bridge(listener: &TcpListener) -> (TestSocket, String)
             .as_str()
             .expect("bridge source should be a string"),
     );
-    send_json(&mut socket, json!({ "id": 4, "result": {} })).await;
+    send_json(&mut socket, json!({ "id": 5, "result": {} })).await;
 
     let evaluate = recv_json(&mut socket).await;
-    assert_eq!(evaluate["id"], 5);
+    assert_eq!(evaluate["id"], 6);
     assert_eq!(evaluate["method"], "Runtime.evaluate");
-    send_json(&mut socket, json!({ "id": 5, "result": {} })).await;
+    send_json(&mut socket, json!({ "id": 6, "result": {} })).await;
     (socket, session_token)
 }
 

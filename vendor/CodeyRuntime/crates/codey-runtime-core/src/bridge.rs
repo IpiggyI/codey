@@ -79,6 +79,7 @@ fn build_bridge_script_for_session(binding_name: &str, session_token: &str) -> S
         r#"
 (() => {{
   const bridgeSession = {session_token};
+  const documentToken = globalThis.crypto.randomUUID();
   window.__codexSessionDeleteCallbacks = new Map();
   window.__codexSessionDeleteSeq = 0;
   const takeCallback = (id) => {{
@@ -99,7 +100,7 @@ fn build_bridge_script_for_session(binding_name: &str, session_token: &str) -> S
     callback.resolve({{ status: "failed", code: "bridge_request_failed", message }});
   }};
   window.__codexSessionDeleteBridge = (path, payload, options = {{}}) => new Promise((resolve) => {{
-    const id = String(++window.__codexSessionDeleteSeq);
+    const id = documentToken + ":" + String(++window.__codexSessionDeleteSeq);
     const configuredTimeout = Number(options?.timeoutMs);
     const timeoutMs = Number.isFinite(configuredTimeout)
       ? Math.max(250, Math.min(configuredTimeout, 60_000))
@@ -214,18 +215,20 @@ pub async fn install_bridge(
     session
         .send_command(3, "Runtime.addBinding", json!({ "name": binding_name }))
         .await?;
+    // Chromium runs this session's new-document scripts only while Page is enabled.
+    session.send_command(4, "Page.enable", json!({})).await?;
 
     let bridge_script = build_bridge_script_for_session(binding_name, &session_token);
     session
         .send_command(
-            4,
+            5,
             "Page.addScriptToEvaluateOnNewDocument",
             json!({ "source": bridge_script }),
         )
         .await?;
     let response = session
         .send_command(
-            5,
+            6,
             "Runtime.evaluate",
             runtime_evaluate_params(&bridge_script),
         )
@@ -303,7 +306,7 @@ pub fn reject_bridge_expression(request_id: &str, message: &str) -> anyhow::Resu
 type ConnectedCdpSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
-async fn connect_cdp_websocket(websocket_url: &str) -> anyhow::Result<ConnectedCdpSocket> {
+pub async fn connect_cdp_websocket(websocket_url: &str) -> anyhow::Result<ConnectedCdpSocket> {
     let candidates = cdp_websocket_connect_candidates(websocket_url);
     // 候选共享原来的连接总预算，避免回退把单轮代价翻倍后吃掉启动注入窗口。
     let attempt_timeout = cdp_connect_attempt_timeout(candidates.len());

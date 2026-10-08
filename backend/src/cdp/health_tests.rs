@@ -7,7 +7,7 @@ use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite::Message};
 async fn accept_bridge(listener: &TcpListener) -> WebSocketStream<TcpStream> {
     let (stream, _) = listener.accept().await.unwrap();
     let mut socket = accept_async(stream).await.unwrap();
-    for id in 1..=5 {
+    for id in 1..=6 {
         let command = socket.next().await.unwrap().unwrap();
         let command: serde_json::Value = serde_json::from_str(command.to_text().unwrap()).unwrap();
         assert_eq!(command["id"], id);

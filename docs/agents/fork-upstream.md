@@ -34,6 +34,8 @@
 
 2026-10-03 针对模型能力与排序核对上游 `master` 固定提交 `398f2f0dfb3213cedbef2e77866f49a06d27e5da`。相关第三方能力名单尚未包含 GPT-6.1 Sol，缺少模板时仍回退四档。本次仅做针对性修复，不改变上方整批移植锚点。需求与验收分别见 [#16](https://github.com/IpiggyI/codey/issues/16) 和 [#17](https://github.com/IpiggyI/codey/issues/17)。
 
+2026-10-08 的 Fast 修复在本地 `vendor/CodeyRuntime/crates/codey-runtime-core/src/bridge.rs` 中增加 `Page.enable`，使当前桥接注册的新文档脚本在重载后执行；请求编号增加页面独有标识，防止旧页面完成响应交给新页面回调；公开既有 CDP 连接函数，供服务档位安装入口复用回环地址回退和连接预算。下次整目录替换时须保留或确认上游已覆盖这些差异。原因与验证见 [Fast 修复交接](../handoffs/2026-10-08-fast-service-tier.md)。
+
 | 区域 | 本分叉 | 上游 | 性质 | 原因 | 用户可感知 |
 |---|---|---|---|---|---|
 | 请求去向 | Codex 直连用户配置里的 provider | 本机代理 `codey_router` 接管，控制台可增删「线路」 | 二开 | [ADR 0001](../adr/0001-remove-built-in-router.md) | 是 |

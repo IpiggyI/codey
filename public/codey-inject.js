@@ -24,6 +24,7 @@
   const styleId = "codey-injected-style";
   const selectedClass = "codey-message-selected";
   const sessionExportAttribute = "data-codey-session-export";
+  const sessionArchiveAttribute = "data-codey-session-archive";
   const tasksImportAttribute = "data-codey-tasks-import";
   const projectImportAttribute = "data-codey-project-import";
   const sessionDeleteAttribute = "data-codey-session-delete";
@@ -54,6 +55,12 @@
       <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
       <line x1="10" x2="10" y1="11" y2="17"></line>
       <line x1="14" x2="14" y1="11" y2="17"></line>
+    </svg>
+  `;
+  const sessionArchiveIcon = `
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+      <rect x="3" y="3" width="18" height="4" rx="1"></rect>
+      <path d="M5 7v13h14V7M10 11h4"></path>
     </svg>
   `;
   let lastSelectedRow = null;
@@ -720,13 +727,14 @@
       [role="list"] > [${threadRunningAttribute}="true"],
       [data-app-action-sidebar-project-list-id] > [${threadRunningAttribute}="true"] { order: -1 !important; }
       [${sessionDeleteStateAttribute}] { display: none !important; }
-      [${sessionExportAttribute}], [${tasksImportAttribute}], [${sessionDeleteAttribute}] { -webkit-app-region: no-drag !important; flex: 0 0 auto; pointer-events: auto !important; }
+      [${sessionExportAttribute}], [${sessionArchiveAttribute}], [${tasksImportAttribute}], [${sessionDeleteAttribute}] { -webkit-app-region: no-drag !important; flex: 0 0 auto; pointer-events: auto !important; }
       [${projectImportAttribute}] { -webkit-app-region: no-drag !important; position: absolute; top: 50%; right: 62px; z-index: 35; flex: 0 0 auto; transform: translateY(-50%); opacity: 0; pointer-events: auto !important; transition: opacity .15s ease; }
       [data-app-action-sidebar-project-row][data-app-action-sidebar-project-id]:hover > [${projectImportAttribute}],
       [${projectImportAttribute}]:focus-visible,
       [${projectImportAttribute}][data-busy="true"] { opacity: .9; }
       [${projectImportAttribute}]:hover { opacity: 1 !important; }
       [data-codey-session-action-row] { display: inline-flex !important; align-items: center !important; flex: 0 0 auto !important; flex-flow: row nowrap !important; gap: 1px !important; width: auto !important; min-width: max-content !important; white-space: nowrap !important; }
+      [data-codey-session-menu]:not(:focus-within):not(:has([data-state="open"])) { position: absolute !important; width: 1px !important; height: 1px !important; overflow: hidden !important; clip-path: inset(50%) !important; pointer-events: none !important; }
       #${sidebarActionTooltipId} { position: fixed; z-index: 2147483647; max-width: min(20rem, calc(100vw - 16px)); pointer-events: none; }
       #${sessionDeletePopoverId} { -webkit-app-region: no-drag !important; position: fixed; z-index: 2147483646; width: min(248px, calc(100vw - 24px)); box-sizing: border-box; border: 1px solid rgba(127, 127, 127, .28); border-radius: 12px; padding: 13px; background: rgba(30, 31, 35, .98); color: #f7f7f8; box-shadow: 0 14px 38px rgba(0, 0, 0, .32); font: 13px/1.45 system-ui, sans-serif; }
       #${sessionDeletePopoverId}::before { content: ""; position: absolute; top: -5px; right: var(--codey-popover-arrow-right, 15px); width: 9px; height: 9px; border-left: 1px solid rgba(127, 127, 127, .28); border-top: 1px solid rgba(127, 127, 127, .28); background: rgba(30, 31, 35, .98); transform: rotate(45deg); }
@@ -2406,7 +2414,7 @@
         // Late discovery from a disposed installation cannot replace the current interface.
         if (disposed) throw unavailableCapability(feature);
         const resolvers = [
-          feature === "deleteMessages" ? appServerManagerRegistryResolverFromModule(module) : null,
+          appServerManagerRegistryResolverFromModule(module),
           appServerManagerResolverFromModule(module),
         ].filter(Boolean);
         for (const resolver of resolvers) {
@@ -2615,8 +2623,12 @@
         return controller.discardConversation(normalizedSessionId);
       });
       return true;
-    } catch {
-      return false;
+    } catch (error) {
+      if (error?.code === "codey_capability_unavailable") {
+        throw new Error("当前 Codex 的会话删除接口不可用，未执行删除", { cause: error });
+      }
+      const reason = error?.message === "Codex 会话接口响应超时" ? "超时" : "失败";
+      throw new Error(`Codex 释放会话${reason}，未执行删除，请稍后重试`, { cause: error });
     }
   };
 
@@ -2812,12 +2824,13 @@
     deletePopoverCleanup = null;
   };
 
-  const findArchiveControl = (thread) => [...thread.querySelectorAll("button, [role=button]")]
+  const findArchiveControl = (thread, nativeOnly = false) => [...thread.querySelectorAll("button, [role=button]")]
     .find((control) => {
       if (
         !(control instanceof HTMLElement)
         || control.hasAttribute(sessionExportAttribute)
         || control.hasAttribute(sessionDeleteAttribute)
+        || nativeOnly && control.hasAttribute(sessionArchiveAttribute)
       ) return false;
       const descriptor = [
         control.getAttribute("aria-label"),
@@ -2828,6 +2841,104 @@
       ].filter(Boolean).join(" ");
       return /归档|取消归档|\barchive\b|\bunarchive\b/i.test(descriptor);
     });
+
+  const nativeSidebarArchiveAction = (thread) => {
+    const menu = thread.querySelector('[aria-haspopup="menu"]');
+    if (!(menu instanceof HTMLElement) || menu.disabled
+      || menu.getAttribute("aria-disabled") === "true" || menu.getAttribute("aria-busy") === "true"
+      || thread.getAttribute("aria-disabled") === "true") return null;
+    let fiber = menu[reactStateKeys(menu).find((key) => !key.startsWith("__reactProps"))];
+    let root = fiber;
+    const visited = new Set();
+    while (root?.return) {
+      if (visited.has(root)) return null;
+      visited.add(root);
+      root = root.return;
+    }
+    if (!root?.stateNode?.current) return null;
+    if (root.stateNode.current !== root) fiber = fiber?.alternate;
+    // Work 隐藏行内归档，但操作组件仍持有包含运行中确认逻辑的回调。
+    visited.clear();
+    for (; fiber && !visited.has(fiber); fiber = fiber.return) {
+      visited.add(fiber);
+      if (fiber.stateNode === thread) break;
+      const props = fiber.memoizedProps;
+      if (!props || !Object.prototype.hasOwnProperty.call(props, "retainArchiveAction")) continue;
+      return props.retainArchiveAction === false && typeof props.getMenuItems === "function"
+        && typeof props.archive === "function" && !props.loading
+        ? { menu, archive: props.archive } : null;
+    }
+    return null;
+  };
+
+  const removeSessionArchiveButton = (thread) => {
+    const button = thread.querySelector(`[${sessionArchiveAttribute}]`);
+    if (button) {
+      closeSessionDeletePopover();
+      thread.querySelector(`[${sessionExportAttribute}]`)?.remove();
+      thread.querySelector(`[${sessionDeleteAttribute}]`)?.remove();
+      const wrapper = button.parentElement;
+      wrapper?.parentElement?.removeAttribute("data-codey-session-action-row");
+      wrapper?.remove();
+    }
+    thread.querySelectorAll("[data-codey-session-menu]")
+      .forEach((menu) => menu.removeAttribute("data-codey-session-menu"));
+  };
+
+  const invokeSidebarArchive = async (thread) => {
+    // 虚拟列表会复用行节点；每次点击重新读取已提交的 React 分支。
+    const action = nativeSidebarArchiveAction(thread);
+    if (!action) {
+      showRuntimeToast("归档操作暂不可用，请从会话菜单重试", "error");
+      return;
+    }
+    try {
+      await action.archive();
+    } catch (error) {
+      showRuntimeToast(`归档失败：${error instanceof Error ? error.message : String(error)}`, "error");
+    }
+  };
+
+  const installSessionArchiveButton = (thread) => {
+    const action = nativeSidebarArchiveAction(thread);
+    if (!action || findArchiveControl(thread, true) || isDeletedSidebarThread(thread)) {
+      removeSessionArchiveButton(thread);
+      return;
+    }
+    const menuWrapper = action.menu.parentElement;
+    const actionRow = menuWrapper?.parentElement;
+    if (!(actionRow instanceof HTMLElement) || actionRow === thread) return;
+    menuWrapper.setAttribute("data-codey-session-menu", "true");
+    if (thread.querySelector(`[${sessionArchiveAttribute}]`)) return;
+    const wrapper = document.createElement("span");
+    wrapper.setAttribute("data-codey-session-archive-wrapper", "true");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute(sessionArchiveAttribute, "true");
+    button.setAttribute("aria-label", "归档会话");
+    inheritNativeButtonClass(button, action.menu);
+    button.innerHTML = sessionArchiveIcon;
+    wrapNativeButtonIcon(button, action.menu);
+    attachSidebarActionTooltip(button, "归档会话");
+    ["pointerdown", "mousedown", "mouseup", "touchstart"].forEach((eventName) => {
+      button.addEventListener(eventName, stopSidebarActionEvent, true);
+    });
+    button.addEventListener("click", (event) => {
+      stopSidebarActionEvent(event);
+      void invokeSidebarArchive(thread);
+    }, true);
+    wrapper.appendChild(button);
+    actionRow.appendChild(wrapper);
+  };
+
+  const installSessionActions = (root = document) => {
+    queryWithin(root, "[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]")
+      .forEach((thread) => {
+        if (thread instanceof HTMLElement) installSessionArchiveButton(thread);
+      });
+    installSessionExportButtons(root);
+    installSessionDeleteButtons(root);
+  };
 
   const projectActionControls = (project) => [...project.querySelectorAll("button, [role=button]")]
     .filter((control) => {
@@ -3729,9 +3840,8 @@
       installMessageSelection(root);
       return;
     }
-    installSessionExportButtons(root);
+    installSessionActions(root);
     installTasksImportButton(root);
-    installSessionDeleteButtons(root);
     installProjectImportButtons(root);
     installThreadUpdatedTimes(root);
     recoverHiddenRunningThreads(root);
@@ -3757,6 +3867,7 @@
   window.__codeyExportSession = exportSession;
   window.__codeyImportSessionFile = importSessionFile;
   window.__codeyInstallSessionDeleteButtons = installSessionDeleteButtons;
+  window.__codeyInstallSessionActions = installSessionActions;
   window.__codeyOpenSessionDeletePopover = openSessionDeletePopover;
   window.__codeyPruneDeletedSidebarSessions = shouldIgnoreDeletedSidebarSessionRoot;
   window.__codeySyncSelectionGroups = syncSelectionGroups;
@@ -3771,6 +3882,7 @@
     `#${sessionDeletePopoverId}`,
     `#${sidebarActionTooltipId}`,
     `[${sessionExportAttribute}]`,
+    "[data-codey-session-archive-wrapper]",
     `[${tasksImportAttribute}]`,
     `[${projectImportAttribute}]`,
     `[${sessionDeleteAttribute}]`,
@@ -4086,6 +4198,8 @@
     attributeOldValue: true,
     attributeFilter: [
       "aria-label",
+      "aria-disabled",
+      "aria-busy",
       "aria-expanded",
       "aria-hidden",
       "aria-describedby",
@@ -4188,6 +4302,8 @@
     mountedToolbar?.remove();
     document.querySelectorAll(`[data-codey-message-select], [${sessionDeleteAttribute}]`)
       .forEach((button) => button.remove());
+    document.querySelectorAll("[data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title]")
+      .forEach(removeSessionArchiveButton);
     window.__codeySessionToolsInjectLoaded = false;
   } };
   window.__codeySessionToolsInjectLoaded = true;
