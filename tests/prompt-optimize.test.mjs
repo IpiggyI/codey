@@ -541,6 +541,35 @@ test("mounts the optimize button when enabled and an API key is configured", asy
   });
 });
 
+test("conversation changes promote a pending scan without waiting for the normal debounce", async () => {
+  const env = createEnvironment(); await flush();
+  const button = env.getElementById("codey-prompt-optimize-button");
+  // 普通输入框变化先安排延迟扫描，再切换会话并重建按钮所在行。
+  env.emitMutation([{ type: "childList", target: env.textarea }]);
+  button.remove();
+  env.anchor.setAttribute("data-above-composer-conversation-id", "conversation-2");
+  env.emitMutation([{ type: "attributes", target: env.anchor, attributeName: "data-above-composer-conversation-id" }]);
+  await flush();
+  assert.equal(button.parentElement, env.toolbar);
+  assert.equal(button.style.display, "inline-flex");
+});
+
+
+test("restores a removed optimize button promptly and coalesces repeated composer mutations", async () => {
+  const env = createEnvironment(); await flush();
+  const button = env.getElementById("codey-prompt-optimize-button");
+  button.remove();
+  const before = env.getComposerQueryCount();
+  for (let i = 0; i < 20; i++) {
+    env.emitMutation([{ type: "childList", target: env.textarea }]);
+  }
+  assert.equal(env.getComposerQueryCount(), before);
+  await flush();
+  assert.equal(button.parentElement, env.toolbar);
+  assert.ok(env.getComposerQueryCount() - before <= 2);
+});
+
+
 test("mounts the optimize button for an enabled current provider without a manual key", async () => {
   const env = createEnvironment({
     enabled: true,
@@ -554,14 +583,14 @@ test("mounts the optimize button for an enabled current provider without a manua
   assert.equal(env.snapshot().enabled, true);
 });
 
-test("keeps the original dark treatment at a 26px height", async () => {
+test("follows the light and dark theme at a 26px height", async () => {
   const env = createEnvironment({ enabled: true, apiKeyConfigured: true });
   await flush();
 
   const button = env.getElementById("codey-prompt-optimize-button");
   const style = env.getElementById("codey-prompt-optimize-style");
   assert.match(style.textContent, /height: 26px !important/);
-  assert.match(style.textContent, /background: rgba\(30, 30, 30, \.92\)/);
+  assert.match(style.textContent, /background:\s*light-dark/);
   assert.doesNotMatch(style.textContent, /--codey-ai-/);
   assert.doesNotMatch(button.innerHTML, /codey-prompt-optimize-ai-gradient/);
 });
