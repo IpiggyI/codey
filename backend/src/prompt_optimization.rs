@@ -57,10 +57,11 @@ impl OptimizedResponseError {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ResolvedPromptOptimizationConfig {
     pub base_url: String,
     pub api_key: String,
+    pub(crate) auth_command: Option<crate::codex_provider::AuthCommandIdentity>,
     pub request_headers: BTreeMap<String, String>,
     /// Overrides the Responses API `store` field when the selected upstream
     /// requires an explicit value. Manual and third-party routes leave this
@@ -78,11 +79,25 @@ pub struct ResolvedPromptOptimizationConfig {
     pub instruction: String,
 }
 
+impl fmt::Debug for ResolvedPromptOptimizationConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResolvedPromptOptimizationConfig")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("upstream_protocol", &self.upstream_protocol)
+            .field("api_key", &"<redacted>")
+            .field("request_headers", &"<redacted>")
+            .finish()
+    }
+}
+
 impl ResolvedPromptOptimizationConfig {
     pub fn from_custom(config: &PromptOptimizationConfig) -> Self {
         Self {
             base_url: config.base_url.clone(),
             api_key: config.api_key.clone(),
+            auth_command: None,
             request_headers: BTreeMap::new(),
             response_store: None,
             response_stream: None,
@@ -91,6 +106,30 @@ impl ResolvedPromptOptimizationConfig {
             upstream_protocol: config.upstream_protocol.clone(),
             instruction: config.instruction.clone(),
         }
+    }
+
+    fn invalidate_command_token(&self, status: reqwest::StatusCode) -> Result<(), String> {
+        if status != reqwest::StatusCode::UNAUTHORIZED || self.api_key.trim().is_empty() {
+            return Ok(());
+        }
+        let Some(auth_command) = &self.auth_command else {
+            return Ok(());
+        };
+        let protocol = optimization_upstream_protocol(self)?;
+        let uses_custom_credential = self.request_headers.iter().any(|(name, value)| {
+            (name.eq_ignore_ascii_case(AUTHORIZATION.as_str()) && !value.trim().is_empty())
+                || (protocol == OptimizationUpstreamProtocol::AnthropicMessages
+                    && name.eq_ignore_ascii_case("x-api-key"))
+        });
+        if !uses_custom_credential {
+            auth_command.invalidate().map_err(|error| {
+                sanitize_resolved_error(
+                    &format!("HTTP {status}：清除 auth.command 缓存失败：{error}"),
+                    self,
+                )
+            })?;
+        }
+        Ok(())
     }
 }
 
@@ -245,6 +284,7 @@ pub async fn fetch_models_resolved(
                 )
             })?;
         let status = response.status();
+        config.invalidate_command_token(status)?;
         let has_fallback = index + 1 < endpoints.len();
         if has_fallback
             && (matches!(
@@ -645,7 +685,7 @@ async fn post_optimization_request(
     config: &ResolvedPromptOptimizationConfig,
     payload: &Value,
 ) -> Result<reqwest::Response, String> {
-    authenticated_request(client.post(endpoint), config)
+    let response = authenticated_request(client.post(endpoint), config)
         .header(CONTENT_TYPE, "application/json")
         .json(payload)
         .timeout(REQUEST_TIMEOUT)
@@ -656,7 +696,9 @@ async fn post_optimization_request(
                 &format!("请求优化 API 失败：{}", format_error_chain(&error)),
                 config,
             )
-        })
+        })?;
+    config.invalidate_command_token(response.status())?;
+    Ok(response)
 }
 
 /// Expands the reqwest error chain (`error sending request …；client error
@@ -978,8 +1020,10 @@ async fn response_body_preview(
     response: reqwest::Response,
     api_key: &str,
 ) -> Result<String, String> {
-    let body =
-        read_bounded_body(response, MAX_ERROR_RESPONSE_BYTES, "API 错误响应", api_key).await?;
+    let status = response.status().as_u16();
+    let body = read_bounded_body(response, MAX_ERROR_RESPONSE_BYTES, "API 错误响应", api_key)
+        .await
+        .map_err(|error| format!("HTTP {status}：{error}"))?;
     Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
@@ -1488,6 +1532,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.contains("过大"), "{error}");
+        assert!(error.contains("HTTP 401"), "{error}");
         server.await.unwrap();
     }
 
@@ -1774,6 +1819,7 @@ mod tests {
         let config = ResolvedPromptOptimizationConfig {
             base_url: "https://provider.example/v1".to_string(),
             api_key: "provider-api-secret".to_string(),
+            auth_command: None,
             request_headers,
             response_store: None,
             response_stream: None,
@@ -1971,6 +2017,7 @@ mod tests {
         let config = ResolvedPromptOptimizationConfig {
             base_url: format!("http://{address}/v1"),
             api_key: "ignored-key".to_string(),
+            auth_command: None,
             request_headers,
             response_store: None,
             response_stream: None,
@@ -2062,6 +2109,7 @@ mod tests {
         let config = ResolvedPromptOptimizationConfig {
             base_url: format!("http://{address}/v1"),
             api_key: String::new(),
+            auth_command: None,
             request_headers,
             response_store: Some(false),
             response_stream: Some(true),

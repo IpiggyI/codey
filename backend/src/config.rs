@@ -710,7 +710,7 @@ pub struct CodeyConfig {
     /// config. Once attached, current-provider model-list reads use the
     /// fingerprint key only and never fall back to a bare provider id.
     #[serde(skip)]
-    pub current_provider_snapshot: Option<crate::model_ownership::CurrentProviderSnapshot>,
+    pub current_provider_snapshot: Option<crate::codex_provider::ProviderSnapshot>,
 }
 
 /// User-declared operating budget, never proof of upstream model capacity.
@@ -1045,8 +1045,12 @@ impl CodeyConfig {
 
     pub fn attach_current_provider_snapshot(
         &mut self,
-        snapshot: crate::model_ownership::CurrentProviderSnapshot,
+        snapshot: impl Into<crate::codex_provider::ProviderSnapshot>,
     ) {
+        let mut snapshot = snapshot.into();
+        if let Some(previous) = &self.current_provider_snapshot {
+            snapshot.inherit_capabilities(previous);
+        }
         self.current_provider_snapshot = Some(snapshot);
     }
 
@@ -1487,10 +1491,18 @@ impl CodeyConfig {
         if !profile.enabled {
             return false;
         }
+        let declared = self
+            .current_provider_snapshot
+            .as_ref()
+            .filter(|snapshot| {
+                snapshot.id == profile.provider_id()
+                    && snapshot.resolved_base_url() == profile.normalized_base_url()
+            })
+            .map(|snapshot| snapshot.supports_remote_compaction());
         if profile.official_account {
-            return self.official_account_available_this_launch;
+            return self.official_account_available_this_launch && declared.unwrap_or(true);
         }
-        profile.supports_remote_compaction
+        declared.unwrap_or(profile.supports_remote_compaction)
             && profile.upstream_protocol == UPSTREAM_PROTOCOL_OPENAI_RESPONSES
     }
 
@@ -1499,6 +1511,11 @@ impl CodeyConfig {
     /// shared provider, so one adapted Chat/Anthropic route must disable it for
     /// the whole runtime even when an official account route is also present.
     pub(crate) fn runtime_supports_remote_compaction(&self) -> bool {
+        if !self.local_router_enabled
+            && let Some(snapshot) = &self.current_provider_snapshot
+        {
+            return snapshot.supports_remote_compaction();
+        }
         let mut has_runtime_route = false;
         for profile in &self.profiles {
             if !profile.enabled || profile.provider_id().trim().is_empty() {
@@ -3043,6 +3060,88 @@ mod tests {
             config.runtime_native_web_search_model_aliases(),
             vec![model_id::model_alias("route-search", "gpt-5.6-sol")]
         );
+    }
+
+    #[test]
+    fn native_remote_compaction_snapshot_controls_native_and_router_modes() {
+        let home = tempfile::tempdir().unwrap();
+        let mut route = ProviderProfile::new("Relay");
+        route.id = "relay".into();
+        route.base_url = "https://relay.example/v1".into();
+        route.supports_remote_compaction = true;
+        route.normalize();
+        for (declaration, expected) in [("v2", true), ("unsupported", false), ("future", false)] {
+            std::fs::write(home.path().join("config.toml"), format!("model_provider = 'relay'\n[model_providers.relay]\nbase_url = 'https://relay.example/v1'\ncapabilities.remote_compaction = '{declaration}'\n")).unwrap();
+            let mut config = CodeyConfig {
+                profiles: vec![route.clone()],
+                ..CodeyConfig::default()
+            };
+            config.attach_current_provider_snapshot(
+                crate::codex_provider::current_provider_snapshot(home.path()).unwrap(),
+            );
+            assert_eq!(config.runtime_supports_remote_compaction(), expected);
+            assert_eq!(
+                config.route_supports_remote_compaction_this_launch(&config.profiles[0]),
+                expected
+            );
+            config.local_router_enabled = true;
+            assert_eq!(config.runtime_supports_remote_compaction(), expected);
+            config.profiles[0].upstream_protocol = UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS.into();
+            assert!(!config.runtime_supports_remote_compaction());
+        }
+    }
+
+    #[test]
+    fn native_remote_compaction_default_endpoint_and_official_account_override() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[model_providers.openai]\ncapabilities.remote_compaction = 'unsupported'\n",
+        )
+        .unwrap();
+        let mut official = ProviderProfile::new("Account");
+        official.id = DERIVED_OFFICIAL_PROFILE_ID.into();
+        official.source_provider_id = Some("openai".into());
+        official.base_url = crate::codex_config::CHATGPT_CODEX_BASE_URL.into();
+        official.auth_mode = AUTH_MODE_OFFICIAL_ACCOUNT.into();
+        official.normalize();
+        let mut config = CodeyConfig {
+            profiles: vec![official],
+            official_account_available_this_launch: true,
+            local_router_enabled: true,
+            ..CodeyConfig::default()
+        };
+        config.attach_current_provider_snapshot(
+            crate::codex_provider::current_provider_snapshot(home.path()).unwrap(),
+        );
+        assert!(!config.route_supports_remote_compaction_this_launch(&config.profiles[0]));
+        assert!(!config.runtime_supports_remote_compaction());
+        std::fs::write(home.path().join("config.toml"), "").unwrap();
+        config.attach_current_provider_snapshot(
+            crate::codex_provider::current_provider_snapshot(home.path()).unwrap(),
+        );
+        assert!(config.runtime_supports_remote_compaction());
+        config.official_account_available_this_launch = false;
+        assert!(!config.runtime_supports_remote_compaction());
+    }
+
+    #[test]
+    fn native_remote_compaction_snapshot_does_not_override_other_routes() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("config.toml"), "model_provider = 'relay'\n[model_providers.relay]\nbase_url = 'https://relay.example/v1'\ncapabilities.remote_compaction = 'v2'\n").unwrap();
+        let mut route = ProviderProfile::new("Other relay");
+        route.id = "relay".into();
+        route.base_url = "https://another.example/v1".into();
+        route.normalize();
+        let mut config = CodeyConfig {
+            local_router_enabled: true,
+            profiles: vec![route],
+            ..CodeyConfig::default()
+        };
+        config.attach_current_provider_snapshot(
+            crate::codex_provider::current_provider_snapshot(home.path()).unwrap(),
+        );
+        assert!(!config.runtime_supports_remote_compaction());
     }
 
     #[test]

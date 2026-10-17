@@ -43,6 +43,7 @@
 - 唯一落盘例外是运行期产物：Codex 不接受用命令行注入钩子，因此 `hooks.json` 仍需写入；写入前备份，退出时恢复。apply 与 restore 都不改写用户的 provider、MCP、模型或未知字段。
 - 官方账号通过原生登录探针及严格端点、认证检查识别。旧版 ChatGPT 登录态（缺少 `auth_mode` 但 `tokens` 中仍有有效令牌）视为可用。不依据模糊文本或第三方配置中的残留凭据判定已登录。
 - 官方账号端点只认 `https://chatgpt.com/backend-api/codex` 这一形态；带端口、查询、片段或仿冒主机的地址不算官方端点。
+- 模型同步和提示词优化共用一个凭据解析器，按 provider 的 `auth` 命令、`env_key` 环境变量、`experimental_bearer_token`、`auth.json` 的 `OPENAI_API_KEY` 的顺序取第一个可用值，最后才回退到 `api_key` 等兼容别名。`auth` 与 `env_key`、`experimental_bearer_token`、`requires_openai_auth` 同时配置时报错。`auth.json` 密钥只在 provider 设置了 `requires_openai_auth = true`（或为内置 `openai`）且 `auth.json` 处于 API 密钥模式（`auth_mode` 为 `apikey`，或缺省且没有 ChatGPT 令牌）时使用；ChatGPT 模式不会使用遗留密钥。`auth.command` 不经 shell，直接运行程序并传入 `args` 与 `cwd`；`timeout_ms` 缺省或为 0 时取 5000 ms，上限 60000 ms；标准输出最多 64 KiB，超时或超限只终止直接子进程。令牌只在内存中按 provider、命令、参数、工作目录缓存，`refresh_interval_ms` 缺省 300000，0 表示不主动过期。HTTP 401 会让缓存的命令令牌失效，且按代数比对，较旧请求的 401 不会清掉已刷新的令牌；请求已带自定义授权头时不清缓存。状态和控制台读取不执行命令。令牌不写日志、不返回前端、不落盘，命令错误不记录命令输出。
 - Unix 私有配置、备份和日志限制当前用户访问。第三方密钥和通知凭据仍以明文保存在私有配置及备份中；后端不会把已保存密钥返回前端。
 - 普通错误日志只保存脱敏失败信息，不保存提示词、正常响应或认证值。
 
@@ -73,6 +74,7 @@ provider、模型和上游格式分别识别。控制台只读展示当前 Codex
 
 历史、Token 记账、压缩触发和结果提交由 Codex 管理；Codey 配置模型目录并声明预算，不维护第二份可写会话历史，也不在进程内转发压缩请求。
 
+- 远程压缩是否可用遵循 provider 显式的 `capabilities.remote_compaction`：`v2` 为真，`unsupported` 为假，其他取值为假并输出诊断。未声明时，官方账号鉴权或内置 provider id `openai` 为真，其余为假，不依据显示名推断。`capabilities.external_web_access` 作为可选布尔值读取，并随 provider 快照展示。
 - 官方和第三方模型均可声明窗口、自动压缩阈值和输出预留。预算按显式配置、旧 1M 声明、精确官方元数据、未知模型保守值的顺序解析；未知模型使用 32768 Token、95% 有效比例。
 - 输出预留保守投影到有效窗口，自动阈值不超过窗口的 90% 和扣除预留后的容量；这不限制实际输出长度，也不能扩大服务端容量。
 - 预算变化要求重启。只校验已启用模型；用户目录缺少或重复预算模型会产生类型化错误，保存前校验不写目录，启动副本按内容哈希写入 Codey 数据目录。恢复默认从原目录生成，不改写用户指令与未知元数据。Windows 和 macOS 原生确认后才清除 Codey 的全部自定义预算并重试一次；Linux 没有原生确认入口，保留预算并明确报错。配置使用既有备份链。官方模型入口展示预算，空窗口恢复默认。

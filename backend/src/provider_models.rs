@@ -15,23 +15,37 @@ use crate::model_list::{self, ModelEndpointError};
 
 /// HTTP inputs for GET `/models` against the current Codex provider.
 ///
-/// Every field is sourced from the user-owned `config.toml` (plus process env
-/// for `env_key` / `env_http_headers`). None of these values come from a stored
+/// Every field is sourced from the user-owned Codex configuration, native
+/// credentials or process environment. None of these values come from a stored
 /// `ProviderProfile`, and none are written back to user config.
 /// TLS uses the shared reqwest client’s system trust store (`rustls` native
 /// roots); there is no Codey-owned certificate setting.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 pub struct ModelSyncRequest {
     /// Source: `[model_providers.<id>].base_url`.
     pub base_url: String,
     /// Source: `[model_providers.<id>].wire_api`, mapped to Codey’s protocol.
     pub upstream_protocol: String,
-    /// Source: user-config key chain (`experimental_bearer_token`, `env_key`,
-    /// aliases, then document-level `experimental_bearer_token`). Never a
+    /// Source: the shared native credential resolver (command, environment,
+    /// provider token, then applicable auth.json API key). Never a
     /// Codey-stored `ProviderProfile.api_key`.
     pub api_key: String,
+    /// Identifies the in-memory command credential used by this request.
+    pub(crate) auth_command: Option<crate::codex_provider::AuthCommandIdentity>,
     /// Source: `[model_providers.<id>].http_headers` plus `env_http_headers`.
     pub request_headers: BTreeMap<String, String>,
+}
+
+impl fmt::Debug for ModelSyncRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ModelSyncRequest")
+            .field("base_url", &self.base_url)
+            .field("upstream_protocol", &self.upstream_protocol)
+            .field("api_key", &"<redacted>")
+            .field("request_headers", &"<redacted>")
+            .finish()
+    }
 }
 
 const PROVIDER_MODEL_REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
@@ -126,6 +140,17 @@ pub async fn fetch(source: &ModelSyncRequest, client: &Client) -> Result<Vec<Str
             .await
             .with_context(|| format!("获取上游模型失败：{endpoint}"))?;
         let status = response.status();
+        let used_command_token = if anthropic_messages {
+            !has_custom_anthropic_key
+        } else {
+            !has_custom_authorization
+        };
+        if status == reqwest::StatusCode::UNAUTHORIZED
+            && used_command_token
+            && let Some(auth_command) = &source.auth_command
+        {
+            auth_command.invalidate()?;
+        }
         let has_fallback = index + 1 < endpoints.len();
         if has_fallback
             && (matches!(
@@ -231,6 +256,104 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn auth_revision_zero_interval_reuses_token_until_http_401() {
+        let home = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            assert!(stream.read(&mut request).unwrap() > 0);
+            stream
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        #[cfg(unix)]
+        let (program, file, args, body) = (
+            "/bin/sh".to_string(),
+            "credential.sh",
+            "['credential.sh']",
+            "printf x >> calls\nprintf fixture-command-token\n",
+        );
+        #[cfg(windows)]
+        let (program, file, args, body) = (
+            std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into()),
+            "credential.cmd",
+            "['/D', '/Q', '/C', 'credential.cmd']",
+            "@echo off\r\n>>calls echo x\r\necho fixture-command-token\r\nexit /b 0\r\n",
+        );
+        std::fs::write(home.path().join(file), body).unwrap();
+        let program = toml_edit::Value::from(program).to_string();
+        let cwd = toml_edit::Value::from(home.path().to_str().unwrap()).to_string();
+        std::fs::write(home.path().join("config.toml"), format!("model_provider = 'relay'\n[model_providers.relay]\nbase_url = 'http://{address}/v1'\nauth = {{ command = {program}, args = {args}, cwd = {cwd}, refresh_interval_ms = 0 }}\n")).unwrap();
+        let resolve = || {
+            let path = home.path().to_path_buf();
+            tokio::task::spawn_blocking(move || {
+                crate::codex_provider::current_provider_model_sync(&path)
+            })
+        };
+        let first = resolve().await.unwrap().unwrap();
+        let cached = resolve().await.unwrap().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("calls"))
+                .unwrap()
+                .matches('x')
+                .count(),
+            1
+        );
+        let client = Client::builder().no_proxy().build().unwrap();
+        let error = fetch(&first.request, &client)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("HTTP 401"));
+        assert!(!error.contains("fixture-command-token"));
+        server.join().unwrap();
+        let refreshed = resolve().await.unwrap().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("calls"))
+                .unwrap()
+                .matches('x')
+                .count(),
+            2
+        );
+        cached
+            .request
+            .auth_command
+            .as_ref()
+            .unwrap()
+            .invalidate()
+            .unwrap();
+        let retained = resolve().await.unwrap().unwrap();
+        assert_eq!(retained.request.api_key, refreshed.request.api_key);
+        assert_eq!(
+            std::fs::read_to_string(home.path().join("calls"))
+                .unwrap()
+                .matches('x')
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn native_credentials_are_redacted_from_request_debug() {
+        let request = super::ModelSyncRequest {
+            api_key: "fixture-native-secret".into(),
+            request_headers: std::collections::BTreeMap::from([(
+                "Authorization".into(),
+                "Bearer fixture-header-secret".into(),
+            )]),
+            ..super::ModelSyncRequest::default()
+        };
+        let debug = format!("{request:?}");
+        assert!(!debug.contains("fixture-native-secret"));
+        assert!(!debug.contains("fixture-header-secret"));
+    }
 
     #[test]
     fn builds_compatible_model_endpoints() {

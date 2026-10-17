@@ -50,7 +50,7 @@ pub(crate) fn runtime_supports_current_routes_for_hot_reload(
         return false;
     }
     if !current.local_router_enabled {
-        return true;
+        return !remote_compaction_transport_requires_restart(applied, current);
     }
     let mut capability_config = current.clone();
     for profile in &mut capability_config.profiles {
@@ -117,7 +117,8 @@ pub(crate) fn provider_route_snapshots(
                     upstream_protocol: profile.upstream_protocol.clone(),
                     auth_mode: profile.auth_mode.clone(),
                     official_account: profile.official_account,
-                    supports_remote_compaction: profile.supports_remote_compaction,
+                    supports_remote_compaction: config
+                        .route_supports_remote_compaction_this_launch(profile),
                     supports_websockets: profile.supports_websockets,
                     supports_native_web_search: profile.supports_native_web_search,
                     model_request_headers: profile.model_request_headers.clone(),
@@ -140,17 +141,25 @@ pub(crate) fn renderer_model_catalog_value(
     config: &CodeyConfig,
     model_state: &model_catalog::ModelSelectionState,
 ) -> Value {
+    renderer_model_catalog_value_at(config, model_state, codex_home())
+}
+
+pub(crate) fn renderer_model_catalog_value_at(
+    config: &CodeyConfig,
+    model_state: &model_catalog::ModelSelectionState,
+    home: &std::path::Path,
+) -> Value {
     if !config.local_router_enabled {
         let mut catalog = renderer_native_model_catalog_value(model_state);
         catalog["legacy_model_aliases"] = json!(config.model_alias_history);
-        let provider = codex_provider::current_provider(codex_home()).ok();
+        let provider = codex_provider::current_provider(home).ok();
         let provider_id = provider
             .as_ref()
             .map(|provider| provider.id.clone())
             .unwrap_or_default();
         catalog["native_model_provider"] = json!(provider_id.clone());
         let user_catalog_configured = crate::codex_config::configured_user_model_catalog_path(
-            codex_home(),
+            home,
             &crate::codex_config::codey_model_catalog_dir(),
         )
         .ok()

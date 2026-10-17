@@ -9,9 +9,8 @@ use uuid::Uuid;
 use super::AppState;
 use crate::codex_config::{CHATGPT_CODEX_BASE_URL, codex_home};
 use crate::codex_provider::{
-    self, PROMPT_OPTIMIZATION_KEY_STATUS_MISSING, PROMPT_OPTIMIZATION_KEY_STATUS_NOT_APPLICABLE,
-    PROMPT_OPTIMIZATION_KEY_STATUS_READY, PROMPT_OPTIMIZATION_KEY_STATUS_UNDECLARED,
-    PROMPT_OPTIMIZATION_KEY_STATUS_UNSUPPORTED, PromptOptimizationProviderOverlay,
+    self, PROMPT_OPTIMIZATION_KEY_STATUS_NOT_APPLICABLE, PROMPT_OPTIMIZATION_KEY_STATUS_READY,
+    PromptOptimizationProviderOverlay,
 };
 use crate::config::PromptOptimizationConfig;
 use crate::error_log;
@@ -33,10 +32,21 @@ fn optimizer_client() -> Result<&'static Client, String> {
     Ok(OPTIMIZER_CLIENT.get_or_init(|| client))
 }
 
-fn resolve_request_config(
+async fn resolve_request_config(
     optimization: &PromptOptimizationConfig,
 ) -> Result<prompt_optimization::ResolvedPromptOptimizationConfig, String> {
-    resolve_request_config_at(optimization, codex_home(), &|name| std::env::var(name).ok())
+    resolve_request_config_async_at(optimization.clone(), codex_home().to_path_buf()).await
+}
+
+async fn resolve_request_config_async_at(
+    optimization: PromptOptimizationConfig,
+    home: std::path::PathBuf,
+) -> Result<prompt_optimization::ResolvedPromptOptimizationConfig, String> {
+    tokio::task::spawn_blocking(move || {
+        resolve_request_config_at(&optimization, &home, &|name| std::env::var(name).ok())
+    })
+    .await
+    .map_err(|_| "解析提示词优化配置任务失败".to_string())?
 }
 
 fn resolve_request_config_at(
@@ -72,54 +82,38 @@ fn resolve_current_provider_request(
     codex_home: &Path,
     env: &impl Fn(&str) -> Option<String>,
 ) -> Result<prompt_optimization::ResolvedPromptOptimizationConfig, String> {
-    let snapshot = codex_provider::current_provider_snapshot(codex_home)
+    let sync = codex_provider::current_provider_model_sync_with_env(codex_home, env)
         .map_err(|error| format!("读取当前 provider 失败：{error:#}"))?;
-    if snapshot.uses_official_account_auth {
+    if sync.snapshot.uses_official_account_auth {
         let request_headers = read_official_auth_headers(codex_home).map_err(|error| {
-            format!(
-                "官方账号登录不可用：{error}。当前 provider 使用官方账号鉴权，提示词优化不会改用环境变量或其他已保存密钥。"
-            )
+            format!("官方账号登录不可用：{error}。当前 provider 使用官方账号鉴权，提示词优化不会改用环境变量或其他已保存密钥。")
         })?;
-        let base_url = if snapshot.base_url.trim().is_empty() {
+        let base_url = if sync.request.base_url.trim().is_empty() {
             CHATGPT_CODEX_BASE_URL.to_string()
         } else {
-            snapshot.base_url
+            sync.request.base_url
         };
         return Ok(official_resolved(optimization, base_url, request_headers));
     }
-
-    let overlay = codex_provider::prompt_optimization_provider_overlay_with_env(codex_home, env)
-        .map_err(|error| format!("读取当前 provider 失败：{error:#}"))?;
-    match overlay.key_status.as_str() {
-        status if status == PROMPT_OPTIMIZATION_KEY_STATUS_UNSUPPORTED => Err(overlay.message),
-        status if status == PROMPT_OPTIMIZATION_KEY_STATUS_UNDECLARED => Err(overlay.message),
-        status if status == PROMPT_OPTIMIZATION_KEY_STATUS_MISSING => Err(overlay.message),
-        status if status == PROMPT_OPTIMIZATION_KEY_STATUS_READY => {
-            if snapshot.base_url.trim().is_empty() {
-                return Err(format!(
-                    "当前 provider「{}」没有 API 地址。可以改用手工填写。",
-                    snapshot.id
-                ));
-            }
-            let api_key = env(&overlay.env_key_name)
-                .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| overlay.message.clone())?;
-            crate::config::validate_outbound_api_url(&snapshot.base_url, "当前 provider API 地址")?;
-            Ok(prompt_optimization::ResolvedPromptOptimizationConfig {
-                base_url: snapshot.base_url,
-                api_key,
-                request_headers: BTreeMap::new(),
-                response_store: None,
-                response_stream: None,
-                response_omit_max_output_tokens: false,
-                model: optimization.model.clone(),
-                upstream_protocol: overlay.upstream_protocol,
-                instruction: optimization.instruction.clone(),
-            })
-        }
-        _ => Err(overlay.message),
+    if sync.request.base_url.trim().is_empty() {
+        return Err(format!(
+            "当前 provider「{}」没有 API 地址。可以改用手工填写。",
+            sync.snapshot.id
+        ));
     }
+    crate::config::validate_outbound_api_url(&sync.request.base_url, "当前 provider API 地址")?;
+    Ok(prompt_optimization::ResolvedPromptOptimizationConfig {
+        base_url: sync.request.base_url,
+        api_key: sync.request.api_key,
+        auth_command: sync.request.auth_command,
+        request_headers: sync.request.request_headers,
+        response_store: None,
+        response_stream: None,
+        response_omit_max_output_tokens: false,
+        model: optimization.model.clone(),
+        upstream_protocol: sync.request.upstream_protocol,
+        instruction: optimization.instruction.clone(),
+    })
 }
 
 fn official_resolved(
@@ -130,6 +124,7 @@ fn official_resolved(
     prompt_optimization::ResolvedPromptOptimizationConfig {
         base_url,
         api_key: String::new(),
+        auth_command: None,
         request_headers,
         response_store: Some(false),
         response_stream: Some(true),
@@ -184,7 +179,7 @@ pub async fn optimize_prompt_command(state: &Arc<AppState>, text: String) -> Res
     if !optimization.enabled {
         return Err("提示词优化尚未启用，请先在 Codey 控制台开启".to_string());
     }
-    let request_config = resolve_request_config(&optimization)?;
+    let request_config = resolve_request_config(&optimization).await?;
     let client = optimizer_client()?;
     match prompt_optimization::optimize_prompt_resolved(client, &request_config, &text).await {
         Ok(optimized) => Ok(json!({"optimized": optimized})),
@@ -212,7 +207,7 @@ pub async fn fetch_prompt_optimization_models_command(
     let mut optimization = draft.unwrap_or_else(|| config.prompt_optimization.clone());
     optimization.merge_redacted_secrets(&config.prompt_optimization);
     optimization.validate()?;
-    let request_config = resolve_request_config(&optimization)?;
+    let request_config = resolve_request_config(&optimization).await?;
     let client = optimizer_client()?;
     let models = prompt_optimization::fetch_models_resolved(client, &request_config).await;
     match models {
@@ -242,7 +237,7 @@ pub async fn test_prompt_optimization_command(
     let mut optimization = draft.unwrap_or_else(|| config.prompt_optimization.clone());
     optimization.merge_redacted_secrets(&config.prompt_optimization);
     optimization.validate()?;
-    let request_config = resolve_request_config(&optimization)?;
+    let request_config = resolve_request_config(&optimization).await?;
     let client = optimizer_client()?;
     match prompt_optimization::test_configuration_resolved(client, &request_config).await {
         Ok(result) => Ok(json!({"status": "ok", "result": result})),
@@ -336,6 +331,229 @@ mod tests {
     use crate::config::{
         PROMPT_OPTIMIZATION_MODE_CURRENT_PROVIDER, PROMPT_OPTIMIZATION_MODE_OFFICIAL_ACCOUNT,
     };
+
+    #[cfg(unix)]
+    fn auth_retry_fixture(home: &Path) -> String {
+        fs::write(
+            home.join("credential.sh"),
+            "printf x >> calls\nprintf fixture-command-key\n",
+        )
+        .unwrap();
+        format!(
+            "model_provider = 'relay'\n[model_providers.relay]\nbase_url = 'http://127.0.0.1:1/v1'\nauth = {{ command = '/bin/sh', args = ['credential.sh'], cwd = {:?}, refresh_interval_ms = 0 }}\n",
+            home.to_str().unwrap()
+        )
+    }
+
+    #[cfg(unix)]
+    async fn auth_retry_error(
+        mut resolved: prompt_optimization::ResolvedPromptOptimizationConfig,
+        operation: &str,
+        status: u16,
+        oversized: bool,
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        resolved.base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0; 8192];
+            assert!(socket.read(&mut request).await.unwrap() > 0);
+            let body = if oversized {
+                "x".repeat(65537)
+            } else {
+                "rejected".to_string()
+            };
+            let response = format!(
+                "HTTP/1.1 {status} Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let client = Client::builder().no_proxy().build().unwrap();
+        let error = match operation {
+            "optimize" => prompt_optimization::optimize_prompt_resolved(&client, &resolved, "test")
+                .await
+                .unwrap_err(),
+            "test" => prompt_optimization::test_configuration_resolved(&client, &resolved)
+                .await
+                .unwrap_err(),
+            "models" => prompt_optimization::fetch_models_resolved(&client, &resolved)
+                .await
+                .unwrap_err(),
+            _ => unreachable!(),
+        };
+        server.await.unwrap();
+        assert!(!error.contains(&resolved.api_key));
+        error
+    }
+
+    #[cfg(unix)]
+    async fn check_auth_retry(status: u16, oversized: bool) {
+        for operation in ["optimize", "test", "models"] {
+            let home = tempfile::tempdir().unwrap();
+            write_user_config(home.path(), &auth_retry_fixture(home.path()));
+            let optimization = current_provider_optimization();
+            let resolved =
+                resolve_request_config_at(&optimization, home.path(), &|_| None).unwrap();
+            let error = auth_retry_error(resolved, operation, status, oversized).await;
+            resolve_request_config_at(&optimization, home.path(), &|_| None).unwrap();
+            let calls = fs::read_to_string(home.path().join("calls")).unwrap();
+            assert_eq!(
+                calls.len(),
+                if status == 401 { 2 } else { 1 },
+                "{operation}"
+            );
+            assert!(error.contains(&format!("HTTP {status}")), "{error}");
+            if oversized {
+                assert!(error.contains("API 错误响应过大，已停止读取"), "{error}");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn auth_retry_401_invalidates_command_token() {
+        check_auth_retry(401, false).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn auth_retry_oversized_401_invalidates_command_token_and_keeps_status() {
+        check_auth_retry(401, true).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn auth_retry_non_401_keeps_command_token() {
+        check_auth_retry(403, false).await;
+        check_auth_retry(500, true).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn auth_retry_stale_401_preserves_newer_command_token() {
+        for operation in ["optimize", "test", "models"] {
+            let home = tempfile::tempdir().unwrap();
+            write_user_config(home.path(), &auth_retry_fixture(home.path()));
+            let optimization = current_provider_optimization();
+            let stale = resolve_request_config_at(&optimization, home.path(), &|_| None).unwrap();
+            stale.auth_command.as_ref().unwrap().invalidate().unwrap();
+            resolve_request_config_at(&optimization, home.path(), &|_| None).unwrap();
+            auth_retry_error(stale, operation, 401, false).await;
+            resolve_request_config_at(&optimization, home.path(), &|_| None).unwrap();
+            assert_eq!(
+                fs::read_to_string(home.path().join("calls")).unwrap().len(),
+                2
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn auth_retry_other_sources_preserve_cached_command_token() {
+        for credential in [
+            "env_key = 'CODEY_TEST_KEY'",
+            "experimental_bearer_token = 'fixture-other-key'",
+            "requires_openai_auth = true",
+        ] {
+            for operation in ["optimize", "test", "models"] {
+                let home = tempfile::tempdir().unwrap();
+                let command_config = auth_retry_fixture(home.path());
+                write_user_config(home.path(), &command_config);
+                let optimization = current_provider_optimization();
+                resolve_request_config_at(&optimization, home.path(), &|_| None).unwrap();
+                write_user_config(
+                    home.path(),
+                    &format!(
+                        "model_provider = 'relay'\n[model_providers.relay]\nbase_url = 'http://127.0.0.1:1/v1'\n{credential}\n"
+                    ),
+                );
+                fs::write(
+                    home.path().join("auth.json"),
+                    r#"{"auth_mode":"apikey","OPENAI_API_KEY":"fixture-other-key"}"#,
+                )
+                .unwrap();
+                let resolved = resolve_request_config_at(&optimization, home.path(), &|_| {
+                    Some("fixture-other-key".to_string())
+                })
+                .unwrap();
+                assert!(resolved.auth_command.is_none());
+                auth_retry_error(resolved, operation, 401, false).await;
+                write_user_config(home.path(), &command_config);
+                resolve_request_config_at(&optimization, home.path(), &|_| None).unwrap();
+                assert_eq!(
+                    fs::read_to_string(home.path().join("calls")).unwrap().len(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn auth_retry_custom_headers_preserve_unused_command_token() {
+        for (protocol, header) in [
+            (
+                crate::config::UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
+                "Authorization",
+            ),
+            (
+                crate::config::UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES,
+                "x-api-key",
+            ),
+        ] {
+            for operation in ["optimize", "test", "models"] {
+                let home = tempfile::tempdir().unwrap();
+                write_user_config(home.path(), &auth_retry_fixture(home.path()));
+                let optimization = current_provider_optimization();
+                let mut resolved =
+                    resolve_request_config_at(&optimization, home.path(), &|_| None).unwrap();
+                resolved.upstream_protocol = protocol.to_string();
+                resolved
+                    .request_headers
+                    .insert(header.to_string(), "fixture-header-key".to_string());
+                auth_retry_error(resolved, operation, 401, false).await;
+                resolve_request_config_at(&optimization, home.path(), &|_| None).unwrap();
+                assert_eq!(
+                    fs::read_to_string(home.path().join("calls")).unwrap().len(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn auth_revision_command_resolution_does_not_block_the_async_worker() {
+        let home = tempfile::tempdir().unwrap();
+        fs::write(
+            home.path().join("credential.sh"),
+            "while [ ! -e release ]; do :; done\nprintf fixture-command-key\n",
+        )
+        .unwrap();
+        write_user_config(
+            home.path(),
+            &format!(
+                "model_provider = 'relay'\n[model_providers.relay]\nbase_url = 'https://relay.example/v1'\nauth = {{ command = '/bin/sh', args = ['credential.sh'], cwd = {:?}, timeout_ms = 3000 }}\n",
+                home.path().to_str().unwrap()
+            ),
+        );
+        let started = std::time::Instant::now();
+        let (progress, resolved) = tokio::join!(
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                fs::write(home.path().join("release"), "").unwrap();
+                started.elapsed()
+            },
+            resolve_request_config_async_at(
+                current_provider_optimization(),
+                home.path().to_path_buf()
+            )
+        );
+        assert!(progress < std::time::Duration::from_secs(1));
+        assert_eq!(resolved.unwrap().api_key, "fixture-command-key");
+    }
 
     #[test]
     fn official_auth_headers_are_loaded_from_codex_auth_json() {
@@ -439,7 +657,7 @@ mod tests {
 name = "Relay"
 base_url = "https://relay.example/v1"
 wire_api = "responses"
-experimental_bearer_token = "inline-must-not-be-used"
+experimental_bearer_token = "inline-fixture-key"
 env_key = "CODEY_PROMPT_OPT_RESOLVE"
 "#,
         );
@@ -471,7 +689,66 @@ env_key = "CODEY_PROMPT_OPT_RESOLVE"
     }
 
     #[test]
-    fn current_provider_resolve_ignores_inline_token_and_saved_manual_key() {
+    fn current_provider_resolve_uses_native_auth_json_api_key() {
+        let home = tempfile::tempdir().unwrap();
+        write_user_config(
+            home.path(),
+            "model_provider = 'official'\n[model_providers.official]\nbase_url = 'https://api.openai.com/v1'\nrequires_openai_auth = true\n",
+        );
+        let auth = json!({"auth_mode": "apikey", "OPENAI_API_KEY": "fixture-native-key"});
+        fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec(&auth).unwrap(),
+        )
+        .unwrap();
+        let before = fs::read(home.path().join("auth.json")).unwrap();
+        let optimization = current_provider_optimization();
+        let resolved = resolve_request_config_at(&optimization, home.path(), &|_| None).unwrap();
+        assert_eq!(resolved.api_key, "fixture-native-key");
+        assert_eq!(resolved.response_store, None);
+        let (error, context) = prompt_optimization_failure_payload(
+            &optimization,
+            &resolved,
+            "rejected fixture-native-key".into(),
+        );
+        assert!(!format!("{error}{context}").contains("fixture-native-key"));
+        assert_eq!(fs::read(home.path().join("auth.json")).unwrap(), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn current_provider_resolve_uses_shared_command_cache_without_proactive_zero_expiry() {
+        let home = tempfile::tempdir().unwrap();
+        fs::write(
+            home.path().join("credential.sh"),
+            "printf x >> calls\nprintf '  fixture-command-key \\n'",
+        )
+        .unwrap();
+        let config = format!(
+            "model_provider = 'relay'\n[model_providers.relay]\nbase_url = 'https://relay.example/v1'\nauth = {{ command = '/bin/sh', args = ['credential.sh'], cwd = {:?}, refresh_interval_ms = 300000 }}\n",
+            home.path().to_str().unwrap()
+        );
+        write_user_config(home.path(), &config);
+        let optimization = current_provider_optimization();
+        let sync =
+            codex_provider::current_provider_model_sync_with_env(home.path(), &|_| None).unwrap();
+        let resolved = resolve_request_config_at(&optimization, home.path(), &|_| None).unwrap();
+        assert_eq!(resolved.api_key, "fixture-command-key");
+        assert_eq!(resolved.api_key, sync.request.api_key);
+        assert_eq!(fs::read_to_string(home.path().join("calls")).unwrap(), "x");
+        let (error, context) = prompt_optimization_failure_payload(
+            &optimization,
+            &resolved,
+            "rejected fixture-command-key".into(),
+        );
+        assert!(!format!("{error}{context}").contains("fixture-command-key"));
+        write_user_config(home.path(), &config.replace("300000", "0"));
+        resolve_request_config_at(&optimization, home.path(), &|_| None).unwrap();
+        assert_eq!(fs::read_to_string(home.path().join("calls")).unwrap(), "x");
+    }
+
+    #[test]
+    fn current_provider_resolve_uses_inline_token_without_saved_manual_key() {
         let home = tempfile::tempdir().unwrap();
         write_user_config(
             home.path(),
@@ -481,19 +758,16 @@ env_key = "CODEY_PROMPT_OPT_RESOLVE"
 name = "Relay"
 base_url = "https://relay.example/v1"
 wire_api = "chat"
-experimental_bearer_token = "inline-must-not-be-used"
+experimental_bearer_token = "inline-fixture-key"
 "#,
         );
-        let error =
+        let resolved =
             resolve_request_config_at(&current_provider_optimization(), home.path(), &|_| {
                 Some("env-must-not-be-used".to_string())
             })
-            .unwrap_err();
-
-        assert!(error.contains("env_key"));
-        assert!(!error.contains("inline-must-not-be-used"));
-        assert!(!error.contains("leftover-manual-secret"));
-        assert!(!error.contains("env-must-not-be-used"));
+            .unwrap();
+        assert_eq!(resolved.api_key, "inline-fixture-key");
+        assert_ne!(resolved.api_key, "leftover-manual-secret");
     }
 
     #[test]
@@ -573,7 +847,6 @@ env_key = "CODEY_PROMPT_OPT_RESOLVE"
 name = "OpenAI"
 base_url = "https://chatgpt.com/backend-api/codex"
 wire_api = "responses"
-env_key = "CODEY_PROMPT_OPT_RESOLVE"
 "#,
         );
         let error =

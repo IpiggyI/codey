@@ -121,7 +121,7 @@ async fn official_current_provider_keeps_codex_builtin_catalog() {
             vec!["gpt-5.6-sol".into()],
         )]),
         default_model: "gpt-5.6-sol".into(),
-        current_provider_snapshot: Some(snapshot),
+        current_provider_snapshot: Some(snapshot.into()),
         ..CodeyConfig::default()
     }
     .normalize();

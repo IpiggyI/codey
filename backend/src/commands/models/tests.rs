@@ -176,6 +176,7 @@ fn native_model_state_and_subagent_defaults_follow_only_the_current_provider() {
         official: false,
         supports_remote_compaction: false,
         base_url: "https://route-a.example/v1".into(),
+        ..Default::default()
     };
 
     let state = native_model_state_for_provider(&config, &provider, home.path()).unwrap();
@@ -199,6 +200,7 @@ fn native_model_state_resolves_a_leftover_default_alias() {
         official: false,
         supports_remote_compaction: false,
         base_url: "https://relay.example/v1".into(),
+        ..Default::default()
     };
     let config = CodeyConfig {
         local_router_enabled: false,
@@ -231,6 +233,7 @@ fn disabled_native_provider_returns_an_explicit_empty_renderer_catalog() {
         official: false,
         supports_remote_compaction: false,
         base_url: route.base_url.clone(),
+        ..Default::default()
     };
     let config = CodeyConfig {
         local_router_enabled: false,
@@ -245,10 +248,8 @@ fn disabled_native_provider_returns_an_explicit_empty_renderer_catalog() {
     let state = native_model_state_for_provider(&config, &provider, home.path()).unwrap();
     assert_eq!(state, Default::default());
 
-    let current_provider = codex_provider::current_provider(codex_home()).unwrap();
-    let mut renderer_config = config;
-    renderer_config.profiles[0].id = current_provider.id;
-    let catalog = renderer_model_catalog_value(&renderer_config, &state);
+    std::fs::write(home.path().join("config.toml"), "model_provider = 'route-a'\n[model_providers.route-a]\nbase_url = 'https://route-a.example/v1'\n").unwrap();
+    let catalog = renderer_model_catalog_value_at(&config, &state, home.path());
     assert_eq!(catalog["status"], "ok");
     assert_eq!(catalog["clear_models"], true);
     assert_eq!(catalog["models"], json!([]));
@@ -264,6 +265,7 @@ fn native_model_selection_updates_current_provider_models_without_route_edits() 
         official: false,
         supports_remote_compaction: false,
         base_url: route.base_url.clone(),
+        ..Default::default()
     };
     let config = CodeyConfig {
         local_router_enabled: false,
@@ -309,6 +311,7 @@ fn native_official_model_selection_keeps_selection_official_only() {
         official: true,
         supports_remote_compaction: true,
         base_url: String::new(),
+        ..Default::default()
     };
     let config = CodeyConfig {
         local_router_enabled: false,
@@ -333,7 +336,7 @@ fn native_official_model_selection_keeps_selection_official_only() {
     );
     let home = tempfile::tempdir().unwrap();
     let model_state = native_model_state_for_provider(&selected, &provider, home.path()).unwrap();
-    let catalog = renderer_model_catalog_value(&selected, &model_state);
+    let catalog = renderer_model_catalog_value_at(&selected, &model_state, home.path());
     let expected_models = model_catalog::default_official_model_slugs()
         .into_iter()
         .filter(|model| model != "gpt-5.6-terra" && model != "gpt-5.6-luna")
@@ -475,6 +478,7 @@ fn disabled_native_provider_clears_models_without_preservation() {
 
 #[test]
 fn native_renderer_catalog_and_hot_reload_do_not_require_local_routes() {
+    let home = tempfile::tempdir().unwrap();
     let config = CodeyConfig {
         local_router_enabled: false,
         ..CodeyConfig::default()
@@ -485,7 +489,7 @@ fn native_renderer_catalog_and_hot_reload_do_not_require_local_routes() {
         default_model: "org/model-a".into(),
         ..Default::default()
     };
-    let catalog = renderer_model_catalog_value(&config, &model_state);
+    let catalog = renderer_model_catalog_value_at(&config, &model_state, home.path());
     assert_eq!(catalog["models"], json!(["org/model-a"]));
     assert!(catalog["model_metadata"][0].get("provider_id").is_none());
     assert!(runtime_supports_current_routes_for_hot_reload(
@@ -505,13 +509,15 @@ fn native_renderer_catalog_and_hot_reload_do_not_require_local_routes() {
 
 #[test]
 fn default_config_exposes_a_native_renderer_catalog() {
-    let catalog = renderer_model_catalog_value(
+    let home = tempfile::tempdir().unwrap();
+    let catalog = renderer_model_catalog_value_at(
         &CodeyConfig::default(),
         &model_catalog::ModelSelectionState {
             third_party_models: vec!["org/model-a".into()],
             default_model: "org/model-a".into(),
             ..Default::default()
         },
+        home.path(),
     );
     assert_eq!(catalog["native_selection_only"], json!(true));
     assert_eq!(catalog["models"], json!(["org/model-a"]));
@@ -527,6 +533,7 @@ fn native_third_party_gpt_selection_keeps_raw_ids_and_does_not_restore_unchecked
         official: false,
         supports_remote_compaction: false,
         base_url: "https://example.invalid/v1".into(),
+        ..Default::default()
     };
     let mut config = CodeyConfig {
         local_router_enabled: false,
@@ -580,6 +587,7 @@ fn native_model_conversion_uses_synced_upstream_models_without_enabled_targets()
 
 #[test]
 fn deleted_route_aliases_survive_native_catalog_and_model_conversion() {
+    let home = tempfile::tempdir().unwrap();
     let config = CodeyConfig {
         local_router_enabled: false,
         model_alias_history: BTreeMap::from([(
@@ -601,8 +609,11 @@ fn deleted_route_aliases_survive_native_catalog_and_model_conversion() {
     ] {
         assert_eq!(native_upstream_model(&config, input), expected);
     }
-    let catalog =
-        renderer_model_catalog_value(&config, &model_catalog::ModelSelectionState::default());
+    let catalog = renderer_model_catalog_value_at(
+        &config,
+        &model_catalog::ModelSelectionState::default(),
+        home.path(),
+    );
     assert_eq!(
         catalog["legacy_model_aliases"]["deleted/vendor/model"],
         "vendor/model"
@@ -812,6 +823,7 @@ fn initial_model_order_is_persisted_without_sync_and_keeps_provider_ownership() 
         official: false,
         supports_remote_compaction: false,
         base_url: "https://relay.example/v1".into(),
+        ..Default::default()
     };
     let state = native_model_state_for_provider(&persisted, &provider, home.path()).unwrap();
     assert_eq!(state.third_party_models, ["gpt-new", "gpt-old"]);
@@ -1666,6 +1678,35 @@ fn native_web_search_models_hot_reload_but_capability_switch_requires_restart() 
     assert!(runtime_supports_current_routes_for_hot_reload(
         &enabled,
         &after_delete
+    ));
+}
+
+#[test]
+fn native_remote_compaction_snapshot_changes_require_restart_and_stop_hot_reload() {
+    let home = tempfile::tempdir().unwrap();
+    let read_config = |remote: &str| {
+        std::fs::write(home.path().join("config.toml"), format!("model_provider = 'relay'\n[model_providers.relay]\nbase_url = 'https://relay.example/v1'\ncapabilities.remote_compaction = '{remote}'\n")).unwrap();
+        let mut config = CodeyConfig::default();
+        config.attach_current_provider_snapshot(
+            codex_provider::current_provider_snapshot(home.path()).unwrap(),
+        );
+        config
+    };
+    let applied = read_config("unsupported");
+    let enabled = read_config("v2");
+    assert!(remote_compaction_transport_requires_restart(
+        &applied, &enabled
+    ));
+    assert!(remote_compaction_transport_requires_restart(
+        &enabled, &applied
+    ));
+    assert!(provider_route_requires_restart(&applied, &enabled));
+    assert!(crate::commands::provider_route_restart_required_for_runtime(&applied, &enabled));
+    assert!(!runtime_supports_current_routes_for_hot_reload(
+        &applied, &enabled
+    ));
+    assert!(runtime_supports_current_routes_for_hot_reload(
+        &enabled, &enabled
     ));
 }
 
