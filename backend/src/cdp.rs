@@ -139,6 +139,7 @@ pub struct InjectionScriptStatus {
 pub struct PreparedInjectionScripts {
     scripts: Arc<[String]>,
     descriptors: Arc<[InjectionScriptDescriptor]>,
+    disable_pet: bool,
 }
 
 pub struct InjectedTarget {
@@ -431,6 +432,7 @@ pub fn prepare_injection_scripts(
     PreparedInjectionScripts {
         scripts: Arc::from(scripts),
         descriptors: Arc::from(descriptors),
+        disable_pet: slim_codex_pet,
     }
 }
 
@@ -501,10 +503,25 @@ fn append_guarded_script(
     }
 }
 
+pub fn spawn_injectable_target_prefetch(
+    debug_port: u16,
+) -> tokio::task::JoinHandle<Option<crate::early_attach::PrefetchedPage>> {
+    crate::early_attach::spawn_early_attach_prefetch(debug_port, CDP_INJECTION_TIMEOUT)
+}
+
 pub async fn retry_inject_with_scripts(
     debug_port: u16,
     handler: BridgeHandler,
     scripts: &PreparedInjectionScripts,
+) -> std::result::Result<InjectedTarget, InjectionRetryFailure> {
+    retry_inject_with_prefetched_target(debug_port, handler, scripts, None).await
+}
+
+pub async fn retry_inject_with_prefetched_target(
+    debug_port: u16,
+    handler: BridgeHandler,
+    scripts: &PreparedInjectionScripts,
+    prefetched_target: Option<tokio::task::JoinHandle<Option<crate::early_attach::PrefetchedPage>>>,
 ) -> std::result::Result<InjectedTarget, InjectionRetryFailure> {
     // Renderer asset preparation on newer Windows Codex builds can consume
     // more than ten seconds before the first injectable page appears. Keep
@@ -512,6 +529,24 @@ pub async fn retry_inject_with_scripts(
     // hard startup deadline.
     let started = tokio::time::Instant::now();
     let deadline = started + CDP_INJECTION_TIMEOUT;
+    // 预取仅消费一次；超时显式取消，避免后台任务继续持有暂停页面。
+    let mut prefetched_page = match prefetched_target {
+        Some(mut handle) => match tokio::time::timeout_at(deadline, &mut handle).await {
+            Ok(Ok(page)) => page,
+            Ok(Err(error)) => {
+                let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                    "early_attach.prefetch_failed",
+                    serde_json::json!({ "message": error.to_string() }),
+                );
+                None
+            }
+            Err(_) => {
+                handle.abort();
+                None
+            }
+        },
+        None => None,
+    };
     let mut delay = Duration::from_millis(100);
     let phase = Arc::new(AtomicU8::new(InjectionPhase::DiscoverTargets as u8));
     let mut previous_error = None;
@@ -525,6 +560,7 @@ pub async fn retry_inject_with_scripts(
             deadline,
             run_injection_attempt(
                 retained_bridge.take(),
+                prefetched_page.take(),
                 debug_port,
                 handler.clone(),
                 scripts,
@@ -731,6 +767,7 @@ enum AttemptOutcome {
 
 async fn run_injection_attempt(
     retained: Option<EstablishedInjection>,
+    prefetched_page: Option<crate::early_attach::PrefetchedPage>,
     debug_port: u16,
     handler: BridgeHandler,
     scripts: &PreparedInjectionScripts,
@@ -738,15 +775,17 @@ async fn run_injection_attempt(
 ) -> AttemptOutcome {
     let bridge = match retained.filter(|bridge| !bridge.pump.is_finished()) {
         Some(bridge) => bridge,
-        None => match establish_injection(debug_port, handler, scripts, phase).await {
-            Ok(bridge) => bridge,
-            Err(error) => {
-                return AttemptOutcome::Retry {
-                    error,
-                    retained: None,
-                };
+        None => {
+            match establish_injection(debug_port, prefetched_page, handler, scripts, phase).await {
+                Ok(bridge) => bridge,
+                Err(error) => {
+                    return AttemptOutcome::Retry {
+                        error,
+                        retained: None,
+                    };
+                }
             }
-        },
+        }
     };
     match verify_injection(&bridge, scripts, phase).await {
         Ok(injection_statuses) => AttemptOutcome::Injected(InjectedTarget {
@@ -778,21 +817,29 @@ async fn run_injection_attempt(
 
 async fn establish_injection(
     debug_port: u16,
+    prefetched_page: Option<crate::early_attach::PrefetchedPage>,
     handler: BridgeHandler,
     scripts: &PreparedInjectionScripts,
     phase: &AtomicU8,
 ) -> Result<EstablishedInjection> {
     phase.store(InjectionPhase::DiscoverTargets as u8, Ordering::Release);
-    let targets = list_targets(debug_port)
-        .await
-        .context("枚举 Codex CDP 页面失败")?;
+    let (target, hold) = match prefetched_page {
+        Some(crate::early_attach::PrefetchedPage::Paused { target, hold }) => (target, Some(hold)),
+        Some(crate::early_attach::PrefetchedPage::Ready { target }) => (target, None),
+        None => {
+            let targets = list_targets(debug_port)
+                .await
+                .context("枚举 Codex CDP 页面失败")?;
+            let target = pick_injectable_codex_page_target(&targets).with_context(|| {
+                format!(
+                    "没有找到可注入的 Codex renderer；CDP targets={}",
+                    summarize_cdp_targets(&targets)
+                )
+            })?;
+            (target, None)
+        }
+    };
     phase.store(InjectionPhase::SelectTarget as u8, Ordering::Release);
-    let target = pick_injectable_codex_page_target(&targets).with_context(|| {
-        format!(
-            "没有找到可注入的 Codex renderer；CDP targets={}",
-            summarize_cdp_targets(&targets)
-        )
-    })?;
     let websocket_url: Arc<str> = Arc::from(
         target
             .web_socket_debugger_url
@@ -801,6 +848,38 @@ async fn establish_injection(
     );
     let handler = with_lazy_loaders(handler, websocket_url.clone());
     phase.store(InjectionPhase::InstallBridge as u8, Ordering::Release);
+    // 拦截先落位再恢复首导航；晚连接覆盖重载完成后才安装桥接。
+    let patch_result = crate::renderer_asset_patch::install_renderer_asset_patch(
+        &websocket_url,
+        scripts.disable_pet,
+        hold.is_some(),
+    )
+    .await;
+    if let Some(hold) = hold {
+        hold.resume().await;
+    }
+    match patch_result {
+        Ok(session) => {
+            if let Err(error) = session.ensure_document_coverage().await {
+                error_log::record_failure_async(
+                    "injection_patch_coverage_failed",
+                    "ensure_document_coverage",
+                    format!("{error:#}"),
+                    serde_json::json!({ "websocketUrl": websocket_url.as_ref() }),
+                )
+                .await;
+            }
+        }
+        Err(error) => {
+            error_log::record_failure_async(
+                "injection_patch_session_failed",
+                "install_renderer_asset_patch",
+                format!("{error:#}"),
+                serde_json::json!({ "websocketUrl": websocket_url.as_ref() }),
+            )
+            .await;
+        }
+    }
     let pump = install_bridge(
         &websocket_url,
         codey_runtime_core::bridge::BRIDGE_BINDING_NAME,
@@ -838,6 +917,13 @@ async fn verify_injection(
     // the existing refresh_injection_statuses command fills in the real state
     // once the UI asks for it.
     phase.store(InjectionPhase::ReadStatuses as u8, Ordering::Release);
+    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+        "cdp.renderer_asset_patch_summary",
+        serde_json::json!({
+            "targetId": bridge.target_id,
+            "patchSession": crate::renderer_asset_patch::session_stats(&bridge.websocket_url),
+        }),
+    );
     Ok(scripts.statuses_with_error("启动后复核注入状态"))
 }
 
@@ -1577,12 +1663,13 @@ mod tests {
         let scripts = PreparedInjectionScripts {
             scripts: Arc::from([]),
             descriptors: Arc::from([]),
+            disable_pet: false,
         };
         let phase = AtomicU8::new(InjectionPhase::InstallBridge as u8);
         // Port zero cannot serve target discovery: either attempt reconnecting
         // instead of polling the retained bridge makes this scenario fail.
         let first =
-            run_injection_attempt(Some(retained), 0, handler.clone(), &scripts, &phase).await;
+            run_injection_attempt(Some(retained), None, 0, handler.clone(), &scripts, &phase).await;
         let AttemptOutcome::Retry {
             retained: Some(retained),
             ..
@@ -1594,7 +1681,8 @@ mod tests {
             InjectionPhase::from_raw(phase.load(Ordering::Acquire)).key(),
             "verifyOverlay"
         );
-        let second = run_injection_attempt(Some(retained), 0, handler, &scripts, &phase).await;
+        let second =
+            run_injection_attempt(Some(retained), None, 0, handler, &scripts, &phase).await;
         let AttemptOutcome::Injected(target) = second else {
             panic!("the next poll should use the same bridge");
         };

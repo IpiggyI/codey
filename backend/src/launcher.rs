@@ -821,16 +821,35 @@ fn injection_failure_cleanup_operation() -> &'static str {
     }
 }
 
-async fn inject_initial_renderer(
+struct InitialRendererInputs<'a> {
     debug_port: u16,
     handler: codey_runtime_core::bridge::BridgeHandler,
-    injection_scripts: &cdp::PreparedInjectionScripts,
-    app_dir: &std::path::Path,
-    home: &std::path::Path,
-    spawned: &SpawnedCodex,
-    child: &Arc<Mutex<Option<Child>>>,
-) -> Result<cdp::InjectedTarget> {
-    let failure = match cdp::retry_inject_with_scripts(debug_port, handler, injection_scripts).await
+    injection_scripts: &'a cdp::PreparedInjectionScripts,
+    app_dir: &'a std::path::Path,
+    home: &'a std::path::Path,
+    spawned: &'a SpawnedCodex,
+    child: &'a Arc<Mutex<Option<Child>>>,
+    prefetched_target: tokio::task::JoinHandle<Option<crate::early_attach::PrefetchedPage>>,
+}
+
+async fn inject_initial_renderer(inputs: InitialRendererInputs<'_>) -> Result<cdp::InjectedTarget> {
+    let InitialRendererInputs {
+        debug_port,
+        handler,
+        injection_scripts,
+        app_dir,
+        home,
+        spawned,
+        child,
+        prefetched_target,
+    } = inputs;
+    let failure = match cdp::retry_inject_with_prefetched_target(
+        debug_port,
+        handler,
+        injection_scripts,
+        Some(prefetched_target),
+    )
+    .await
     {
         Ok(target) => return Ok(target),
         Err(failure) => failure,
@@ -1398,6 +1417,8 @@ async fn spawn_and_inject_runtime(
     runtime_config_overrides: &[String],
 ) -> Result<SpawnedRenderer> {
     let spawn_inject_started = Instant::now();
+    // 在启动与 CLI 包装器握手期间预取，首导航前暂停时先装 Fetch 再放行。
+    let target_prefetch = cdp::spawn_injectable_target_prefetch(patch.debug_port);
     let mut spawned = match spawn_codex(
         &mut storage.app_dir,
         patch.debug_port,
@@ -1409,6 +1430,7 @@ async fn spawn_and_inject_runtime(
     {
         Ok(spawned) => spawned,
         Err(error) => {
+            target_prefetch.abort();
             return Err(restore_runtime_config_after_error(home, error).await);
         }
     };
@@ -1422,15 +1444,16 @@ async fn spawn_and_inject_runtime(
         performance_detail: spawned.performance_detail.clone(),
     };
     let child = Arc::new(Mutex::new(spawned.child.take()));
-    let injected_target = inject_initial_renderer(
-        patch.debug_port,
-        handler.clone(),
+    let injected_target = inject_initial_renderer(InitialRendererInputs {
+        debug_port: patch.debug_port,
+        handler: handler.clone(),
         injection_scripts,
-        &storage.app_dir,
+        app_dir: &storage.app_dir,
         home,
-        &spawned,
-        &child,
-    )
+        spawned: &spawned,
+        child: &child,
+        prefetched_target: target_prefetch,
+    })
     .await?;
     let inject_renderer_ms = spawn_inject_started.elapsed().as_millis() as u64 - codex_spawn_ms;
     let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(

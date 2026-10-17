@@ -2,6 +2,13 @@ import assert from "node:assert/strict";
 
 import { readSource } from "./read-source.mjs";
 
+// Loads the page script with the same options prelude used by CDP.
+export async function loadStartupPatchTemplate({ disablePet = false } = {}) {
+  const template = await readSource("backend/src/renderer_asset_patch.js");
+  assert.ok(template, "renderer asset patch template should be readable");
+  return `globalThis.__CODEY_RENDERER_PATCH_OPTIONS__ = ${JSON.stringify({ disablePet })};\n${template}`;
+}
+
 // Slices spawn_codex in backend/src/launcher/process.rs into its per-platform
 // `#[cfg]` blocks so platform contracts can be asserted from any host.
 export async function loadSpawnCodexSections() {

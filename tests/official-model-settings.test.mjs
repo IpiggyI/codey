@@ -25,7 +25,6 @@ test("official settings use effective availability and save only the displayed c
     "@tabler/icons-react": components,
     "@heroui/react": components,
     "./components/ui": components,
-    "./components/ModelCombobox": components,
     "./components/ModelOrderEditor": components,
     "./modelIds": await loadTypeScriptModule(new URL("../src/modelIds.ts", import.meta.url)),
     "./modelRoutes": { globalDefaultForProvider: (config) => config.defaultModel },
@@ -52,7 +51,7 @@ test("official settings use effective availability and save only the displayed c
   const props = {
     config: { selectedModelsByProvider: { openai: [models[0]] }, defaultModel: models[0] },
     currentProviderSnapshot: { id: "openai", ownershipKey: "openai", usesOfficialAccountAuth: true },
-    officialAccountAvailable: true, modelState: state(models), subagentModelOptions: [],
+    officialAccountAvailable: true, modelState: state(models),
     onSaveOfficialRouteSettings: async (...args) => { saved = args; return true; },
   };
   const render = () => { cursor = 0; return nodes(exports.ModelSection(props)); };

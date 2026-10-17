@@ -33,7 +33,7 @@
   const initialConfig = { settingsRevision: 1, selectedModelsByProvider: { [key]: initialState.thirdPartyModels },
     modelOrderModeByProvider: {}, supports1MContextByProvider: {}, modelContextByProvider: {},
     manualThirdPartyModelsByProvider: {}, declaredOfficialModelsByProvider: {}, upstreamModelsByProvider: { [key]: initialState.upstreamModels },
-    defaultModel: 'gpt-old', miscModel: '' };
+    defaultModel: 'gpt-old' };
   function Harness() {
     const [config, setConfig] = React.useState(initialConfig);
     const [status, setStatus] = React.useState({});
@@ -60,8 +60,8 @@
       React.createElement('button', { onClick: () => hook.openModelPicker(hook.modelState, '', 'relay') }, '打开同步弹窗'),
       React.createElement('output', { id: 'saved' }, JSON.stringify(config)),
       React.createElement('output', { id: 'notice' }, notice?.text),
-      React.createElement(ModelSection, { config, onConfigChange: setConfig, currentProviderSnapshot: snapshot,
-        subagentModelOptions: [], officialAccountAvailable: false, popupContainer: portalContainer, modelState: hook.modelState,
+      React.createElement(ModelSection, { config, currentProviderSnapshot: snapshot,
+        officialAccountAvailable: false, popupContainer: portalContainer, modelState: hook.modelState,
         dirty: false, isBusy: !!busy, busy, showAccountUsageInHeader: false, onSyncCurrentProvider() {},
         onFetchRouteModels: () => hook.openModelPicker(hook.modelState, '', 'relay'), onSetDefaultModel() {},
         onSaveModelOrder: hook.saveModelOrder, routerSessionDiagnosis: null, onMigrateRouterSessions() {} }),

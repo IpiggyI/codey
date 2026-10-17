@@ -1202,8 +1202,6 @@ export function App({
             <ModelSection
               config={config}
               currentProviderSnapshot={currentProviderSnapshot}
-              onConfigChange={handleConfigChange}
-              subagentModelOptions={subagentModelOptions}
               officialAccountAvailable={status.officialAccountAvailable === true}
               popupContainer={popupContainer}
               modelState={modelState}

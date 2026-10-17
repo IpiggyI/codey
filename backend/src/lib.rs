@@ -12,6 +12,7 @@ mod context_recovery;
 mod crashpad_pending_guard;
 #[cfg(windows)]
 mod desktop_instance;
+mod early_attach;
 mod error_log;
 pub mod fastctx;
 mod fastctx_route_gate;
@@ -37,6 +38,7 @@ mod process_cleanup;
 mod process_tree;
 mod prompt_optimization;
 mod provider_models;
+mod renderer_asset_patch;
 mod rollout_last_request;
 mod route_request_log;
 mod session_delete;

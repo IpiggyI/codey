@@ -70,7 +70,6 @@ export type Config = {
   declaredOfficialModelsByProvider: Record<string, string[]>;
   upstreamModelsByProvider: Record<string, string[]>;
   defaultModel: string;
-  miscModel: string;
   disableTraceLogWrites: boolean;
   protectCrashpadPending: boolean;
   slimCodexPet: boolean;
@@ -124,7 +123,6 @@ export type Maintenance = {
   ghostTasksPruned?: number;
   performanceStatus?: string;
   performanceDetail?: string;
-  startupInjectionMode?: string;
 };
 
 export type InjectionScriptStatus = {

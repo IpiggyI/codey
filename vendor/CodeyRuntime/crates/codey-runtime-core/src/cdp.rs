@@ -43,6 +43,44 @@ pub async fn list_targets(debug_port: u16) -> anyhow::Result<Vec<CdpTarget>> {
     )
 }
 
+/// 浏览器端点（`/json/version`）的 WebSocket 地址：Target 域的自动挂载
+/// 只能在这条会话上做，page 级会话拿不到 Target 协议。
+pub async fn browser_websocket_url(debug_port: u16) -> anyhow::Result<String> {
+    let client = cdp_http_client()?;
+    // 与 list_targets 相同的回环地址顺序：Chrome 150+ 拒绝 IP 字面量 Host。
+    let urls = [
+        format!("http://localhost:{debug_port}/json/version"),
+        format!("http://127.0.0.1:{debug_port}/json/version"),
+        format!("http://[::1]:{debug_port}/json/version"),
+    ];
+    let mut errors = Vec::new();
+    for url in urls {
+        match client.get(&url).send().await {
+            Ok(response) => match response.error_for_status() {
+                Ok(response) => match response.json::<serde_json::Value>().await {
+                    Ok(payload) => {
+                        if let Some(ws_url) = payload
+                            .get("webSocketDebuggerUrl")
+                            .and_then(serde_json::Value::as_str)
+                            .filter(|url| !url.is_empty())
+                        {
+                            return Ok(ws_url.to_string());
+                        }
+                        errors.push(format!("{url}: 响应缺少 webSocketDebuggerUrl"));
+                    }
+                    Err(error) => errors.push(format!("{url}: {error:#}")),
+                },
+                Err(error) => errors.push(format!("{url}: {error:#}")),
+            },
+            Err(error) => errors.push(format!("{url}: {error:#}")),
+        }
+    }
+    anyhow::bail!(
+        "failed to query CDP browser endpoint on loopback addresses: {}",
+        errors.join("; ")
+    )
+}
+
 fn cdp_http_client() -> anyhow::Result<&'static reqwest::Client> {
     if let Some(client) = CDP_HTTP_CLIENT.get() {
         return Ok(client);
@@ -151,5 +189,34 @@ mod tests {
         let second = cdp_http_client().unwrap();
 
         assert!(std::ptr::eq(first, second));
+    }
+
+    #[tokio::test]
+    async fn browser_endpoint_reads_the_version_websocket_url() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            let size = stream.read(&mut request).await.unwrap();
+            let request = std::str::from_utf8(&request[..size]).unwrap();
+            assert!(request.starts_with("GET /json/version HTTP/1.1\r\n"));
+            assert!(
+                request
+                    .to_ascii_lowercase()
+                    .contains(&format!("host: localhost:{port}"))
+            );
+            let body = r#"{"webSocketDebuggerUrl":"ws://localhost/devtools/browser/test"}"#;
+            stream.write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len(),
+            ).as_bytes()).await.unwrap();
+        });
+        assert_eq!(
+            browser_websocket_url(port).await.unwrap(),
+            "ws://localhost/devtools/browser/test"
+        );
+        server.await.unwrap();
     }
 }
