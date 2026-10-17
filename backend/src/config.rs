@@ -2948,18 +2948,9 @@ mod tests {
                 .count(),
             1
         );
-        assert_eq!(
-            selected,
-            [
-                "gpt-6-astra",
-                "gpt-5.6-sol",
-                "gpt-5.6-terra",
-                "gpt-5.6-luna",
-                "gpt-5.5",
-                "relay/shared-model",
-                "relay/manual-model",
-            ]
-        );
+        let mut expected_selected = model_catalog::default_official_model_slugs();
+        expected_selected.extend(["relay/shared-model".into(), "relay/manual-model".into()]);
+        assert_eq!(selected, expected_selected);
     }
 
     #[test]

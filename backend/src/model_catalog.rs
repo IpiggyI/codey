@@ -38,17 +38,15 @@ const CONTEXT_1M_WINDOW: u64 = 1_000_000;
 const DEFAULT_CONTEXT_WINDOW: u64 = 272_000;
 const DEFAULT_EFFECTIVE_CONTEXT_WINDOW_PERCENT: u64 = 95;
 const PERSONALITY_PLACEHOLDER: &str = "{{ personality }}";
-/// Official account models Codey exposes. Upstream retires a model by dropping
-/// it from the Codex model cache, so a retired slug has to leave this list in
-/// the same change; otherwise the picker keeps offering a model the account can
-/// no longer call, and catalog generation fails when the bundled template is
-/// gone.
-const OFFICIAL_MODELS: [(&str, &str); 5] = [
+/// Official account fallback models, used only when no native catalog is available.
+const OFFICIAL_MODELS: [(&str, &str); 7] = [
+    ("gpt-6.1-sol", "GPT-6.1-Sol"),
     ("gpt-6-astra", "GPT-6-Astra"),
+    ("gpt-6-sol", "GPT-6-Sol"),
+    ("gpt-6-luna", "GPT-6-Luna"),
     ("gpt-5.6-sol", "GPT-5.6-Sol"),
     ("gpt-5.6-terra", "GPT-5.6-Terra"),
     ("gpt-5.6-luna", "GPT-5.6-Luna"),
-    ("gpt-5.5", "GPT-5.5"),
 ];
 
 #[derive(Debug)]
@@ -1163,33 +1161,43 @@ fn read_official_entries_uncached(
         );
     }
 
-    let templates = OFFICIAL_MODELS
-        .iter()
-        .enumerate()
-        .map(|(priority, (slug, display_name))| {
-            let mut matching_models = catalogs
-                .iter()
-                .flat_map(|models| models.iter())
-                .filter(|model| model.get("slug").and_then(Value::as_str) == Some(*slug));
-            let mut model = matching_models
-                .next()
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("Codex 模型模板缺少固定官方模型 {slug}"))?;
-            let fallbacks = matching_models.collect::<Vec<_>>();
-            complete_reasoning_metadata(&mut model, &fallbacks);
-            normalize_official_model(&mut model, slug, display_name, priority);
-            remove_fast_speed_controls(&mut model);
-            if bundled_fast_model_slugs.contains(&model_id::key(slug)) {
-                add_fast_speed_controls(&mut model);
-            }
-            Ok(model)
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let templates = fallback_official_templates(&catalogs, &bundled_fast_model_slugs)?;
     Ok(OfficialCatalogEntries {
         candidates: templates.clone(),
         templates,
         official_order: bundled_official_order,
     })
+}
+
+fn fallback_official_templates(
+    catalogs: &[Vec<Value>],
+    bundled_fast_model_slugs: &HashSet<String>,
+) -> Result<Vec<Value>> {
+    let mut templates = Vec::new();
+    for (priority, (slug, display_name)) in OFFICIAL_MODELS.iter().enumerate() {
+        let mut matching_models = catalogs
+            .iter()
+            .flat_map(|models| models.iter())
+            .filter(|model| model.get("slug").and_then(Value::as_str) == Some(*slug));
+        let Some(mut model) = matching_models.next().cloned() else {
+            let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                "model_catalog.fixed_template_missing",
+                json!({ "slug": slug }),
+            );
+            continue;
+        };
+        let fallbacks = matching_models.collect::<Vec<_>>();
+        complete_reasoning_metadata(&mut model, &fallbacks);
+        normalize_official_model(&mut model, slug, display_name, priority);
+        if bundled_fast_model_slugs.contains(&model_id::key(slug)) {
+            add_fast_speed_controls(&mut model);
+        }
+        templates.push(model);
+    }
+    if templates.is_empty() {
+        bail!("Codex 模型模板缺少全部固定官方模型");
+    }
+    Ok(templates)
 }
 
 fn fill_missing_model_fields(target: &mut Value, source: &Value) {
@@ -1724,14 +1732,14 @@ fn add_fast_speed_controls(model: &mut Value) {
             service_tiers.push(json!({
                 "id": FAST_SERVICE_TIER_ID,
                 "name": "Fast",
-                "description": "1.5x speed, increased usage"
+                "description": "Faster responses, increased usage"
             }));
         }
     } else {
         model["service_tiers"] = json!([{
             "id": FAST_SERVICE_TIER_ID,
             "name": "Fast",
-            "description": "1.5x speed, increased usage"
+            "description": "Faster responses, increased usage"
         }]);
     }
 
@@ -1747,19 +1755,6 @@ fn add_fast_speed_controls(model: &mut Value) {
         }
     } else {
         model["additional_speed_tiers"] = json!([FAST_SPEED_TIER_ID]);
-    }
-}
-
-fn remove_fast_speed_controls(model: &mut Value) {
-    if let Some(service_tiers) = model.get_mut("service_tiers").and_then(Value::as_array_mut) {
-        service_tiers
-            .retain(|tier| tier.get("id").and_then(Value::as_str) != Some(FAST_SERVICE_TIER_ID));
-    }
-    if let Some(speed_tiers) = model
-        .get_mut("additional_speed_tiers")
-        .and_then(Value::as_array_mut)
-    {
-        speed_tiers.retain(|tier| tier.as_str() != Some(FAST_SPEED_TIER_ID));
     }
 }
 
@@ -1809,8 +1804,10 @@ fn synthetic_model(
             object.remove("multi_agent_reasoning_effort");
         }
     }
-    model["service_tiers"] = json!([]);
-    model["additional_speed_tiers"] = json!([]);
+    if !preserve_source_runtime_metadata {
+        model["service_tiers"] = json!([]);
+        model["additional_speed_tiers"] = json!([]);
+    }
     ensure_catalog_compatibility(&mut model);
     clamp_reasoning_efforts(&mut model);
     add_fast_speed_controls(&mut model);
@@ -1942,7 +1939,7 @@ mod tests {
             ]
         });
         let bundled = codey_runtime_core::model_suffix::bundled_model_catalog().unwrap();
-        for (slug, _) in OFFICIAL_MODELS {
+        for slug in ["gpt-6-astra", "gpt-5.6-terra", "gpt-5.6-luna"] {
             let exists = cache["models"]
                 .as_array()
                 .unwrap()
@@ -1980,6 +1977,31 @@ mod tests {
             model["model_messages"] = json!({
                 "instructions_template": "test-only template"
             });
+        }
+        cache
+    }
+
+    fn official_fallback_cache() -> Value {
+        let mut cache = official_cache();
+        let bundled = codey_runtime_core::model_suffix::bundled_model_catalog().unwrap();
+        for (slug, _) in OFFICIAL_MODELS {
+            if cache["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|model| model["slug"] == slug)
+            {
+                continue;
+            }
+            let mut model = bundled["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|model| model["slug"] == slug)
+                .unwrap()
+                .clone();
+            model["base_instructions"] = json!(format!("test-only instructions for {slug}"));
+            cache["models"].as_array_mut().unwrap().push(model);
         }
         cache
     }
@@ -2545,6 +2567,232 @@ mod tests {
     }
 
     #[test]
+    fn catalog_audit_official_fallback_list_matches_current_models() {
+        assert_eq!(
+            default_official_model_slugs(),
+            [
+                "gpt-6.1-sol",
+                "gpt-6-astra",
+                "gpt-6-sol",
+                "gpt-6-luna",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+            ]
+        );
+    }
+
+    #[test]
+    fn catalog_audit_missing_native_catalog_uses_available_bundled_templates() {
+        let home = tempfile::tempdir().unwrap();
+        let entries =
+            read_official_entries_uncached(&[home.path().join("models_cache.json")], false)
+                .unwrap();
+
+        assert_eq!(
+            entries
+                .candidates
+                .iter()
+                .map(|model| model["slug"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "gpt-6.1-sol",
+                "gpt-6-astra",
+                "gpt-6-sol",
+                "gpt-6-luna",
+                "gpt-5.6-sol",
+                "gpt-5.6-terra",
+                "gpt-5.6-luna",
+            ]
+        );
+        for (slug, description) in [
+            ("gpt-6.1-sol", "2x speed, increased usage"),
+            ("gpt-6-sol", "1.5x speed"),
+            ("gpt-6-luna", "1.5x speed"),
+        ] {
+            let model = entries
+                .candidates
+                .iter()
+                .find(|model| model["slug"] == slug)
+                .unwrap();
+            assert_eq!(model["service_tiers"][0]["id"], "priority");
+            assert_eq!(model["service_tiers"][0]["name"], "Fast");
+            assert_eq!(model["service_tiers"][0]["description"], description);
+            assert_eq!(model["additional_speed_tiers"], json!(["fast"]));
+        }
+    }
+
+    #[test]
+    fn catalog_audit_partial_templates_follow_fixed_model_order() {
+        let catalogs = vec![vec![
+            json!({"slug": "gpt-5.6-luna"}),
+            json!({"slug": "gpt-5.5"}),
+            json!({"slug": "gpt-6.1-sol"}),
+        ]];
+        let templates = fallback_official_templates(&catalogs, &HashSet::new()).unwrap();
+
+        assert_eq!(templates.len(), 2);
+        assert_eq!(templates[0]["slug"], "gpt-6.1-sol");
+        assert_eq!(templates[0]["priority"], 0);
+        assert_eq!(templates[1]["slug"], "gpt-5.6-luna");
+        assert_eq!(templates[1]["priority"], 6);
+    }
+
+    #[test]
+    fn catalog_audit_fallback_fails_without_any_fixed_template() {
+        let catalogs = vec![vec![json!({"slug": "gpt-5.5"})]];
+        let error = fallback_official_templates(&catalogs, &HashSet::new()).unwrap_err();
+
+        assert_eq!(error.to_string(), "Codex 模型模板缺少全部固定官方模型");
+    }
+
+    #[test]
+    fn catalog_audit_fallback_preserves_native_fast_and_unknown_tiers() {
+        let model = json!({
+            "slug": "gpt-6.1-sol",
+            "service_tiers": [
+                {"id": "priority", "name": "Fast", "description": "2x speed, increased usage"},
+                {"id": "ultrafast", "name": "Ultrafast", "description": "Native ultrafast description"}
+            ],
+            "additional_speed_tiers": ["fast", "ultrafast"]
+        });
+        let catalogs = vec![vec![model.clone()]];
+        for fast_slugs in [HashSet::new(), HashSet::from(["gpt-6.1-sol".into()])] {
+            let templates = fallback_official_templates(&catalogs, &fast_slugs).unwrap();
+
+            assert_eq!(templates[0]["service_tiers"], model["service_tiers"]);
+            assert_eq!(
+                templates[0]["additional_speed_tiers"],
+                model["additional_speed_tiers"]
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_audit_added_fast_has_no_fixed_speed_multiplier() {
+        let mut model = json!({
+            "service_tiers": [{"id": "ultrafast", "name": "Ultrafast", "description": "Native description"}],
+            "additional_speed_tiers": ["ultrafast"]
+        });
+        let native_tier = model["service_tiers"][0].clone();
+        add_fast_speed_controls(&mut model);
+
+        assert_native_fast(&model);
+        assert_eq!(model["service_tiers"][0], native_tier);
+        assert_eq!(model["service_tiers"][1]["name"], "Fast");
+        let description = model["service_tiers"][1]["description"].as_str().unwrap();
+        assert!(!description.is_empty());
+        assert!(
+            !description
+                .chars()
+                .any(|character| character.is_ascii_digit())
+        );
+        assert_eq!(
+            model["additional_speed_tiers"],
+            json!(["ultrafast", "fast"])
+        );
+        let completed = model.clone();
+        add_fast_speed_controls(&mut model);
+        assert_eq!(model, completed);
+    }
+
+    #[test]
+    fn catalog_audit_fast_added_to_missing_metadata_has_no_fixed_multiplier() {
+        let mut model = json!({});
+        add_fast_speed_controls(&mut model);
+
+        assert_native_fast(&model);
+        let description = model["service_tiers"][0]["description"].as_str().unwrap();
+        assert!(!description.is_empty());
+        assert!(
+            !description
+                .chars()
+                .any(|character| character.is_ascii_digit())
+        );
+    }
+
+    #[test]
+    fn catalog_audit_native_catalog_and_route_alias_keep_original_tiers() {
+        let home = tempfile::tempdir().unwrap();
+        let mut model = official_cache()["models"][0].clone();
+        model["service_tiers"] = json!([
+            {"id": "priority", "name": "Native Fast", "description": "2x speed, increased usage"},
+            {"id": "ultrafast", "name": "Ultrafast", "description": "Native description"}
+        ]);
+        model["additional_speed_tiers"] = json!(["fast", "ultrafast"]);
+        fs::write(
+            home.path().join("models_cache.json"),
+            serde_json::to_vec(&json!({"models": [model.clone()]})).unwrap(),
+        )
+        .unwrap();
+        let selected = vec!["provider/gpt-5.6-sol".into()];
+        for official in [true, false] {
+            assert_eq!(
+                refresh_for_provider(home.path(), official, Some(&selected), &selected).unwrap(),
+                1
+            );
+            let generated: Value = serde_json::from_slice(
+                &fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap(),
+            )
+            .unwrap();
+            let expected_slug = if official {
+                "gpt-5.6-sol"
+            } else {
+                &selected[0]
+            };
+            assert_eq!(generated["models"][0]["slug"], expected_slug);
+            assert_eq!(
+                generated["models"][0]["service_tiers"],
+                model["service_tiers"]
+            );
+            assert_eq!(
+                generated["models"][0]["additional_speed_tiers"],
+                model["additional_speed_tiers"]
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_audit_explicit_catalog_without_native_cache_is_not_replaced() {
+        let home = tempfile::tempdir().unwrap();
+        let user_path = home.path().join("user-catalog.json");
+        let mut model = official_cache()["models"][0].clone();
+        model["slug"] = json!("user-only-model");
+        model["display_name"] = json!("User Model");
+        let original = serde_json::to_vec(&json!({
+            "models": [model]
+        }))
+        .unwrap();
+        fs::write(&user_path, &original).unwrap();
+
+        let models = available_official_models(home.path(), home.path(), Some(&user_path)).unwrap();
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].slug, "user-only-model");
+        assert_eq!(models[0].display_name, "User Model");
+        refresh_catalog(CatalogRefreshArgs {
+            codex_home: home.path(),
+            catalog_dir: home.path(),
+            official_provider: true,
+            include_official_models: true,
+            upstream_models: None,
+            selected_models: &[],
+            excluded_official_models: &[],
+            websocket_models: None,
+            native_web_search_models: None,
+            context_1m_models: None,
+            user_catalog: Some(&user_path),
+        })
+        .unwrap();
+        let generated: Value =
+            serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
+                .unwrap();
+        assert_eq!(generated["models"].as_array().unwrap().len(), 1);
+        assert_eq!(generated["models"][0]["slug"], "user-only-model");
+        assert_eq!(fs::read(user_path).unwrap(), original);
+    }
+
+    #[test]
     fn official_catalog_keeps_native_visible_order_and_completed_fast_metadata() {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
@@ -2790,7 +3038,7 @@ mod tests {
     #[test]
     fn fallback_catalog_does_not_invent_astra_multi_agent_metadata() {
         let home = tempfile::tempdir().unwrap();
-        let mut catalog = official_cache();
+        let mut catalog = official_fallback_cache();
         let astra = catalog["models"]
             .as_array_mut()
             .unwrap()
@@ -3559,7 +3807,7 @@ mod tests {
     #[test]
     fn cold_start_replaces_stale_codey_fast_metadata() {
         let home = tempfile::tempdir().unwrap();
-        let mut stale_catalog = official_cache();
+        let mut stale_catalog = official_fallback_cache();
         for model in stale_catalog["models"].as_array_mut().unwrap() {
             add_fast_speed_controls(model);
         }
@@ -3837,9 +4085,11 @@ mod tests {
     fn official_exclusions_mark_only_the_remaining_model_as_supported() {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
-        let excluded = default_official_model_slugs()
+        let excluded = available_official_models(home.path(), home.path(), None)
+            .unwrap()
             .into_iter()
-            .filter(|model| model != "gpt-5.6-sol")
+            .map(|model| model.slug)
+            .filter(|slug| slug != "gpt-5.6-sol" && slug != "gpt-5.3-codex-spark")
             .collect::<Vec<_>>();
 
         let state = selection_state_with_manual_models_and_exclusions(
@@ -3884,9 +4134,11 @@ mod tests {
     fn leftover_alias_does_not_revive_an_excluded_official_model() {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
-        let excluded = default_official_model_slugs()
+        let excluded = available_official_models(home.path(), home.path(), None)
+            .unwrap()
             .into_iter()
-            .filter(|model| model != "gpt-5.6-sol")
+            .map(|model| model.slug)
+            .filter(|slug| slug != "gpt-5.6-sol" && slug != "gpt-5.3-codex-spark")
             .collect::<Vec<_>>();
 
         let state = selection_state_with_manual_models_and_exclusions(

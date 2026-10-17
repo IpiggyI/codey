@@ -334,8 +334,12 @@ fn native_official_model_selection_keeps_selection_official_only() {
     let home = tempfile::tempdir().unwrap();
     let model_state = native_model_state_for_provider(&selected, &provider, home.path()).unwrap();
     let catalog = renderer_model_catalog_value(&selected, &model_state);
+    let expected_models = model_catalog::default_official_model_slugs()
+        .into_iter()
+        .filter(|model| model != "gpt-5.6-terra" && model != "gpt-5.6-luna")
+        .collect::<Vec<_>>();
     assert_eq!(catalog["native_selection_only"], true);
-    assert_eq!(catalog["models"], json!(["gpt-6-astra", "gpt-5.6-sol"]));
+    assert_eq!(catalog["models"], json!(expected_models));
     assert!(catalog.get("model_provider").is_none());
     assert!(
         catalog["model_metadata"][0]
