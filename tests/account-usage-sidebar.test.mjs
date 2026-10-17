@@ -242,3 +242,96 @@ test("shows the error state when the first quota read fails", async () => {
   assert.equal(usage.dataset.state, "error");
   assert.equal(usage.textContent, "额度暂不可用");
 });
+
+const appServerWindow = (usedPercent, windowDurationMins, resetsAt) => ({ usedPercent, windowDurationMins, resetsAt });
+
+// 后端读取失败时，侧栏会回退到 app-server 的 account/rateLimits/read。
+const mountAppServerUsage = (rateLimitsResponse) => {
+  const env = mountSidebar({ usageResult: { status: "error", message: "官方额度接口返回 401" } });
+  env.window.__codeyReadAccountRateLimits = async () => rateLimitsResponse;
+  return env;
+};
+
+test("app-server rateLimitsByLimitId keeps codex as the summary and lists other groups separately", async () => {
+  const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+  const env = mountAppServerUsage({
+    rateLimits: { limitId: "codex", primary: appServerWindow(99, 300, resetsAt), secondary: appServerWindow(99, 10080, resetsAt) },
+    rateLimitsByLimitId: {
+      codex: { limitId: "codex", primary: appServerWindow(10, 300, resetsAt), secondary: appServerWindow(30, 10080, resetsAt), planType: "plus" },
+      codex_bengalfox: {
+        limitId: "codex_bengalfox",
+        limitName: "  GPT-5.3-Codex-Spark ",
+        primary: appServerWindow(100, 300, resetsAt),
+        secondary: appServerWindow(25, 10080, resetsAt),
+      },
+      empty_group: { limitId: "empty_group", limitName: "没有窗口", primary: null },
+    },
+  });
+  await env.window.__codeyRefreshAccountUsage();
+  const usage = env.document.getElementById("codey-account-usage");
+  assert.ok(usage);
+  // 摘要来自 rateLimitsByLimitId.codex，而不是 rateLimits 或其他额度组。
+  assert.match(usage.innerHTML, /周额度[\s\S]*?70%[\s\S]*?5 小时[\s\S]*?90%/);
+  assert.equal(usage.dataset.windowCount, "2");
+  assert.match(usage.innerHTML, /class="codey-usage-plan-tag">Plus</);
+  const summary = usage.innerHTML.slice(0, usage.innerHTML.indexOf("codey-account-usage-details"));
+  assert.doesNotMatch(summary, /GPT-5\.3-Codex-Spark/);
+  // 其他额度组只出现在详情里，带名称和独立的小标题。
+  assert.match(usage.innerHTML, /其他额度组[\s\S]*?GPT-5\.3-Codex-Spark[\s\S]*?已用尽[\s\S]*?5 小时额度[\s\S]*?剩余 0%[\s\S]*?周额度[\s\S]*?剩余 75%/);
+  assert.doesNotMatch(usage.innerHTML, /没有窗口/);
+});
+
+test("app-server legacy rateLimits payload renders without an additional group section", async () => {
+  const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+  const env = mountAppServerUsage({
+    rateLimits: { primary: appServerWindow(20, 300, resetsAt), secondary: appServerWindow(45, 10080, resetsAt), planType: "plus" },
+  });
+  await env.window.__codeyRefreshAccountUsage();
+  const usage = env.document.getElementById("codey-account-usage");
+  assert.ok(usage);
+  assert.match(usage.innerHTML, /周额度[\s\S]*?55%[\s\S]*?5 小时[\s\S]*?80%/);
+  assert.doesNotMatch(usage.innerHTML, /其他额度组/);
+});
+
+test("app-server rateLimitsByLimitId falls back to rateLimits when codex is absent", async () => {
+  const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+  const env = mountAppServerUsage({
+    rateLimits: { limitId: "codex", primary: appServerWindow(20, 300, resetsAt), secondary: appServerWindow(45, 10080, resetsAt) },
+    rateLimitsByLimitId: {
+      codex_other: { primary: appServerWindow(50, 300, resetsAt) },
+    },
+  });
+  await env.window.__codeyRefreshAccountUsage();
+  const usage = env.document.getElementById("codey-account-usage");
+  assert.ok(usage);
+  assert.match(usage.innerHTML, /周额度[\s\S]*?55%[\s\S]*?5 小时[\s\S]*?80%/);
+  // 没有 limitName 时用键名作为组名。
+  assert.match(usage.innerHTML, /其他额度组[\s\S]*?codex_other[\s\S]*?剩余 50%/);
+});
+
+test("backend additionalLimits render in the details with names, blocked marker and escaping", async () => {
+  const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+  const env = mountSidebar({
+    usageResult: {
+      status: "ok",
+      planType: "pro",
+      fetchedAt: Math.floor(Date.now() / 1000),
+      primary: { usedPercent: 15, windowMinutes: 300, resetsAt },
+      secondary: { usedPercent: 40, windowMinutes: 10080, resetsAt },
+      additionalLimits: [
+        { limitName: "Spark <b>", limitId: "spark", primary: { usedPercent: 100, windowMinutes: 300, resetsAt }, blocked: true },
+        { limitName: "Review", secondary: { usedPercent: 10, windowMinutes: 10080, resetsAt }, blocked: false },
+        { limitName: "", primary: { usedPercent: 1, windowMinutes: 300 }, blocked: false },
+      ],
+    },
+  });
+  await env.window.__codeyRefreshAccountUsage();
+  const usage = env.document.getElementById("codey-account-usage");
+  assert.ok(usage);
+  assert.equal(usage.dataset.windowCount, "2");
+  assert.match(usage.innerHTML, /其他额度组[\s\S]*?Spark &lt;b&gt;[\s\S]*?已用尽[\s\S]*?5 小时额度[\s\S]*?Review[\s\S]*?周额度[\s\S]*?剩余 90%/);
+  assert.doesNotMatch(usage.innerHTML, /Spark <b>/);
+  assert.equal(usage.innerHTML.match(/已用尽/g).length, 1);
+  const summary = usage.innerHTML.slice(0, usage.innerHTML.indexOf("codey-account-usage-details"));
+  assert.doesNotMatch(summary, /Spark|Review/);
+});

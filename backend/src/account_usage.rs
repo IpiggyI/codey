@@ -101,6 +101,8 @@ pub struct AccountUsageSnapshot {
     pub secondary: Option<AccountUsageWindow>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credits: Option<AccountCredits>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub additional_limits: Vec<AccountUsageLimitGroup>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_label: Option<String>,
     pub fetched_at: u64,
@@ -113,6 +115,19 @@ pub struct AccountUsageWindow {
     pub window_minutes: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resets_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountUsageLimitGroup {
+    pub limit_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub primary: Option<AccountUsageWindow>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secondary: Option<AccountUsageWindow>,
+    pub blocked: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -522,8 +537,62 @@ fn parse_account_usage(value: &Value, fetched_at: u64) -> Result<AccountUsageSna
         primary,
         secondary,
         credits,
+        additional_limits: parse_additional_limits(value, snapshot, fetched_at),
         account_label: None,
         fetched_at,
+    })
+}
+
+fn parse_additional_limits(
+    value: &Value,
+    core: &Value,
+    fetched_at: u64,
+) -> Vec<AccountUsageLimitGroup> {
+    let core_id = string_field(core, &["limit_id", "limitId"]);
+    let core_name = string_field(core, &["limit_name", "limitName"]);
+    value
+        .get("additional_rate_limits")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let limit_name = string_field(entry, &["limit_name"])?;
+            let limit_id = string_field(entry, &["limit_id"]);
+            if core_id.is_some() && core_id == limit_id || core_name.as_ref() == Some(&limit_name) {
+                return None;
+            }
+            parse_additional_limit(entry, limit_name, limit_id, fetched_at)
+        })
+        .collect()
+}
+
+fn parse_additional_limit(
+    entry: &Value,
+    limit_name: String,
+    limit_id: Option<String>,
+    fetched_at: u64,
+) -> Option<AccountUsageLimitGroup> {
+    let rate_limit = entry.get("rate_limit")?;
+    let primary = parse_window(
+        rate_limit,
+        &["primary", "primary_window", "primaryWindow"],
+        fetched_at,
+    );
+    let secondary = parse_window(
+        rate_limit,
+        &["secondary", "secondary_window", "secondaryWindow"],
+        fetched_at,
+    );
+    (primary.is_some() || secondary.is_some()).then(|| AccountUsageLimitGroup {
+        limit_name,
+        limit_id,
+        primary,
+        secondary,
+        blocked: [entry, rate_limit].into_iter().any(|value| {
+            ["blocked", "limit_reached", "limitReached"]
+                .iter()
+                .any(|key| value.get(*key).and_then(Value::as_bool) == Some(true))
+        }),
     })
 }
 
@@ -732,6 +801,7 @@ mod tests {
                 unlimited: false,
                 balance: Some("10".to_string()),
             }),
+            additional_limits: Vec::new(),
             account_label: None,
             fetched_at: 1_700_000_000,
         }
@@ -1104,6 +1174,136 @@ mod tests {
         let secondary = snapshot.secondary.unwrap();
         assert_eq!(secondary.used_percent, 28.0);
         assert_eq!(secondary.resets_at, Some(1_700_086_400));
+    }
+
+    #[test]
+    fn parses_named_additional_limits_and_serializes_camel_case_fields() {
+        let value = serde_json::json!({
+            "plan_type": "plus",
+            "rate_limit": {
+                "primary_window": {"used_percent": 10, "limit_window_seconds": 18000}
+            },
+            "additional_rate_limits": [
+                {
+                    "limit_name": "  Weekly model  ",
+                    "limit_id": "weekly-model",
+                    "rate_limit": {
+                        "secondary_window": {
+                            "remaining_percent": 75,
+                            "limit_window_seconds": 604800,
+                            "reset_at": 1800000000000_u64
+                        }
+                    }
+                },
+                {
+                    "limit_name": "Blocked model",
+                    "rate_limit": {
+                        "limit_reached": true,
+                        "primary_window": {
+                            "used_percent": 110,
+                            "limit_window_seconds": 61,
+                            "reset_after_seconds": 600
+                        }
+                    }
+                }
+            ]
+        });
+        let snapshot = parse_account_usage(&value, 1_700_000_000).unwrap();
+        assert_eq!(snapshot.additional_limits.len(), 2);
+        assert_eq!(snapshot.additional_limits[0].limit_name, "Weekly model");
+        assert!(snapshot.additional_limits[0].primary.is_none());
+        assert!(snapshot.additional_limits[1].blocked);
+        assert_eq!(
+            serde_json::to_value(snapshot).unwrap(),
+            serde_json::json!({
+                "planType": "plus",
+                "primary": {"usedPercent": 10.0, "windowMinutes": 300},
+                "fetchedAt": 1700000000,
+                "additionalLimits": [
+                    {
+                        "limitName": "Weekly model",
+                        "limitId": "weekly-model",
+                        "secondary": {
+                            "usedPercent": 25.0,
+                            "windowMinutes": 10080,
+                            "resetsAt": 1800000000
+                        },
+                        "blocked": false
+                    },
+                    {
+                        "limitName": "Blocked model",
+                        "primary": {
+                            "usedPercent": 100.0,
+                            "windowMinutes": 2,
+                            "resetsAt": 1700000600
+                        },
+                        "blocked": true
+                    }
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn skips_invalid_additional_limits_and_explicit_core_duplicates() {
+        let core = serde_json::json!({
+            "limit_id": "core-id",
+            "limit_name": "Core",
+            "primary_window": {"used_percent": 10, "window_minutes": 300}
+        });
+        let value = serde_json::json!({
+            "rate_limit": core,
+            "additional_rate_limits": [
+                {"limit_name": "  ", "rate_limit": core},
+                {"rate_limit": core},
+                {"limit_name": "Missing rate limit"},
+                {"limit_name": "No windows", "rate_limit": {}},
+                {"limit_name": "Invalid window", "rate_limit": {
+                    "primary_window": {"used_percent": 20}
+                }},
+                {"limit_name": " Core ", "rate_limit": core},
+                {"limit_name": "Alias", "limit_id": "core-id", "rate_limit": core},
+                {"limit_name": "Distinct", "rate_limit": core, "blocked": true}
+            ]
+        });
+        let snapshot = parse_account_usage(&value, 1_700_000_000).unwrap();
+        assert_eq!(snapshot.additional_limits.len(), 1);
+        let group = &snapshot.additional_limits[0];
+        assert_eq!(group.limit_name, "Distinct");
+        assert_eq!(group.primary, snapshot.primary);
+        assert!(group.blocked);
+
+        let mut without_additional = value.clone();
+        without_additional["additional_rate_limits"] =
+            value["additional_rate_limits"].as_array().unwrap()[..7]
+                .to_vec()
+                .into();
+        let snapshot = parse_account_usage(&without_additional, 1_700_000_000).unwrap();
+        assert!(snapshot.additional_limits.is_empty());
+        assert!(
+            serde_json::to_value(snapshot)
+                .unwrap()
+                .get("additionalLimits")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn additional_limits_do_not_replace_the_core_anchor() {
+        let value = serde_json::json!({
+            "additional_rate_limits": [{
+                "limit_name": "Weekly",
+                "rate_limit": {
+                    "secondary_window": {"used_percent": 20, "window_minutes": 10080}
+                }
+            }]
+        });
+        assert_eq!(
+            parse_account_usage(&value, 1_700_000_000)
+                .unwrap_err()
+                .to_string(),
+            "官方额度响应中没有可展示的额度信息"
+        );
     }
 
     #[test]

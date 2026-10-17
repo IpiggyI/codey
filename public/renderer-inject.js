@@ -667,6 +667,32 @@
     };
   };
 
+  // 把 rateLimitsByLimitId 中除通用额度外的条目整理成与后端快照相同的额度组形状。
+  const normalizeAppServerAdditionalLimits = (byLimitId, coreBucket) => {
+    if (!byLimitId) return [];
+    const coreId = typeof coreBucket?.limitId === "string" ? coreBucket.limitId.trim() : "";
+    const groups = [];
+    for (const [key, bucket] of Object.entries(byLimitId)) {
+      if (!bucket || typeof bucket !== "object" || bucket === coreBucket) continue;
+      const limitId = typeof bucket.limitId === "string" && bucket.limitId.trim() ? bucket.limitId.trim() : key;
+      if (key === "codex" || limitId === "codex" || (coreId && limitId === coreId)) continue;
+      const primary = normalizeAppServerUsageWindow(bucket.primary);
+      const secondary = normalizeAppServerUsageWindow(bucket.secondary);
+      if (!primary && !secondary) continue;
+      const limitName = typeof bucket.limitName === "string" && bucket.limitName.trim()
+        ? bucket.limitName.trim()
+        : key;
+      groups.push({
+        limitName,
+        limitId,
+        ...(primary ? { primary } : {}),
+        ...(secondary ? { secondary } : {}),
+        blocked: [primary, secondary].some((window) => window && window.usedPercent >= 100),
+      });
+    }
+    return groups;
+  };
+
   const normalizeAppServerAccountUsage = (response) => {
     const unavailable = { status: "unavailable", code: "codex_usage_incompatible", message: "当前 Codex 暂时无法提供额度信息" };
     const payload = response?.result && typeof response.result === "object"
@@ -675,11 +701,18 @@
     if (!payload || typeof payload !== "object") {
       return unavailable;
     }
-    // 账号摘要只读取通用额度，不能合并模型专属的 rateLimitsByLimitId。
-    const buckets = [];
-    if (payload.rateLimits && typeof payload.rateLimits === "object") {
-      buckets.push(payload.rateLimits);
-    }
+    // 账号摘要只读取通用额度（rateLimitsByLimitId.codex，缺失时退回旧版 rateLimits），
+    // 其余额度组只进入 additionalLimits，不能合并进摘要。
+    const byLimitId = payload.rateLimitsByLimitId && typeof payload.rateLimitsByLimitId === "object"
+      ? payload.rateLimitsByLimitId
+      : null;
+    const legacyBucket = payload.rateLimits && typeof payload.rateLimits === "object"
+      ? payload.rateLimits
+      : null;
+    const coreBucket = byLimitId?.codex && typeof byLimitId.codex === "object"
+      ? byLimitId.codex
+      : legacyBucket;
+    const buckets = coreBucket ? [coreBucket] : [];
     const windowsByKind = new Map();
     for (const bucket of buckets) {
       for (const rawWindow of [bucket.primary, bucket.secondary]) {
@@ -702,16 +735,18 @@
     if (!primary && !secondary && !credits) {
       return unavailable;
     }
-    const planType = buckets
-      .map((bucket) => bucket.planType)
+    const planType = [...buckets, legacyBucket]
+      .map((bucket) => bucket?.planType)
       .find((value) => typeof value === "string" && value.trim())
       || (typeof payload.planType === "string" ? payload.planType : undefined);
+    const additionalLimits = normalizeAppServerAdditionalLimits(byLimitId, coreBucket);
     return {
       status: "ok",
       ...(planType ? { planType } : {}),
       ...(primary ? { primary } : {}),
       ...(secondary ? { secondary } : {}),
       ...(credits ? { credits } : {}),
+      ...(additionalLimits.length ? { additionalLimits } : {}),
       fetchedAt: Math.floor(Date.now() / 1000),
     };
   };
@@ -927,6 +962,32 @@
     `;
   };
 
+  // 其他额度组各自独立计算，只在详情中展示，标题明确它们不属于上方通用额度。
+  const accountUsageLimitGroupsDetail = (groups) => {
+    if (!Array.isArray(groups) || !groups.length) return "";
+    const items = groups.map((group) => {
+      const windows = [group.primary, group.secondary]
+        .map((window) => accountUsageDetailWindow(window))
+        .filter(Boolean)
+        .join("");
+      return `
+        <div class="codey-usage-detail-row">
+          <div class="codey-usage-detail-main">
+            <span class="codey-usage-detail-label">${escapeAccountUsageText(group.limitName)}</span>
+            ${group.blocked ? '<span class="codey-usage-detail-value">已用尽</span>' : ""}
+          </div>
+        </div>
+        ${windows}
+      `;
+    });
+    return `
+      <div class="codey-usage-details-heading">
+        <span class="codey-usage-details-title">其他额度组（独立计算，不含在上方额度内）</span>
+      </div>
+      ${items.join("")}
+    `;
+  };
+
   const accountUsageFetchedLabel = (fetchedAt) => {
     const timestamp = Number(fetchedAt);
     if (!Number.isFinite(timestamp) || timestamp <= 0) return "";
@@ -945,14 +1006,15 @@
       accountUsageDetailWindow(result?.secondary),
       accountUsageCreditsDetail(result?.credits),
     ].filter(Boolean);
+    const groups = accountUsageLimitGroupsDetail(result?.additionalLimits);
     const fetched = accountUsageFetchedLabel(result?.fetchedAt);
-    if (!rows.length && !fetched) return "";
+    if (!rows.length && !groups && !fetched) return "";
     return `
       <div id="codey-account-usage-details" class="codey-usage-details" role="tooltip">
         <div class="codey-usage-details-heading">
           <span class="codey-usage-details-title">额度详情</span>
         </div>
-        <div class="codey-usage-details-list">${rows.join("")}</div>
+        <div class="codey-usage-details-list">${rows.join("")}${groups}</div>
         ${fetched ? `<div class="codey-usage-details-updated">${escapeAccountUsageText(fetched)}</div>` : ""}
       </div>
     `;
@@ -1011,6 +1073,25 @@
     };
   };
 
+  const sidebarUsageLimitGroups = (groups) => {
+    if (!Array.isArray(groups)) return undefined;
+    const normalized = [];
+    for (const group of groups) {
+      const limitName = typeof group?.limitName === "string" ? group.limitName.trim() : "";
+      const primary = sidebarUsageWindow(group?.primary);
+      const secondary = sidebarUsageWindow(group?.secondary);
+      if (!limitName || (!primary && !secondary)) continue;
+      normalized.push({
+        limitName,
+        ...(typeof group.limitId === "string" && group.limitId ? { limitId: group.limitId } : {}),
+        ...(primary ? { primary } : {}),
+        ...(secondary ? { secondary } : {}),
+        blocked: group.blocked === true,
+      });
+    }
+    return normalized.length ? normalized : undefined;
+  };
+
   const sidebarUsageResult = (result) => {
     if (!result || result.status !== "ok") return result;
     const primary = sidebarUsageWindow(result.primary);
@@ -1019,6 +1100,7 @@
       ...result,
       ...(primary ? { primary } : { primary: undefined }),
       ...(secondary ? { secondary } : { secondary: undefined }),
+      additionalLimits: sidebarUsageLimitGroups(result.additionalLimits),
     };
   };
 
