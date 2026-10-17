@@ -22,6 +22,62 @@ const entitlementSource = [
   "let r=await requirements(e,t);return r.requirements?.featureRequirements?.fast_mode!==!1}",
 ].join("");
 
+const nativeModelAccessSource = [
+  "const includeUltraReasoningEffort=!0;",
+  "function visible({additionalAvailableModels:e,apiKeyDaybreakSupported:t,authMethod:n,availableModels:r,hasConfiguredModelCatalog:i,isCustomModelProvider:a,model:o,useHiddenModels:s}){",
+  "let c=o.availableAccessPrograms?.cyber;return n===`apikey`&&!t&&c!=null&&c.length>0&&!c.includes(`standard`)?!1:",
+  "e?.has(o.model)===!0||o.model!==`codex-auto-review`&&(i&&!o.hidden||",
+  "(s&&!a&&n!==`amazonBedrock`?r.has(o.model)||n===`apikey`&&t&&!o.hidden&&c?.some(e=>e!==`standard`)===!0:!o.hidden))}",
+].join("");
+
+for (const gate of ["model allowlist", "model visibility"]) {
+  test(`Codex 26.1013 native model access skips the ${gate} patch`, async () => {
+    const { patch, records } = await loadRendererPatch();
+    assert.equal(patch("app://-/assets/app-initial-native-models.js", nativeModelAccessSource), null);
+    assert.deepEqual(records.filter(({ operation }) => operation === `renderer_patch:${gate}`), []);
+    const visible = runInNewContext(`${nativeModelAccessSource};visible`);
+    const options = {
+      additionalAvailableModels: new Set(), apiKeyDaybreakSupported: false,
+      authMethod: "apikey", availableModels: new Set(), hasConfiguredModelCatalog: false,
+      isCustomModelProvider: true, model: { model: "provider-model", hidden: false },
+      useHiddenModels: true,
+    };
+    assert.equal(visible(options), true);
+    assert.equal(visible({ ...options, authMethod: "chatgpt" }), true);
+    assert.equal(visible({ ...options, model: { ...options.model, hidden: true } }), false);
+    assert.equal(visible({ ...options, isCustomModelProvider: false, authMethod: "chatgpt" }), false);
+    assert.equal(visible({ ...options, isCustomModelProvider: false, authMethod: "chatgpt",
+      availableModels: new Set(["provider-model"]) }), true);
+    assert.equal(visible({ ...options, model: { ...options.model,
+      availableAccessPrograms: { cyber: ["restricted"] } } }), false);
+    assert.equal(visible({ ...options, apiKeyDaybreakSupported: true,
+      model: { ...options.model, availableAccessPrograms: { cyber: ["restricted"] } } }), true);
+  });
+}
+
+test("Codex 26.1013 native model recognition follows renamed bindings", async () => {
+  const { patch, records } = await loadRendererPatch();
+  const renamed = nativeModelAccessSource.replace(/\b[aceinorst]\b/g, (name) => `$${name}`);
+  assert.equal(patch("app://-/assets/app-initial-renamed-models.js", renamed), null);
+  assert.deepEqual(records, []);
+});
+
+test("Codex 26.1013 model gates still report incompatible provider and visibility conditions", async () => {
+  for (const source of [
+    nativeModelAccessSource.replace("s&&!a", "s&&a"),
+    nativeModelAccessSource.replace(":!o.hidden))", ":o.hidden))"),
+    nativeModelAccessSource.replace("r.has(o.model)", "r.has(other.model)"),
+  ]) {
+    const { patch, records } = await loadRendererPatch();
+    assert.equal(patch("app://-/assets/app-initial-incompatible-models.js", source), null);
+    assert.deepEqual(records.map(({ operation }) => operation), [
+      "renderer_patch:model allowlist",
+      "renderer_patch:model visibility",
+    ]);
+    assert.ok(records.every(({ context }) => context.matchCount === 0));
+  }
+});
+
 test("the renderer patch loads without Node, Electron or a DOM", async () => {
   const { patch, context, records } = await loadRendererPatch();
   assert.equal(context.process, undefined);

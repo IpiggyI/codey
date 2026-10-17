@@ -187,6 +187,10 @@
   const rendererHasNativeCustomProviderModelAccess = (source) =>
     /function\s+[$A-Z_a-z][$\w]*\(\{[^}]*isCustomModelProvider\s*:\s*([$A-Z_a-z][$\w]*)[^}]*model\s*:\s*([$A-Z_a-z][$\w]*)[^}]*useHiddenModels\s*:\s*([$A-Z_a-z][$\w]*)[^}]*\}\)\s*\{\s*return[\s\S]{0,512}?\3\s*&&\s*!\s*\1\s*&&[\s\S]{0,256}?\?\s*[$A-Z_a-z][$\w]*\.has\(\s*\2\.model\s*\)\s*:\s*!\s*\2\.hidden\s*\)*\s*\}/.test(
       source,
+    ) ||
+    // 新版增加访问计划判断，仍由自定义提供方标记绕过账号白名单。
+    /function\s+[$A-Z_a-z][$\w]*\(\{additionalAvailableModels:([$A-Z_a-z][$\w]*),apiKeyDaybreakSupported:([$A-Z_a-z][$\w]*),authMethod:([$A-Z_a-z][$\w]*),availableModels:([$A-Z_a-z][$\w]*),hasConfiguredModelCatalog:([$A-Z_a-z][$\w]*),isCustomModelProvider:([$A-Z_a-z][$\w]*),model:([$A-Z_a-z][$\w]*),useHiddenModels:([$A-Z_a-z][$\w]*)\}\)\{let ([$A-Z_a-z][$\w]*)=\7\.availableAccessPrograms\?\.cyber;return \3===`apikey`&&!\2&&\9!=null&&\9\.length>0&&!\9\.includes\(`standard`\)\?!1:\1\?\.has\(\7\.model\)===!0\|\|\7\.model!==`codex-auto-review`&&\(\5&&!\7\.hidden\|\|\(\8&&!\6&&\3!==`amazonBedrock`\?\4\.has\(\7\.model\)\|\|\3===`apikey`&&\2&&!\7\.hidden&&\9\?\.some\(([$A-Z_a-z][$\w]*)=>\10!==`standard`\)===!0:!\7\.hidden\)\)\}/.test(
+      source,
     );
   const replacePetRendererImportWithStubs = (match, importClause) => {
     if (typeof importClause !== "string" || importClause.trim() === "") {
