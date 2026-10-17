@@ -45,7 +45,6 @@ test("settings reports startup health and the confirmed main-process injection m
   assert.match(sectionsSource, /startupInjectionMode === "inspector"/);
   assert.match(sectionsSource, /startupInjectionMode === "cli"/);
   assert.match(typesSource, /startupInjectionMode\?: string/);
-  assert.match(launcherRootSource, /pub startup_injection_mode: String/);
   assert.doesNotMatch(sectionsSource, /兼容模式|主进程增强|已优化/);
   const failedSummary = runtimeStatusPresentation.summarizeInjectionScripts([
     {

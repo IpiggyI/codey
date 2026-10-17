@@ -15,7 +15,6 @@ impl CodeyRuntime {
                 ghost_tasks_pruned: 0,
                 performance_status: String::new(),
                 performance_detail: String::new(),
-                startup_injection_mode: String::new(),
             },
             applied_model_config: RwLock::new(Arc::new(RuntimeModelConfig::from_config(&config))),
             applied_subagent_config: RwLock::new(Arc::new(RuntimeSubagentConfig::from_config(
@@ -29,8 +28,6 @@ impl CodeyRuntime {
             process_id: None,
             #[cfg(unix)]
             process_group_id: None,
-            #[cfg(target_os = "macos")]
-            inspector_argument: None,
             watchdog_shutdown: Mutex::new(None),
             watchdog_task: Mutex::new(None),
             exit_watchdog_shutdown: Mutex::new(None),

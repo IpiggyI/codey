@@ -85,7 +85,6 @@ pub struct MaintenanceStatus {
     pub ghost_tasks_pruned: usize,
     pub performance_status: String,
     pub performance_detail: String,
-    pub startup_injection_mode: String,
 }
 
 struct SessionMaintenanceSummary {
@@ -158,8 +157,6 @@ pub struct CodeyRuntime {
     process_id: Option<u32>,
     #[cfg(unix)]
     process_group_id: Option<u32>,
-    #[cfg(target_os = "macos")]
-    inspector_argument: Option<String>,
     watchdog_shutdown: Mutex<Option<oneshot::Sender<()>>>,
     watchdog_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     exit_watchdog_shutdown: Mutex<Option<oneshot::Sender<()>>>,
@@ -781,14 +778,9 @@ async fn stop_codex_processes(
     app_dir: &std::path::Path,
     process_id: Option<u32>,
     #[cfg(unix)] process_group_id: Option<u32>,
-    #[cfg(target_os = "macos")] inspector_argument: Option<&str>,
 ) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        if let Some(inspector_argument) = inspector_argument {
-            return stop_macos_codex(inspector_argument, app_dir, process_id, process_group_id)
-                .await;
-        }
         terminate_unix_codex_processes(app_dir, process_id, process_group_id, None)
             .await
             .map(|_| ())
@@ -868,8 +860,6 @@ async fn inject_initial_renderer(
         spawned.process_id,
         #[cfg(unix)]
         spawned.process_group_id,
-        #[cfg(target_os = "macos")]
-        spawned.inspector_argument.as_deref(),
     )
     .await
     {
@@ -1411,8 +1401,6 @@ async fn spawn_and_inject_runtime(
     let mut spawned = match spawn_codex(
         &mut storage.app_dir,
         patch.debug_port,
-        config.misc_model_catalog_id(),
-        config.slim_codex_pet,
         config.subagent_optimization,
         config.gpu_launch_mode,
         runtime_config_overrides,
@@ -1432,7 +1420,6 @@ async fn spawn_and_inject_runtime(
         ghost_tasks_pruned: storage.session_maintenance.ghost_tasks_pruned,
         performance_status: spawned.performance_status.clone(),
         performance_detail: spawned.performance_detail.clone(),
-        startup_injection_mode: spawned.startup_injection_mode.clone(),
     };
     let child = Arc::new(Mutex::new(spawned.child.take()));
     let injected_target = inject_initial_renderer(
@@ -1657,8 +1644,6 @@ impl CodeyRuntime {
                 );
             }
         };
-        #[cfg(target_os = "macos")]
-        let inspector_argument = spawned.inspector_argument.clone();
         let process_id = spawned.process_id;
         let RuntimeWatchers {
             injection_statuses,
@@ -1700,8 +1685,6 @@ impl CodeyRuntime {
                 process_id,
                 #[cfg(unix)]
                 process_group_id: spawned.process_group_id,
-                #[cfg(target_os = "macos")]
-                inspector_argument,
                 watchdog_shutdown: Mutex::new(Some(watchdog_shutdown)),
                 watchdog_task: Mutex::new(Some(watchdog_task)),
                 exit_watchdog_shutdown: Mutex::new(Some(exit_watchdog_shutdown)),
@@ -1721,8 +1704,6 @@ impl CodeyRuntime {
                 self.process_id,
                 #[cfg(unix)]
                 self.process_group_id,
-                #[cfg(target_os = "macos")]
-                self.inspector_argument.as_deref(),
             ),
             restore_runtime_config(codex_home()),
         )

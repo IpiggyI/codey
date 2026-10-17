@@ -1348,7 +1348,6 @@ struct CodeyConfigSaveInput {
     model_context_present: bool,
     #[allow(dead_code)]
     route_request_log_present: bool,
-    misc_model_present: bool,
     subagent_roles_present: bool,
     subagent_model_present: bool,
     subagent_reasoning_effort_present: bool,
@@ -1362,7 +1361,6 @@ impl CodeyConfigSaveInput {
             supports_1m_context_present: true,
             model_context_present: true,
             route_request_log_present: true,
-            misc_model_present: true,
             subagent_roles_present: true,
             subagent_model_present: true,
             subagent_reasoning_effort_present: true,
@@ -1381,7 +1379,6 @@ fn codey_config_save_input(args: &Value) -> Result<CodeyConfigSaveInput, String>
     let supports_1m_context_present = fields.contains_key("supports1MContextByProvider");
     let model_context_present = fields.contains_key("modelContextByProvider");
     let route_request_log_present = fields.contains_key("routeRequestLog");
-    let misc_model_present = fields.contains_key("miscModel");
     let subagent_roles_present = fields.contains_key("subagentRoles");
     let subagent_model_present = fields.contains_key("subagentModel");
     let subagent_reasoning_effort_present = fields.contains_key("subagentReasoningEffort");
@@ -1392,11 +1389,23 @@ fn codey_config_save_input(args: &Value) -> Result<CodeyConfigSaveInput, String>
         supports_1m_context_present,
         model_context_present,
         route_request_log_present,
-        misc_model_present,
         subagent_roles_present,
         subagent_model_present,
         subagent_reasoning_effort_present,
     })
+}
+
+#[cfg(test)]
+#[test]
+fn legacy_misc_model_save_request_is_accepted() {
+    let mut config = serde_json::to_value(CodeyConfig::default()).unwrap();
+    config["miscModel"] = "missing-legacy-model".into();
+    let input = codey_config_save_input(&serde_json::json!({ "config": config })).unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let store = ConfigStore::new(temp.path().join("config.json"));
+    store.save(&input.config).unwrap();
+    let saved = serde_json::to_value(store.load().unwrap()).unwrap();
+    assert!(saved.get("miscModel").is_none());
 }
 
 async fn save_codey_config_input(
@@ -1425,7 +1434,6 @@ async fn save_codey_config_locked(
         supports_1m_context_present: _,
         model_context_present: _,
         route_request_log_present: _,
-        misc_model_present,
         subagent_roles_present,
         subagent_model_present,
         subagent_reasoning_effort_present,
@@ -1451,9 +1459,6 @@ async fn save_codey_config_locked(
     config.disable_trace_log_writes = config_input.disable_trace_log_writes;
     config.protect_crashpad_pending = config_input.protect_crashpad_pending;
     config.slim_codex_pet = config_input.slim_codex_pet;
-    if misc_model_present {
-        config.misc_model = config_input.misc_model;
-    }
     config.gpu_launch_mode = config_input.gpu_launch_mode;
     let fast_context_tools_status = current_fast_context_tools_status();
     config.fast_context_tools = embedded_fast_context_tools_enabled(
@@ -2122,7 +2127,6 @@ pub(super) fn config_requires_restart_with_route_status(
         || applied.codex_app_path != current.codex_app_path
         || applied.user_scripts != current.user_scripts
         || applied.slim_codex_pet != current.slim_codex_pet
-        || applied.misc_model != current.misc_model
         || applied.quota_unlock_enabled != current.quota_unlock_enabled
         || applied.gpu_launch_mode != current.gpu_launch_mode
         || applied.fast_context_tools != current.fast_context_tools

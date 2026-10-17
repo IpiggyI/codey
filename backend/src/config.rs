@@ -642,8 +642,6 @@ pub struct CodeyConfig {
     /// unambiguous across suppliers.
     #[serde(default)]
     pub default_model: String,
-    #[serde(default)]
-    pub misc_model: String,
     #[serde(default = "default_true")]
     pub disable_trace_log_writes: bool,
     /// Keeps Codex/ChatGPT Crashpad pending reports below a bounded disk
@@ -775,7 +773,6 @@ impl Default for CodeyConfig {
             upstream_models_by_provider: BTreeMap::new(),
             model_alias_history: BTreeMap::new(),
             default_model: String::new(),
-            misc_model: String::new(),
             disable_trace_log_writes: true,
             protect_crashpad_pending: true,
             slim_codex_pet: true,
@@ -852,7 +849,6 @@ impl CodeyConfig {
             &mut self.upstream_models_by_provider,
         );
         self.remember_model_aliases();
-        self.misc_model = self.misc_model.trim().to_string();
         self.normalize_global_default_model();
         normalize_subagent_config(
             &mut self.subagent_model,
@@ -1541,22 +1537,6 @@ impl CodeyConfig {
         self.current_model_list_key()
             .and_then(|provider_id| self.upstream_models_by_provider.get(provider_id))
             .map(Vec::as_slice)
-    }
-
-    pub(crate) fn misc_model_catalog_id(&self) -> Option<String> {
-        let requested = self.misc_model.trim();
-        if requested.is_empty() {
-            return None;
-        }
-        let provider = self.current_provider_snapshot.as_ref()?;
-        self.configured_model_targets()
-            .into_iter()
-            .find(|target| {
-                target.provider_id == provider.id
-                    && (model_id::equal(&target.upstream_model, requested)
-                        || model_id::equal(&target.alias, requested))
-            })
-            .map(|target| target.upstream_model)
     }
 
     pub fn default_model(&self) -> Option<&str> {
@@ -4250,29 +4230,22 @@ mod tests {
         );
     }
     #[test]
-    fn auxiliary_model_accepts_only_current_provider_models_and_preserves_unknown_choice() {
-        let mut config = CodeyConfig::default();
-        let snapshot = crate::model_ownership::CurrentProviderSnapshot::from_parts(
-            "relay",
-            "https://relay.test/v1",
-            "responses",
-            false,
-        );
-        config.profiles[0].id = "relay".into();
-        config.profiles[0].source_provider_id = Some("relay".into());
-        config.profiles[0].official_account = false;
-        config.profiles[0].base_url = snapshot.base_url.clone();
-        config.attach_current_provider_snapshot(snapshot.clone());
-        config
-            .selected_models_by_provider
-            .insert(snapshot.ownership_key, vec!["helper".into()]);
-        config.misc_model = "helper".into();
-        assert_eq!(config.misc_model_catalog_id().as_deref(), Some("helper"));
-        config.misc_model = "missing".into();
-        assert!(config.misc_model_catalog_id().is_none());
-        assert_eq!(config.misc_model, "missing");
-        config.misc_model.clear();
-        assert!(config.misc_model_catalog_id().is_none());
+    fn legacy_misc_model_config_loads_and_saves_without_the_removed_field() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(temp.path().join("config.json"));
+        let mut legacy = serde_json::to_value(CodeyConfig::default()).unwrap();
+        legacy["miscModel"] = "missing-legacy-model".into();
+        legacy["slimCodexPet"] = false.into();
+        let input: CodeyConfig = serde_json::from_value(legacy.clone()).unwrap();
+        fs::write(store.path(), serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let loaded = store.load().unwrap();
+        assert!(!loaded.slim_codex_pet);
+        store.save(&input).unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        assert!(saved.get("miscModel").is_none());
+        assert_eq!(saved["slimCodexPet"], false);
+        assert_eq!(store.load().unwrap(), loaded);
     }
 }
 

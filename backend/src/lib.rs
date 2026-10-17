@@ -12,8 +12,6 @@ mod context_recovery;
 mod crashpad_pending_guard;
 #[cfg(windows)]
 mod desktop_instance;
-#[cfg(any(windows, target_os = "macos", test))]
-mod electron_fuses;
 mod error_log;
 pub mod fastctx;
 mod fastctx_route_gate;

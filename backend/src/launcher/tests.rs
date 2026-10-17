@@ -326,7 +326,7 @@ fn macos_launch_forces_a_new_app_instance() {
     let command = build_fresh_macos_open_command(
         std::path::Path::new("/Applications/ChatGPT.app"),
         9229,
-        &["--inspect-brk=127.0.0.1:19321".to_string()],
+        &["--disable-gpu".to_string()],
     );
     assert_eq!(command.first().map(String::as_str), Some("open"));
     assert!(command.iter().any(|part| part == "-n"));
@@ -336,11 +336,7 @@ fn macos_launch_forces_a_new_app_instance() {
             .iter()
             .any(|part| part == "--remote-debugging-port=9229")
     );
-    assert!(
-        command
-            .iter()
-            .any(|part| part == "--inspect-brk=127.0.0.1:19321")
-    );
+    assert!(command.iter().any(|part| part == "--disable-gpu"));
 }
 
 #[cfg(target_os = "macos")]
@@ -375,7 +371,7 @@ fn macos_running_check_matches_only_the_app_main_executable() {
 #[test]
 fn owned_codex_tree_includes_bundle_helpers_and_external_descendants() {
     let processes = crate::process_tree::parse_unix_process_snapshot(
-        b"100 1 100 Thu Jul 23 19:23:12 2026 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT --inspect\n\
+        b"100 1 100 Thu Jul 23 19:23:12 2026 /Applications/ChatGPT.app/Contents/MacOS/ChatGPT --remote-debugging-port=9229\n\
           101 100 100 Thu Jul 23 19:23:13 2026 /Applications/ChatGPT.app/Contents/Resources/codex app-server\n\
           102 101 102 Thu Jul 23 19:23:14 2026 node ./mcp/server.mjs\n\
           103 1 103 Thu Jul 23 19:23:15 2026 /Applications/ChatGPT.app/Contents/Frameworks/browser_crashpad_handler\n\
@@ -387,7 +383,7 @@ fn owned_codex_tree_includes_bundle_helpers_and_external_descendants() {
             Path::new("/Applications/ChatGPT.app"),
             None,
             None,
-            Some("--inspect"),
+            Some("--remote-debugging-port=9229"),
         ),
         HashSet::from([100, 101, 102, 103])
     );
@@ -463,7 +459,6 @@ async fn runtime_stop_preserves_resources_on_failure_and_allows_retry() {
             ghost_tasks_pruned: 0,
             performance_status: String::new(),
             performance_detail: String::new(),
-            startup_injection_mode: String::new(),
         },
         applied_model_config: RwLock::new(Arc::new(RuntimeModelConfig::from_config(&config))),
         applied_subagent_config: RwLock::new(Arc::new(RuntimeSubagentConfig::from_config(&config))),
@@ -475,8 +470,6 @@ async fn runtime_stop_preserves_resources_on_failure_and_allows_retry() {
         child,
         process_id,
         process_group_id: process_id,
-        #[cfg(target_os = "macos")]
-        inspector_argument: None,
         watchdog_shutdown: Mutex::new(Some(watchdog_shutdown)),
         watchdog_task: Mutex::new(Some(watchdog_task)),
         exit_watchdog_shutdown: Mutex::new(Some(exit_shutdown)),
