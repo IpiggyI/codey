@@ -17,10 +17,10 @@
 
 | 侧 | 标签 | 提交 | 日期 |
 |---|---|---|---|
-| 本分叉 | `v1.2.3` | `release: v1.2.3` 提交 | 2026-10-12 |
+| 本分叉 | `v1.3.0` | `release: v1.3.0` 提交 | 2026-10-18 |
 | 上游 | [`master`（包含 `v1.2.5`）](https://github.com/SuperGness/codey/tree/ec0bf0ea31c847bbc5ad10a6e4674b21a7b238fe) | [`ec0bf0e`](https://github.com/SuperGness/codey/commit/ec0bf0ea31c847bbc5ad10a6e4674b21a7b238fe) | 2026-10-03 核实远端，与本次固定目标一致 |
 | 早期内容锚点 | 上游 `v0.10.7` | `bd03e13` | 上次整段同步 |
-| vendor | 上游 `master` | `11de98c6` | 2026-10-12 按文件三方合并，保留本地改动 |
+| vendor | 上游 `v1.3.0` | `194c2788` | 2026-10-18 按文件三方合并，保留本地改动；另含 v1.3.1 的 `browser_websocket_url` |
 
 本分叉版本号自行递增，与上游同名版本不是同一份软件。本地的上游标签在 `upstream/` 命名空间，见 `INTERNAL_DEVELOPMENT.md` 发布一节。
 
