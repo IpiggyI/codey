@@ -4,6 +4,7 @@
 # Rust and frontend build output
 /target/
 /target-legacy/
+/.cargo-check-target/
 /vendor/CodeyRuntime/target/
 /dist/
 /dist-overlay/

@@ -1085,7 +1085,8 @@ impl CliWrapperReadiness {
             marker,
         };
         readiness.mark(CliWrapperMarkerStatus::Launching, None);
-        let stream = if !handshake_required {
+        let tcp_available = handshake_tcp_channel_available();
+        let stream = if !handshake_required || !tcp_available {
             None
         } else {
             match connect() {
@@ -1111,6 +1112,7 @@ impl CliWrapperReadiness {
             "launcher.cli_wrapper_handshake_connect",
             serde_json::json!({
                 "connected": stream.is_some(),
+                "tcpChannelAvailable": tcp_available,
                 "elapsedMs": started.elapsed().as_millis(),
             }),
         );
@@ -1160,6 +1162,47 @@ impl CliWrapperReadiness {
 #[cfg(any(windows, target_os = "macos", test))]
 fn cli_wrapper_handshake_required(optional: Option<&OsStr>) -> bool {
     optional != Some(OsStr::new("1"))
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn handshake_tcp_channel_available() -> bool {
+    #[cfg(windows)]
+    {
+        // AppContainer 隔离可能阻止回环连接，此时仅通过标记文件确认执行。
+        !running_in_app_container()
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
+}
+
+#[cfg(windows)]
+fn running_in_app_container() -> bool {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TokenIsAppContainer};
+    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let mut token = HANDLE::default();
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.is_err() {
+        return false;
+    }
+    // 让 OwnedHandle 负责关闭；查不到令牌信息时按非隔离进程处理，不影响握手。
+    let token = unsafe { OwnedHandle::from_raw_handle(token.0) };
+    let mut value = 0u32;
+    let mut returned = 0u32;
+    unsafe {
+        GetTokenInformation(
+            HANDLE(token.as_raw_handle()),
+            TokenIsAppContainer,
+            Some((&mut value as *mut u32).cast()),
+            std::mem::size_of::<u32>() as u32,
+            &mut returned,
+        )
+    }
+    .is_ok()
+        && value != 0
 }
 
 #[cfg(any(windows, target_os = "macos"))]
