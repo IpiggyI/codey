@@ -40,7 +40,7 @@
 
 - Codey 配置单独保存于系统配置目录，保留三份有效滚动备份；`CODEX_HOME` 非空时优先使用。
 - 用户配置（`~/.codex/config.toml`）和 `auth.json` 只读。Codey 不写入、不迁移、不重写用户配置，也不做自动修复。本次运行需要的配置一律通过运行期覆盖传给单次 Codex 进程。
-- 唯一落盘例外是运行期产物：Codex 不接受用命令行注入钩子，因此 `hooks.json` 仍需写入；写入前备份，退出时恢复。apply 与 restore 都不改写用户的 provider、MCP、模型或未知字段。
+- Hook 定义与信任状态合成单条 `hooks={…}` 运行期覆盖，信任键使用 `/<session-flags>/config.toml:<事件>:<组索引>:<处理器索引>`，不再写入或备份用户 `hooks.json`。Codex 合并加载用户已有的 Hook 和信任项；旧版已写入的 Hook 通过原有租约恢复路径清理一次。应用与恢复都不改写用户的 provider、MCP、模型或未知字段。
 - 官方账号通过原生登录探针及严格端点、认证检查识别。旧版 ChatGPT 登录态（缺少 `auth_mode` 但 `tokens` 中仍有有效令牌）视为可用。不依据模糊文本或第三方配置中的残留凭据判定已登录。
 - 官方账号端点只认 `https://chatgpt.com/backend-api/codex` 这一形态；带端口、查询、片段或仿冒主机的地址不算官方端点。
 - 模型同步和提示词优化共用一个凭据解析器，按 provider 的 `auth` 命令、`env_key` 环境变量、`experimental_bearer_token`、`auth.json` 的 `OPENAI_API_KEY` 的顺序取第一个可用值，最后才回退到 `api_key` 等兼容别名。`auth` 与 `env_key`、`experimental_bearer_token`、`requires_openai_auth` 同时配置时报错。`auth.json` 密钥只在 provider 设置了 `requires_openai_auth = true`（或为内置 `openai`）且 `auth.json` 处于 API 密钥模式（`auth_mode` 为 `apikey`，或缺省且没有 ChatGPT 令牌）时使用；ChatGPT 模式不会使用遗留密钥。`auth.command` 不经 shell，直接运行程序并传入 `args` 与 `cwd`；`timeout_ms` 缺省或为 0 时取 5000 ms，上限 60000 ms；标准输出最多 64 KiB，超时或超限只终止直接子进程。令牌只在内存中按 provider、命令、参数、工作目录缓存，`refresh_interval_ms` 缺省 300000，0 表示不主动过期。HTTP 401 会让缓存的命令令牌失效，且按代数比对，较旧请求的 401 不会清掉已刷新的令牌；请求已带自定义授权头时不清缓存。状态和控制台读取不执行命令。令牌不写日志、不返回前端、不落盘，命令错误不记录命令输出。
@@ -104,7 +104,7 @@ provider、模型和上游格式分别识别。控制台只读展示当前 Codex
 ## 子代理与 FastCtx
 
 - 增强在原生 macOS、Windows 上生成五种 Codey 角色和内部默认角色，复用 Codex agents 工具及生命周期 Hook；角色选择提示按用途推荐，不替代权限检查，也不是强制分工。
-- Hook、角色副本和策略仅写入本次运行资产（`hooks.json` 与运行期覆盖）。只读角色最多并行三个，出现写入角色时最多两个，由根代理在所有尝试结束后验收。
+- Hook 通过内联运行期覆盖提供，角色副本和策略保存在 Codey 自有运行资产中。CLI 包装器只为原生应用服务器传递覆盖，并过滤旧启动文件中的 WSL 专用条目。主进程补丁移除后，WSL 托管的应用服务器没有接收 Codey 运行期 Hook 的入口，因此不会收到这些 Hook。只读角色最多并行三个，出现写入角色时最多两个，由根代理在所有尝试结束后验收。
 - 模型和思考强度按当前 Codex provider 的可用模型校验。不可用的角色模型会明确标出待重选，不会悄悄替换。
 - 门禁结合任务绑定、能力证明和账本限制工具，策略缺失或身份不明时保守拒绝。仅完整无筛选列表可全量核对状态，等待超时不视为任务结束。
 - 正常任务不按运行时长或不变状态回收。初始化异常、状态损坏及明确的状态工具未注册错误仍走对应恢复路径；状态工具故障恢复等待 30 秒且禁止回收仍有工具在执行的子代理。失联不代表成功。
@@ -190,7 +190,7 @@ macOS 本地调试未签名安装包时，确认来源后可用 `xattr -dr com.a
 ## 维护约束
 
 - 不恢复内置路由。见 [ADR 0001](docs/adr/0001-remove-built-in-router.md)。`local_router_enabled` 缺省为关闭；加载和保存 Codey 配置时若磁盘上仍为 true，按关闭处理。这不是保留路由，只是清掉同步残留的开关。
-- 用户配置只读，永不写入。见 [ADR 0002](docs/adr/0002-user-config-is-read-only.md)。运行期配置通过 CLI 包装器传递命令行覆盖；唯一落盘例外是运行期产物 `hooks.json`。
+- 用户配置只读，永不写入。见 [ADR 0002](docs/adr/0002-user-config-is-read-only.md)。运行期配置及 Hook 定义、信任状态通过 CLI 包装器传递命令行覆盖；仅保留旧版 `hooks.json` 租约的一次性恢复。
 - 按提交挑选跟踪上游，不整段 merge。见 [ADR 0003](docs/adr/0003-track-upstream-by-cherry-pick.md)。与上游的当前差异及原因维护在 [docs/agents/fork-upstream.md](docs/agents/fork-upstream.md)；对照、挑选或跳过上游后必须同步更新该文件，用户可感知的条目同步 README「与上游的差异」。
 - `vendor/CodeyRuntime` 整目录替换，内部未调用代码不删。见 ADR 0003。同步时不要在 vendor 内手工删除未引用模块；backend 只停止调用。
 - 自动更新必须关闭。见 ADR 0003 后果。默认更新源硬编码指向上游发布清单，一次在线更新会把上游正式版装回来，覆盖本分叉。保留 `tests/update-disabled.test.mjs`。

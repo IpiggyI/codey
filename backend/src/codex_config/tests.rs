@@ -81,12 +81,13 @@ fn runtime_input_guard_detects_concurrent_file_changes() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("config.toml");
 
-    assert!(optional_file_matches(&path, None).unwrap());
-    fs::write(&path, b"original").unwrap();
-    assert!(!optional_file_matches(&path, None).unwrap());
-    assert!(optional_file_matches(&path, Some(b"original")).unwrap());
-    fs::write(&path, b"concurrent").unwrap();
-    assert!(!optional_file_matches(&path, Some(b"original")).unwrap());
+    assert!(codex_config_matches(&path, None).unwrap());
+    let original = b"model = 'original'";
+    fs::write(&path, original).unwrap();
+    assert!(!codex_config_matches(&path, None).unwrap());
+    assert!(codex_config_matches(&path, Some(original)).unwrap());
+    fs::write(&path, b"model = 'concurrent'").unwrap();
+    assert!(!codex_config_matches(&path, Some(original)).unwrap());
 }
 
 #[test]
@@ -1360,8 +1361,7 @@ direct_only_tool_namespaces = ["mcp__existing", "mcp__codey_fastctx", "mcp__code
         Some(CODEY_FASTCTX_HOST_TOKEN_LIMIT)
     );
     assert_eq!(document["features"]["hooks"].as_bool(), Some(true));
-    // The FastCtx route hook itself is delivered via the runtime hooks.json,
-    // never through the TOML document.
+    // FastCtx 路由 Hook 通过运行期覆盖提供，不写入此处的 TOML 文档。
     assert!(document.get("hooks").is_none());
     assert!(!first.contains(crate::fastctx_route_gate::HOOK_ARGUMENT));
 }
@@ -1501,8 +1501,7 @@ command = "echo preserve-user-hook"
         multi_agent["multi_agent_mode_hint_text"].as_str(),
         Some(ROOT_AGENT_MULTI_AGENT_MODE_HINT)
     );
-    // Hook definitions are delivered through the runtime hooks.json; the
-    // effective TOML keeps only the user's own hook group untouched.
+    // Hook 定义通过运行期覆盖提供，此处只保留用户自己的命令组。
     let pre_tool_use = document["hooks"]["PreToolUse"]
         .as_array_of_tables()
         .unwrap();
@@ -1921,6 +1920,226 @@ experimental_bearer_token = "upstream-secret-token"
 }
 
 #[test]
+fn legacy_applied_hooks_are_restored_once_before_inline_runtime_apply() {
+    for original in [None, Some(b"{\"hooks\":{}}\n".as_slice())] {
+        let (_temp, home, marker, backup_root) = isolated_runtime_fixture();
+        let backup_dir = backup_root.join("legacy");
+        fs::create_dir_all(&backup_dir).unwrap();
+        let applied = br#"{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"codey --codey-subagent-gate-hook"}]}]}}"#;
+        fs::write(home.join("hooks.json"), applied).unwrap();
+        fs::write(backup_dir.join(APPLIED_HOOKS_JSON_FILE), applied).unwrap();
+        if let Some(original) = original {
+            fs::write(backup_dir.join("hooks.json"), original).unwrap();
+        }
+        fs::write(
+            &marker,
+            serde_json::to_vec(&serde_json::json!({
+                "backupDir": backup_dir,
+                "runtimeHooksApplied": true,
+                "originalHooksFileExists": original.is_some(),
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(restore_runtime_config_at(&home, &marker, true).unwrap());
+        assert_eq!(
+            read_optional(&home.join("hooks.json")).unwrap().as_deref(),
+            original
+        );
+        assert!(!restore_runtime_config_at(&home, &marker, true).unwrap());
+        apply_realistic_isolated_runtime(&home, &marker, &backup_root);
+        assert_eq!(
+            read_optional(&home.join("hooks.json")).unwrap().as_deref(),
+            original
+        );
+        assert!(restore_runtime_config_at(&home, &marker, true).unwrap());
+        assert_eq!(
+            read_optional(&home.join("hooks.json")).unwrap().as_deref(),
+            original
+        );
+    }
+}
+
+#[test]
+fn runtime_hooks_are_one_inline_override_without_user_file_writes() {
+    for (subagents, fastctx) in [(true, false), (false, true), (true, true)] {
+        let (_temp, home, marker, backup_root) = isolated_runtime_fixture();
+        let applied = apply_isolated_test_runtime_config(
+            &home,
+            false,
+            fastctx.then_some(Path::new("/opt/codey/codey-fastctx")),
+            subagents,
+            DEFAULT_SUBAGENT_MODEL,
+            DEFAULT_SUBAGENT_REASONING_EFFORT,
+            None,
+            &marker,
+            &backup_root,
+        )
+        .unwrap();
+        assert!(!home.join("hooks.json").exists());
+        let hooks = inline_runtime_hooks(&applied.runtime_config_overrides);
+        let specs = if subagents {
+            &SUBAGENT_GATE_HOOKS[..]
+        } else {
+            &FASTCTX_ROUTE_HOOKS[..]
+        };
+        assert_inline_runtime_hooks(&hooks, specs, subagents, fastctx, cfg!(windows));
+        let lease: RuntimeConfigLease =
+            serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+        assert!(!lease.runtime_hooks_applied);
+        assert!(!lease.backup_dir.join("hooks.json").exists());
+        assert!(!lease.backup_dir.join(APPLIED_HOOKS_JSON_FILE).exists());
+        assert!(restore_runtime_config_at(&home, &marker, true).unwrap());
+        assert!(!home.join("hooks.json").exists());
+    }
+}
+
+fn inline_runtime_hooks(overrides: &[String]) -> Value {
+    assert!(
+        !overrides
+            .iter()
+            .any(|entry| entry.starts_with("__CODEY_WSL_ONLY__:"))
+    );
+    assert!(
+        !overrides
+            .iter()
+            .any(|entry| entry.starts_with("hooks.state."))
+    );
+    assert!(overrides.iter().any(|entry| entry == "features.hooks=true"));
+    let hooks = overrides
+        .iter()
+        .filter(|entry| entry.starts_with("hooks="))
+        .collect::<Vec<_>>();
+    assert_eq!(hooks.len(), 1);
+    hooks[0].parse::<DocumentMut>().unwrap()["hooks"]
+        .as_value()
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn inline_hook_commands_and_trust_match_native_platforms() {
+    for (subagents, fastctx) in [(true, false), (false, true), (true, true)] {
+        let subagent_commands = subagents.then(|| crate::subagent_gate::hook_commands().unwrap());
+        let fastctx_commands = (fastctx && !subagents).then(|| {
+            crate::subagent_gate::hook_commands_for(crate::fastctx_route_gate::HOOK_ARGUMENT)
+                .unwrap()
+        });
+        let combined_commands = (fastctx && subagents).then(|| {
+            crate::subagent_gate::hook_commands_for(crate::subagent_gate::COMBINED_HOOK_ARGUMENT)
+                .unwrap()
+        });
+        let overrides = build_runtime_hooks_overrides(
+            subagent_commands.as_ref(),
+            fastctx_commands.as_ref(),
+            combined_commands.as_ref(),
+        );
+        assert_eq!(overrides.len(), 1);
+        assert!(overrides[0].starts_with("hooks="));
+        assert!(
+            !overrides
+                .iter()
+                .any(|entry| entry.starts_with("__CODEY_WSL_ONLY__:"))
+        );
+        for windows in [true, false] {
+            let hooks = build_runtime_hooks_value(
+                subagent_commands.as_ref(),
+                fastctx_commands.as_ref(),
+                combined_commands.as_ref(),
+                windows,
+            );
+            let parsed = format!("hooks={hooks}").parse::<DocumentMut>().unwrap();
+            let hooks = parsed["hooks"].as_value().unwrap();
+            let specs = if subagents {
+                &SUBAGENT_GATE_HOOKS[..]
+            } else {
+                &FASTCTX_ROUTE_HOOKS[..]
+            };
+            assert_inline_runtime_hooks(hooks, specs, subagents, fastctx, windows);
+        }
+    }
+}
+
+fn assert_inline_runtime_hooks(
+    hooks: &Value,
+    specs: &[CodeyHookSpec],
+    subagents: bool,
+    fastctx: bool,
+    windows: bool,
+) {
+    let hooks = hooks.as_inline_table().unwrap();
+    let events = if subagents {
+        &[
+            ("PreToolUse", "pre_tool_use"),
+            ("PostToolUse", "post_tool_use"),
+            ("UserPromptSubmit", "user_prompt_submit"),
+            ("SubagentStart", "subagent_start"),
+            ("SubagentStop", "subagent_stop"),
+            ("Stop", "stop"),
+            ("SessionEnd", "session_end"),
+        ][..]
+    } else {
+        &[("PreToolUse", "pre_tool_use")][..]
+    };
+    assert_eq!(
+        specs
+            .iter()
+            .map(|spec| (spec.toml_event, spec.event_key))
+            .collect::<Vec<_>>(),
+        events
+    );
+    assert_eq!(hooks.len(), specs.len() + 1);
+    let state = hooks["state"].as_inline_table().unwrap();
+    assert_eq!(state.len(), specs.len());
+    for spec in specs {
+        let groups = hooks[spec.toml_event].as_array().unwrap();
+        assert_eq!(groups.len(), 1);
+        let group = groups.get(0).unwrap().as_inline_table().unwrap();
+        let matcher = match spec.toml_event {
+            "PreToolUse" if subagents => Some("*"),
+            "PreToolUse" => Some(crate::fastctx_route_gate::HOOK_MATCHER),
+            "PostToolUse" => Some(crate::subagent_orchestrator::POST_TOOL_HOOK_MATCHER),
+            _ => None,
+        };
+        assert_eq!(group.get("matcher").and_then(Value::as_str), matcher);
+        let handlers = group["hooks"].as_array().unwrap();
+        assert_eq!(handlers.len(), 1);
+        let handler = handlers.get(0).unwrap().as_inline_table().unwrap();
+        let argument = if subagents && fastctx && spec.event_key == "pre_tool_use" {
+            crate::subagent_gate::COMBINED_HOOK_ARGUMENT
+        } else if subagents {
+            crate::subagent_gate::HOOK_ARGUMENT
+        } else {
+            crate::fastctx_route_gate::HOOK_ARGUMENT
+        };
+        let commands = crate::subagent_gate::hook_commands_for(argument).unwrap();
+        let command = if windows {
+            &commands.command_windows
+        } else {
+            &commands.command
+        };
+        assert_eq!(handler["type"].as_str(), Some("command"));
+        assert_eq!(handler["command"].as_str(), Some(command.as_str()));
+        assert_eq!(
+            handler["timeout"].as_integer(),
+            Some(spec.timeout_seconds as i64)
+        );
+        assert!(handler.get("commandWindows").is_none());
+        let key = format!("/<session-flags>/config.toml:{}:0:0", spec.event_key);
+        let expected = crate::subagent_gate::hook_trust_hash(
+            spec.event_key,
+            matcher,
+            command,
+            spec.timeout_seconds,
+        );
+        assert_eq!(
+            state[&key].as_inline_table().unwrap()["trusted_hash"].as_str(),
+            Some(expected.as_str())
+        );
+    }
+}
+
+#[test]
 fn isolated_fastctx_installs_route_hook_without_subagent_optimization() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("codex-home");
@@ -1956,30 +2175,30 @@ wire_api = "responses"
             .iter()
             .any(|entry| entry == "features.hooks=true")
     );
-    assert_eq!(
-        applied
-            .runtime_config_overrides
-            .iter()
-            .filter(|entry| entry.starts_with("hooks.state."))
-            .count(),
-        FASTCTX_ROUTE_HOOKS.len()
-    );
+    let hooks = inline_runtime_hooks(&applied.runtime_config_overrides);
     assert!(
         !applied
             .runtime_config_overrides
             .iter()
             .any(|entry| entry.starts_with("features.multi_agent_v2."))
     );
-    let hooks: serde_json::Value =
-        serde_json::from_slice(&fs::read(home.join("hooks.json")).unwrap()).unwrap();
-    let groups = hooks["hooks"]["PreToolUse"].as_array().unwrap();
+    assert!(!home.join("hooks.json").exists());
+    let groups = hooks.as_inline_table().unwrap()["PreToolUse"]
+        .as_array()
+        .unwrap();
     assert_eq!(groups.len(), 1);
     assert_eq!(
-        groups[0]["matcher"].as_str(),
+        groups.get(0).unwrap().as_inline_table().unwrap()["matcher"].as_str(),
         Some(crate::fastctx_route_gate::HOOK_MATCHER)
     );
     assert!(
-        groups[0]["hooks"][0]["command"]
+        groups.get(0).unwrap().as_inline_table().unwrap()["hooks"]
+            .as_array()
+            .unwrap()
+            .get(0)
+            .unwrap()
+            .as_inline_table()
+            .unwrap()["command"]
             .as_str()
             .unwrap()
             .contains(crate::fastctx_route_gate::HOOK_ARGUMENT)
@@ -1991,7 +2210,7 @@ wire_api = "responses"
 }
 
 #[test]
-fn isolated_runtime_constraints_stay_out_of_config_and_restore_hooks() {
+fn isolated_runtime_constraints_stay_out_of_config_and_leave_user_hooks_untouched() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("codex-home");
     let state_dir = temp.path().join("codey-state");
@@ -2110,11 +2329,8 @@ wire_api = "responses"
             );
         }
     }
-    let pre_tool_state_key = format!("{}:pre_tool_use:1:0", home.join("hooks.json").display());
-    let pre_tool_prefix = format!(
-        "hooks.state.{}.trusted_hash=",
-        toml_string_literal(&pre_tool_state_key)
-    );
+    let hooks = inline_runtime_hooks(&applied.runtime_config_overrides);
+    assert_inline_runtime_hooks(&hooks, &SUBAGENT_GATE_HOOKS, true, true, cfg!(windows));
     let hook_commands =
         crate::subagent_gate::hook_commands_for(crate::subagent_gate::COMBINED_HOOK_ARGUMENT)
             .unwrap();
@@ -2129,9 +2345,15 @@ wire_api = "responses"
         selected_command,
         crate::subagent_gate::HOOK_TIMEOUT_SECONDS,
     );
-    assert!(applied.runtime_config_overrides.iter().any(|entry| {
-        entry.starts_with(&pre_tool_prefix) && entry.contains(&expected_pre_tool_hash)
-    }));
+    assert_eq!(
+        hooks.as_inline_table().unwrap()["state"]
+            .as_inline_table()
+            .unwrap()["/<session-flags>/config.toml:pre_tool_use:0:0"]
+            .as_inline_table()
+            .unwrap()["trusted_hash"]
+            .as_str(),
+        Some(expected_pre_tool_hash.as_str())
+    );
     assert!(
         applied
             .runtime_config_overrides
@@ -2179,30 +2401,7 @@ wire_api = "responses"
             "missing runtime override {required_key}"
         );
     }
-    assert_eq!(
-        applied
-            .runtime_config_overrides
-            .iter()
-            .filter(|entry| entry.starts_with("hooks.state."))
-            .count(),
-        SUBAGENT_GATE_HOOKS.len()
-    );
-    assert_eq!(
-        applied
-            .runtime_config_overrides
-            .iter()
-            .filter(|entry| entry.starts_with(CODEY_WSL_ONLY_OVERRIDE_PREFIX))
-            .count(),
-        if cfg!(windows) {
-            SUBAGENT_GATE_HOOKS.len()
-        } else {
-            0
-        }
-    );
     for runtime_override in &applied.runtime_config_overrides {
-        let runtime_override = runtime_override
-            .strip_prefix(CODEY_WSL_ONLY_OVERRIDE_PREFIX)
-            .unwrap_or(runtime_override);
         runtime_override
             .parse::<DocumentMut>()
             .unwrap_or_else(|error| {
@@ -2210,46 +2409,10 @@ wire_api = "responses"
             });
     }
 
-    let hooks: serde_json::Value =
-        serde_json::from_slice(&fs::read(home.join("hooks.json")).unwrap()).unwrap();
-    assert_eq!(hooks["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
-    assert_eq!(
-        hooks["hooks"]["PreToolUse"][0]["hooks"][0]["command"].as_str(),
-        Some("/usr/bin/true")
-    );
-    assert_eq!(
-        hooks["hooks"]["PreToolUse"][1]["matcher"].as_str(),
-        Some("*")
-    );
-    assert!(
-        hooks["hooks"]["PreToolUse"][1]["hooks"][0]["command"]
-            .as_str()
-            .unwrap()
-            .contains(crate::subagent_gate::COMBINED_HOOK_ARGUMENT)
-    );
-    let windows_command = hooks["hooks"]["PreToolUse"][1]["hooks"][0]["commandWindows"]
-        .as_str()
-        .unwrap();
-    assert!(windows_command.starts_with("& '"), "{windows_command}");
-    assert!(windows_command.contains(crate::subagent_gate::COMBINED_HOOK_ARGUMENT));
-    for event in [
-        "PostToolUse",
-        "UserPromptSubmit",
-        "SubagentStart",
-        "SubagentStop",
-        "Stop",
-        "SessionEnd",
-    ] {
-        assert_eq!(
-            hooks["hooks"][event].as_array().unwrap().len(),
-            1,
-            "{event}"
-        );
-    }
-    assert_eq!(
-        hooks["hooks"]["PostToolUse"][0]["matcher"].as_str(),
-        Some(crate::subagent_orchestrator::POST_TOOL_HOOK_MATCHER)
-    );
+    assert_eq!(fs::read(home.join("hooks.json")).unwrap(), original_hooks);
+    let lease: RuntimeConfigLease = serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+    assert!(!lease.backup_dir.join("hooks.json").exists());
+    assert!(!lease.backup_dir.join(APPLIED_HOOKS_JSON_FILE).exists());
     let constraints_dir = state_dir.join(CODEY_CONSTRAINTS_DIR);
     assert_eq!(
         fs::read_to_string(constraints_dir.join(CODEY_ROOT_INSTRUCTIONS_FILE)).unwrap(),
@@ -2447,7 +2610,7 @@ fn realistic_apply_and_restore_leave_user_config_bytes_and_hooks_untouched() {
         fs::read(home.join("config.toml")).unwrap(),
         REALISTIC_USER_CONFIG
     );
-    assert!(home.join("hooks.json").exists());
+    assert!(!home.join("hooks.json").exists());
     assert_runtime_overrides_are_codex_enhancements(&applied.runtime_config_overrides);
 
     assert!(restore_runtime_config_at(&home, &marker, true).unwrap());

@@ -70,7 +70,6 @@ const CODEY_RUNTIME_CONFIG_LOCK_FILE: &str = "codex-runtime-config.lock";
 const RUNTIME_CONFIG_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const RUNTIME_CONFIG_LOCK_RETRY: Duration = Duration::from_millis(10);
 const RUNTIME_AGENT_SCHEMA_VERSION: u32 = 1;
-const CODEY_WSL_ONLY_OVERRIDE_PREFIX: &str = "__CODEY_WSL_ONLY__:";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -396,7 +395,6 @@ fn apply_isolated_runtime_router_config(
     } = options;
     fs::create_dir_all(home)?;
     let config_path = home.join("config.toml");
-    let hooks_path = home.join("hooks.json");
     let original_config = read_codex_config(&config_path)?;
     let existing = str::from_utf8(original_config.as_deref().unwrap_or_default())
         .context("Codex config.toml 不是 UTF-8")?;
@@ -474,11 +472,6 @@ fn apply_isolated_runtime_router_config(
     )?;
 
     let runtime_hooks_enabled = subagent_optimization || fastctx_namespace.is_some();
-    let original_hooks = if runtime_hooks_enabled {
-        read_optional(&hooks_path)?
-    } else {
-        None
-    };
     let subagent_hook_commands = subagent_optimization
         .then(crate::subagent_gate::hook_commands)
         .transpose()?;
@@ -490,20 +483,14 @@ fn apply_isolated_runtime_router_config(
     let fastctx_hook_commands = (fastctx_namespace.is_some() && !subagent_optimization)
         .then(|| crate::subagent_gate::hook_commands_for(crate::fastctx_route_gate::HOOK_ARGUMENT))
         .transpose()?;
-    let (updated_hooks, hook_trust_entries) = if runtime_hooks_enabled {
-        let RuntimeHooksFile {
-            contents,
-            trust_entries,
-        } = build_runtime_hooks_file(
-            original_hooks.as_deref(),
-            &hooks_path,
+    let hook_overrides = if runtime_hooks_enabled {
+        build_runtime_hooks_overrides(
             subagent_hook_commands.as_ref(),
             fastctx_hook_commands.as_ref(),
             combined_hook_commands.as_ref(),
-        )?;
-        (Some(contents), trust_entries)
+        )
     } else {
-        (None, Vec::new())
+        Vec::new()
     };
     let mut runtime_config_overrides = build_isolated_runtime_overrides(
         &effective_document,
@@ -511,7 +498,7 @@ fn apply_isolated_runtime_router_config(
         &runtime_agents,
         model_catalog_path,
         fastctx_namespace,
-        &hook_trust_entries,
+        &hook_overrides,
     )?;
     runtime_config_overrides.extend(crate::computer_use::runtime_overrides(
         home,
@@ -522,12 +509,6 @@ fn apply_isolated_runtime_router_config(
     prune_stale_backup_dirs(backup_root, marker);
     let backup_dir = backup_root.join(format!("{}-{}", timestamp_millis(), std::process::id()));
     create_private_dir_all(&backup_dir)?;
-    if let Some(bytes) = original_hooks.as_deref() {
-        write_private_file(&backup_dir.join("hooks.json"), bytes)?;
-    }
-    if let Some(bytes) = updated_hooks.as_deref() {
-        write_private_file(&backup_dir.join(APPLIED_HOOKS_JSON_FILE), bytes)?;
-    }
     let runtime_agent_hashes = runtime_agent_hashes(&runtime_agents);
 
     let state = RuntimeConfigLease {
@@ -546,37 +527,20 @@ fn apply_isolated_runtime_router_config(
             0
         },
         runtime_agent_hashes,
-        runtime_hooks_applied: updated_hooks.is_some(),
-        original_hooks_file_exists: original_hooks.is_some(),
+        runtime_hooks_applied: false,
+        original_hooks_file_exists: false,
     };
     if let Err(error) = write_lease(marker, &state) {
         let _ = fs::remove_dir_all(&backup_dir);
         return Err(error);
     }
 
-    let inputs_unchanged = codex_config_matches(&config_path, original_config.as_deref())?
-        && (!runtime_hooks_enabled
-            || optional_file_matches(&hooks_path, original_hooks.as_deref())?);
+    let inputs_unchanged = codex_config_matches(&config_path, original_config.as_deref())?;
     if !inputs_unchanged {
         discard_runtime_lease(home, marker, &backup_dir).with_context(|| {
             "Codex 配置在 Codey 保存隔离约束快照后发生变化；取消启动时清理租约失败，恢复备份已保留"
         })?;
         bail!("Codex 配置在 Codey 保存隔离约束快照后发生变化；已取消本次启动");
-    }
-
-    if let Some(updated_hooks) = updated_hooks.as_deref()
-        && let Err(write_error) =
-            atomic_write(&hooks_path, updated_hooks).context("写入 Codey 独立 Hook 文件失败")
-    {
-        match rollback_isolated_runtime_config(home, marker, &state) {
-            Ok(()) => {
-                let _ = fs::remove_dir_all(&backup_dir);
-                return Err(write_error);
-            }
-            Err(rollback_error) => {
-                anyhow::bail!("{write_error:#}；清理隔离运行时租约也失败：{rollback_error:#}");
-            }
-        }
     }
 
     let policy_result = if subagent_optimization {
@@ -972,10 +936,6 @@ fn remove_constraint_text(existing: &str, constraint: &str) -> String {
     current.trim().to_string()
 }
 
-fn optional_file_matches(path: &Path, expected: Option<&[u8]>) -> Result<bool> {
-    Ok(read_optional(path)?.as_deref() == expected)
-}
-
 fn discard_runtime_lease(home: &Path, marker: &Path, backup_dir: &Path) -> Result<()> {
     // A cancelled startup must not leave either half of the runtime policy
     // journal behind. Clear it before dropping the lease so a cleanup failure
@@ -1209,6 +1169,7 @@ fn restore_runtime_config_at(
 }
 
 fn restore_runtime_hooks_file(home: &Path, state: &RuntimeConfigLease) -> Result<()> {
+    // 仅为旧版已写入 hooks.json 的租约保留一次性恢复；新版租约不再写入该文件。
     if !state.runtime_hooks_applied {
         return Ok(());
     }
@@ -1230,8 +1191,7 @@ fn restore_runtime_hooks_file(home: &Path, state: &RuntimeConfigLease) -> Result
         return restore_optional_bytes(&hooks_path, original.as_deref());
     }
 
-    // A user may edit hooks.json while Codey is running. In that case remove
-    // only Codey's identifiable command groups and retain all concurrent edits.
+    // 用户可能在旧版运行期间编辑文件，此时只移除 Codey 命令组，保留并发编辑。
     let Ok(mut document) = serde_json::from_slice::<serde_json::Value>(&current) else {
         return Ok(());
     };
@@ -1380,9 +1340,7 @@ fn patch_config_with_fastctx_mode(
         )?;
     }
     if fastctx_namespace.is_some() {
-        // Hook definitions live in the runtime hooks.json built by
-        // `build_runtime_hooks_file`; the TOML document only carries the
-        // feature flag that `build_isolated_runtime_overrides` forwards.
+        // Hook 定义与信任项由单条运行期覆盖提供，此处只启用功能开关。
         enable_hooks_feature(&mut doc)?;
     }
     document_string(&doc)
@@ -1508,17 +1466,6 @@ struct CodeyHookSpec {
     timeout_seconds: u64,
 }
 
-struct RuntimeHookTrustEntry {
-    state_key: String,
-    trusted_hash: String,
-    wsl_trusted_hash: Option<String>,
-}
-
-struct RuntimeHooksFile {
-    contents: Vec<u8>,
-    trust_entries: Vec<RuntimeHookTrustEntry>,
-}
-
 const SUBAGENT_GATE_HOOKS: [CodeyHookSpec; 7] = [
     CodeyHookSpec {
         toml_event: "PreToolUse",
@@ -1571,37 +1518,28 @@ const FASTCTX_ROUTE_HOOKS: [CodeyHookSpec; 1] = [CodeyHookSpec {
     timeout_seconds: crate::fastctx_route_gate::HOOK_TIMEOUT_SECONDS,
 }];
 
-fn build_runtime_hooks_file(
-    existing: Option<&[u8]>,
-    hooks_path: &Path,
+fn build_runtime_hooks_overrides(
     subagent_commands: Option<&crate::subagent_gate::HookCommands>,
     fastctx_commands: Option<&crate::subagent_gate::HookCommands>,
     combined_commands: Option<&crate::subagent_gate::HookCommands>,
-) -> Result<RuntimeHooksFile> {
-    let mut root = match existing {
-        Some(existing) => serde_json::from_slice::<serde_json::Value>(existing)
-            .context("解析 Codex hooks.json 失败")?,
-        None => serde_json::json!({
-            "description": CODEY_HOOKS_DESCRIPTION,
-            "hooks": {},
-        }),
-    };
-    let root = root
-        .as_object_mut()
-        .ok_or_else(|| anyhow::anyhow!("Codex hooks.json 顶层必须是 JSON object"))?;
-    if !root.contains_key("hooks") {
-        root.insert("hooks".to_string(), serde_json::json!({}));
-    }
-    let hooks = root
-        .get_mut("hooks")
-        .and_then(serde_json::Value::as_object_mut)
-        .ok_or_else(|| anyhow::anyhow!("Codex hooks.json 的 hooks 必须是 JSON object"))?;
-    for groups in hooks.values_mut() {
-        if let Some(groups) = groups.as_array_mut() {
-            groups.retain(|group| !json_hook_group_is_codey_owned(group));
-        }
-    }
+) -> Vec<String> {
+    let mut overrides = Vec::new();
+    let hooks = build_runtime_hooks_value(
+        subagent_commands,
+        fastctx_commands,
+        combined_commands,
+        cfg!(windows),
+    );
+    push_runtime_override_value(&mut overrides, "hooks", &hooks);
+    overrides
+}
 
+fn build_runtime_hooks_value(
+    subagent_commands: Option<&crate::subagent_gate::HookCommands>,
+    fastctx_commands: Option<&crate::subagent_gate::HookCommands>,
+    combined_commands: Option<&crate::subagent_gate::HookCommands>,
+    windows: bool,
+) -> Value {
     let mut hook_plans = Vec::with_capacity(3);
     if let Some(subagent_commands) = subagent_commands {
         if let Some(combined_commands) = combined_commands {
@@ -1614,72 +1552,60 @@ fn build_runtime_hooks_file(
     if let Some(fastctx_commands) = fastctx_commands {
         hook_plans.push((&FASTCTX_ROUTE_HOOKS[..], fastctx_commands));
     }
-    let mut trust_entries =
-        Vec::with_capacity(hook_plans.iter().map(|(specs, _)| specs.len()).sum());
+    let mut hooks = InlineTable::new();
+    let mut state = InlineTable::new();
     for (specs, commands) in hook_plans {
-        let selected_command = if cfg!(windows) {
+        let command = if windows {
             commands.command_windows.as_str()
         } else {
             commands.command.as_str()
         };
         for &spec in specs {
-            let groups = hooks
-                .entry(spec.toml_event.to_string())
-                .or_insert_with(|| serde_json::Value::Array(Vec::new()))
-                .as_array_mut()
-                .ok_or_else(|| {
-                    anyhow::anyhow!("hooks.json hooks.{} 必须是数组", spec.toml_event)
-                })?;
-            let group_index = groups.len();
-            let mut group = serde_json::Map::new();
-            if let Some(matcher) = spec.matcher {
-                group.insert(
-                    "matcher".to_string(),
-                    serde_json::Value::String(matcher.to_string()),
-                );
-            }
-            group.insert(
-                "hooks".to_string(),
-                serde_json::json!([{
-                    "type": "command",
-                    "command": commands.command,
-                    "commandWindows": commands.command_windows,
-                    "timeout": spec.timeout_seconds,
-                }]),
-            );
-            groups.push(serde_json::Value::Object(group));
-
-            let state_key = format!(
-                "{}:{}:{group_index}:0",
-                hooks_path.display(),
-                spec.event_key
-            );
-            let trusted_hash = crate::subagent_gate::hook_trust_hash(
-                spec.event_key,
-                spec.matcher,
-                selected_command,
-                spec.timeout_seconds,
-            );
-            trust_entries.push(RuntimeHookTrustEntry {
-                state_key,
-                trusted_hash,
-                wsl_trusted_hash: cfg!(windows).then(|| {
-                    crate::subagent_gate::hook_trust_hash(
-                        spec.event_key,
-                        spec.matcher,
-                        &commands.command,
-                        spec.timeout_seconds,
-                    )
-                }),
-            });
+            append_runtime_hook(&mut hooks, &mut state, spec, command);
         }
     }
-    let mut rendered = serde_json::to_vec_pretty(&serde_json::Value::Object(root.clone()))?;
-    rendered.push(b'\n');
-    Ok(RuntimeHooksFile {
-        contents: rendered,
-        trust_entries,
-    })
+    hooks.insert("state", Value::InlineTable(state));
+    Value::InlineTable(hooks)
+}
+
+fn append_runtime_hook(
+    hooks: &mut InlineTable,
+    state: &mut InlineTable,
+    spec: CodeyHookSpec,
+    command: &str,
+) {
+    let mut handler = InlineTable::new();
+    handler.insert("type", Value::from("command"));
+    handler.insert("command", Value::from(command));
+    handler.insert("timeout", Value::from(spec.timeout_seconds as i64));
+    let mut handlers = Array::new();
+    handlers.push(Value::InlineTable(handler));
+    let mut group = InlineTable::new();
+    if let Some(matcher) = spec.matcher {
+        group.insert("matcher", Value::from(matcher));
+    }
+    group.insert("hooks", Value::Array(handlers));
+    let groups = hooks
+        .entry(spec.toml_event)
+        .or_insert(Value::Array(Array::new()));
+    let groups = groups.as_array_mut().expect("Codey Hook 事件必须是数组");
+    let group_index = groups.len();
+    groups.push(Value::InlineTable(group));
+    let trusted_hash = crate::subagent_gate::hook_trust_hash(
+        spec.event_key,
+        spec.matcher,
+        command,
+        spec.timeout_seconds,
+    );
+    let mut trust = InlineTable::new();
+    trust.insert("trusted_hash", Value::from(trusted_hash));
+    state.insert(
+        format!(
+            "/<session-flags>/config.toml:{}:{group_index}:0",
+            spec.event_key
+        ),
+        Value::InlineTable(trust),
+    );
 }
 
 fn json_hook_group_is_codey_owned(group: &serde_json::Value) -> bool {
@@ -1703,7 +1629,7 @@ fn build_isolated_runtime_overrides(
     runtime_agents: &[RuntimeAgentRegistration],
     model_catalog_path: Option<&Path>,
     fastctx_namespace: Option<&str>,
-    hook_trust_entries: &[RuntimeHookTrustEntry],
+    hook_overrides: &[String],
 ) -> Result<Vec<String>> {
     let mut overrides = Vec::new();
     push_required_document_override(
@@ -1890,45 +1816,14 @@ fn build_isolated_runtime_overrides(
             );
         }
     }
-    if !hook_trust_entries.is_empty() {
+    if !hook_overrides.is_empty() {
         push_required_document_override(
             &mut overrides,
             effective,
             &["features", "hooks"],
             "features.hooks",
         )?;
-        let expected_hook_count = if runtime_agents.is_empty() {
-            usize::from(fastctx_namespace.is_some())
-        } else {
-            SUBAGENT_GATE_HOOKS.len()
-        };
-        anyhow::ensure!(
-            hook_trust_entries.len() == expected_hook_count,
-            "Codey Hook 信任项不完整"
-        );
-        for trust_entry in hook_trust_entries {
-            let state_segment = toml_string_literal(&trust_entry.state_key);
-            let key = format!("hooks.state.{state_segment}.trusted_hash");
-            push_runtime_override_value(
-                &mut overrides,
-                &key,
-                &Value::from(trust_entry.trusted_hash.as_str()),
-            );
-            if let Some(wsl_trusted_hash) = trust_entry.wsl_trusted_hash.as_deref() {
-                let mut wsl_override = Vec::with_capacity(1);
-                push_runtime_override_value(
-                    &mut wsl_override,
-                    &key,
-                    &Value::from(wsl_trusted_hash),
-                );
-                overrides.push(format!(
-                    "{CODEY_WSL_ONLY_OVERRIDE_PREFIX}{}",
-                    wsl_override
-                        .pop()
-                        .expect("WSL Hook trust override was rendered")
-                ));
-            }
-        }
+        overrides.extend_from_slice(hook_overrides);
     }
     Ok(overrides)
 }
@@ -1975,10 +1870,6 @@ fn push_runtime_override_value(overrides: &mut Vec<String>, key: &str, value: &V
     let mut value = value.clone();
     value.decor_mut().clear();
     overrides.push(format!("{key}={value}"));
-}
-
-fn toml_string_literal(value: &str) -> String {
-    Value::from(value).to_string()
 }
 
 fn append_constraint_text(existing: &str, addition: &str) -> String {

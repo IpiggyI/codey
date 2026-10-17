@@ -930,7 +930,7 @@ fn app_server_runtime_configs(runtime_overrides: &[String]) -> Vec<String> {
     let mut configs = vec!["analytics.enabled=false".to_string()];
     for config in runtime_overrides {
         let key = runtime_override_key(config);
-        if key.is_empty() || key == "analytics.enabled" {
+        if key.is_empty() || key == "analytics.enabled" || key.starts_with("__CODEY_WSL_ONLY__:") {
             continue;
         }
         if let Some(index) = configs
@@ -1513,6 +1513,31 @@ mod tests {
                 "model_provider=codey_router",
                 "-c",
                 "features.hooks=true",
+            ]
+            .map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn cli_wrapper_drops_stale_wsl_only_runtime_overrides() {
+        let overrides = [
+            "__CODEY_WSL_ONLY__:hooks={PreToolUse=[]}",
+            "  __CODEY_WSL_ONLY__:hooks.state.legacy.trusted_hash=\"sha256:old\"",
+            "hooks={PreToolUse=[]}",
+            "developer_instructions=\"Preserve __CODEY_WSL_ONLY__: in values\"",
+        ]
+        .map(str::to_string);
+        let args = [OsString::from("app-server")];
+        assert_eq!(
+            rewrite_app_server_args(&args, &overrides).unwrap(),
+            [
+                "app-server",
+                "-c",
+                "analytics.enabled=false",
+                "-c",
+                "hooks={PreToolUse=[]}",
+                "-c",
+                "developer_instructions=\"Preserve __CODEY_WSL_ONLY__: in values\"",
             ]
             .map(OsString::from)
         );
