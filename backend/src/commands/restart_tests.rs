@@ -1,5 +1,140 @@
 use super::*;
 
+fn message_delete_test_home() -> tempfile::TempDir {
+    let home = tempfile::tempdir().unwrap();
+    let connection = rusqlite::Connection::open(home.path().join("state_5.sqlite")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, body TEXT NOT NULL);
+             INSERT INTO messages VALUES ('m1', 's1', 'remove'), ('m2', 's1', 'keep');",
+        )
+        .unwrap();
+    home
+}
+
+#[tokio::test]
+async fn message_delete_restart_flag_schedules_only_after_persistent_success() {
+    let home = message_delete_test_home();
+    let restarts = std::cell::Cell::new(0);
+    let result = delete_selected_messages(
+        home.path().to_path_buf(),
+        json!({"sessionId": "s1", "messageIds": ["m1"], "restartCodex": true}),
+        || {
+            let connection =
+                rusqlite::Connection::open(home.path().join("state_5.sqlite")).unwrap();
+            let remaining: String = connection
+                .query_row("SELECT id FROM messages", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(remaining, "m2");
+            assert!(
+                home.path()
+                    .join(".codey-message-delete-tombstones-v1")
+                    .is_dir()
+            );
+            restarts.set(restarts.get() + 1);
+            std::future::ready(Ok(json!({"status": "restarting"})))
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["deleted"], 1);
+    assert_eq!(restarts.get(), 1);
+}
+
+#[tokio::test]
+async fn message_delete_absent_or_non_boolean_restart_flag_keeps_existing_behavior() {
+    for restart_flag in [None, Some(json!(false)), Some(json!("true"))] {
+        let home = message_delete_test_home();
+        let mut payload = json!({"sessionId": "s1", "messageIds": ["m1"]});
+        if let Some(flag) = restart_flag {
+            payload["restartCodex"] = flag;
+        }
+        let result = delete_selected_messages(
+            home.path().to_path_buf(),
+            payload,
+            || -> std::future::Ready<Result<Value, String>> {
+                panic!("restart requires an explicit true flag")
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result,
+            json!({"deleted": 1, "resolvedMessageIds": ["m1"], "unsupportedDatabases": []})
+        );
+    }
+}
+
+#[tokio::test]
+async fn message_delete_partial_or_unsupported_cleanup_never_restarts() {
+    for unsupported in [false, true] {
+        let home = message_delete_test_home();
+        if unsupported {
+            rusqlite::Connection::open(home.path().join("thread_history_1.sqlite"))
+                .unwrap()
+                .execute_batch("CREATE TABLE unknown (id TEXT)")
+                .unwrap();
+        }
+        let ids = if unsupported {
+            vec!["m1"]
+        } else {
+            vec!["m1", "missing"]
+        };
+        let result = delete_selected_messages(
+            home.path().to_path_buf(),
+            json!({"sessionId": "s1", "messageIds": ids, "restartCodex": true}),
+            || -> std::future::Ready<Result<Value, String>> {
+                panic!("partial deletion must not restart Codex")
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["deleted"], 1);
+        assert_eq!(
+            !result["unsupportedDatabases"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            unsupported
+        );
+    }
+}
+
+#[tokio::test]
+async fn message_delete_failed_storage_never_restarts() {
+    let home = message_delete_test_home();
+    rusqlite::Connection::open(home.path().join("state_5.sqlite"))
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER reject_delete BEFORE DELETE ON messages
+             BEGIN SELECT RAISE(ABORT, 'delete refused'); END;",
+        )
+        .unwrap();
+    let error = delete_selected_messages(
+        home.path().to_path_buf(),
+        json!({"sessionId": "s1", "messageIds": ["m1"], "restartCodex": true}),
+        || -> std::future::Ready<Result<Value, String>> {
+            panic!("failed deletion must not restart Codex")
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("delete refused"));
+}
+
+#[tokio::test]
+async fn message_delete_restart_failure_reports_that_deletion_already_succeeded() {
+    let home = message_delete_test_home();
+    let error = delete_selected_messages(
+        home.path().to_path_buf(),
+        json!({"sessionId": "s1", "messageIds": ["m1"], "restartCodex": true}),
+        || std::future::ready(Err("正在退出".into())),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error, "消息已永久删除，但无法重启 Codex：正在退出");
+}
+
 #[test]
 fn unknown_official_auth_from_auto_store_allows_official_only_launch_to_reach_runtime() {
     let mut previous = CodeyConfig::default();

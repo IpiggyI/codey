@@ -472,21 +472,11 @@ impl AppState {
                 .await
             }
             "/session/delete-messages" => {
-                let session_id = bridge_string(&payload, "sessionId");
-                let message_ids = payload
-                    .get("messageIds")
-                    .and_then(Value::as_array)
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                delete_selected_messages(session_id, message_ids)
-                    .await
-                    .unwrap_or_else(api_error_message)
+                delete_selected_messages(codex_home().to_path_buf(), payload, || {
+                    schedule_restart_codey_runtime(self)
+                })
+                .await
+                .unwrap_or_else(api_error_message)
             }
             "/plugins/list" => {
                 let home = codex_home();
@@ -2241,17 +2231,32 @@ async fn cache_session_titles(state: &Arc<AppState>, payload: &Value) -> Value {
     json!({"status":"ok"})
 }
 
-pub async fn delete_selected_messages(
-    session_id: String,
-    message_ids: Vec<String>,
-) -> Result<Value, String> {
-    let home = codex_home();
+async fn delete_selected_messages<F>(
+    home: PathBuf,
+    payload: Value,
+    schedule_restart: impl FnOnce() -> F,
+) -> Result<Value, String>
+where
+    F: std::future::Future<Output = Result<Value, String>>,
+{
+    let session_id = bridge_string(&payload, "sessionId");
+    let message_ids = bridge_string_array(&payload, "messageIds", usize::MAX);
+    let requested_count = message_ids.len();
     let result = tokio::task::spawn_blocking(move || {
-        delete_messages_persistently(home, &session_id, &message_ids)
+        delete_messages_persistently(&home, &session_id, &message_ids)
     })
     .await
     .map_err(|error| format!("消息删除任务异常退出：{error}"))?
     .map_err(|error| error.to_string())?;
+    if payload.get("restartCodex").and_then(Value::as_bool) == Some(true)
+        && requested_count > 0
+        && result.deleted == requested_count
+        && result.unsupported_databases.is_empty()
+    {
+        schedule_restart()
+            .await
+            .map_err(|error| format!("消息已永久删除，但无法重启 Codex：{error}"))?;
+    }
     serde_json::to_value(result).map_err(|error| error.to_string())
 }
 

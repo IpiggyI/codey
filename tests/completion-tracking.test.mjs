@@ -396,6 +396,8 @@ const createLocalDeletionManager = (overrides = {}) => ({
   getHostId() { return "local"; },
   getConversation() { return { turns: [], resumeState: "resumed" }; },
   getStreamRole() { return { role: "owner" }; },
+  getCachedConversations() { return [this.getConversation("session-1")]; },
+  requestClient: { getAppServerVersion() { return "0.163.0-alpha.10.2"; } },
   async sendRequest() {},
   updateConversationState() {},
   inactiveThreadUnsubscriber: { clearConversationStreamOwnership() {} },
@@ -404,6 +406,8 @@ const createLocalDeletionManager = (overrides = {}) => ({
 
 const createRecoveryController = (events, overrides = {}) => ({
   kind: "manager",
+  planMessageDeletion() { return { kind: "middle" }; },
+  async revertMessageDeletion() { assert.fail("persistence fixture only supports middle deletion"); },
   async prepareMessageDeletion() {},
   async finishMessageDeletion() {},
   async refreshRecentConversations() {},
@@ -733,12 +737,9 @@ test("deletion uses the local registry instead of RPC stubs without custom nativ
   const manager = {
     getHostId() { return "local"; },
     getConversation() { return conversation; },
+    getCachedConversations() { return [conversation]; },
     getStreamRole() { return { role: "owner" }; },
-    async sendRequest(method, params) {
-      assert.equal(method, "thread/unsubscribe");
-      assert.equal(params.threadId, "session-1");
-      events.push("unsubscribe");
-    },
+    async sendRequest() { assert.fail("middle deletion must not send native requests"); },
     updateConversationState(sessionId, update) {
       assert.equal(sessionId, "session-1");
       update(conversation);
@@ -770,7 +771,7 @@ test("deletion uses the local registry instead of RPC stubs without custom nativ
   runtime.setSessionId("session-1");
   await runtime.window.__codeyDeleteSelectedMessages();
   assert.equal(runtime.window.__codeyCodexSessionController.manager, manager);
-  assert.deepEqual(events, ["unsubscribe", "persist", "update", "clear"]);
+  assert.deepEqual(events, ["persist", "update", "clear"]);
   assert.deepEqual(rpcCalls, []);
   assert.equal(conversation.turns[0], retainedTurn);
   assert.deepEqual(runtime.getVisibleTurnIds(), ["turn-2"]);
@@ -985,7 +986,225 @@ test("deletes selected turns in place without evicting or resuming the conversat
   assert.deepEqual(runtime.alerts, []);
 });
 
-test("persistent deletion waits for the native subscription to be released", async () => {
+test("selected suffix uses native revert and keeps Codey deletion bookkeeping", async () => {
+  const turns = [1, 2, 3].map((id) => ({ turnId: `turn-${id}`, status: "completed" }));
+  const conversation = { id: "session-1", turns, historyMode: "paginated", resumeState: "resumed" };
+  const requests = [];
+  const applications = [];
+  const response = { thread: { id: conversation.id } };
+  const manager = createLocalDeletionManager({
+    getConversation() { return conversation; },
+    async sendRequest(method, params) { requests.push({ method, params }); return response; },
+    applyRevertResponseToConversation(payload) {
+      applications.push(payload);
+      conversation.turns = conversation.turns.filter((turn) => !payload.revertedTurns.includes(turn));
+    },
+    updateConversationState() { assert.fail("native response must own the state update"); },
+  });
+  const runtime = loadInjection({
+    turnIds: ["turn-1", "turn-2", "turn-3"], selectedTurnIds: ["turn-2", "turn-3"],
+    localAppServerManager: manager,
+  });
+  await runtime.window.__codeyDeleteSelectedMessages();
+  assert.deepEqual(requests.map(({ method, params }) => [method, { ...params }]), [["thread/revert", { threadId: "session-1", beforeTurnId: "turn-2" }]]);
+  assert.equal(applications[0].response, response);
+  assert.deepEqual([...applications[0].revertedTurns], turns.slice(1));
+  assert.equal(applications[0].revertedTurns[0], turns[1]);
+  assert.equal(conversation.resumeState, "resumed");
+  assert.equal(runtime.bridgeCalls.some(({ path }) => path === "/session/delete-messages"), false);
+  runtime.window.__codeyInstallMessageSelection();
+  assert.deepEqual(runtime.getVisibleTurnIds(), ["turn-1"]);
+  const stale = runtime.appendTurn("turn-2");
+  runtime.window.__codeyInstallMessageSelection();
+  assert.equal(stale.removed, true);
+  assert.deepEqual(runtime.alerts, []);
+  assert.doesNotMatch(runtime.confirmations[0], /重启/);
+});
+
+test("non-paginated selected suffix uses the legacy native pair without persistent deletion", async () => {
+  for (const hasRevert of [false, true]) {
+    const conversation = { id: "session-1", historyMode: "full", turns: [{ turnId: "turn-1" }, { turnId: "turn-2" }], resumeState: "resumed" };
+    const requests = [];
+    const response = { thread: { id: conversation.id } };
+    const manager = createLocalDeletionManager({
+      getConversation() { return conversation; },
+      requestClient: { getAppServerVersion() { assert.fail("legacy rollback must not read the revert capability"); } },
+      async sendRequest(method, params) {
+        requests.push({ method, params });
+        assert.equal(method, "thread/rollback");
+        return response;
+      },
+      applyRollbackResponseToConversation(payload) {
+        assert.equal(payload.conversationState, conversation);
+        assert.equal(payload.rollbackResponse, response);
+        assert.equal(payload.conversationId, conversation.id);
+        conversation.turns.pop();
+      },
+    });
+    if (hasRevert) manager.applyRevertResponseToConversation = () => assert.fail("legacy history must not revert");
+    const runtime = loadInjection({ turnIds: ["turn-1", "turn-2"], selectedTurnIds: ["turn-2"], localAppServerManager: manager });
+    await runtime.window.__codeyDeleteSelectedMessages();
+    assert.deepEqual(requests.map(({ method }) => method), ["thread/rollback"]);
+    assert.deepEqual({ ...requests.at(-1).params }, { threadId: "session-1", numTurns: 1 });
+    assert.equal(runtime.bridgeCalls.some(({ path }) => path === "/session/delete-messages"), false);
+    assert.deepEqual(runtime.alerts, []);
+    runtime.window.__codeyInstallMessageSelection();
+    assert.deepEqual(runtime.getVisibleTurnIds(), ["turn-1"]);
+  }
+});
+
+test("failed native suffix deletion never falls through to persistent deletion", async () => {
+  const conversation = { id: "session-1", historyMode: "paginated", turns: [{ turnId: "turn-1" }] };
+  const requests = [];
+  const manager = createLocalDeletionManager({
+    getConversation() { return conversation; },
+    async sendRequest(method) { requests.push(method); throw new Error("permission denied"); },
+    applyRevertResponseToConversation() { assert.fail("failed request has no response"); },
+    applyRollbackResponseToConversation() { assert.fail("ordinary failures must not roll back"); },
+  });
+  const runtime = loadInjection({ selectedTurnIds: ["turn-1"], localAppServerManager: manager });
+  await runtime.window.__codeyDeleteSelectedMessages();
+  assert.deepEqual(requests, ["thread/revert"]);
+  assert.equal(runtime.bridgeCalls.some(({ path }) => path === "/session/delete-messages"), false);
+  assert.match(runtime.alerts[0], /permission denied/);
+  assert.deepEqual(runtime.getVisibleTurnIds(), ["turn-1"]);
+});
+
+test("unconfirmed paginated revert sends neither rollback nor persistent deletion", async () => {
+  for (const version of [null, "0.148.0-alpha.12"]) {
+    const conversation = { id: "session-1", historyMode: "paginated", turns: [{ turnId: "turn-1" }] };
+    const requests = [];
+    const manager = createLocalDeletionManager({
+      getConversation() { return conversation; },
+      requestClient: { getAppServerVersion() { return version; } },
+      async sendRequest(method) { requests.push(method); },
+      applyRevertResponseToConversation() { assert.fail("unconfirmed capability must not revert"); },
+      applyRollbackResponseToConversation() { assert.fail("paginated history must not roll back"); },
+    });
+    const runtime = loadInjection({ selectedTurnIds: ["turn-1"], localAppServerManager: manager });
+    await runtime.window.__codeyDeleteSelectedMessages();
+    assert.deepEqual(requests, []);
+    assert.equal(runtime.bridgeCalls.some(({ path }) => path === "/session/delete-messages"), false);
+    assert.match(runtime.alerts[0], /无法确认.*撤回能力/);
+    assert.deepEqual(runtime.getVisibleTurnIds(), ["turn-1"]);
+  }
+});
+
+test("middle deletion confirms a Codex restart and explicitly requests it from the bridge", async () => {
+  const conversation = { id: "session-1", turns: [{ turnId: "turn-1" }, { turnId: "turn-2" }] };
+  const requests = [];
+  const manager = createLocalDeletionManager({
+    getConversation() { return conversation; },
+    getCachedConversations() { return [conversation]; },
+    async sendRequest(method) { requests.push(method); },
+  });
+  const runtime = loadInjection({
+    turnIds: ["turn-1", "turn-2"], selectedTurnIds: ["turn-1"], localAppServerManager: manager,
+    bridgeHandler(path) { return path === "/session/delete-messages" ? { deleted: 1 } : { status: "ok" }; },
+  });
+  await runtime.window.__codeyDeleteSelectedMessages();
+  assert.match(runtime.confirmations[0], /无法撤销/);
+  assert.match(runtime.confirmations[0], /Codex.*重启|重启.*Codex/);
+  const deletion = runtime.bridgeCalls.filter(({ path }) => path === "/session/delete-messages");
+  assert.equal(deletion.length, 1);
+  assert.deepEqual({ ...deletion[0].payload, messageIds: [...deletion[0].payload.messageIds] }, {
+    sessionId: "session-1", messageIds: ["turn-1"], restartCodex: true,
+  });
+  assert.deepEqual(requests, []);
+  assert.deepEqual(runtime.alerts, []);
+});
+
+test("unsuccessful middle deletion leaves the conversation and stream ownership unchanged", async () => {
+  for (const { result, error, message } of [
+    { error: new Error("bridge stopped"), message: /bridge stopped/ },
+    { result: { status: "failed", message: "delete refused" }, message: /delete refused/ },
+    { result: { deleted: 1 }, message: /只永久删除了 1\/2/ },
+    { result: { deleted: 0 }, message: /未在会话文件中找到/ },
+    { result: { deleted: 2, unsupportedDatabases: ["thread_history_1.sqlite"] }, message: /索引数据库未完成清理/ },
+  ]) {
+    const conversation = {
+      id: "session-1", resumeState: "resumed", requests: [],
+      turns: [1, 2, 3].map((id) => ({ turnId: `turn-${id}`, status: "completed" })),
+    };
+    const before = structuredClone(conversation);
+    let updates = 0;
+    let clears = 0;
+    const manager = createLocalDeletionManager({
+      getConversation() { return conversation; },
+      getCachedConversations() { return [conversation]; },
+      updateConversationState(_sessionId, update) { updates += 1; update(conversation); },
+      inactiveThreadUnsubscriber: { clearConversationStreamOwnership() { clears += 1; } },
+    });
+    const runtime = loadInjection({
+      turnIds: ["turn-1", "turn-2", "turn-3"], selectedTurnIds: ["turn-1", "turn-2"], localAppServerManager: manager,
+      bridgeHandler(path) {
+        if (path !== "/session/delete-messages") return { status: "ok" };
+        if (error) throw error;
+        return result;
+      },
+    });
+    await runtime.window.__codeyDeleteSelectedMessages();
+    assert.match(runtime.alerts[0], message);
+    assert.equal(updates, 0);
+    assert.equal(clears, 0);
+    assert.deepEqual(conversation, before);
+    assert.deepEqual(runtime.getVisibleTurnIds(), ["turn-1", "turn-2", "turn-3"]);
+    assert.equal(runtime.getTurnRow(0).classList.contains("codey-message-selected"), true);
+  }
+});
+
+test("middle deletion refuses another conversation's running task before confirmation", async () => {
+  const conversation = { id: "session-1", turns: [{ turnId: "turn-1" }, { turnId: "turn-2" }] };
+  const requests = [];
+  const manager = createLocalDeletionManager({
+    getConversation() { return conversation; },
+    getCachedConversations() { return [conversation, { id: "other", threadRuntimeStatus: { type: "active" } }]; },
+    async sendRequest(method) { requests.push(method); },
+  });
+  const runtime = loadInjection({ turnIds: ["turn-1", "turn-2"], selectedTurnIds: ["turn-1"], localAppServerManager: manager });
+  await runtime.window.__codeyDeleteSelectedMessages();
+  assert.match(runtime.alerts.at(-1), /窗口.*任务.*运行/);
+  assert.deepEqual(runtime.confirmations, []);
+  assert.deepEqual(requests, []);
+  assert.equal(runtime.bridgeCalls.some(({ path }) => path === "/session/delete-messages"), false);
+});
+
+test("middle deletion rechecks other conversations after confirmation", async () => {
+  const conversation = { id: "session-1", turns: [{ turnId: "turn-1" }, { turnId: "turn-2" }] };
+  const other = { id: "other", requests: [] };
+  const manager = createLocalDeletionManager({
+    getConversation() { return conversation; },
+    getCachedConversations() { return [conversation, other]; },
+    async sendRequest() { assert.fail("must not send native requests"); },
+  });
+  const runtime = loadInjection({ turnIds: ["turn-1", "turn-2"], selectedTurnIds: ["turn-1"], localAppServerManager: manager });
+  runtime.window.confirm = () => { other.requests.push({ id: "started" }); return true; };
+  await runtime.window.__codeyDeleteSelectedMessages();
+  assert.match(runtime.alerts[0], /窗口.*任务.*运行/);
+  assert.equal(runtime.bridgeCalls.some(({ path }) => path === "/session/delete-messages"), false);
+});
+
+test("cancelling selected-turn deletion sends no native or bridge deletion request", async () => {
+  for (const selected of ["turn-1", "turn-2"]) {
+    const conversation = { id: "session-1", turns: [{ turnId: "turn-1" }, { turnId: "turn-2" }] };
+    const requests = [];
+    const manager = createLocalDeletionManager({
+      getConversation() { return conversation; },
+      getCachedConversations() { return [conversation]; },
+      async sendRequest(method) { requests.push(method); },
+      applyRevertResponseToConversation() { assert.fail("cancelled"); },
+    });
+    const runtime = loadInjection({ turnIds: ["turn-1", "turn-2"], selectedTurnIds: [selected], localAppServerManager: manager });
+    runtime.window.confirm = (message) => { runtime.confirmations.push(message); return false; };
+    await runtime.window.__codeyDeleteSelectedMessages();
+    assert.equal(runtime.confirmations.length, 1);
+    assert.deepEqual(requests, []);
+    assert.equal(runtime.bridgeCalls.some(({ path }) => path === "/session/delete-messages"), false);
+    assert.deepEqual(runtime.getVisibleTurnIds(), ["turn-1", "turn-2"]);
+  }
+});
+
+test("middle deletion waits for the window validation before persistence", async () => {
   let release;
   let deleteCalls = 0;
   const runtime = loadInjection({
@@ -1067,12 +1286,11 @@ test("reinstalled toolbar click uses the current deletion controller", async () 
   assert.deepEqual(runtime.alerts, []);
 });
 
-test("tasks started while native unsubscribe is pending prevent persistent deletion", async () => {
-  let release;
-  const conversation = { turns: [{ turnId: "turn-1", status: "completed" }], requests: [], threadRuntimeStatus: { type: "idle" } };
+test("tasks started during middle deletion confirmation prevent persistence", async () => {
+  const conversation = { turns: [{ turnId: "turn-1", status: "completed" }, { turnId: "turn-2", status: "completed" }], requests: [], threadRuntimeStatus: { type: "idle" } };
   const manager = createLocalDeletionManager({
     getConversation() { return conversation; },
-    sendRequest() { return new Promise((resolve) => { release = resolve; }); },
+    sendRequest() { assert.fail("must not send native requests"); },
     updateConversationState() { assert.fail("must not change an active conversation"); },
   });
   const runtime = loadInjection({
@@ -1081,14 +1299,12 @@ test("tasks started while native unsubscribe is pending prevent persistent delet
     codexSessionController: { kind: "manager", manager },
   });
   runtime.setSessionId("session-1");
-  const pending = runtime.window.__codeyDeleteSelectedMessages();
-  await flushMicrotasks();
-  assert.ok(release);
-  conversation.threadRuntimeStatus = { type: "active" };
-  conversation.requests.push({ id: "started" });
-  conversation.turns.push({ turnId: "new", status: "inProgress" });
-  release();
-  await pending;
+  runtime.window.confirm = () => {
+    conversation.threadRuntimeStatus = { type: "active" };
+    conversation.requests.push({ id: "started" });
+    return true;
+  };
+  await runtime.window.__codeyDeleteSelectedMessages();
   assert.equal(runtime.bridgeCalls.some((call) => call.path === "/session/delete-messages"), false);
   assert.match(runtime.alerts.at(-1), /当前任务仍在运行/);
   assert.deepEqual(runtime.getVisibleTurnIds(), ["turn-1"]);
@@ -1139,7 +1355,7 @@ test("deletion uses the visible composer and excludes selected rows in cached co
   assert.equal(requests.length, 1);
   for (const request of requests) {
     assert.deepEqual(JSON.parse(JSON.stringify(request.payload)), {
-      sessionId: "current-session", messageIds: ["current-turn"],
+      sessionId: "current-session", messageIds: ["current-turn"], restartCodex: true,
     });
   }
   assert.equal(runtime.getTurnRow(0).removed, false);
@@ -1172,7 +1388,7 @@ test("switching retained conversations never copies selections into another sess
   await runtime.window.__codeyDeleteSelectedMessages();
   const request = runtime.bridgeCalls.find((call) => call.path === "/session/delete-messages");
   assert.deepEqual(JSON.parse(JSON.stringify(request.payload)), {
-    sessionId: "second-session", messageIds: ["second-turn"],
+    sessionId: "second-session", messageIds: ["second-turn"], restartCodex: true,
   });
   assert.equal(runtime.getTurnRow(0).removed, false);
 });
@@ -1229,17 +1445,17 @@ test("does not hide a row when an index database remains unsupported", async () 
   assert.match(runtime.alerts[0], /索引数据库未完成清理/);
 });
 
-test("failed host release never sends a destructive delete request", async () => {
+test("failed window validation never sends a destructive delete request", async () => {
   const runtime = loadInjection({
     turnIds: ["turn-1"], selectedTurnIds: ["turn-1"],
     codexSessionController: createRecoveryController([], {
-      async prepareMessageDeletion() { throw new Error("unsubscribe failed"); },
+      async prepareMessageDeletion() { throw new Error("window validation failed"); },
     }),
   });
   await runtime.window.__codeyDeleteSelectedMessages();
   assert.equal(runtime.bridgeCalls.some((call) => call.path === "/session/delete-messages"), false);
   assert.deepEqual(runtime.getVisibleTurnIds(), ["turn-1"]);
-  assert.match(runtime.alerts[0], /unsubscribe failed/);
+  assert.match(runtime.alerts[0], /window validation failed/);
 });
 
 test("removes a hard-deleted turn and rejects a stale React rerender", async () => {
@@ -1360,7 +1576,7 @@ test("keeps a turn visible when no persisted turn was deleted", async () => {
     selectedTurnIds: ["failed-turn"],
     codexSessionController: createRecoveryController([], {
       prepareMessageDeletion() { dispatcherCalls += 1; },
-      finishMessageDeletion(_sessionId, messageIds) { assert.deepEqual([...messageIds], []); },
+      finishMessageDeletion() { assert.fail("failed persistence must not finish deletion"); },
     }),
     bridgeHandler: async (path) => {
       if (path !== "/session/delete-messages") return { status: "ok" };
@@ -1490,6 +1706,7 @@ test("deletes an interrupted turn and its userless continuation as one logical r
   );
   assert.deepEqual(JSON.parse(JSON.stringify(deletion?.payload)), {
     sessionId: "session-1",
+    restartCodex: true,
     messageIds: ["stable-interrupted-turn", "stable-continued-turn"],
   });
   assert.match(runtime.confirmations[0], /删除 1 轮对话/);
@@ -1623,6 +1840,7 @@ test("replaces a grouped tail placeholder with its hydrated stable turn id", asy
   );
   assert.deepEqual(JSON.parse(JSON.stringify(deletion?.payload)), {
     sessionId: "session-1",
+    restartCodex: true,
     messageIds: ["turn-tail-origin", "turn-tail-stable"],
   });
 });
@@ -1714,6 +1932,7 @@ test("normalizes a selected standalone tail when hydration merges it into the or
   );
   assert.deepEqual(JSON.parse(JSON.stringify(deletion?.payload)), {
     sessionId: "session-1",
+    restartCodex: true,
     messageIds: ["turn-selected-tail-origin", "turn-selected-tail"],
   });
   assert.match(runtime.confirmations[0], /删除 1 轮对话/);
@@ -1851,6 +2070,7 @@ test("restores a complete logical group when only its continuation remounts", as
   );
   assert.deepEqual(JSON.parse(JSON.stringify(deletion?.payload)), {
     sessionId: "session-1",
+    restartCodex: true,
     messageIds: ["turn-remount-origin", "turn-remount-continuation"],
   });
 });
@@ -1958,6 +2178,7 @@ test("restores selection when a logical group remounts through a new continuatio
   );
   assert.deepEqual(JSON.parse(JSON.stringify(deletion?.payload)), {
     sessionId: "session-1",
+    restartCodex: true,
     messageIds: ["turn-selected-origin", "turn-selected-continuation"],
   });
   assert.match(runtime.confirmations[0], /删除 1 轮对话/);
@@ -2045,6 +2266,7 @@ test("uses the selected group as topology after the ordinary logical cache is ev
   );
   assert.deepEqual(JSON.parse(JSON.stringify(deletion?.payload)), {
     sessionId: "session-1",
+    restartCodex: true,
     messageIds: ["turn-evicted-origin", "turn-evicted-continuation"],
   });
 });
@@ -2108,6 +2330,7 @@ test("keeps the origin selected when a continuation row is reused for a new user
   );
   assert.deepEqual(JSON.parse(JSON.stringify(deletion?.payload)), {
     sessionId: "session-1",
+    restartCodex: true,
     messageIds: ["turn-reuse-origin", "turn-reuse-continuation"],
   });
   assert.deepEqual(runtime.getVisibleTurnIds(), ["turn-reuse-new-user"]);
@@ -2167,6 +2390,7 @@ test("keeps an explicitly mismatched continuation reference in a separate group"
   );
   assert.deepEqual(JSON.parse(JSON.stringify(deletion?.payload)), {
     sessionId: "session-1",
+    restartCodex: true,
     messageIds: ["turn-explicit-continuation"],
   });
 });
@@ -2270,6 +2494,7 @@ test("keeps only the old anchor selected when a cached continuation becomes a us
   );
   assert.deepEqual(JSON.parse(JSON.stringify(deletion?.payload)), {
     sessionId: "session-1",
+    restartCodex: true,
     messageIds: ["turn-split-origin"],
   });
   assert.match(runtime.confirmations[0], /删除 1 轮对话/);
@@ -2330,6 +2555,7 @@ test("shrinks an offscreen selected group when its visible continuation becomes 
   );
   assert.deepEqual(JSON.parse(JSON.stringify(deletion?.payload)), {
     sessionId: "session-1",
+    restartCodex: true,
     messageIds: ["turn-offscreen-origin"],
   });
   assert.match(runtime.confirmations[0], /删除 1 轮对话/);
@@ -2369,6 +2595,7 @@ test("sends the normalized rollout turn id to the delete bridge", async () => {
   );
   assert.deepEqual(JSON.parse(JSON.stringify(deletion?.payload)), {
     sessionId: "session-1",
+    restartCodex: true,
     messageIds: ["019ff498-5f1c-7452-aac5-88e4eb99e657"],
   });
   assert.deepEqual(runtime.getVisibleTurnIds(), []);

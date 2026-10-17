@@ -2264,6 +2264,12 @@
   window.__codeyAppServerManagerRegistryResolverFromModule = appServerManagerRegistryResolverFromModule;
 
   const messageDeletionMethods = {
+    isRunning(conversation) {
+      return conversation?.threadRuntimeStatus?.type === "active"
+        || Boolean(conversation?.requests?.length)
+        || [...(conversation?.turns || []), ...Object.values(conversation?.turnHistory?.history?.entitiesByKey || {})]
+          .some((turn) => turn?.status === "inProgress");
+    },
     validate(conversationId) {
       const conversation = this.getConversation(conversationId);
       const history = conversation?.turnHistory;
@@ -2276,20 +2282,128 @@
           || !history.history.entitiesByKey
           || typeof history.history.entitiesByKey !== "object"))
       ) throw new Error("当前会话不支持局部删除");
-      const turns = [...conversation.turns, ...Object.values(history?.history?.entitiesByKey || {})];
-      if (
-        conversation.threadRuntimeStatus?.type === "active"
-        || conversation.requests?.length
-        || turns.some((turn) => turn?.status === "inProgress")
-      ) throw new Error("当前任务仍在运行，请等待任务结束后再删除");
+      if (messageDeletionMethods.isRunning(conversation)) {
+        throw new Error("当前任务仍在运行，请等待任务结束后再删除");
+      }
       if (this.getStreamRole(conversationId)?.role === "follower") {
         throw new Error("请在拥有当前会话的窗口中删除消息");
       }
+      return conversation;
+    },
+    entries(conversation) {
+      const history = conversation.turnHistory?.history;
+      if (!history) return conversation.turns.map((turn) => ({ turn, key: "", island: null }));
+      const liveTurns = new Map(conversation.turns.filter((turn) => turn.turnId).map((turn) => [turn.turnId, turn]));
+      const entries = history.islands.flatMap((island) => island.entries.map(({ value: key }) => {
+        const turn = history.entitiesByKey[key];
+        if (!turn) throw new Error("当前会话不支持局部删除");
+        return { key, island, turn: liveTurns.get(turn.turnId) || turn };
+      }));
+      const knownTurns = new Set(entries.map(({ turn }) => turn));
+      const knownIds = new Set(entries.map(({ turn }) => turn.turnId).filter(Boolean));
+      const beforeTurn = new Map();
+      let pending = [];
+      let hasAnchor = false;
+      for (const turn of conversation.turns) {
+        if (turn.turnId && knownIds.has(turn.turnId)) {
+          beforeTurn.set(turn.turnId, [...(beforeTurn.get(turn.turnId) || []), ...pending]);
+          pending = [];
+          hasAnchor = true;
+        } else if (!knownTurns.has(turn)) {
+          pending.push({ turn, key: "", island: null });
+        }
+      }
+      return entries.flatMap((entry) => [...(beforeTurn.get(entry.turn.turnId) || []), entry])
+        .concat(pending.map((entry) => ({ ...entry, positionKnown: hasAnchor })));
+    },
+    validateWindow() {
+      if (!declaredMethod(this, "getCachedConversations")) {
+        throw new Error("无法检查此 Codex 窗口的任务状态，未执行删除");
+      }
+      const conversations = this.getCachedConversations();
+      if (!Array.isArray(conversations)) throw new Error("无法检查此 Codex 窗口的任务状态，未执行删除");
+      if (conversations.some(messageDeletionMethods.isRunning)) {
+        throw new Error("此 Codex 窗口仍有任务在运行，请等待所有任务结束后再删除中间轮次");
+      }
+    },
+    plan(conversationId, messageIds) {
+      const conversationState = messageDeletionMethods.validate.call(this, conversationId);
+      const entries = messageDeletionMethods.entries(conversationState);
+      const matches = (id, { turn, key }) => id === turn.turnId || Boolean(key && (id === key || id === `history-content:${key}`));
+      if (!messageIds.length || messageIds.some((id) => !entries.some((entry) => matches(id, entry)))) {
+        throw new Error("无法识别所选轮次，请重新打开当前会话后重试");
+      }
+      const selected = entries.map((entry) => messageIds.some((id) => matches(id, entry)));
+      const first = selected.indexOf(true);
+      const revertedEntries = entries.slice(first);
+      const kind = selected.slice(first).every(Boolean)
+        && revertedEntries.every((entry) => entry.positionKnown !== false) ? "suffix" : "middle";
+      if (kind === "suffix" && conversationState.turnHistory) {
+        const tail = conversationState.turnHistory.history.islands.at(-1);
+        if (tail?.newerBoundary?.status !== "exhausted"
+          || revertedEntries.some(({ island }) => island && island !== tail)) {
+          throw new Error("所选轮次到会话末尾的历史尚未完整加载，请重新打开会话后重试");
+        }
+      }
+      if (kind === "middle") messageDeletionMethods.validateWindow.call(this);
+      return { kind, conversationState, revertedTurns: revertedEntries.map(({ turn }) => turn) };
     },
     async prepare(conversationId) {
       messageDeletionMethods.validate.call(this, conversationId);
-      await this.sendRequest("thread/unsubscribe", { threadId: conversationId });
-      messageDeletionMethods.validate.call(this, conversationId);
+      messageDeletionMethods.validateWindow.call(this);
+    },
+    suffix(conversationId, messageIds) {
+      const plan = messageDeletionMethods.plan.call(this, conversationId, messageIds);
+      const { kind, revertedTurns } = plan;
+      if (kind !== "suffix") throw new Error("所选轮次已不在会话末尾，请重新选择后删除");
+      if (revertedTurns.some((turn) => !turn.turnId)) {
+        throw new Error("所选末尾轮次尚无稳定标识，请重新打开会话后重试");
+      }
+      return plan;
+    },
+    supportsRevert() {
+      // Codex enables threadRevert from 0.148.0-alpha.13 and for development version 0.0.0.
+      const client = this.requestClient;
+      const version = declaredMethod(client, "getAppServerVersion") ? client.getAppServerVersion() : null;
+      if (version === "0.0.0") return true;
+      const match = typeof version === "string"
+        && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(version);
+      if (!match) return false;
+      const minimum = [0, 148, 0];
+      for (let index = 0; index < minimum.length; index += 1) {
+        const part = Number(match[index + 1]);
+        if (part !== minimum[index]) return part > minimum[index];
+      }
+      if (!match[4]) return true;
+      const prerelease = match[4].split(".").map((part) => /^(0|[1-9]\d*)$/.test(part) ? Number(part) : part);
+      for (const [index, required] of ["alpha", 13].entries()) {
+        const part = prerelease[index];
+        if (part == null) return false;
+        if (part === required) continue;
+        return typeof part === "number"
+          ? typeof required === "number" && part > required
+          : typeof required === "number" || part.localeCompare(required) > 0;
+      }
+      return true;
+    },
+    async revert(conversationId, messageIds) {
+      const { conversationState, revertedTurns } = messageDeletionMethods.suffix.call(this, conversationId, messageIds);
+      if (conversationState.historyMode === "paginated") {
+        if (!messageDeletionMethods.supportsRevert.call(this)) {
+          throw new Error("无法确认当前 Codex 的原生撤回能力，未执行删除");
+        }
+        if (!declaredMethod(this, "applyRevertResponseToConversation")) {
+          throw new Error("当前 Codex 不支持原生删除末尾轮次，未执行删除");
+        }
+        const response = await this.sendRequest("thread/revert", { threadId: conversationId, beforeTurnId: revertedTurns[0].turnId });
+        await this.applyRevertResponseToConversation({ conversationId, response, revertedTurns });
+        return;
+      }
+      if (!declaredMethod(this, "applyRollbackResponseToConversation")) {
+        throw new Error("当前 Codex 不支持原生删除末尾轮次，未执行删除");
+      }
+      const rollbackResponse = await this.sendRequest("thread/rollback", { threadId: conversationId, numTurns: revertedTurns.length });
+      await this.applyRollbackResponseToConversation({ conversationId, conversationState, rollbackResponse });
     },
     finish(conversationId, messageIds) {
       const selected = new Set(messageIds);
@@ -2340,6 +2454,8 @@
       notifyConversationDeleted: declaredMethod(manager, "handleThreadDeletion")
         ? (sessionId) => manager.handleThreadDeletion([sessionId]) : null,
       prepareMessageDeletion: canDeleteMessages ? messageDeletionMethods.prepare.bind(manager) : null,
+      planMessageDeletion: canDeleteMessages ? messageDeletionMethods.plan.bind(manager) : null,
+      revertMessageDeletion: canDeleteMessages ? messageDeletionMethods.revert.bind(manager) : null,
       finishMessageDeletion: canDeleteMessages ? messageDeletionMethods.finish.bind(manager) : null,
       refreshRecentConversations: declaredMethod(manager, "refreshRecentConversations")
         ? () => manager.refreshRecentConversations() : null,
@@ -2356,7 +2472,7 @@
     const methods = feature === "sidebarDelete"
       ? ["discardConversation", "notifyConversationDeleted"]
       : feature === "deleteMessages"
-      ? ["prepareMessageDeletion", "finishMessageDeletion"]
+      ? ["planMessageDeletion", "revertMessageDeletion", "prepareMessageDeletion", "finishMessageDeletion"]
       : feature === "refresh" ? ["refreshRecentConversations"] : [];
     return methods.length ? methods.every((method) => typeof controller[method] === "function")
       : controller.kind === "manager" || controller.kind === "signals";
@@ -3381,24 +3497,35 @@
       window.alert("当前任务仍在运行，请等待任务结束后再删除会话记录");
       return;
     }
-    if (!window.confirm(`删除 ${logicalCount} 轮对话？\n无法撤销。`)) return;
     messageDeleteInFlight = true;
     const deleteButton = document.getElementById(toolbarId)?.querySelector?.("[data-codey-delete]");
     if (deleteButton) deleteButton.disabled = true;
     let controller;
-    let prepared = false;
     try {
-      showRuntimeToast(`正在永久删除 ${logicalCount} 轮对话…`);
       let result;
+      let nativeDeletion = false;
       try {
         controller = await getCodexSessionController("deleteMessages");
         if (disposed) return;
-        await controller.prepareMessageDeletion(sessionId);
-        if (disposed) return;
-        if (controller.manager) messageDeletionMethods.validate.call(controller.manager, sessionId);
+        const plan = controller.planMessageDeletion(sessionId, messageIds);
+        const restartCodex = plan.kind === "middle";
+        if (!window.confirm(`删除 ${logicalCount} 轮对话？\n无法撤销。${restartCodex ? "\nCodex 将重启以应用删除。" : ""}`)) return;
         if (isTaskRunning()) throw new Error("当前任务仍在运行，请等待任务结束后再删除");
-        prepared = true;
-        result = await callBridge("/session/delete-messages", { sessionId, messageIds });
+        showRuntimeToast(`正在永久删除 ${logicalCount} 轮对话…`);
+        if (restartCodex) {
+          await controller.prepareMessageDeletion(sessionId);
+          if (disposed) return;
+          if (controller.manager) {
+            messageDeletionMethods.validate.call(controller.manager, sessionId);
+            messageDeletionMethods.validateWindow.call(controller.manager);
+          }
+          if (isTaskRunning()) throw new Error("当前任务仍在运行，请等待任务结束后再删除");
+          result = await callBridge("/session/delete-messages", { sessionId, messageIds, restartCodex: true });
+        } else {
+          await controller.revertMessageDeletion(sessionId, messageIds);
+          nativeDeletion = true;
+          result = { deleted: messageIds.length };
+        }
         if (disposed) return;
       } catch (error) {
         if (disposed) return;
@@ -3438,8 +3565,7 @@
         : messageIds;
       const deletedIds = [...new Set([...messageIds, ...resolvedMessageIds])];
       try {
-        prepared = false;
-        await controller.finishMessageDeletion(sessionId, deletedIds);
+        if (!nativeDeletion) await controller.finishMessageDeletion(sessionId, deletedIds);
         if (disposed) return;
       } catch (error) {
         if (disposed) return;
@@ -3456,13 +3582,6 @@
       updateToolbar();
       showRuntimeToast(`已永久删除 ${logicalCount} 轮对话`);
     } finally {
-      if (prepared && !disposed) {
-        try {
-          await controller.finishMessageDeletion(sessionId, []);
-        } catch {
-          if (!disposed) showRuntimeToast("会话状态更新失败，请重新打开当前对话", "error");
-        }
-      }
       messageDeleteInFlight = false;
       if (!disposed && deleteButton) deleteButton.disabled = false;
     }
