@@ -602,6 +602,50 @@ test("MCP reload reports an unavailable manager instead of using legacy session 
   assert.equal(runtime.window.__codeyPageCapabilities.mcpReload.status, "unavailable");
 });
 
+test("capability discovery preserves import failures without changing the status text", async () => {
+  const runtime = loadInjection({
+    initialSessionId: "",
+    discoveredAppServerManager: {},
+  });
+  runtime.window.__codeyImportCodexAsset = async () => {
+    throw new Error("asset import failed: module unavailable");
+  };
+  const message = "当前 Codex 暂不支持MCP 配置刷新，请稍后重试";
+  await assert.rejects(runtime.window.__codeyLoadCodexSessionController({ feature: "mcpReload" }), {
+    code: "codey_capability_unavailable",
+    message: `${message}（asset import failed: module unavailable）`,
+  });
+  assert.equal(runtime.window.__codeyPageCapabilities.mcpReload.message, message);
+  assert.equal(runtime.window.__codeyPageCapabilities.mcpReload.status, "unavailable");
+});
+
+test("capability discovery does not append a duplicate unavailable reason", async () => {
+  const runtime = loadInjection({ initialSessionId: "" });
+  const message = "当前 Codex 暂不支持MCP 配置刷新，请稍后重试";
+  await assert.rejects(runtime.window.__codeyLoadCodexSessionController({ feature: "mcpReload" }), {
+    code: "codey_capability_unavailable",
+    message,
+  });
+});
+
+test("capability discovery preserves a native operation timeout as its reason", async () => {
+  const runtime = loadInjection({
+    initialSessionId: "",
+    discoveredAppServerManager: {},
+  });
+  runtime.window.__codeyImportCodexAsset = () => new Promise(() => {});
+  const pending = runtime.window.__codeyLoadCodexSessionController({ feature: "usage" });
+  const rejected = assert.rejects(pending, (error) => (
+    error.code === "codey_capability_unavailable"
+    && error.message.startsWith("当前 Codex 暂不支持官方额度读取，请稍后重试（")
+    && error.message.includes("超时")
+  ));
+  await flushMicrotasks();
+  runtime.flushTimers();
+  await rejected;
+  assert.equal(runtime.window.__codeyPageCapabilities.usage.message, "当前 Codex 暂不支持官方额度读取，请稍后重试");
+});
+
 test("MCP reload discovery is not capped by the native session timeout", async () => {
   const requests = [];
   const manager = {

@@ -39,10 +39,11 @@ const PROMPT_OPTIMIZE_SCRIPT: &str = include_str!("../../dist-overlay/inject/pro
 const COMPOSER_USAGE_SCRIPT: &str = include_str!("../../dist-overlay/inject/composer-usage.js");
 const QUOTA_UNLOCK_SCRIPT: &str = include_str!("../../dist-overlay/inject/quota-unlock.js");
 const MAX_INJECTION_ERROR_CHARS: usize = 500;
+const MAX_INJECTION_DETAIL_CHARS: usize = 2000;
 static SETTINGS_OVERLAY_LOAD_SCRIPT: OnceLock<Arc<str>> = OnceLock::new();
 static SESSION_TOOLS_LOAD_SCRIPT: OnceLock<Arc<str>> = OnceLock::new();
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 #[repr(u8)]
 enum InjectionPhase {
     DiscoverTargets,
@@ -72,7 +73,29 @@ impl InjectionPhase {
             Self::ReadStatuses => "读取注入状态",
         }
     }
+
+    fn key(self) -> &'static str {
+        match self {
+            Self::DiscoverTargets => "discoverTargets",
+            Self::SelectTarget => "selectTarget",
+            Self::InstallBridge => "installBridge",
+            Self::VerifyOverlay => "verifyOverlay",
+            Self::ReadStatuses => "readStatuses",
+        }
+    }
+
+    fn is_discovery(self) -> bool {
+        matches!(self, Self::DiscoverTargets | Self::SelectTarget)
+    }
 }
+
+const INJECTION_PHASES: [InjectionPhase; 5] = [
+    InjectionPhase::DiscoverTargets,
+    InjectionPhase::SelectTarget,
+    InjectionPhase::InstallBridge,
+    InjectionPhase::VerifyOverlay,
+    InjectionPhase::ReadStatuses,
+];
 
 #[derive(Clone)]
 struct InjectionScriptDescriptor {
@@ -127,11 +150,22 @@ pub struct InjectedTarget {
 #[derive(Debug)]
 pub struct InjectionRetryFailure {
     error: anyhow::Error,
+    detail: Option<String>,
+    final_phase: InjectionPhase,
+    reached_bridge_stage: u32,
 }
 
 impl InjectionRetryFailure {
     pub fn into_error(self) -> anyhow::Error {
         self.error
+    }
+
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
+    }
+
+    pub fn debug_endpoint_unreachable(&self) -> bool {
+        self.final_phase.is_discovery() && self.reached_bridge_stage == 0
     }
 }
 
@@ -476,22 +510,44 @@ pub async fn retry_inject_with_scripts(
     // more than ten seconds before the first injectable page appears. Keep
     // enough budget for the bridge commands after discovery while retaining a
     // hard startup deadline.
-    let deadline = tokio::time::Instant::now() + CDP_INJECTION_TIMEOUT;
+    let started = tokio::time::Instant::now();
+    let deadline = started + CDP_INJECTION_TIMEOUT;
     let mut delay = Duration::from_millis(100);
     let phase = Arc::new(AtomicU8::new(InjectionPhase::DiscoverTargets as u8));
     let mut previous_error = None;
+    let mut previous_detail = None;
+    let mut stats = InjectionRetryStats::default();
+    let mut retained_bridge = None;
     let last_error = loop {
-        phase.store(InjectionPhase::DiscoverTargets as u8, Ordering::Release);
+        stats.attempts += 1;
+        let attempt_started = tokio::time::Instant::now();
         match tokio::time::timeout_at(
             deadline,
-            inject_with_scripts(debug_port, handler.clone(), scripts, &phase),
+            run_injection_attempt(
+                retained_bridge.take(),
+                debug_port,
+                handler.clone(),
+                scripts,
+                &phase,
+            ),
         )
         .await
         {
-            Ok(Ok(target)) => return Ok(target),
-            Ok(Err(error)) => {
+            Ok(AttemptOutcome::Injected(target)) => {
+                stats.report("injected", started.elapsed(), None);
+                return Ok(target);
+            }
+            Ok(AttemptOutcome::Retry { error, retained }) => {
+                retained_bridge = retained;
                 let current_phase = InjectionPhase::from_raw(phase.load(Ordering::Acquire));
+                stats.record_failure(current_phase, attempt_started.elapsed());
+                previous_detail = Some(injection_failure_detail(&error));
                 if tokio::time::Instant::now() + delay > deadline {
+                    stats.report(
+                        "noRetryBudget",
+                        started.elapsed(),
+                        previous_detail.as_deref(),
+                    );
                     break anyhow::anyhow!(
                         "Codex CDP bridge 注入失败（阶段：{}；{}）",
                         current_phase.label(),
@@ -504,6 +560,12 @@ pub async fn retry_inject_with_scripts(
             }
             Err(_) => {
                 let current_phase = InjectionPhase::from_raw(phase.load(Ordering::Acquire));
+                stats.record_failure(current_phase, attempt_started.elapsed());
+                stats.report(
+                    "deadlineExceeded",
+                    started.elapsed(),
+                    previous_detail.as_deref(),
+                );
                 let previous_error = previous_error
                     .as_deref()
                     .map(|error| format!("；最近一次失败：{error}"))
@@ -517,7 +579,65 @@ pub async fn retry_inject_with_scripts(
             }
         }
     };
-    Err(InjectionRetryFailure { error: last_error })
+    Err(InjectionRetryFailure {
+        error: last_error,
+        detail: previous_detail,
+        final_phase: InjectionPhase::from_raw(phase.load(Ordering::Acquire)),
+        reached_bridge_stage: stats.bridge_failures(),
+    })
+}
+
+#[derive(Default)]
+struct InjectionRetryStats {
+    attempts: u32,
+    phase_failures: [u32; INJECTION_PHASES.len()],
+    failure_expense_ms: u64,
+    last_failure_phase: Option<InjectionPhase>,
+}
+
+impl InjectionRetryStats {
+    fn record_failure(&mut self, phase: InjectionPhase, cost: Duration) {
+        self.phase_failures[phase as usize] += 1;
+        self.failure_expense_ms += cost.as_millis() as u64;
+        self.last_failure_phase = Some(phase);
+    }
+
+    fn bridge_failures(&self) -> u32 {
+        self.phase_failures[InjectionPhase::InstallBridge as usize..]
+            .iter()
+            .sum()
+    }
+
+    fn report(&self, outcome: &str, elapsed: Duration, last_error: Option<&str>) {
+        let failures: serde_json::Map<String, serde_json::Value> = INJECTION_PHASES
+            .iter()
+            .filter(|phase| self.phase_failures[**phase as usize] > 0)
+            .map(|phase| {
+                (
+                    phase.key().to_string(),
+                    serde_json::json!(self.phase_failures[*phase as usize]),
+                )
+            })
+            .collect();
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "cdp.injection_retry_summary",
+            serde_json::json!({
+                "outcome": outcome,
+                "attempts": self.attempts,
+                "discoveryFailures": self.phase_failures[..=InjectionPhase::SelectTarget as usize].iter().sum::<u32>(),
+                "bridgeFailures": self.bridge_failures(),
+                "failures": failures,
+                "failureExpenseMs": self.failure_expense_ms,
+                "lastFailurePhase": self.last_failure_phase.map(InjectionPhase::key),
+                "lastError": last_error,
+                "totalMs": elapsed.as_millis() as u64,
+            }),
+        );
+    }
+}
+
+fn injection_failure_detail(error: &anyhow::Error) -> String {
+    truncate_chars(&format!("{error:#}"), MAX_INJECTION_DETAIL_CHARS)
 }
 
 fn summarize_cdp_targets(targets: &[CdpTarget]) -> String {
@@ -595,12 +715,73 @@ fn safe_injection_error_summary(error: &anyhow::Error) -> String {
     }
 }
 
-async fn inject_with_scripts(
+struct EstablishedInjection {
+    target_id: String,
+    websocket_url: Arc<str>,
+    pump: BridgePumpHandle,
+}
+
+enum AttemptOutcome {
+    Injected(InjectedTarget),
+    Retry {
+        error: anyhow::Error,
+        retained: Option<EstablishedInjection>,
+    },
+}
+
+async fn run_injection_attempt(
+    retained: Option<EstablishedInjection>,
     debug_port: u16,
     handler: BridgeHandler,
     scripts: &PreparedInjectionScripts,
     phase: &AtomicU8,
-) -> Result<InjectedTarget> {
+) -> AttemptOutcome {
+    let bridge = match retained.filter(|bridge| !bridge.pump.is_finished()) {
+        Some(bridge) => bridge,
+        None => match establish_injection(debug_port, handler, scripts, phase).await {
+            Ok(bridge) => bridge,
+            Err(error) => {
+                return AttemptOutcome::Retry {
+                    error,
+                    retained: None,
+                };
+            }
+        },
+    };
+    match verify_injection(&bridge, scripts, phase).await {
+        Ok(injection_statuses) => AttemptOutcome::Injected(InjectedTarget {
+            websocket_url: bridge.websocket_url,
+            pump: bridge.pump,
+            injection_statuses,
+        }),
+        Err(error) => {
+            // Poll readiness on the installed bridge; only a failed CDP session
+            // needs target discovery and script registration again.
+            let invalid = bridge.pump.is_finished()
+                || target_health_error_requires_rediscovery(&error)
+                || format!("{error:#}").contains("CDP websocket closed before response");
+            if invalid {
+                bridge.pump.close().await;
+                AttemptOutcome::Retry {
+                    error,
+                    retained: None,
+                }
+            } else {
+                AttemptOutcome::Retry {
+                    error,
+                    retained: Some(bridge),
+                }
+            }
+        }
+    }
+}
+
+async fn establish_injection(
+    debug_port: u16,
+    handler: BridgeHandler,
+    scripts: &PreparedInjectionScripts,
+    phase: &AtomicU8,
+) -> Result<EstablishedInjection> {
     phase.store(InjectionPhase::DiscoverTargets as u8, Ordering::Release);
     let targets = list_targets(debug_port)
         .await
@@ -628,12 +809,24 @@ async fn inject_with_scripts(
     )
     .await
     .with_context(|| format!("向 Codex renderer {} 安装 CDP bridge 失败", target.id))?;
+    Ok(EstablishedInjection {
+        target_id: target.id,
+        websocket_url,
+        pump,
+    })
+}
+
+async fn verify_injection(
+    bridge: &EstablishedInjection,
+    scripts: &PreparedInjectionScripts,
+    phase: &AtomicU8,
+) -> Result<Arc<[InjectionScriptStatus]>> {
     phase.store(InjectionPhase::VerifyOverlay as u8, Ordering::Release);
-    ensure_settings_overlay_ready(&websocket_url)
+    ensure_settings_overlay_ready(&bridge.websocket_url)
         .await
-        .with_context(|| format!("验证 Codex renderer {} 的 Codey 浮层失败", target.id))?;
+        .with_context(|| format!("验证 Codex renderer {} 的 Codey 浮层失败", bridge.target_id))?;
     codey_runtime_core::bridge::evaluate_script_with_await_promise_timeout(
-        &websocket_url,
+        &bridge.websocket_url,
         "window.__codeyServiceTierInstallation",
         true,
         Duration::from_secs(25),
@@ -645,12 +838,7 @@ async fn inject_with_scripts(
     // the existing refresh_injection_statuses command fills in the real state
     // once the UI asks for it.
     phase.store(InjectionPhase::ReadStatuses as u8, Ordering::Release);
-    let injection_statuses = scripts.statuses_with_error("启动后复核注入状态");
-    Ok(InjectedTarget {
-        websocket_url,
-        pump,
-        injection_statuses,
-    })
+    Ok(scripts.statuses_with_error("启动后复核注入状态"))
 }
 
 impl PreparedInjectionScripts {
@@ -1284,6 +1472,135 @@ mod health_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn endpoint_unreachable_only_when_no_attempt_reached_the_bridge() {
+        let failure = |phase: InjectionPhase, reached_bridge_stage: u32| InjectionRetryFailure {
+            error: anyhow::anyhow!("x"),
+            detail: None,
+            final_phase: phase,
+            reached_bridge_stage,
+        };
+        assert!(failure(InjectionPhase::DiscoverTargets, 0).debug_endpoint_unreachable());
+        assert!(failure(InjectionPhase::SelectTarget, 0).debug_endpoint_unreachable());
+        assert!(!failure(InjectionPhase::DiscoverTargets, 1).debug_endpoint_unreachable());
+        assert!(!failure(InjectionPhase::InstallBridge, 1).debug_endpoint_unreachable());
+        assert!(!failure(InjectionPhase::VerifyOverlay, 2).debug_endpoint_unreachable());
+    }
+
+    #[test]
+    fn injection_retry_stats_keep_each_phase_and_bridge_rounds() {
+        let mut stats = InjectionRetryStats::default();
+        stats.record_failure(InjectionPhase::DiscoverTargets, Duration::from_millis(10));
+        stats.record_failure(InjectionPhase::SelectTarget, Duration::from_millis(20));
+        stats.record_failure(InjectionPhase::InstallBridge, Duration::from_millis(30));
+        stats.record_failure(InjectionPhase::VerifyOverlay, Duration::from_millis(40));
+        stats.record_failure(InjectionPhase::ReadStatuses, Duration::from_millis(50));
+        assert_eq!(stats.phase_failures, [1, 1, 1, 1, 1]);
+        assert_eq!(stats.bridge_failures(), 3);
+        assert_eq!(stats.failure_expense_ms, 150);
+        assert_eq!(
+            stats.last_failure_phase.map(InjectionPhase::key),
+            Some("readStatuses")
+        );
+    }
+
+    #[test]
+    fn injection_failure_detail_keeps_the_full_bounded_error_chain() {
+        let error = anyhow::anyhow!("inner cause").context("outer context");
+        assert_eq!(
+            injection_failure_detail(&error),
+            "outer context: inner cause"
+        );
+        let huge = anyhow::anyhow!("x".repeat(MAX_INJECTION_DETAIL_CHARS * 2));
+        assert_eq!(
+            injection_failure_detail(&huge).chars().count(),
+            MAX_INJECTION_DETAIL_CHARS
+        );
+    }
+
+    #[tokio::test]
+    async fn injection_retry_reuses_the_live_bridge_while_overlay_becomes_ready() {
+        use futures_util::{SinkExt, StreamExt};
+        use serde_json::{Value, json};
+        use tokio::net::TcpListener;
+        use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut pump = accept_async(stream).await.unwrap();
+            for id in 1..=6 {
+                let command = pump.next().await.unwrap().unwrap();
+                let command: Value = serde_json::from_str(command.to_text().unwrap()).unwrap();
+                assert_eq!(command["id"], id);
+                pump.send(Message::Text(
+                    json!({"id": id, "result": {}}).to_string().into(),
+                ))
+                .await
+                .unwrap();
+            }
+            for value in [json!(false), json!("not ready"), json!(true), Value::Null] {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut probe = accept_async(stream).await.unwrap();
+                let command = probe.next().await.unwrap().unwrap();
+                let command: Value = serde_json::from_str(command.to_text().unwrap()).unwrap();
+                assert_eq!(command["method"], "Runtime.evaluate");
+                probe
+                    .send(Message::Text(
+                        json!({
+                            "id": command["id"], "result": {"result": {"value": value}}
+                        })
+                        .to_string()
+                        .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            while pump.next().await.is_some() {}
+        });
+        let handler = bridge_handler(|_, _| async { json!({"status": "ok"}) });
+        let pump = install_bridge(
+            &url,
+            codey_runtime_core::bridge::BRIDGE_BINDING_NAME,
+            handler.clone(),
+            &[],
+        )
+        .await
+        .unwrap();
+        let retained = EstablishedInjection {
+            target_id: "page-1".into(),
+            websocket_url: url.into(),
+            pump,
+        };
+        let scripts = PreparedInjectionScripts {
+            scripts: Arc::from([]),
+            descriptors: Arc::from([]),
+        };
+        let phase = AtomicU8::new(InjectionPhase::InstallBridge as u8);
+        // Port zero cannot serve target discovery: either attempt reconnecting
+        // instead of polling the retained bridge makes this scenario fail.
+        let first =
+            run_injection_attempt(Some(retained), 0, handler.clone(), &scripts, &phase).await;
+        let AttemptOutcome::Retry {
+            retained: Some(retained),
+            ..
+        } = first
+        else {
+            panic!("overlay readiness should retain the installed bridge");
+        };
+        assert_eq!(
+            InjectionPhase::from_raw(phase.load(Ordering::Acquire)).key(),
+            "verifyOverlay"
+        );
+        let second = run_injection_attempt(Some(retained), 0, handler, &scripts, &phase).await;
+        let AttemptOutcome::Injected(target) = second else {
+            panic!("the next poll should use the same bridge");
+        };
+        target.close().await;
+        server.await.unwrap();
+    }
 
     #[test]
     fn user_scripts_run_once_per_document_and_retry_after_failure() {

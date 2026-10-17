@@ -59,6 +59,8 @@ use process::{codex_runtime_arguments, gpu_launch_arguments};
 
 const CDP_WATCHDOG_INTERVAL: Duration = Duration::from_secs(30);
 const CDP_WATCHDOG_FAILURE_THRESHOLD: u8 = 2;
+// Each reinjection already spends a full discovery budget before failing.
+const CDP_WATCHDOG_ENDPOINT_LOSS_LIMIT: u8 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InjectionHealth {
@@ -842,6 +844,7 @@ async fn inject_initial_renderer(
         Err(failure) => failure,
     };
     let error_message = format!("{failure:#}");
+    let failure_detail = failure.detail().map(str::to_string);
     let failure_metadata = error_log::FailureMetadata {
         stage: Some("startup.renderer_injection".to_string()),
         recoverable: Some(false),
@@ -856,6 +859,7 @@ async fn inject_initial_renderer(
             "appPath": app_dir,
             "debugPort": debug_port,
             "processId": spawned.process_id,
+            "lastError": failure_detail,
         }),
     );
 
@@ -926,6 +930,7 @@ fn spawn_injection_watchdog(
         interval.tick().await;
         let mut target = injected_target;
         let mut consecutive_failures = 0u8;
+        let mut endpoint_losses = 0u8;
         'watchdog: loop {
             tokio::select! {
                 biased;
@@ -977,6 +982,9 @@ fn spawn_injection_watchdog(
                     }
                 }
             };
+            if health == InjectionHealth::Healthy {
+                watchdog_endpoint_loss_limit_reached(&mut endpoint_losses, false);
+            }
             if !watchdog_should_reinject(&mut consecutive_failures, health) {
                 continue;
             }
@@ -998,8 +1006,10 @@ fn spawn_injection_watchdog(
                     *watchdog_websocket_url.write().await = next_websocket_url;
                     previous.close().await;
                     consecutive_failures = 0;
+                    watchdog_endpoint_loss_limit_reached(&mut endpoint_losses, false);
                 }
                 Err(error) => {
+                    let endpoint_unreachable = error.debug_endpoint_unreachable();
                     let error_message = format!("{error:#}");
                     error_log::record_failure_with_metadata_async(
                         "injection_failed",
@@ -1011,6 +1021,8 @@ fn spawn_injection_watchdog(
                         },
                         serde_json::json!({
                             "debugPort": debug_port,
+                            "lastError": error.detail(),
+                            "debugEndpointUnreachable": endpoint_unreachable,
                         }),
                     )
                     .await;
@@ -1018,6 +1030,21 @@ fn spawn_injection_watchdog(
                         .statuses_with_error(format!("脚本重新注入失败：{error_message}"));
                     eprintln!("Codey CDP bridge 恢复失败：{error_message}");
                     consecutive_failures = CDP_WATCHDOG_FAILURE_THRESHOLD.saturating_sub(1);
+                    if watchdog_endpoint_loss_limit_reached(
+                        &mut endpoint_losses,
+                        endpoint_unreachable,
+                    ) {
+                        *watchdog_statuses.write().await = watchdog_scripts
+                            .statuses_with_error("Codex 调试端点持续不可达，集成已停用；通过 Codey 重新启动 Codex 后恢复");
+                        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                            "bridge.injection_disabled",
+                            serde_json::json!({
+                                "debugPort": debug_port,
+                                "consecutiveEndpointLosses": endpoint_losses,
+                            }),
+                        );
+                        break 'watchdog;
+                    }
                 }
             }
         }
@@ -1812,6 +1839,40 @@ fn spawn_crashpad_guard_watcher(
         }
     });
     (shutdown_tx, task)
+}
+
+fn watchdog_endpoint_loss_limit_reached(endpoint_losses: &mut u8, unreachable: bool) -> bool {
+    *endpoint_losses = if unreachable {
+        endpoint_losses.saturating_add(1)
+    } else {
+        0
+    };
+    *endpoint_losses >= CDP_WATCHDOG_ENDPOINT_LOSS_LIMIT
+}
+
+#[cfg(test)]
+mod endpoint_loss_tests {
+    use super::*;
+
+    #[test]
+    fn cdp_watchdog_stops_after_three_consecutive_endpoint_losses() {
+        let mut losses = 0;
+        assert!(!watchdog_endpoint_loss_limit_reached(&mut losses, true));
+        assert!(!watchdog_endpoint_loss_limit_reached(&mut losses, true));
+        assert!(watchdog_endpoint_loss_limit_reached(&mut losses, true));
+        assert_eq!(losses, 3);
+    }
+
+    #[test]
+    fn cdp_watchdog_endpoint_losses_must_be_consecutive() {
+        let mut losses = 2;
+        // Healthy checks, successful reinstalls and failures past discovery
+        // all break the sequence of unreachable endpoint failures.
+        assert!(!watchdog_endpoint_loss_limit_reached(&mut losses, false));
+        assert_eq!(losses, 0);
+        assert!(!watchdog_endpoint_loss_limit_reached(&mut losses, true));
+        assert_eq!(losses, 1);
+    }
 }
 
 fn watchdog_should_reinject(consecutive_failures: &mut u8, health: InjectionHealth) -> bool {

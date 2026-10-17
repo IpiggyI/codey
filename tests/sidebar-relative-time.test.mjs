@@ -1093,6 +1093,37 @@ test("does not tight-loop retry a failed timestamp bridge request", async () => 
   );
 });
 
+for (const code of ["bridge_timeout", "bridge_reinstalled"]) {
+  test(`timestamp refresh recovers after ${code} on the ordinary interval`, async () => {
+    const now = Date.UTC(2026, 7, 10, 12);
+    const { row, content } = sidebarThreadEntry({ sessionId: "thread-recovery" });
+    const calls = [];
+    const fixture = loadInjection({
+      now,
+      rows: [row],
+      bridgeHandler: async (path, payload, options) => {
+        if (path !== "/session/timestamps") return { status: "ok" };
+        calls.push({ payload, options });
+        return calls.length === 1
+          ? { status: "failed", code, message: code }
+          : { status: "ok", timestamps: { "thread-recovery": now - 60_000 } };
+      },
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].options.timeoutMs, 10_000);
+    assert.equal(content.querySelector("[data-codey-thread-updated-at]"), null);
+    fixture.runIntervals();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(calls.length, 1);
+    fixture.advanceTime(60_000);
+    fixture.runIntervals();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(calls.length, 2);
+    assert.equal(content.querySelector("[data-codey-thread-updated-at]")?.textContent, "2 分");
+  });
+}
+
 test("keeps the cached time when a forced bridge refresh fails", async () => {
   const row = new FakeElement();
   row.setAttribute("data-app-action-sidebar-thread-row", "");
@@ -1321,7 +1352,10 @@ test("accepts only a unique semantic AppServerManager resolver", () => {
 
 test("timestamp metadata uses only the bounded bridge route", () => {
   assert.match(source, /threadTimestampBridgePath = "\/session\/timestamps"/);
-  assert.match(source, /callBridge\(threadTimestampBridgePath, \{ sessionIds \}\)/);
+  assert.match(
+    source,
+    /callBridge\(\s*threadTimestampBridgePath,\s*\{ sessionIds \},\s*\{ timeoutMs: threadTimestampFetchTimeoutMs \},?\s*\)/,
+  );
   assert.doesNotMatch(source, /method: "thread\/(?:list|read)"/);
   assert.doesNotMatch(source, /fetch\(url\)/);
 });

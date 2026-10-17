@@ -135,6 +135,8 @@
   const taskListSectionHeadings = new Set(["task", "tasks", "recent", "recents", "任务", "最近"]);
   const threadRunningLossGraceMs = 2_000;
   const threadTimestampRefreshIntervalMs = 60_000;
+  // A lost bridge reply must release the in-flight batch before the next refresh.
+  const threadTimestampFetchTimeoutMs = 10_000;
   const completedTaskReconcileIntervalMs = 15_000;
   const threadTimestampBridgePath = "/session/timestamps";
   const maxPendingThreadTimestampRefs = 200;
@@ -1883,7 +1885,11 @@
     threadUpdatedAtFetchInFlight = true;
     try {
       const sessionIds = [...new Set(refs.map(({ sessionId }) => sessionId))];
-      const result = await callBridge(threadTimestampBridgePath, { sessionIds });
+      const result = await callBridge(
+        threadTimestampBridgePath,
+        { sessionIds },
+        { timeoutMs: threadTimestampFetchTimeoutMs },
+      );
       if (disposed) return;
       if (result?.status !== "ok" || !result.timestamps || typeof result.timestamps !== "object") {
         throw new Error(result?.message || "Codey thread timestamp bridge is unavailable");
@@ -2405,6 +2411,7 @@
     const urls = (await discoverCodexAppAssetUrls())
       .sort((left, right) => managerAssetPriority(right) - managerAssetPriority(left));
     if (disposed) throw unavailableCapability(feature);
+    let discoveryError = null;
     for (const url of urls) {
       const namedSignalAsset = url.includes("app-server-manager-signals-");
       try {
@@ -2430,6 +2437,7 @@
         fallbackDispatcher ||= signalDispatcherFromModule(module, namedSignalAsset);
       } catch (error) {
         if (disposed) throw error;
+        discoveryError = error;
         continue;
       }
     }
@@ -2439,7 +2447,7 @@
       window.__codeyCodexSessionController = controller;
       return controller;
     }
-    throw unavailableCapability(feature);
+    throw discoveryError || unavailableCapability(feature);
   };
   const loadCodexSessionController = async ({ requireCompletionReconcile = false, feature = "session" } = {}) => {
     if (requireCompletionReconcile) feature = "reconcile";
@@ -2467,10 +2475,15 @@
       state.retryAt = 0;
       publishCapability(feature, true);
       return controller;
-    }, () => {
+    }, (error) => {
       state.failures += 1;
       state.retryAt = Date.now() + Math.min(30_000, 1_000 * 2 ** Math.min(state.failures - 1, 5));
-      throw unavailableCapability(feature);
+      const capabilityError = unavailableCapability(feature);
+      const reason = String(error?.message || error || "");
+      if (reason && reason !== capabilityError.message) {
+        capabilityError.message = `${capabilityError.message}（${reason}）`;
+      }
+      throw capabilityError;
     }).finally(() => { state.pending = null; });
     return state.pending;
   };
