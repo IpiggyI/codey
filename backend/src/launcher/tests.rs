@@ -519,13 +519,7 @@ async fn runtime_stop_preserves_resources_on_failure_and_allows_retry() {
     // The real test child exits while its watcher still owns Child.
     let failure = runtime
         .stop_with_cleanup(
-            stop_codex_processes(
-                &runtime.codex_app_path,
-                process_id,
-                process_id,
-                #[cfg(target_os = "macos")]
-                None,
-            ),
+            stop_codex_processes(&runtime.codex_app_path, process_id, process_id),
             async {
                 std::fs::write(config_path.join("invalid-child"), "config").map_err(Into::into)
             },

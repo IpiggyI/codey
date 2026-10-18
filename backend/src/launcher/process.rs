@@ -1175,7 +1175,7 @@ fn add_macos_cli_wrapper(
     Ok(())
 }
 
-#[cfg(any(windows, target_os = "macos", test))]
+#[cfg(any(windows, test))]
 fn startup_error_allows_retry(error: &anyhow::Error) -> bool {
     #[cfg(any(windows, test))]
     if error.is::<WindowsPackageChanged>() {
