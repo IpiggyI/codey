@@ -86,6 +86,7 @@ function loadInjection({
   bridge,
   sessionController,
   localManager,
+  codexAssets,
   dispatcher = async () => {},
   now = () => Date.now(),
   tasksSectionHeading = "Tasks",
@@ -180,7 +181,8 @@ function loadInjection({
   const document = {
     body,
     documentElement,
-    scripts: localManager ? [{ src: "app://-/assets/app-shared-session-delete.js" }] : [],
+    scripts: codexAssets ? Object.keys(codexAssets).map((src) => ({ src }))
+      : localManager ? [{ src: "app://-/assets/app-shared-session-delete.js" }] : [],
     addEventListener(type, listener) {
       documentListeners.set(type, listener);
     },
@@ -255,7 +257,13 @@ function loadInjection({
     },
   };
   if (sessionController) window.__codeyCodexSessionController = sessionController;
-  if (localManager) {
+  if (codexAssets) {
+    const scope = { query: null, get: codexAssets.scopeGet, set() {}, watch() {}, when() {} };
+    body.__reactFiber$manager = { memoizedState: { scope }, return: null };
+    delete codexAssets.scopeGet;
+    window.fetch = async (url) => ({ ok: url in codexAssets, text: async () => codexAssets[url].source });
+    window.__codeyImportCodexAsset = async (url) => codexAssets[url].module;
+  } else if (localManager) {
     const scope = { query: null, get: () => localManager, set() {}, watch() {}, when() {} };
     body.__reactFiber$manager = { memoizedState: { scope }, return: null };
     window.__codeyImportCodexAsset = async () => ({ Registry: class {
@@ -560,6 +568,44 @@ test("discovers the native registry and releases an unloaded persisted session b
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(events, ["thread/unsubscribe:thread-1", "evict:thread-1", "persist", "notify:thread-1", "refresh"]);
   assert.equal(runtime.window.__codeyCodexSessionController.manager, manager);
+});
+
+test("resolves the native manager through its state key when the registry class is not exported", async (t) => {
+  const initialUrl = "app://-/assets/app-initial-session-delete.js";
+  const sharedUrl = "app://-/assets/app-shared-session-delete.js";
+  const registry = "class Okl{getAll(){return this.scope.get(xs)}getForHostId(e){return this.scope.get(QO,e)}}";
+  const layouts = {
+    exported: (key) => ({
+      [initialUrl]: { source: `const QO={};${registry}export{QO as G6n,Pl as a};`, module: { G6n: key, a: () => {} } },
+    }),
+    imported: (key) => ({
+      [initialUrl]: { source: `import{b as QO}from"./app-shared-session-delete.js";${registry}export{Pl as a};`, module: { a: () => {} } },
+      [sharedUrl]: { source: "const R={};export{R as b};", module: { b: key } },
+    }),
+  };
+  for (const [layout, assets] of Object.entries(layouts)) await t.test(layout, async () => {
+    const events = [];
+    const manager = nativeDeletionManager(events);
+    const key = {};
+    const codexAssets = assets(key);
+    codexAssets.scopeGet = (requested, hostId) => {
+      if (requested !== key || hostId !== "local") throw new Error("unknown state");
+      return manager;
+    };
+    const runtime = loadInjection({
+      dispatcher: null, codexAssets,
+      bridge: async (path) => {
+        if (path === "/session/delete") { events.push("persist"); return { status: "ok", deleted: true }; }
+        return { status: "ok" };
+      },
+    });
+    events.length = 0;
+    runtime.thread.querySelector("[data-codey-session-delete]").click();
+    runtime.document.body.querySelector("[data-codey-session-delete-confirm]").click();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(events, ["thread/unsubscribe:thread-1", "evict:thread-1", "persist", "notify:thread-1", "refresh"]);
+    assert.equal(runtime.window.__codeyCodexSessionController.manager, manager);
+  });
 });
 
 test("native registry release rejection or timeout never evicts or deletes an old session", async (t) => {

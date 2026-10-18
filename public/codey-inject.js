@@ -2263,6 +2263,43 @@
   };
   window.__codeyAppServerManagerRegistryResolverFromModule = appServerManagerRegistryResolverFromModule;
 
+  const importCodexAsset = (url) => (typeof window.__codeyImportCodexAsset === "function"
+    ? window.__codeyImportCodexAsset(url) : import(url));
+
+  const moduleBindings = (source, keyword) => {
+    const bindings = [];
+    const pattern = keyword === "export"
+      ? /\bexport\s*\{([^}]*)\}/g
+      : /\bimport\s*\{([^}]*)\}\s*from\s*["']([^"']+)["']/g;
+    for (const match of source.matchAll(pattern)) {
+      for (const entry of match[1].split(",")) {
+        const names = /^\s*([\w$]+)(?:\s+as\s+([\w$]+))?\s*$/.exec(entry);
+        if (names) bindings.push({ name: names[1], alias: names[2] || names[1], from: match[2] });
+      }
+    }
+    return bindings;
+  };
+
+  // Some builds keep the manager registry internal and export only the state
+  // key its getForHostId reads, so locate that key through the module source.
+  const appServerManagerStateKeyResolverFromSource = async (module, url) => {
+    const fetchAsset = typeof window.fetch === "function" ? window.fetch.bind(window) : null;
+    const response = fetchAsset ? await fetchAsset(url) : null;
+    if (!response?.ok || typeof response.text !== "function") return null;
+    const source = String(await response.text());
+    if (!source.includes("getAll(")) return null;
+    const localKeys = [...new Set([...source.matchAll(
+      /\bgetForHostId\(([\w$]+)\)\{[^{}]{0,200}?\.scope\.get\(([\w$]+),\1\)/g,
+    )].map((match) => match[2]))];
+    if (localKeys.length !== 1) return null;
+    const exported = moduleBindings(source, "export").find(({ name }) => name === localKeys[0]);
+    let key = exported ? module?.[exported.alias] : undefined;
+    const imported = exported ? null : moduleBindings(source, "import").find(({ alias }) => alias === localKeys[0]);
+    if (imported) key = (await importCodexAsset(new URL(imported.from, url).href))?.[imported.name];
+    return key && (typeof key === "object" || typeof key === "function")
+      ? (scope, hostId) => scope.get(key, hostId) : null;
+  };
+
   const messageDeletionMethods = {
     isRunning(conversation) {
       return conversation?.threadRuntimeStatus?.type === "active"
@@ -2531,15 +2568,18 @@
     for (const url of urls) {
       const namedSignalAsset = url.includes("app-server-manager-signals-");
       try {
-        const module = typeof window.__codeyImportCodexAsset === "function"
-          ? await window.__codeyImportCodexAsset(url)
-          : await import(url);
+        const module = await importCodexAsset(url);
         // Late discovery from a disposed installation cannot replace the current interface.
         if (disposed) throw unavailableCapability(feature);
         const resolvers = [
           appServerManagerRegistryResolverFromModule(module),
           appServerManagerResolverFromModule(module),
         ].filter(Boolean);
+        if (!resolvers.length) {
+          const resolver = await appServerManagerStateKeyResolverFromSource(module, url);
+          if (disposed) throw unavailableCapability(feature);
+          if (resolver) resolvers.push(resolver);
+        }
         for (const resolver of resolvers) {
           const manager = appServerManagerFromReact(resolver);
           if (!manager) continue;
