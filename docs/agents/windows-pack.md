@@ -1,6 +1,6 @@
 # Windows 安装包
 
-改了安装后用户会跑的应用，并要请人装包验收时，先打包，再把安装包路径交给人。不要推送标签来换本机验证包。
+改了安装后用户会跑的应用，并要请人装包验收时，先打包，再把安装包路径交给人。默认用 `docs/agents/ci-pack.md` 的云端打包；本文件的本机打包是备用方式，仅在 GitHub 不可用或需要离线出包时使用。不要推送标签来换验证包。
 
 入口脚本支持 Windows Git Bash 和 WSL，分别经 `cygpath -w` 和 `wslpath -w` 调用 Windows PowerShell；源码拷到 `%TEMP%` 的 NTFS 再编译；成功输出 `NSIS_OK:`；产物写到 Downloads。
 
@@ -32,7 +32,7 @@ Windows 上可直接跑该 `ps1`，但须先在源码树执行 `pnpm run vite:bu
 
 - 从 `\\wsl.localhost` 或 `\\wsl$` 跑 cargo / 链接
 - 另写 Node 包装、把 `ps1` 拷到别的目录再编、把安装包拷到桌面当作交付
-- 用推送 `v*` 标签或 `workflow_dispatch` 打未提交改动的验证包
+- 用推送 `v*` 标签打验证包
 - 代为安装、启动或结束已装的 Codey，改开机项
 
 发布安装包仍走 GitHub `v*` 标签与 `.github/workflows/build-desktop.yml`，与本机验证包分开。

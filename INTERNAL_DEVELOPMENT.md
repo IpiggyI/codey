@@ -174,7 +174,7 @@ provider、模型和上游格式分别识别。控制台只读展示当前 Codex
 
 Windows 桌面工具由 Go 1.26 编译，支持 x64 和 arm64；可用 `CODEY_COMPUTER_USE_GO` 指定编译器。macOS 用 Xcode 的 Swift 编译器构建 macOS 14 及以上载荷，并生成本地临时签名；Linux 无原生载荷。原生源目录 `vendor/ComputerUse` 与上游固定目标逐字节一致，MIT 许可随插件和安装包分发。
 
-本机 Windows 验证包（不推送）只走 `scripts/build-windows.sh`，流程见 `docs/agents/windows-pack.md`。脚本会复制桌面工具源并校验本机 Go，可传 `-ComputerUseGo` 指定 Windows `go.exe`；加 `-RunComputerUseTests` 会先在 NTFS 副本中执行原生协议与资源隔离测试，不执行桌面动作。GitHub 的 `v*` 标签仍由 `.github/workflows/build-desktop.yml` 打发布安装包。
+验证包默认由 `scripts/ci-pack.sh` 在已推送的功能分支上手动触发 `.github/workflows/build-desktop.yml`，再下载产物，流程见 `docs/agents/ci-pack.md`。GitHub 不可用或需要离线出包时，本机 Windows 验证包只走 `scripts/build-windows.sh`，流程见 `docs/agents/windows-pack.md`。脚本会复制桌面工具源并校验本机 Go，可传 `-ComputerUseGo` 指定 Windows `go.exe`；加 `-RunComputerUseTests` 会先在 NTFS 副本中执行原生协议与资源隔离测试，不执行桌面动作。GitHub 的 `v*` 标签仍由 `.github/workflows/build-desktop.yml` 打发布安装包。
 
 Windows x64 与 macOS arm64 发布打包任务通过 `CARGO_PROFILE_RELEASE_LTO=thin` 和 `CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16` 覆盖默认的 fat LTO 与单代码生成单元，以减少 release 优化和链接耗时。Windows 发布打包另用 `rust-lld` 链接。本地构建，以及与 macOS 打包并行的检查任务，沿用 Cargo.toml 默认配置。Windows 发布打包不再重复 Rust 测试、Clippy 和格式检查，这些留在 `.github/workflows/ci.yml` 的 Windows 任务。macOS 的 TypeScript、JavaScript 与 Rust 检查在独立任务里与打包并行，发布前都要通过。此调整可能影响二进制体积和运行性能。
 
