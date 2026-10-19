@@ -167,6 +167,8 @@ const createEnvironment = (options = {}) => {
       },
     },
   };
+  let accountIdentityResult = options.accountIdentity
+    ?? { status: "ok", loggedIn: true, accountLabel: "user@example.com" };
   const notificationCallbacks = [];
   const calls = [];
   let nowMs = options.nowMs ?? Date.now();
@@ -180,7 +182,10 @@ const createEnvironment = (options = {}) => {
     }
   }
   let settingsResult = {
-    currentProviderSnapshot: { id: options.providerId ?? "gs" },
+    currentProviderSnapshot: {
+      id: options.providerId ?? "gs",
+      usesOfficialAccountAuth: options.usesOfficialAccountAuth ?? false,
+    },
     cacheValidMinutes: options.cacheValidMinutes ?? 30,
   };
 
@@ -281,6 +286,7 @@ const createEnvironment = (options = {}) => {
     calls.push(path);
     if (path === "/settings/get") return settingsResult;
     if (path === "/account/usage") return accountUsageResult;
+    if (path === "/account/identity") return accountIdentityResult;
     if (path === "/session/last-model-request") {
       if (lastModelRequestFailures > 0) {
         lastModelRequestFailures -= 1;
@@ -327,9 +333,15 @@ const createEnvironment = (options = {}) => {
     toolbar,
     sendButton,
     // Mirrors the rollout's latest token_count for a thread.
-    recordModelRequest: (threadId = "thread-1", message = tokenUsageMessage(threadId), at = nowMs) => {
+    recordModelRequest: (
+      threadId = "thread-1",
+      message = tokenUsageMessage(threadId),
+      at = nowMs,
+      details = {},
+    ) => {
       const last = message.params.tokenUsage.last || {};
       modelRequests.set(threadId, {
+        ...details,
         requestedAt: at,
         lastTokenUsage: {
           inputTokens: last.inputTokens ?? null,
@@ -345,6 +357,10 @@ const createEnvironment = (options = {}) => {
     setAccountUsage: (next) => {
       accountUsageResult = next;
     },
+    setAccountIdentity: (next) => {
+      accountIdentityResult = next;
+    },
+    focusWindow: () => sandbox.window.dispatchEvent({ type: "focus" }),
     emitNotification: (message) => {
       sandbox.window.__codeyComposerUsage.applyNotification(message);
     },
@@ -669,28 +685,176 @@ test("hides the usage chip until a matching thread token event arrives", async (
   assert.equal(usage.nextElementSibling, env.contextWrap);
 });
 
-test("usage popover lists screenshot fields and skips invented cost", async () => {
+const popoverRows = (env) => [
+  ...env.getElementById("codey-thread-usage-popover").innerHTML.matchAll(
+    /<div data-codey-usage-row><span>(.*?)<\/span><span([^>]*)>(.*?)<\/span><\/div>/g,
+  ),
+].map(([, name, attrs, value]) => ({
+  name,
+  value,
+  color: /color:(#[0-9a-f]+)/.exec(attrs)?.[1] ?? null,
+}));
+
+const rowValue = (env, name) => popoverRows(env).find((row) => row.name === name);
+
+// `sv-SE` renders local time as YYYY-MM-DD HH:mm:ss, an independent oracle.
+const localDateTime = (ms) => new Date(ms).toLocaleString("sv-SE");
+
+const requestUsageMessage = ({ input = 70_710, cached = 70_100, output = 236 } = {}) => {
+  const message = tokenUsageMessage();
+  message.params.tokenUsage.modelContextWindow = 475_000;
+  message.params.tokenUsage.last = {
+    inputTokens: input,
+    cachedInputTokens: cached,
+    outputTokens: output,
+    totalTokens: input + output,
+  };
+  return message;
+};
+
+const showRecordedRequest = async (env, message, details) => {
+  env.recordModelRequest("thread-1", message, env.now(), details);
+  await flush();
+  env.emitNotification(message);
+  await flush();
+};
+
+test("usage popover lists the agreed rows in order", async () => {
+  const env = createEnvironment({ nowMs: Date.UTC(2026, 9, 19, 11, 16, 54) });
+  const startedAt = env.now() - 6_000;
+  await showRecordedRequest(env, requestUsageMessage(), {
+    sessionStartedAt: startedAt,
+    responseWindow: { startedAt: env.now() - 6_200, endedAt: env.now() },
+    turnReasoningOutputTokens: 14,
+    compactionCount: 0,
+  });
+  assert.deepEqual(popoverRows(env).map(({ name, value }) => [name, value]), [
+    ["账号", "gs"],
+    ["开始时间", localDateTime(startedAt)],
+    ["上次回复", localDateTime(env.now())],
+    ["上下文", "14.9% (70.9k/475k)"],
+    ["输入/输出/缓存", "610 / 236 / 70.1k"],
+    ["最近缓存命中率", "CH 99.1%"],
+    ["缓存时间剩余", "30:00"],
+    ["压缩次数", "0"],
+    ["速度", "38 tok/s"],
+    ["耗时", "6.2s"],
+    ["本轮推理", "14"],
+  ]);
+  assert.equal(rowValue(env, "速度").color, "#ffbf00");
+  assert.equal(rowValue(env, "耗时").color, "#22c55e");
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("speed and duration use the three colour tiers", async () => {
+  const cases = [
+    { output: 600, seconds: 10, speed: ["60 tok/s", "#22c55e"], duration: ["10.0s", "#22c55e"] },
+    { output: 599, seconds: 10, speed: ["60 tok/s", "#ffbf00"], duration: ["10.0s", "#22c55e"] },
+    { output: 450, seconds: 15, speed: ["30 tok/s", "#ffbf00"], duration: ["15.0s", "#ffbf00"] },
+    { output: 299, seconds: 10, speed: ["30 tok/s", "#ff3b30"], duration: ["10.0s", "#22c55e"] },
+    { output: 399, seconds: 39.9, speed: ["10 tok/s", "#ff3b30"], duration: ["39.9s", "#ffbf00"] },
+    { output: 397, seconds: 40, speed: ["9.9 tok/s", "#ff3b30"], duration: ["40.0s", "#ff3b30"] },
+    { output: 83, seconds: 83, speed: ["1.0 tok/s", "#ff3b30"], duration: ["1m 23s", "#ff3b30"] },
+    { output: 3720, seconds: 3720, speed: ["1.0 tok/s", "#ff3b30"], duration: ["1h 2m", "#ff3b30"] },
+  ];
+  for (const { output, seconds, speed, duration } of cases) {
+    const env = createEnvironment();
+    await showRecordedRequest(env, requestUsageMessage({ output }), {
+      responseWindow: { startedAt: env.now() - seconds * 1000, endedAt: env.now() },
+    });
+    const label = `${output} tokens in ${seconds}s`;
+    const speedRow = rowValue(env, "速度");
+    const durationRow = rowValue(env, "耗时");
+    assert.deepEqual([speedRow.value, speedRow.color], speed, label);
+    assert.deepEqual([durationRow.value, durationRow.color], duration, label);
+    env.window.__codeyComposerUsage.dispose();
+  }
+});
+
+test("rows read from the rollout stay hidden when the thread has no local rollout", async () => {
+  const env = createEnvironment();
+  await flush();
+  env.emitNotification(requestUsageMessage());
+  await flush();
+  assert.deepEqual(popoverRows(env).map(({ name, value }) => [name, value]), [
+    ["账号", "gs"],
+    ["上下文", "14.9% (70.9k/475k)"],
+    ["输入/输出/缓存", "610 / 236 / 70.1k"],
+    ["最近缓存命中率", "CH 99.1%"],
+    ["缓存时间剩余", "未知"],
+  ]);
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("speed, duration and turn reasoning hide when the rollout lacks them", async () => {
+  const env = createEnvironment();
+  await showRecordedRequest(env, requestUsageMessage(), {
+    sessionStartedAt: env.now() - 60_000,
+    responseWindow: null,
+    turnReasoningOutputTokens: null,
+    compactionCount: 3,
+  });
+  const names = popoverRows(env).map((row) => row.name);
+  assert.equal(rowValue(env, "压缩次数").value, "3");
+  for (const name of ["速度", "耗时", "本轮推理"]) assert.equal(names.includes(name), false, name);
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("speed divides the rollout's own output, not a newer notification's", async () => {
+  const env = createEnvironment();
+  await showRecordedRequest(env, requestUsageMessage({ output: 400 }), {
+    responseWindow: { startedAt: env.now() - 10_000, endedAt: env.now() },
+  });
+  assert.equal(rowValue(env, "速度").value, "40 tok/s");
+  // The next notification arrives before its rollout line is readable.
+  env.emitNotification(requestUsageMessage({ input: 71_000, output: 900 }));
+  await flush();
+  assert.equal(rowValue(env, "速度").value, "40 tok/s");
+  assert.equal(rowValue(env, "输入/输出/缓存").value, "900 / 900 / 70.1k");
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("account row shows the official account only for providers that sign in with it", async () => {
+  const cases = [
+    [{ usesOfficialAccountAuth: true }, "user@example.com"],
+    [{ usesOfficialAccountAuth: false }, "gs"],
+    [{ usesOfficialAccountAuth: true, accountIdentity: { status: "ok", loggedIn: false, accountLabel: null } }, "未登录"],
+    [{ usesOfficialAccountAuth: true, accountIdentity: { status: "ok", loggedIn: true, accountLabel: null } }, "gs"],
+    [{ usesOfficialAccountAuth: true, accountIdentity: { status: "failed", message: "读取失败" } }, "gs"],
+  ];
+  for (const [options, expected] of cases) {
+    const env = createEnvironment(options);
+    await flush();
+    env.emitNotification(tokenUsageMessage());
+    await flush();
+    assert.equal(rowValue(env, "账号").value, expected, JSON.stringify(options));
+    env.window.__codeyComposerUsage.dispose();
+  }
+});
+
+test("account row follows an account switch when the window regains focus", async () => {
+  const env = createEnvironment({ usesOfficialAccountAuth: true });
+  await flush();
+  env.emitNotification(tokenUsageMessage());
+  await flush();
+  assert.equal(rowValue(env, "账号").value, "user@example.com");
+  env.setAccountIdentity({ status: "ok", loggedIn: true, accountLabel: "other@example.com" });
+  env.focusWindow();
+  await flush();
+  assert.equal(rowValue(env, "账号").value, "other@example.com");
+  env.window.__codeyComposerUsage.dispose();
+});
+
+test("usage popover drops the retired rows and skips invented cost", async () => {
   const env = createEnvironment();
   env.recordModelRequest();
   await flush();
   env.emitNotification(tokenUsageMessage());
   await flush();
-  const popover = env.getElementById("codey-thread-usage-popover");
-  assert.match(popover.innerHTML, /用量/);
-  assert.match(popover.innerHTML, /账号/);
-  assert.match(popover.innerHTML, />gs</);
-  assert.match(popover.innerHTML, /上下文/);
-  assert.match(popover.innerHTML, /最近缓存命中率/);
-  assert.match(popover.innerHTML, /CH 99\.6%/);
-  assert.match(popover.innerHTML, /缓存剩余/);
-  assert.match(popover.innerHTML, /缓存读取/);
-  assert.match(popover.innerHTML, /缓存写入/);
-  assert.match(popover.innerHTML, /推理/);
-  assert.match(popover.innerHTML, /Token 总数/);
-  assert.match(popover.innerHTML, /输入 \/ 输出/);
-  assert.doesNotMatch(popover.innerHTML, /会话费用估算/);
-  assert.doesNotMatch(popover.innerHTML, /已记录消耗/);
-  assert.doesNotMatch(popover.innerHTML, /输出速度/);
+  const names = popoverRows(env).map((row) => row.name);
+  for (const name of ["缓存读取", "缓存写入", "推理", "Token 总数", "输入 / 输出", "输出速度", "缓存剩余", "会话费用估算", "已记录消耗"]) {
+    assert.equal(names.includes(name), false, name);
+  }
 });
 
 test("quota unlock keeps the conversation usage chip on real token counts", async () => {

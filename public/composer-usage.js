@@ -3,7 +3,7 @@
 // Subscribe through manager RPC or legacy requestClient callbacks, then read
 // stored usage when entering a thread. Account quota lives in the sidebar.
 // Keep Codey's product contract: CH → context% → 用量, live cache remaining
-// ring on CH, hover 缓存剩余, hide usage until token data, and never invent
+// ring on CH, hover 缓存时间剩余, hide usage until token data, and never invent
 // unit prices.
 (() => {
   const moduleLoaded = window.__codeyComposerUsageModuleLoaded === true;
@@ -12,6 +12,7 @@
 
   const settingsPath = "/settings/get";
   const lastModelRequestPath = "/session/last-model-request";
+  const accountIdentityPath = "/account/identity";
   // The rollout line and the usage notification come from the same event; a
   // few short retries cover the moment before the line is readable, and a
   // bridge that is not ready yet right after a page refresh.
@@ -44,6 +45,10 @@
 
   let ready = false;
   let providerId = "";
+  // undefined until settings say whether the provider signs in with the
+  // official account; only then does the account row show its email.
+  let providerUsesOfficialAuth;
+  let accountIdentity = null;
   let usageByThread = new Map();
   let inputElement = null;
   let usageRoot = null;
@@ -61,8 +66,8 @@
   let usageSelection = null;
   let usageError = null;
   let cacheValidMinutes = cacheValidMinutesDefault;
-  // Per thread: { status: "ok", at } from the rollout's latest model request,
-  // or { status: "unknown", reason } when it cannot be read or matched.
+  // Per thread: { status: "ok", at, request } from the rollout's latest model
+  // request, or { status: "unknown", reason } when it cannot be read or matched.
   const cacheAnchorByThread = new Map();
   const cacheAnchorRequests = new Map();
   let storedUsageRead = "";
@@ -180,6 +185,40 @@
     };
   };
 
+  // Speed and duration tiers follow cc-usage, with its orange tier folded into red.
+  const speedTone = (rate) => {
+    if (rate >= 60) return "ok";
+    if (rate >= 30) return "warn";
+    return "hot";
+  };
+
+  const durationTone = (seconds) => {
+    if (seconds < 15) return "ok";
+    if (seconds < 40) return "warn";
+    return "hot";
+  };
+
+  const formatSpeed = (rate) => {
+    const oneDecimal = rate.toFixed(1);
+    return rate >= 10 || Number(oneDecimal) >= 10
+      ? `${Math.round(rate)} tok/s`
+      : `${oneDecimal} tok/s`;
+  };
+
+  const formatDuration = (seconds) => {
+    if (seconds < 59.95) return `${seconds.toFixed(1)}s`;
+    const total = Math.round(seconds);
+    if (total < 3600) return `${Math.floor(total / 60)}m ${total % 60}s`;
+    return `${Math.floor(total / 3600)}h ${Math.floor((total % 3600) / 60)}m`;
+  };
+
+  const formatDateTime = (ms) => {
+    const date = new Date(ms);
+    const pad = (value) => String(value).padStart(2, "0");
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+      + ` ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+  };
+
   const toneColor = (tone) => {
     if (tone === "hot") return "#ff3b30";
     if (tone === "warn") return "#ffbf00";
@@ -193,12 +232,9 @@
     ["totalTokens", "total_tokens"],
     ["inputTokens", "input_tokens"],
     ["cachedInputTokens", "cached_input_tokens"],
-    ["cacheWriteInputTokens", "cache_write_input_tokens"],
     ["outputTokens", "output_tokens"],
-    ["reasoningOutputTokens", "reasoning_output_tokens"],
     ["totalCostUsd", "total_cost_usd"],
     ["totalCredits", "total_credits"],
-    ["outputTokensPerSecond", "output_tokens_per_second"],
   ];
 
   const chipRingBox = (chip) => {
@@ -442,6 +478,11 @@
       usage.cacheHitRatePercent = Math.min(100, (cachedInputTokens / inputTokens) * 100);
     }
     addBreakdown(usage, last);
+    if (inputTokens !== undefined) {
+      usage.lastInputTokens = inputTokens;
+      usage.lastCachedInputTokens = cachedInputTokens;
+      usage.lastOutputTokens = pickNumber(last, "outputTokens", "output_tokens");
+    }
     if (Object.keys(usage).length === 0) return null;
     // Matched against the rollout's latest token_count before trusting its time.
     if (inputTokens !== undefined) {
@@ -469,8 +510,6 @@
       usage.inputTokens,
       usage.outputTokens,
       usage.cachedInputTokens,
-      usage.cacheWriteInputTokens,
-      usage.reasoningOutputTokens,
     ].some((value) => value !== undefined);
   };
 
@@ -488,7 +527,11 @@
     return "用量";
   };
 
-  const accountIdentity = () => providerId || "未登录";
+  const accountRowValue = () => {
+    if (providerUsesOfficialAuth !== true || !accountIdentity) return providerId || "未登录";
+    if (!accountIdentity.loggedIn) return "未登录";
+    return accountIdentity.accountLabel || providerId || "未登录";
+  };
 
   const addStyle = () => {
     if (document.getElementById(styleId)) return;
@@ -942,6 +985,81 @@
     }));
   };
 
+  // Rows read from the rollout describe one model request: its own output and
+  // its own window, so speed never mixes two requests.
+  const rolloutRows = (request) => {
+    const rows = [];
+    const output = request.lastTokenUsage?.outputTokens;
+    const span = request.responseWindow;
+    const seconds = Number.isFinite(span?.startedAt) && Number.isFinite(span?.endedAt)
+      ? (span.endedAt - span.startedAt) / 1000
+      : 0;
+    if (seconds > 0 && Number.isFinite(output)) {
+      const rate = output / seconds;
+      rows.push({ name: "速度", value: formatSpeed(rate), color: toneColor(speedTone(rate)) });
+      rows.push({
+        name: "耗时",
+        value: formatDuration(seconds),
+        color: toneColor(durationTone(seconds)),
+      });
+    }
+    if (Number.isFinite(request.turnReasoningOutputTokens)) {
+      rows.push(["本轮推理", formatTokenCount(request.turnReasoningOutputTokens)]);
+    }
+    return rows;
+  };
+
+  const usagePopoverRows = (usage, threadId, timer) => {
+    const anchor = threadId ? cacheAnchorByThread.get(threadId) : undefined;
+    const request = anchor?.status === "ok" ? anchor.request || {} : null;
+    const rows = [["账号", accountRowValue()]];
+    if (request && Number.isFinite(request.sessionStartedAt)) {
+      rows.push(["开始时间", formatDateTime(request.sessionStartedAt)]);
+    }
+    if (request) rows.push(["上次回复", formatDateTime(anchor.at)]);
+    if (usage.contextUsedTokens !== undefined && usage.contextWindowTokens) {
+      const percent = decimal((usage.contextUsedTokens / usage.contextWindowTokens) * 100, 1);
+      rows.push([
+        "上下文",
+        `${percent}% (${formatTokenCount(usage.contextUsedTokens)}/${formatTokenCount(usage.contextWindowTokens)})`,
+      ]);
+    }
+    if (usage.lastInputTokens !== undefined) {
+      const cached = usage.lastCachedInputTokens ?? 0;
+      rows.push([
+        "输入/输出/缓存",
+        [Math.max(0, usage.lastInputTokens - cached), usage.lastOutputTokens ?? 0, cached]
+          .map(formatTokenCount)
+          .join(" / "),
+      ]);
+    }
+    if (usage.cacheHitRatePercent !== undefined) {
+      rows.push(["最近缓存命中率", formatCacheHit(usage.cacheHitRatePercent)]);
+      if (timer.kind === "live") {
+        rows.push({
+          name: "缓存时间剩余",
+          value: formatCacheRemaining(timer.remainingMs),
+          color: toneColor(timer.tone),
+        });
+      } else if (timer.kind === "expired") {
+        rows.push(["缓存时间剩余", "已过期"]);
+      } else if (timer.kind === "unknown") {
+        rows.push(["缓存时间剩余", "未知"]);
+      }
+    }
+    if (request && Number.isFinite(request.compactionCount)) {
+      rows.push(["压缩次数", String(request.compactionCount)]);
+    }
+    if (request) rows.push(...rolloutRows(request));
+    if (usage.totalCostUsd !== undefined) {
+      rows.push(["会话费用估算", `$${usage.totalCostUsd.toFixed(3)}`]);
+    }
+    if (usage.totalCredits !== undefined) {
+      rows.push(["已记录消耗", `${decimal(usage.totalCredits, 3)} credits`]);
+    }
+    return rows;
+  };
+
   const renderUsage = () => {
     if (!usageRoot || !usagePopover) return;
     const threadId = findComposerConversationId(inputElement);
@@ -960,69 +1078,20 @@
       labelNode.style.color = timer.kind === "live" ? toneColor(timer.tone) : "";
     } else usageRoot.textContent = label;
     const ariaRemaining = timer.kind === "live"
-      ? `，缓存剩余 ${formatCacheRemaining(timer.remainingMs)}`
+      ? `，缓存时间剩余 ${formatCacheRemaining(timer.remainingMs)}`
       : "";
     usageRoot.setAttribute("aria-label", `对话用量：${label}${ariaRemaining}`);
     usageRoot.style.display = "inline-flex";
     // The capsule is measured from the laid-out chip, so it runs after display.
     renderCacheRing(timer);
-    const rows = [
-      ["账号", accountIdentity()],
-    ];
-    if (usage.contextUsedTokens !== undefined && usage.contextWindowTokens) {
-      rows.push([
-        "上下文",
-        `${decimal((usage.contextUsedTokens / usage.contextWindowTokens) * 100, 1)}% / ${formatTokenCount(usage.contextWindowTokens)}`,
-      ]);
-    }
-    if (usage.cacheHitRatePercent !== undefined) {
-      rows.push(["最近缓存命中率", formatCacheHit(usage.cacheHitRatePercent)]);
-      if (timer.kind === "live") {
-        rows.push({
-          name: "缓存剩余",
-          value: formatCacheRemaining(timer.remainingMs),
-          color: toneColor(timer.tone),
-        });
-      } else if (timer.kind === "expired") {
-        rows.push(["缓存剩余", "已过期"]);
-      } else if (timer.kind === "unknown") {
-        rows.push(["缓存剩余", "未知"]);
-      }
-    }
-    if (usage.cachedInputTokens !== undefined) {
-      rows.push(["缓存读取", formatTokenCount(usage.cachedInputTokens)]);
-    }
-    if (usage.cacheWriteInputTokens !== undefined) {
-      rows.push(["缓存写入", formatTokenCount(usage.cacheWriteInputTokens)]);
-    }
-    if (usage.reasoningOutputTokens !== undefined) {
-      rows.push(["推理", formatTokenCount(usage.reasoningOutputTokens)]);
-    }
-    if (usage.totalTokens !== undefined) {
-      rows.push(["Token 总数", formatTokenCount(usage.totalTokens)]);
-    }
-    if (usage.inputTokens !== undefined || usage.outputTokens !== undefined) {
-      rows.push([
-        "输入 / 输出",
-        `${formatTokenCount(usage.inputTokens || 0)} / ${formatTokenCount(usage.outputTokens || 0)}`,
-      ]);
-    }
-    if (usage.outputTokensPerSecond !== undefined) {
-      rows.push(["输出速度", `${decimal(usage.outputTokensPerSecond, 1)} Token/秒`]);
-    }
-    if (usage.totalCostUsd !== undefined) {
-      rows.push(["会话费用估算", `$${usage.totalCostUsd.toFixed(3)}`]);
-    }
-    if (usage.totalCredits !== undefined) {
-      rows.push(["已记录消耗", `${decimal(usage.totalCredits, 3)} credits`]);
-    }
+    const rows = usagePopoverRows(usage, threadId, timer);
     usagePopover.innerHTML =
       `<div data-codey-usage-title>用量</div>` +
       rows.map((row) => {
         const name = Array.isArray(row) ? row[0] : row.name;
         const value = Array.isArray(row) ? row[1] : row.value;
         const color = Array.isArray(row) ? undefined : row.color;
-        const remaining = name === "缓存剩余";
+        const remaining = name === "缓存时间剩余";
         const valueAttr = remaining ? " data-codey-cache-remaining" : "";
         const valueStyle = color ? ` style="color:${color}"` : "";
         return `<div data-codey-usage-row><span>${escapeText(name)}</span><span${valueAttr}${valueStyle}>${escapeText(value)}</span></div>`;
@@ -1030,16 +1099,36 @@
     scheduleCacheTick();
   };
 
-  const applyProviderId = (nextId) => {
+  const applyProviderSnapshot = (snapshot) => {
+    const nextId = snapshot?.id;
     const nextProvider = typeof nextId === "string" && nextId.trim() ? nextId.trim() : "";
     if (!nextProvider) return;
     providerId = nextProvider;
+    if (typeof snapshot.usesOfficialAccountAuth === "boolean") {
+      providerUsesOfficialAuth = snapshot.usesOfficialAccountAuth;
+    }
+  };
+
+  const loadAccountIdentity = async () => {
+    try {
+      const identity = await callBridge(accountIdentityPath);
+      if (identity?.status !== "ok") throw new Error(identity?.message || "读取官方账号失败");
+      accountIdentity = {
+        loggedIn: identity.loggedIn === true,
+        accountLabel: typeof identity.accountLabel === "string" ? identity.accountLabel.trim() : "",
+      };
+    } catch (error) {
+      // The account row falls back to the provider id.
+      accountIdentity = null;
+      console.warn("[Codey] composer usage account read failed", error);
+    }
+    renderUsage();
   };
 
   const loadSettings = async () => {
     try {
       const settings = await callBridge(settingsPath);
-      applyProviderId(settings?.currentProviderSnapshot?.id);
+      applyProviderSnapshot(settings?.currentProviderSnapshot);
       cacheValidMinutes = normalizeCacheValidMinutes(settings?.cacheValidMinutes);
       renderUsage();
     } catch {
@@ -1095,7 +1184,7 @@
         }
         const request = result.found ? result.request : null;
         if (request && Number.isFinite(request.requestedAt) && requestMatchesUsage(request, usage)) {
-          setCacheAnchor(threadId, { status: "ok", at: request.requestedAt });
+          setCacheAnchor(threadId, { status: "ok", at: request.requestedAt, request });
           return;
         }
         retryOr(request ? "mismatch" : "no-usage");
@@ -1334,20 +1423,22 @@
     if (nextMinutes !== undefined) {
       cacheValidMinutes = normalizeCacheValidMinutes(nextMinutes);
     }
-    applyProviderId(event?.detail?.currentProviderSnapshot?.id);
+    applyProviderSnapshot(event?.detail?.currentProviderSnapshot);
     renderUsage();
     void loadSettings();
+    void loadAccountIdentity();
   };
   const onFocus = () => {
     if (usageError) usageSelection = null;
     scan();
+    void loadAccountIdentity();
   };
 
   const boot = async () => {
     addStyle();
     ensureChips();
     startObserver();
-    await loadSettings();
+    await Promise.all([loadSettings(), loadAccountIdentity()]);
     if (disposed) return;
     scan();
     renderUsage();

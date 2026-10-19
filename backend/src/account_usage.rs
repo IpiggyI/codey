@@ -400,6 +400,28 @@ pub(crate) fn account_usage_preflight(
 pub(crate) fn read_official_auth(path: &Path) -> Result<OfficialAuth> {
     let bytes = fs::read(path).with_context(|| "未找到 Codex 官方登录信息")?;
     let value: Value = serde_json::from_slice(&bytes).with_context(|| "Codex 登录信息格式无效")?;
+    official_auth_from_value(&value)
+}
+
+pub(crate) fn account_identity(path: &Path) -> Result<Value> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(serde_json::json!({"status":"ok", "loggedIn":false, "accountLabel":null}));
+        }
+        Err(error) => return Err(error).context("读取 Codex 官方登录信息失败"),
+    };
+    let value: Value = serde_json::from_slice(&bytes).context("Codex 登录信息格式无效")?;
+    // A local login is usable only when it has the same credentials as account usage.
+    let auth = official_auth_from_value(&value).ok();
+    Ok(serde_json::json!({
+        "status": "ok",
+        "loggedIn": auth.is_some(),
+        "accountLabel": auth.and_then(|auth| auth.account_label),
+    }))
+}
+
+fn official_auth_from_value(value: &Value) -> Result<OfficialAuth> {
     let is_chatgpt = value
         .get("auth_mode")
         .and_then(Value::as_str)
@@ -720,6 +742,78 @@ mod tests {
             r#"{"auth_mode":"chatgpt","tokens":{"access_token":"token-value","account_id":"account-value"}}"#,
         )
         .unwrap();
+    }
+
+    #[test]
+    fn account_identity_returns_local_login_and_reuses_label_priority() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("auth.json");
+        let claims = [
+            (
+                serde_json::json!({"email":"user@example.com", "preferred_username":"user", "name":"Name"}),
+                "user@example.com",
+            ),
+            (
+                serde_json::json!({"preferred_username":"user", "name":"Name"}),
+                "user",
+            ),
+            (serde_json::json!({"name":"Name"}), "Name"),
+            (
+                serde_json::json!({"https://api.openai.com/profile":{"email":"profile@example.com"}}),
+                "profile@example.com",
+            ),
+        ];
+        for (claims, label) in claims {
+            let auth = serde_json::json!({"auth_mode":"chatgpt", "tokens":{
+                "access_token":"token-value", "id_token":unsigned_jwt(claims)
+            }});
+            fs::write(&path, serde_json::to_vec(&auth).unwrap()).unwrap();
+            assert_eq!(
+                account_identity(&path).unwrap(),
+                serde_json::json!({
+                    "status":"ok", "loggedIn":true, "accountLabel":label
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn account_identity_reports_not_logged_in_without_official_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("auth.json");
+        let expected = serde_json::json!({"status":"ok", "loggedIn":false, "accountLabel":null});
+        assert_eq!(account_identity(&path).unwrap(), expected);
+        for auth in [
+            serde_json::json!({"auth_mode":"apikey", "OPENAI_API_KEY":"key"}),
+            serde_json::json!({"auth_mode":"chatgpt", "tokens":{}}),
+        ] {
+            fs::write(&path, serde_json::to_vec(&auth).unwrap()).unwrap();
+            assert_eq!(account_identity(&path).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn account_identity_keeps_login_when_label_is_missing() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("auth.json");
+        write_chatgpt_auth(&path);
+        assert_eq!(
+            account_identity(&path).unwrap(),
+            serde_json::json!({
+                "status":"ok", "loggedIn":true, "accountLabel":null
+            })
+        );
+    }
+
+    #[test]
+    fn account_identity_reports_invalid_json_instead_of_missing_login() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("auth.json");
+        fs::write(&path, "{").unwrap();
+        assert_eq!(
+            account_identity(&path).unwrap_err().to_string(),
+            "Codex 登录信息格式无效"
+        );
     }
 
     #[test]
