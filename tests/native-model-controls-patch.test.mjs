@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
-import { serviceTierEnvironment } from "./helpers/service-tier-environment.mjs";
+import { legacyServiceTierEnvironment, serviceTierEnvironment } from "./helpers/service-tier-environment.mjs";
 
 import { loadStartupPatchTemplate } from "./helpers/startup-patch.mjs";
 
 const normalizeLineEndings = (source) => source.replace(/\r\n/g, "\n");
 
 function nativeServiceTierRuntime(source) {
-  const environment = serviceTierEnvironment();
+  const environment = legacyServiceTierEnvironment();
   const runtime = runInNewContext(`${source};({
     read: (tier) => Mq(scope, 'local', state.modelSettings.model, tier),
     select: (conversationId, tier) => whi(conversationId, {
@@ -512,7 +512,7 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
     assert.equal(await serviceTierRequestAllowed({}, "host"), true);
 
     const nativeServiceTierSource = await readFile(
-      new URL("./fixtures/codex-service-tier.js", import.meta.url), "utf8",
+      new URL("./fixtures/codex-service-tier-legacy.js", import.meta.url), "utf8",
     );
     // These aliases belong to the two original renderer modules.
     const nativeAliases = "\nconst mke=yjt,KGe=vjt;";
@@ -561,10 +561,14 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
     assert.equal(nativeRuntime.select(null, null).isLoading, true);
     assert.deepEqual(nativeRuntime.errors, []);
 
+    const accessSource = await readFile(new URL("./fixtures/codex-service-tier.js", import.meta.url), "utf8");
+    const accessShared = await readFile(new URL("./fixtures/codex-service-tier-shared.js", import.meta.url), "utf8");
+    const patchedAccessSource = await patchAsset(accessSource, "app://-/assets/app-initial-5851df3f6cb1.js");
     const rendererPlanner = await readFile(new URL("../backend/src/cdp/service_tier.js", import.meta.url), "utf8");
-    const rendererPatch = runInNewContext(`${rendererPlanner};codeyServiceTierExpression`)(patchedNativeSource);
-    const combined = runInNewContext(`${patchedNativeSource};${nativeAliases};${rendererPatch};({
-      read:(model,tier)=>Mq(scope,'local',model,tier)
+    const rendererPatch = runInNewContext(`${rendererPlanner};codeyServiceTierExpression`)(patchedAccessSource);
+    const combined = runInNewContext(`${accessShared};${patchedAccessSource};
+      const Xi=Xat,Tr=Uat,We=Wat,Lee=Yat;${rendererPatch};({
+      read:(model,tier)=>x$s(scope,'local',model,tier)
     })`, serviceTierEnvironment());
     assert.equal(await combined.read("supported", "priority"), "priority");
     assert.equal(await combined.read("unsupported", "priority"), null);

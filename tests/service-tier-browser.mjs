@@ -8,14 +8,18 @@ import { serviceTierEnvironment } from "./helpers/service-tier-environment.mjs";
 
 const { chromium } = await import(process.env.CODEY_PLAYWRIGHT_MODULE || "playwright");
 const native = await readFile(new URL("./fixtures/codex-service-tier.js", import.meta.url), "utf8");
+const shared = await readFile(new URL("./fixtures/codex-service-tier-shared.js", import.meta.url), "utf8");
 const keys = Object.keys(serviceTierEnvironment());
-const moduleSource = `const {${keys.join(",")}}=window.nativeTierEnvironment;
-  ${native}\nconst mke=yjt,KGe=vjt;export {Mq as read,whi as select};`;
+// Native helpers stay imports, as in the real module, so the patch must reach them from the reader frame.
+const moduleSource = `import {Xat as Xi,Uat as Tr,Wat as We,Yat as Lee} from "./shared-fixture.js";
+  const {${keys.join(",")}}=window.nativeTierEnvironment;
+  ${native}\nexport {x$s as read,_wo as select};`;
 const server = createServer((request, response) => {
   const url = new URL(request.url, "http://localhost");
   const moduleUrl = `/app-initial-fixture.js${url.pathname === "/incompatible" ? "?incompatible" : ""}`;
   response.setHeader("Content-Type", url.pathname.endsWith(".js") ? "text/javascript" : "text/html");
-  response.end(url.pathname.endsWith(".js")
+  response.end(url.pathname === "/shared-fixture.js" ? `${shared}\nexport {Xat,Uat,Wat,Yat};`
+    : url.pathname.endsWith(".js")
     ? (url.search ? moduleSource.replaceAll("serviceTierForRequest:", "unknown:") : moduleSource)
     : `<link rel="modulepreload" href="${moduleUrl}"><body><div id="root"></div><script>
       window.nativeTierEnvironment=(${serviceTierEnvironment.toString()})();

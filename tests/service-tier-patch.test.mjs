@@ -5,18 +5,31 @@ import test from "node:test";
 import { serviceTierEnvironment } from "./helpers/service-tier-environment.mjs";
 
 const fixture = await readFile(new URL("./fixtures/codex-service-tier.js", import.meta.url), "utf8");
+const shared = await readFile(new URL("./fixtures/codex-service-tier-shared.js", import.meta.url), "utf8");
+const legacy = await readFile(new URL("./fixtures/codex-service-tier-legacy.js", import.meta.url), "utf8");
 const planner = await readFile(new URL("../backend/src/cdp/service_tier.js", import.meta.url), "utf8");
-const expression = runInNewContext(`${planner};codeyServiceTierExpression`)(fixture);
+const plan = (source) => runInNewContext(`${planner};codeyServiceTierExpression`)(source);
+const native = `${shared};${fixture};const Xi=Xat,Tr=Uat,We=Wat,Lee=Yat;`;
 
 test("native independent tier reads and selection share model validation", async () => {
+  const expression = plan(fixture);
   const env = serviceTierEnvironment();
-  const runtime = runInNewContext(`${fixture};const mke=yjt,KGe=vjt;
-    ({read:(model,tier)=>Mq(scope,'local',model,tier),
+  const runtime = runInNewContext(`${native}
+    ({read:(model,tier)=>x$s(scope,'local',model,tier),
       apply:()=>${expression},
-      select:(id,tier)=>whi(id,{modelSettings:state.modelSettings,setModelAndReasoningEffort(){}},
-        {value:tier},false,{serviceTier:tier,isLoading:state.settingsLoading}).serviceTierSettings})`, env);
+      select:(id,tier)=>_wo(id,{modelSettings:state.modelSettings,setModelAndReasoningEffort(){}},
+        {value:tier},false,{serviceTier:tier,isLoading:state.settingsLoading})})`, env);
+  const options = (selected) => selected.serviceTierSettings.availableOptions.map((option) => option.value);
   assert.equal(await runtime.read("supported", "priority"), null);
+  const mounted = runtime.select(null, "priority");
+  assert.equal(mounted.serviceTierAccess, null);
+  assert.deepEqual(options(mounted), [null]);
+  assert.equal(mounted.serviceTierSettings.serviceTierForRequest, null);
   assert.equal(runtime.apply(), true);
+  const remounted = runtime.select(null, "priority");
+  assert.deepEqual({ ...remounted.serviceTierAccess }, { fast: true, ultrafast: true });
+  assert.deepEqual(options(remounted), [null, "priority"]);
+  assert.equal(remounted.serviceTierSettings.serviceTierForRequest, "priority");
   for (const auth of [null, "apikey", "chatgpt", "personalAccessToken"]) {
     env.state.authMethod = auth;
     assert.equal(await runtime.read("supported", "priority"), "priority");
@@ -30,19 +43,22 @@ test("native independent tier reads and selection share model validation", async
       env.state.config.service_tier = tier;
       assert.equal(await runtime.read(null), model === "supported" && tier !== "default" ? "priority" : null);
     }
-    env.state.selection = { type: "selected", value: "priority" };
+    env.state.selection = { type: "custom", serviceTier: "priority" };
     assert.equal(await runtime.read(model), model === "supported" ? "priority" : null);
+    env.state.selection = { type: "standard" };
+    assert.equal(await runtime.read(model), null);
     env.state.selection = { type: "fromConfig" };
     env.state.modelSettings.model = model;
     for (const id of [null, "thread"]) {
       env.state.modelSettings.serviceTier = "priority";
-      const selected = runtime.select(id, "priority");
+      const selected = runtime.select(id, "priority").serviceTierSettings;
       assert.equal(selected.serviceTierForRequest, model === "supported" ? "priority" : null);
-      env.state.requirementsPending = true;
       assert.equal(selected.selectedServiceTier, selected.serviceTierForRequest);
-      assert.equal(runtime.select(id, "priority").isLoading, false);
+      env.state.requirementsPending = true;
+      assert.equal(runtime.select(id, "priority").serviceTierSettings.isLoading, false);
+      env.state.requirementsPending = false;
       env.state.settingsLoading = true;
-      assert.equal(runtime.select(id, "priority").isLoading, true);
+      assert.equal(runtime.select(id, "priority").serviceTierSettings.isLoading, true);
       env.state.settingsLoading = false;
     }
   }
@@ -50,12 +66,13 @@ test("native independent tier reads and selection share model validation", async
 });
 
 test("unknown native layouts fail before generating a partial patch", () => {
-  const plan = runInNewContext(`${planner};codeyServiceTierExpression`);
+  assert.throws(() => plan(legacy), /服务档位权限形态不兼容/);
   assert.throws(() => plan(fixture.replaceAll("serviceTierForRequest:", "unknown:")), /形态不兼容/);
+  assert.throws(() => plan(fixture.replace("?Tr(c):null", "?c:null")), /服务档位依赖形态不兼容/);
   assert.throws(() => plan(fixture + fixture), /形态不兼容/);
-  const runtime = runInNewContext(`${fixture};const mke=yjt,KGe=vjt;
-    qfi=function changed(){};const before=[Mq,qfi,whi];
-    ({apply:()=>${expression},unchanged:()=>[Mq,qfi,whi].every((fn,i)=>fn===before[i])})`, serviceTierEnvironment());
+  const runtime = runInNewContext(`${native}
+    Mxo=function changed(){};const before=[x$s,Mxo,_wo];
+    ({apply:()=>${plan(fixture)},unchanged:()=>[x$s,Mxo,_wo].every((fn,i)=>fn===before[i])})`, serviceTierEnvironment());
   assert.throws(() => runtime.apply(), /源码已变化/);
   assert.equal(runtime.unchanged(), true);
 });

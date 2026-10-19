@@ -251,6 +251,63 @@ async fn binding_failure_releases_breakpoint_and_objects() {
     server.await.unwrap();
 }
 
+async fn failed_install(responses: Vec<(&'static str, Value)>) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+        for (method, mut response) in responses {
+            let message = ws.next().await.unwrap().unwrap();
+            let command: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
+            assert_eq!(command["method"], method);
+            response["id"] = command["id"].clone();
+            ws.send(Message::Text(response.to_string().into()))
+                .await
+                .unwrap();
+        }
+        assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
+    });
+    let error = install(&url).await.unwrap_err().to_string();
+    server.await.unwrap();
+    error
+}
+
+#[tokio::test]
+async fn failures_keep_the_first_line_of_page_and_protocol_errors() {
+    let cleanup = || {
+        vec![
+            ("Runtime.releaseObjectGroup", json!({"result":{}})),
+            ("Debugger.disable", json!({"result":{}})),
+        ]
+    };
+    let mut page = vec![
+        ("Debugger.enable", json!({"result":{}})),
+        (
+            "Runtime.evaluate",
+            json!({"result":{"exceptionDetails":{"text":"Uncaught","exception":{
+                "description":"Error: 服务档位权限形态不兼容\n    at unique (<anonymous>:60:42)"
+            }}}}),
+        ),
+    ];
+    page.extend(cleanup());
+    let error = failed_install(page).await;
+    assert!(
+        error.ends_with("页面检查失败：Runtime.evaluate：Error: 服务档位权限形态不兼容"),
+        "{error}"
+    );
+    let mut protocol = vec![(
+        "Debugger.enable",
+        json!({"error":{"code":-32601,"message":"'Debugger.enable' wasn't found"}}),
+    )];
+    protocol.extend(cleanup());
+    let error = failed_install(protocol).await;
+    assert!(
+        error.ends_with("调试命令失败：Debugger.enable：'Debugger.enable' wasn't found"),
+        "{error}"
+    );
+}
+
 #[tokio::test]
 async fn disconnected_debugger_reports_failure() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -53,15 +53,23 @@ impl Session {
             if response["id"].as_u64() != Some(id) {
                 continue;
             }
-            ensure!(
-                response.get("error").is_none(),
-                "服务档位调试命令失败：{method}"
-            );
+            if let Some(error) = response.get("error") {
+                bail!(
+                    "服务档位调试命令失败：{method}：{}",
+                    failure_detail(error.get("message"))
+                );
+            }
             let result = response["result"].clone();
-            ensure!(
-                result.get("exceptionDetails").is_none(),
-                "服务档位页面检查失败：{method}"
-            );
+            if let Some(details) = result.get("exceptionDetails") {
+                bail!(
+                    "服务档位页面检查失败：{method}：{}",
+                    failure_detail(
+                        details
+                            .pointer("/exception/description")
+                            .or_else(|| details.get("text"))
+                    )
+                );
+            }
             return Ok(result);
         }
         Err(anyhow!("服务档位调试连接已关闭"))
@@ -148,6 +156,15 @@ impl Session {
         self.command("Debugger.disable", json!({})).await?;
         Ok(())
     }
+}
+
+/// Keeps only the first line of the error so page stacks stay out of the log.
+fn failure_detail(value: Option<&Value>) -> String {
+    let line = value
+        .and_then(Value::as_str)
+        .and_then(|text| text.lines().next())
+        .unwrap_or("无详情");
+    super::truncate_chars(line, 160)
 }
 
 fn object_id(response: &Value) -> Result<String> {

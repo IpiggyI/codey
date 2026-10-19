@@ -61,7 +61,7 @@ function codeyServiceTierExpression(source) {
     return matches[0];
   };
   const read = unique((s) => s.includes("Failed to read service tier for request"), "读取");
-  const ui = unique((s) => s.includes("isServiceTierAllowed:") && s.includes("authMethod:")
+  const ui = unique((s) => s.includes("serviceTierAccess:") && s.includes("authMethod:")
     && !s.includes("selectedServiceTier:"), "权限");
   const selection = unique((s) => s.includes("serviceTierForRequest:") && s.includes("selectedServiceTier:"), "选择");
   const args = read.source.match(/^async function [$\w]+\(([$\w]+),([$\w]+),([$\w]+),([$\w]+)\)/);
@@ -69,7 +69,9 @@ function codeyServiceTierExpression(source) {
   const model = read.source.match(/await ([$\w]+)\(([$\w]+),([$\w]+),([$\w]+)\?\?([$\w]+)\.model\)/);
   const config = read.source.match(/let\{config:([$\w]+)\}=await ([$\w]+)\(([$\w]+),([$\w]+),\{includeLayers:!1,cwd:null\},\{priority:`critical`\}\),([$\w]+)=([$\w]+)\(\1\)/);
   const normalize = selection.source.match(/([$\w]+)=([$\w]+)==null\?null:([$\w]+)\(([$\w]+),\2\)(?:,\2=\1)?;let /);
-  if (!args || !permission || !model || !config || !normalize
+  const access = ui.source.match(/[$\w]+=[$\w]+&&![$\w]+&&[$\w]+!=null\?([$\w]+)\([$\w]+\):null/);
+  const accessResult = ui.source.match(/\{serviceTierAccess:([$\w]+),/);
+  if (!args || !permission || !model || !config || !normalize || !access || !accessResult
     || permission[3] !== args[1] || permission[4] !== args[2]) {
     throw new Error("服务档位依赖形态不兼容");
   }
@@ -79,18 +81,17 @@ function codeyServiceTierExpression(source) {
     if (count !== 1) throw new Error("服务档位补偿匹配次数异常");
     return output;
   };
-  const readerSource = read.source.replace(permission[0], `let ${permission[1]}=!0;`);
-  const uiSource = replaceOne(ui.source,
-    /([$\w]+)=(?:[$\w]+&&![$\w]+&&([$\w]+)!=null&&\2\?\.requirements\?\.featureRequirements\?\.fast_mode!==!1|!0)(?=,[$\w]+;return)/g,
-    (_m, name) => `${name}=!0`);
+  const readerSource = read.source.replace(permission[0], `let ${permission[1]}=codeyServiceTierAccess;`);
+  // Replace the value after the memo cache so already mounted consumers also receive it.
+  const uiSource = replaceOne(ui.source, /let ([$\w]+)=[$\w]+(?=,[$\w]+;return)/g, (_m, name) => {
+    if (name !== accessResult[1]) throw new Error("服务档位依赖形态不兼容");
+    return `let ${name}=codeyServiceTierAccess`;
+  });
   let selectionSource = replaceOne(selection.source,
-    /\?(?:([$\w]+)\?)?([$\w]+)(?::null)?:([$\w]+)\(([$\w]+),\2(?:,\1)?\)/g,
-    (_m, _allowed, tier, resolver, model) => `?${tier}:${resolver}(${model},${tier})`);
-  selectionSource = replaceOne(selectionSource,
     /([$\w]+)=([$\w]+)==null\?null:([$\w]+)\(([$\w]+),\2\)(?:,\2=\1)?;let /g,
     (_m, selected, requested, validate, model) => `${selected}=${requested}==null?null:${validate}(${model},${requested}),${requested}=${selected};let `);
   selectionSource = replaceOne(selectionSource,
-    /(=[$\w]+\.isLoading\|\|[$\w]+\|\|[$\w]+\.isLoading(?:\|\|[$\w]+\?\.isLoading===!0)?)(?:\|\|[$\w]+==null&&[$\w]+)?(?=,)/g,
+    /(=[$\w]+\|\|[$\w]+\.isLoading\|\|[$\w]+\|\|[$\w]+\.isLoading\|\|[$\w]+\?\.isLoading===!0)\|\|[$\w]+==null&&[$\w]+(?=,)/g,
     (_m, loading) => loading);
   // Direct eval runs in the native module frame, preserving its private imports.
   // Build every replacement before assigning any module binding.
@@ -101,6 +102,9 @@ function codeyServiceTierExpression(source) {
       typeof fn === 'function' && Function.prototype.toString.call(fn) === expected[index])) {
       throw new Error('服务档位模块源码已变化');
     }
+    // Native access computed without account requirements. One stable object
+    // keeps memoized consumers from re-rendering on every call.
+    const codeyServiceTierAccess = ${access[1]}({});
     const originalRead = (${readerSource});
     const validate = ${normalize[3]}, findModel = ${model[1]};
     const nextUi = (${uiSource}), nextSelection = (${selectionSource});
