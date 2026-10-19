@@ -152,7 +152,9 @@ NODE
 
 ### 尚未验收与已知限制
 
-- Windows 实际运行和真实请求档位两项尚未执行。需要获准后构建、安装和重启，再按上文验收表采集状态和请求。
+- Windows 实际运行已验收。验证包由 GitHub Actions 运行 `39231792901` 基于分支 `fix/service-tier-access` 构建，安装后由用户启动。只读读取主页面状态，`service-tier` 为 `effective`，`__codeyServiceTierStatus.status` 为 `ready`，其余内置功能为 `effective`，提示词优化因关闭而为 `inactive`。控制台不再显示“基础异常”。
+- 控制台显示的“1 个功能尚待确认”来自用户配置中的 `user-script-1`。用户脚本没有生效自检，状态只会是 `executed`。该脚本用于保留 `GPT-` 前缀，内置模型白名单注入已先设置 `window.__codeyKeepGptPrefix`，所以它会直接返回。这项提示与本次修复无关。
+- 用户报告安装后 Fast 模式正常触发。新建、继续、恢复聊天和模型切换几种情况没有逐项记录，请求字段与上游实际处理也没有分别采集。
 - 本地检查无法证明当前页面的 `codeyServiceTierScope` 能找到读取作用域。实时诊断在规划阶段已经失败，没有执行到作用域检查之后。
 - 启动资源补丁 `backend/src/renderer_asset_patch.js` 仍按 `isServiceTierAllowed` 匹配。本次已验证它不改动当前结构的夹具。页面注入 `public/model-whitelist-inject.js` 的 `repairNativeFastControls` 也按该字段匹配。根据当前模块中该字段的匹配数为零，推断它在当前结构上不起作用，但没有实际运行验证。本次没有修改这两处。
 - 当前 `app-initial` 的请求构建路径还有 `xin` 和 `zin` 两处检查，它们用 `configRequirements/read` 的结果调用 `Tr` 再次筛选档位。这两处不检查认证方式，只在账号需求明确写有 `fast_mode=false` 时清空档位。本次没有修改这项原生策略。2026-10-08 的交接记录说明当时的旧版本没有返回该限制；当前版本的返回值尚未核实。
