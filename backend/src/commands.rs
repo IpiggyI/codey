@@ -359,6 +359,13 @@ impl AppState {
             }
             "/backend/health" => json!({"status":"ok"}),
             "/account/usage" => account_usage_snapshot(self).await,
+            "/account/identity" => {
+                let path = codex_home().join("auth.json");
+                blocking_value("读取官方账号身份", move || {
+                    account_usage::account_identity(&path)
+                })
+                .await
+            }
             "/session/wake-watcher" => {
                 self.session_scan_wake.notify_one();
                 json!({"status":"ok"})
