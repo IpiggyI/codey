@@ -128,6 +128,7 @@ function loadInjection({
   codexSignalDispatcher = null,
   discoveredAppServerManager = null,
   localAppServerManager = null,
+  cachedManagerScope = null,
   selectedTurnIds = [],
   hiddenTurnIds = [],
   sessionElements = {},
@@ -193,6 +194,9 @@ function loadInjection({
         getForHostId(hostId) { return this.scope.get("manager", hostId); }
       };
     }
+  }
+  if (cachedManagerScope) {
+    documentBody.__reactFiber$cachedManager = { memoizedState: { scope: cachedManagerScope }, return: null };
   }
   const document = {
     documentElement,
@@ -377,6 +381,7 @@ function loadInjection({
     getReloadCount: () => reloadCount,
     getTurnRow: (index = 0) => rows[index] || null,
     getDeleteButton: () => toolbar?.querySelector("[data-codey-delete]"),
+    context,
     reinstall: () => vm.runInNewContext(source, context),
     getVisibleTurnIds: () => rows
       .filter((row) => !row.removed)
@@ -501,6 +506,86 @@ test("usage-only manager remains available when deletion and reconciliation are 
   assert.equal(runtime.alerts.length, 0);
   assert.deepEqual(runtime.getVisibleTurnIds(), ["turn-1"]);
   assert.equal(runtime.window.__codeyPageCapabilities.deleteMessages.status, "unavailable");
+});
+
+function cachedManagerScope(managers, { inherited = false, mounted = true } = {}) {
+  const families = managers.map(() => ({ kind: "signal-family" }));
+  const bindings = new Map(families.map((family) => [family, new Map(mounted ? [["local", {}]] : [])]));
+  const reads = [];
+  const node = { familyBindings: bindings };
+  const scope = {
+    query: null,
+    node: inherited ? { familyBindings: new Map() } : node,
+    chain: new Map(inherited ? [["parent", node]] : []),
+    get(family, hostId) {
+      assert.equal(hostId, "local");
+      assert.ok(bindings.get(family)?.has(hostId), "discovery must not initialize an unused signal");
+      reads.push(family);
+      return managers[families.indexOf(family)];
+    },
+    set() { throw Error("discovery must not change signals"); },
+    watch() { throw Error("discovery must not create RPC watchers"); },
+    when() {},
+  };
+  return { scope, reads };
+}
+
+test("discovers a cached local manager when its registry is no longer exported", async () => {
+  for (const inherited of [false, true]) {
+    const requests = [];
+    const client = { hostId: "local", enqueueRequest() { throw Error("must not send"); }, createRequest() {}, onResult() {} };
+    const manager = { requestClient: client, sendRequest(method) { requests.push(method); return { rateLimits: {} }; } };
+    const { scope, reads } = cachedManagerScope([manager], { inherited });
+    const runtime = loadInjection({ initialSessionId: "", cachedManagerScope: scope });
+    assert.ok((await runtime.window.__codeyReadAccountRateLimits()).rateLimits);
+    assert.equal((await runtime.window.__codeyLoadCodexSessionController()).manager, manager);
+    assert.equal(runtime.window.__codeyPageCapabilities.usage.status, "available");
+    assert.deepEqual(requests, ["account/rateLimits/read"]);
+    assert.equal(reads.length, 1, "reuse the verified manager on subsequent calls");
+  }
+});
+
+test("cached manager discovery rejects remote, incomplete, ambiguous, and unmounted managers", async () => {
+  const manager = (hostId = "local") => ({
+    requestClient: { hostId, enqueueRequest() {}, createRequest() {}, onResult() {} },
+    sendRequest() { throw Error("must not send"); },
+  });
+  for (const [managers, options] of [
+    [[manager("remote")], {}],
+    [[{ requestClient: { hostId: "local" }, sendRequest() {} }], {}],
+    [[manager(), manager()], {}],
+    [[manager()], { mounted: false }],
+  ]) {
+    const { scope, reads } = cachedManagerScope(managers, options);
+    const runtime = loadInjection({ initialSessionId: "", cachedManagerScope: scope });
+    assert.equal((await runtime.window.__codeyReadAccountRateLimits()).status, "unavailable");
+    assert.equal(runtime.window.__codeyPageCapabilities.usage.status, "unavailable");
+    if (options.mounted === false) assert.equal(reads.length, 0);
+  }
+});
+
+test("message deletion uses the registered local manager and rejects a disposed one", async () => {
+  const manager = {
+    getHostId() { return "local"; },
+    getConversation() { return null; },
+    getStreamRole() { return { role: "owner" }; },
+    sendRequest() { throw Error("must not send"); },
+    updateConversationState() {},
+    inactiveThreadUnsubscriber: { clearConversationStreamOwnership() {} },
+  };
+  const runtime = loadInjection({ initialSessionId: "" });
+  await assert.rejects(
+    runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" }),
+    { code: "codey_capability_unavailable" },
+  );
+  // The renderer patch creates the registry inside the page realm.
+  runtime.context.__codeyAppServerManagers = vm.runInContext("new Map()", runtime.context).set("local", manager);
+  const controller = await runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" });
+  assert.equal(controller.manager, manager);
+  assert.equal(runtime.window.__codeyPageCapabilities.deleteMessages.status, "available");
+  manager.disposed = true;
+  await assert.rejects(controller.prepareMessageDeletion("session-1"), { code: "codey_capability_unavailable" });
+  assert.throws(() => controller.finishMessageDeletion("session-1", []), { code: "codey_capability_unavailable" });
 });
 
 test("MCP reload prefers the patched AppServerRequestClient over fiber discovery", async () => {

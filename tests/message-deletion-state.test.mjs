@@ -4,11 +4,17 @@ import test from "node:test";
 
 const source = readFileSync(new URL("../public/codey-inject.js", import.meta.url), "utf8");
 const start = source.indexOf("  const messageDeletionMethods = {");
-const end = source.indexOf("  const isLocalMessageDeletionManager", start);
+const end = source.indexOf("  const managerSessionController", start);
 assert.ok(start >= 0 && end > start);
 const declaredStart = source.indexOf("  const declaredMethod =");
 const declaredEnd = source.indexOf("  const appServerManagerRegistryResolverFromModule", declaredStart);
-const methods = Function(`${source.slice(declaredStart, declaredEnd)}\n${source.slice(start, end)}; return messageDeletionMethods;`)();
+const capabilityStart = source.indexOf("  const capabilityProbes =");
+const capabilityEnd = source.indexOf("  const sessionControllerCanReconcileCompletedConversation", capabilityStart);
+assert.ok(capabilityStart >= 0 && capabilityEnd > capabilityStart);
+const methods = Function(`const disposed=false, window={};
+  ${source.slice(declaredStart, declaredEnd)}
+  ${source.slice(capabilityStart, capabilityEnd)}
+  ${source.slice(start, end)}; return messageDeletionMethods;`)();
 
 function fixture({ canonical = false, historyMode = "paginated", version = "0.163.0-alpha.10.2" } = {}) {
   const first = { turnId: "turn-1", status: "completed", items: [] };
@@ -48,6 +54,7 @@ function fixture({ canonical = false, historyMode = "paginated", version = "0.16
   const response = { thread: { id: conversation.id } };
   const manager = {
     ...methods,
+    getHostId() { return "local"; },
     role: { role: "owner" },
     getConversation(sessionId) {
       assert.equal(sessionId, conversation.id);
@@ -341,4 +348,16 @@ test("suffix deletion rechecks tasks ownership and history before sending a requ
     assert.deepEqual(runtime.requests, []);
     assert.equal(runtime.conversation.resumeState, "resumed");
   }
+});
+
+test("a manager disposed after preparation cannot change the conversation", async () => {
+  const { manager, conversation, requests } = fixture();
+  await manager.prepare(conversation.id);
+  manager.disposed = true;
+  const before = structuredClone(conversation);
+  await assert.rejects(manager.prepare(conversation.id), { code: "codey_capability_unavailable" });
+  assert.throws(() => manager.finish(conversation.id, ["turn-1"]), { code: "codey_capability_unavailable" });
+  assert.deepEqual(requests, []);
+  assert.deepEqual(conversation, before);
+  assert.deepEqual(manager.role, { role: "owner" });
 });
