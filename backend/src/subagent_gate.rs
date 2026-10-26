@@ -874,13 +874,14 @@ fn trusted_root_turn_matches(
     ) else {
         return Ok(false);
     };
+    // 恢复后的文件名可能在会话 ID 后追加后缀；会话身份由下方 session_meta 校验。
     if !transcript.is_absolute()
         || !metadata.is_file()
         || !path.starts_with(sessions)
         || !path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.ends_with(&format!("-{}.jsonl", input.session_id)))
+            .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
     {
         return Ok(false);
     }
@@ -4135,6 +4136,69 @@ mod tests {
     }
 
     #[test]
+    fn resumed_root_rejects_non_rollout_paths_and_paths_outside_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(STATE_DIRECTORY);
+        let sessions = temp.path().join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let session_id = "resume-path-session";
+        let runtime_id = "runtime-a";
+        create_active_marker(&root, runtime_id, session_id, "child-a").unwrap();
+        let write_rollout = |path: &Path| {
+            let records = [
+                json!({"type": "session_meta", "payload": {"id": session_id, "source": "vscode"}}),
+                json!({"type": "event_msg", "payload": {"type": "turn_aborted", "turn_id": "old-turn"}}),
+                json!({"type": "event_msg", "payload": {"type": "task_started", "turn_id": "new-turn"}}),
+            ];
+            fs::write(
+                path,
+                records
+                    .iter()
+                    .map(|record| format!("{record}\n"))
+                    .collect::<String>(),
+            )
+            .unwrap();
+        };
+        let mut transcripts = vec![
+            temp.path()
+                .join(format!("rollout-{session_id}_suffix.jsonl")),
+            sessions.join(format!("events-{session_id}.jsonl")),
+            sessions.join(format!("rollout-{session_id}.txt")),
+        ];
+        for transcript in &transcripts {
+            write_rollout(transcript);
+        }
+        let directory = sessions.join(format!("rollout-{session_id}_directory.jsonl"));
+        fs::create_dir(&directory).unwrap();
+        transcripts.push(directory);
+        #[cfg(unix)]
+        {
+            let target = sessions.join(format!("rollout-{session_id}_target.jsonl"));
+            write_rollout(&target);
+            let link = sessions.join(format!("rollout-{session_id}_link.jsonl"));
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            transcripts.push(link);
+            let linked_directory = sessions.join("outside");
+            std::os::unix::fs::symlink(temp.path(), &linked_directory).unwrap();
+            transcripts.push(linked_directory.join(format!("rollout-{session_id}_suffix.jsonl")));
+        }
+        for transcript in transcripts {
+            bind_root_turn(&root, runtime_id, session_id, "old-turn", 10).unwrap();
+            let mut interrupt = input("PreToolUse", session_id);
+            interrupt.turn_id = Some("new-turn".into());
+            interrupt.transcript_path = Some(transcript.to_string_lossy().into_owned());
+            interrupt.tool_name = Some("agents.interrupt_agent".into());
+            interrupt.tool_input = Some(json!({"target": "/root/child-a"}));
+            assert!(
+                !trusted_root_turn_matches(&interrupt, &root, runtime_id, 20).unwrap(),
+                "{}",
+                transcript.display()
+            );
+            assert!(!root_turn_matches(&root, runtime_id, session_id, Some("new-turn")).unwrap());
+        }
+    }
+
+    #[test]
     fn resumed_root_recovers_binding_from_its_aborted_turn_without_cancelling_children() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join(STATE_DIRECTORY);
@@ -4142,7 +4206,7 @@ mod tests {
         fs::create_dir_all(&sessions).unwrap();
         let session_id = "resume-session";
         let runtime_id = "runtime-a";
-        let transcript = sessions.join(format!("rollout-{session_id}.jsonl"));
+        let transcript = sessions.join(format!("rollout-{session_id}_resume-suffix.jsonl"));
         create_active_marker(&root, runtime_id, session_id, "child-a").unwrap();
         let mut interrupt = input("PreToolUse", session_id);
         interrupt.turn_id = Some("new-turn".into());
