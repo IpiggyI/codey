@@ -12,6 +12,7 @@ struct MockCdpState {
     discovery_requests: AtomicUsize,
     health_checks: AtomicUsize,
     injections: AtomicUsize,
+    close_bridges: tokio::sync::Notify,
 }
 
 struct MockCdp {
@@ -41,6 +42,7 @@ impl MockCdp {
             discovery_requests: AtomicUsize::new(0),
             health_checks: AtomicUsize::new(0),
             injections: AtomicUsize::new(0),
+            close_bridges: tokio::sync::Notify::new(),
         });
         let http_state = state.clone();
         let http_task = tokio::spawn(async move {
@@ -108,7 +110,17 @@ impl MockCdp {
                     else {
                         return;
                     };
-                    while let Some(Ok(message)) = socket.next().await {
+                    let mut bridge = false;
+                    loop {
+                        // Dropping the socket without a close frame mimics
+                        // Codex resetting the persistent bridge connection.
+                        let message = tokio::select! {
+                            message = socket.next() => message,
+                            _ = state.close_bridges.notified(), if bridge => return,
+                        };
+                        let Some(Ok(message)) = message else {
+                            return;
+                        };
                         if message.is_close() {
                             let _ = socket.close(None).await;
                             return;
@@ -148,6 +160,7 @@ impl MockCdp {
                                 if command["params"]["name"]
                                     == codey_runtime_core::bridge::BRIDGE_BINDING_NAME
                                 {
+                                    bridge = true;
                                     state.injections.fetch_add(1, Ordering::SeqCst);
                                 }
                                 serde_json::json!({})
@@ -355,6 +368,51 @@ async fn cdp_watchdog_recovers_after_repeated_endpoint_loss_and_resets_interval(
         tokio::task::yield_now().await;
     }
     tick_health(&mock, CDP_WATCHDOG_INTERVAL).await;
+    stop_watchdog(watchdog).await;
+}
+
+#[tokio::test]
+async fn cdp_watchdog_rebuilds_a_closed_bridge_pump_without_waiting_for_the_interval() {
+    let mock = MockCdp::start().await;
+    let watchdog = mock.watchdog().await;
+    let _clock = ManualClock::pause();
+    tokio::task::yield_now().await;
+
+    let previous = watchdog.statuses.read().await.clone();
+    mock.state.close_bridges.notify_waiters();
+    // The paused clock never reaches the watchdog interval, so only the pump
+    // closure itself can trigger this reinjection.
+    wait_until(|| mock.state.injections.load(Ordering::SeqCst) == 2).await;
+    // Verification still runs after the binding; advancing the clock before it
+    // finishes would expire the reinjection deadline instead.
+    wait_until(|| {
+        watchdog
+            .statuses
+            .try_read()
+            .is_ok_and(|current| !Arc::ptr_eq(&current, &previous))
+    })
+    .await;
+    assert_eq!(mock.state.health_checks.load(Ordering::SeqCst), 0);
+    for _ in 0..1000 {
+        tokio::task::yield_now().await;
+    }
+    tick_health(&mock, CDP_WATCHDOG_INTERVAL).await;
+    assert_eq!(mock.state.injections.load(Ordering::SeqCst), 2);
+    stop_watchdog(watchdog).await;
+}
+
+#[tokio::test]
+async fn cdp_watchdog_confirms_an_unhealthy_bridge_without_waiting_a_full_interval() {
+    let mock = MockCdp::start().await;
+    let watchdog = mock.watchdog().await;
+    let _clock = ManualClock::pause();
+    tokio::task::yield_now().await;
+
+    mock.state.healthy.store(false, Ordering::SeqCst);
+    tick_health(&mock, CDP_WATCHDOG_INTERVAL).await;
+    assert_eq!(mock.state.injections.load(Ordering::SeqCst), 1);
+    tick_health(&mock, CDP_WATCHDOG_UNHEALTHY_CONFIRM_INTERVAL).await;
+    wait_until(|| mock.state.injections.load(Ordering::SeqCst) == 2).await;
     stop_watchdog(watchdog).await;
 }
 

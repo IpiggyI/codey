@@ -59,6 +59,8 @@ use process::{codex_runtime_arguments, gpu_launch_arguments};
 
 const CDP_WATCHDOG_INTERVAL: Duration = Duration::from_secs(30);
 const CDP_WATCHDOG_FAILURE_THRESHOLD: u8 = 2;
+// 页面明确答复桥接失效后，确认这一判断不必再等一整轮巡检。
+const CDP_WATCHDOG_UNHEALTHY_CONFIRM_INTERVAL: Duration = Duration::from_secs(5);
 // 连续发现失败只能说明端点暂时不可达；降低重试频率，保留后续自动恢复。
 const CDP_WATCHDOG_ENDPOINT_LOSS_LIMIT: u8 = 3;
 const CDP_WATCHDOG_ENDPOINT_RETRY_INTERVAL: Duration = Duration::from_secs(120);
@@ -952,11 +954,20 @@ fn spawn_injection_watchdog(
         let mut target = injected_target;
         let mut consecutive_failures = 0u8;
         let mut endpoint_losses = 0u8;
+        let mut confirm_unhealthy = false;
         'watchdog: loop {
+            // 泵已结束而重建失败时不再监听，否则会跳过重试间隔空转。
+            let pump_running = !target.pump_finished();
+            let wait = if confirm_unhealthy {
+                CDP_WATCHDOG_UNHEALTHY_CONFIRM_INTERVAL
+            } else {
+                retry_interval
+            };
             tokio::select! {
                 biased;
                 _ = &mut shutdown_rx => break,
-                _ = tokio::time::sleep(retry_interval) => {}
+                _ = target.pump_closed(), if pump_running => {}
+                _ = tokio::time::sleep(wait) => {}
             }
             let health = tokio::select! {
                 biased;
@@ -1010,7 +1021,9 @@ fn spawn_injection_watchdog(
                 watchdog_endpoint_loss_limit_reached(&mut endpoint_losses, false);
                 retry_interval = CDP_WATCHDOG_INTERVAL;
             }
-            if !watchdog_should_reinject(&mut consecutive_failures, health) {
+            let reinject = watchdog_should_reinject(&mut consecutive_failures, health);
+            confirm_unhealthy = !reinject && health == InjectionHealth::Unhealthy;
+            if !reinject {
                 continue;
             }
             let reinjection = tokio::select! {

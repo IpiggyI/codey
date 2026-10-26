@@ -199,6 +199,16 @@ impl InjectedTarget {
         self.websocket_url.clone()
     }
 
+    /// 常驻桥接连接的消息泵是否已经结束。
+    /// 结束时页面内的桥接调用再也无法送达后端，重新注入是唯一出路。
+    pub fn pump_finished(&self) -> bool {
+        self.pump.is_finished()
+    }
+
+    pub async fn pump_closed(&self) {
+        self.pump.finished().await;
+    }
+
     pub async fn close(self) {
         self.pump.close().await;
     }
@@ -1398,10 +1408,31 @@ fn lazy_settings_overlay_loader_script() -> &'static str {
   }
   if (existing?.__codeyLazyLoader) return;
 
+  // 高于后端连接加求值的预算；桥接失联时不能让加载永远挂起、吞掉后续点击。
+  const loadTimeoutMs = 15000;
   let loading = null;
   const formatError = (error) => error instanceof Error
     ? `${error.name}: ${error.message}`
     : String(error || "未知错误");
+  const readyOverlay = () => {
+    const overlay = window.__codeySettingsOverlay;
+    return overlay && overlay !== proxy && typeof overlay.toggle === "function"
+      ? overlay
+      : null;
+  };
+  const requestLoad = (retried) => Promise.resolve(
+    window.__codexSessionDeleteBridge(loadPath, {}, { timeoutMs: loadTimeoutMs }),
+  ).then((result) => {
+    // 看门狗重建桥接会以 bridge_reinstalled 结束旧调用，新桥接已可用，重发一次。
+    if (result?.code === "bridge_reinstalled" && !retried) return requestLoad(true);
+    // 后端求值超时后页面仍可能执行完脚本，以浮层是否就绪为准。
+    const overlay = readyOverlay();
+    if (overlay) return overlay;
+    if (!result || result.status !== "ok") {
+      throw new Error(result?.message || "配置面板加载请求失败");
+    }
+    throw new Error(window.__codeyOverlayError || "未生成浮层控制器");
+  });
   const proxy = {
     __codeyLazyLoader: true,
     close() {},
@@ -1411,18 +1442,7 @@ fn lazy_settings_overlay_loader_script() -> &'static str {
       if (typeof window.__codexSessionDeleteBridge !== "function") {
         return Promise.reject(new Error("Codey bridge 尚未就绪"));
       }
-      loading = Promise.resolve(
-        window.__codexSessionDeleteBridge(loadPath, {}),
-      ).then((result) => {
-        if (!result || result.status !== "ok") {
-          throw new Error(result?.message || "配置面板加载请求失败");
-        }
-        const overlay = window.__codeySettingsOverlay;
-        if (!overlay || overlay === proxy || typeof overlay.toggle !== "function") {
-          throw new Error(window.__codeyOverlayError || "未生成浮层控制器");
-        }
-        return overlay;
-      });
+      loading = requestLoad(false);
       return loading;
     },
     open() {

@@ -16,6 +16,10 @@
   const runtimeHealthCheckTimeoutMs = 3_000;
   const runtimeHealthFailureRetryMs = 1_000;
   const runtimeHealthFailureThreshold = 2;
+  // 判定中断后加密复查，看门狗修好桥接后红色状态能尽快解除。
+  const runtimeHealthUnavailableRetryMs = 5_000;
+  // 超时回调比预算晚到这么久，说明是页面主线程自己卡住，无法据此判断后端。
+  const runtimeHealthStallToleranceMs = 1_500;
   const sessionToolsIdleLoadTimeoutMs = 5_000;
   const sessionToolsLoadTimeoutMs = 10_000;
   const accountUsageRefreshIntervalMs = 60_000;
@@ -45,11 +49,12 @@
   let sessionToolsLoadPromise = null;
   let scanTimer = 0;
   let runtimeHealthTimer = 0;
-  let runtimeHealthCheckInFlight = false;
+  let runtimeHealthCheckPromise = null;
   let runtimeHealthFailures = 0;
   let runtimeHealthState = "checking";
   let runtimeHealthMessage = "";
   let runtimeHealthObservedAt = 0;
+  let settingsOpenPending = false;
   let sessionToolsInteractionArmed = false;
   let sessionToolsIdleLoadScheduled = false;
   let bootstrapObserver = null;
@@ -238,8 +243,16 @@
       scheduleRuntimeHealthCheck();
       return runtimeHealthSnapshot();
     }
-    if (runtimeHealthCheckInFlight) return runtimeHealthSnapshot();
-    runtimeHealthCheckInFlight = true;
+    // 并发调用共用同一次检查：点击入口要等到这次的结论，不能拿旧快照。
+    runtimeHealthCheckPromise ||= runRuntimeHealthCheck().finally(() => {
+      runtimeHealthCheckPromise = null;
+    });
+    return runtimeHealthCheckPromise;
+  };
+
+  const runRuntimeHealthCheck = async () => {
+    let inconclusive = false;
+    const observedAt = Date.now();
     try {
       if (typeof window.__codexSessionDeleteBridge !== "function") {
         runtimeHealthFailures = runtimeHealthFailureThreshold;
@@ -258,30 +271,55 @@
       error.code = result?.code || "backend_unavailable";
       throw error;
     } catch (error) {
-      runtimeHealthFailures += 1;
       const immediate = error?.code === "bridge_unavailable";
+      // 看门狗重建桥接时，上一代未完成的调用以 bridge_reinstalled 结束，
+      // 说明后端正在恢复；页面卡顿时超时同样不反映后端状态。两者都不计失败。
+      inconclusive = !immediate && (
+        error?.code === "bridge_reinstalled"
+        || Date.now() - observedAt > runtimeHealthCheckTimeoutMs + runtimeHealthStallToleranceMs
+      );
+      if (inconclusive) return runtimeHealthSnapshot();
+      runtimeHealthFailures += 1;
       if (immediate) runtimeHealthFailures = runtimeHealthFailureThreshold;
       if (runtimeHealthFailures >= runtimeHealthFailureThreshold) {
         return setRuntimeHealthState("unavailable", "Codey 后端未响应");
       }
       return setRuntimeHealthState("checking", "正在确认 Codey 进程状态");
     } finally {
-      runtimeHealthCheckInFlight = false;
-      const nextDelay = runtimeHealthFailures > 0
-        && runtimeHealthFailures < runtimeHealthFailureThreshold
-        ? runtimeHealthFailureRetryMs
-        : runtimeHealthCheckIntervalMs;
+      let nextDelay = runtimeHealthCheckIntervalMs;
+      if (runtimeHealthState === "unavailable") nextDelay = runtimeHealthUnavailableRetryMs;
+      if (inconclusive || (runtimeHealthFailures > 0 && runtimeHealthFailures < runtimeHealthFailureThreshold)) {
+        nextDelay = runtimeHealthFailureRetryMs;
+      }
       scheduleRuntimeHealthCheck(nextDelay);
     }
   };
 
-  const openSettings = () => {
+  const openSettings = async () => {
+    if (settingsOpenPending) return;
     if (runtimeHealthState === "unavailable") {
+      // 红色状态可能来自页面卡顿的误判，或桥接已恢复而下一轮检查未到；
+      // 当场复查一次，仍连不上才提示。
+      settingsOpenPending = true;
+      let health;
+      try {
+        health = await checkRuntimeHealth();
+      } finally {
+        settingsOpenPending = false;
+      }
+      if (health.state === "healthy") {
+        openSettingsOverlay();
+        return;
+      }
       window.alert(
         "Codey 进程异常或已退出，当前配置面板无法连接。请退出 Codex 后重新启动 Codey。",
       );
       return;
     }
+    openSettingsOverlay();
+  };
+
+  const openSettingsOverlay = () => {
     if (window.__codeySettingsOverlay?.toggle) {
       window.__codeySettingsOverlay.toggle();
       return;
@@ -447,7 +485,7 @@
       button.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
-        openSettings();
+        void openSettings();
       }, true);
     }
     if (railMount) {
