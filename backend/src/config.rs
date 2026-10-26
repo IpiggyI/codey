@@ -1832,6 +1832,11 @@ impl CodeyConfig {
     }
 
     fn normalize_subagent_model_references(&mut self) {
+        // Native model selection resolves saved selectors at the runtime
+        // boundary. Preserve raw ids here, including provider-looking names.
+        if !self.local_router_enabled {
+            return;
+        }
         let targets = self.configured_model_targets();
         if targets.is_empty() {
             return;
@@ -1844,9 +1849,6 @@ impl CodeyConfig {
                 .find(|target| model_id::equal(&target.alias, requested))
                 .map(|target| target.alias.clone())
                 .or_else(|| {
-                    if !self.local_router_enabled {
-                        return None;
-                    }
                     // Preserve the model's route identity for subagents. The
                     // router selects their isolated HTTP/SSE transport per
                     // request, so catalog identity does not grant upstream WS.
@@ -2393,6 +2395,47 @@ mod tests {
         let mut config = CodeyConfig::default();
         config.profiles[0].name = name.to_string();
         config
+    }
+
+    #[test]
+    fn native_subagent_models_survive_normalization_and_persistence_with_route_like_prefixes() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path().join("config.json"));
+        let mut route = ProviderProfile::new("Vendor");
+        route.id = "vendor".into();
+        route.base_url = "https://vendor.example/v1".into();
+        let config = CodeyConfig {
+            local_router_enabled: false,
+            active_profile_id: route.id.clone(),
+            profiles: vec![route],
+            selected_models_by_provider: BTreeMap::from([("vendor".into(), vec!["Model".into()])]),
+            model_alias_history: BTreeMap::from([(
+                "deleted/vendor/model".into(),
+                "Vendor/Model".into(),
+            )]),
+            ..CodeyConfig::default()
+        };
+        for model in [
+            "Vendor/Model",
+            "Vendor/Other",
+            "deleted/Vendor/Model",
+            "unknown/model",
+        ] {
+            let mut native = config.clone();
+            native.subagent_model = model.into();
+            native.subagent_roles = uniform_subagent_roles(model, "high");
+            let normalized = native.normalize();
+            assert_eq!(normalized.subagent_model, model);
+            store.save(&normalized).unwrap();
+            let restored = store.load().unwrap();
+            assert_eq!(restored.subagent_model, model);
+            assert!(
+                restored
+                    .subagent_roles
+                    .values()
+                    .all(|role| role.model == model)
+            );
+        }
     }
 
     #[test]
