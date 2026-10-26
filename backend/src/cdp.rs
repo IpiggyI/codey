@@ -353,9 +353,13 @@ pub fn prepare_injection_scripts(
               if (!usage || typeof usage.snapshot !== "function") return "";
               const snapshot = usage.snapshot();
               if (snapshot.ready !== true) return "";
-              return snapshot.usageVisible === true
-                ? "输入栏用量芯片已就绪"
-                : { effective: false, inactive: true, detail: "等待输入栏" };
+              if (snapshot.usageVisible === true) return "输入栏用量芯片已就绪";
+              if (snapshot.composerFound === false) {
+                return { effective: false, inactive: true, detail: "等待输入栏" };
+              }
+              return snapshot.subscribed === true
+                ? { effective: false, inactive: true, detail: "当前对话暂无用量" }
+                : { effective: false, detail: "尚未订阅对话用量" };
             })()"#
                 .to_string(),
             Feature,

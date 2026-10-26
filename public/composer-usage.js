@@ -73,14 +73,13 @@
   let storedUsageRead = "";
   let cacheTimer = 0;
 
-  const publishInjectionStatus = (detail) => {
+  const publishInjectionStatus = (status, detail, error = null) => {
     const entry = window.__codeyInjectionStatus?.[injectionStatusId];
     if (!entry || entry.status === "pending") return;
-    const status = ready ? "effective" : "inactive";
-    if (entry.status === status && entry.detail === detail && !entry.error) return;
+    if (entry.status === status && entry.detail === detail && entry.error === error) return;
     entry.status = status;
     entry.detail = detail;
-    entry.error = null;
+    entry.error = error;
     if (
       typeof window.dispatchEvent === "function"
       && typeof window.CustomEvent === "function"
@@ -1352,15 +1351,22 @@
           await window.__codeyLoadSessionTools();
         }
         let controller = null;
+        let controllerError = "";
         if (typeof window.__codeyLoadCodexSessionController === "function") {
           try {
             controller = await window.__codeyLoadCodexSessionController();
-          } catch {
+          } catch (error) {
             controller = null;
+            controllerError = String(error?.message || error || "");
           }
         }
         const { managerTargets, targets } = collectPendingNotificationTargets(controller);
         await bindNotificationTargets(targets);
+        if (!boundNotificationTargets.size) {
+          usageError = controllerError
+            ? `未取得 Codex 会话管理器：${controllerError}`
+            : "未找到对话用量通知入口";
+        }
         if (managerTargets.some((target) => boundNotificationTargets.has(target))) {
           sessionManagerBound = true;
         }
@@ -1371,7 +1377,7 @@
     })().catch(() => {
       usageError = "订阅对话用量失败";
       notificationSubscribePromise = null;
-    });
+    }).finally(publishUsageStatus);
     return notificationSubscribePromise;
   };
 
@@ -1389,11 +1395,26 @@
     return true;
   };
 
+  // Effective means notifications are subscribed. A new conversation without
+  // usage stays effective with the chip hidden; a failed discovery names its cause.
+  const publishUsageStatus = () => {
+    if (disposed || !ready) return;
+    if (!inputElement) {
+      publishInjectionStatus("executed", "等待输入栏");
+    } else if (boundNotificationTargets.size) {
+      publishInjectionStatus("effective", "输入栏用量芯片已就绪");
+    } else if (usageError) {
+      publishInjectionStatus("failed", "输入栏用量未订阅", usageError);
+    } else {
+      publishInjectionStatus("executed", "正在订阅对话用量");
+    }
+  };
+
   const scan = () => {
     if (disposed) return;
     ready = true;
-    const mounted = updateChipPlacement();
-    publishInjectionStatus(mounted ? "输入栏用量芯片已就绪" : "等待输入栏");
+    updateChipPlacement();
+    publishUsageStatus();
   };
 
   const scheduleScan = () => {
@@ -1451,6 +1472,7 @@
       ready,
       providerId,
       usageVisible: usageRoot?.style.display === "inline-flex",
+      composerFound: Boolean(inputElement),
       subscribed: boundNotificationTargets.size > 0,
       usageError,
       usageLabel: usageRoot?.querySelector?.("[data-codey-usage-label]")?.textContent

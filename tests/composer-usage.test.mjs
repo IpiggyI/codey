@@ -439,6 +439,30 @@ test("subscribes to the callable RPC manager and releases its lease", async () =
   assert.equal(env.snapshot().subscribed, false);
 });
 
+test("injection status is effective only after the usage subscription exists", async () => {
+  const rpc = rpcManager();
+  const env = createEnvironment({ loadSessionController: async () => ({ kind: "manager", manager: rpc.manager }) });
+  await flush();
+  const entry = env.window.__codeyInjectionStatus["composer-usage"];
+  assert.equal(rpc.subscriptions.length, 1);
+  assert.equal(entry.status, "effective");
+  assert.equal(entry.detail, "输入栏用量芯片已就绪");
+  assert.equal(entry.error, null);
+});
+
+test("a failed manager discovery reports why usage is not subscribed", async () => {
+  const env = createEnvironment({
+    loadSessionController: async () => { throw new Error("当前 Codex 暂不支持会话管理，请稍后重试"); },
+  });
+  await flush();
+  const entry = env.window.__codeyInjectionStatus["composer-usage"];
+  assert.equal(env.snapshot().subscribed, false);
+  assert.equal(env.snapshot().composerFound, true);
+  assert.equal(entry.status, "failed");
+  assert.equal(entry.detail, "输入栏用量未订阅");
+  assert.equal(entry.error, "未取得 Codex 会话管理器：当前 Codex 暂不支持会话管理，请稍后重试");
+});
+
 test("reads history without a new notification and refreshes on thread re-entry", async () => {
   const reads = [];
   const rpc = rpcManager((id) => {
