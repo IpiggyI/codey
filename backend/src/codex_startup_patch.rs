@@ -449,14 +449,14 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
                 use std::os::windows::process::CommandExt;
                 relay.creation_flags(codey_runtime_core::windows_create_no_window());
             }
-            let mut relay = relay.spawn().context("启动 Codex 本地路由请求转发失败")?;
+            let relay =
+                input_router.insert(relay.spawn().context("启动 Codex 本地路由请求转发失败")?);
             command.stdin(
                 relay
                     .stdout
                     .take()
                     .context("Codex 本地路由请求管道不可用")?,
             );
-            input_router = Some(relay);
         }
         #[cfg(target_os = "macos")]
         {
@@ -493,9 +493,8 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
     let mut child = match launch {
         Ok(child) => child,
         Err(error) => {
-            if let Some(mut relay) = input_router {
-                let _ = relay.kill();
-                let _ = relay.wait();
+            if let Some(relay) = input_router.as_mut() {
+                terminate_cli_child(relay, "输入转发器");
             }
             if let Some(readiness) = readiness {
                 // 校验或创建进程失败必须显式回传，避免被误报成握手超时。
@@ -514,14 +513,54 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
         readiness.executed();
     }
     let status = child.wait();
-    if let Some(mut relay) = input_router {
-        let _ = relay.kill();
-        let _ = relay.wait();
+    if status.is_err() {
+        terminate_cli_child(&mut child, "Codex CLI");
+    }
+    // CLI 已结束，不再需要输入转发器。
+    if let Some(relay) = input_router.as_mut() {
+        terminate_cli_child(relay, "输入转发器");
     }
     let status =
         status.with_context(|| format!("等待 Codex CLI 退出失败：{}", target.display()))?;
     let _ = codey_runtime_core::diagnostic_log::flush_diagnostic_log();
     std::process::exit(status.code().unwrap_or(1));
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn wait_for_cli_child_exit(
+    child: &mut std::process::Child,
+    timeout: std::time::Duration,
+) -> std::io::Result<bool> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(true),
+            Ok(None) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(false);
+        }
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(20)));
+    }
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn terminate_cli_child(child: &mut std::process::Child, role: &str) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    let termination = child.kill();
+    // Windows 的终止请求是异步的；回收同样有时限，避免清理失败阻塞包装器退出。
+    match wait_for_cli_child_exit(child, std::time::Duration::from_secs(1)) {
+        Ok(true) => {}
+        result => eprintln!(
+            "Codey 回收 {role} 失败（PID {}）：终止结果 {termination:?}，等待结果 {result:?}",
+            child.id()
+        ),
+    }
 }
 
 #[cfg(any(windows, target_os = "macos", test))]
@@ -1426,6 +1465,40 @@ mod tests {
                 .status,
             CliWrapperMarkerStatus::Launching
         );
+    }
+
+    #[test]
+    fn cli_helper_process_fixture() {
+        if std::env::var_os("CODEY_TEST_CLI_HELPER_RELAY").is_none() {
+            return;
+        }
+        // 父进程不关闭 stdin 时一直阻塞，模拟仍在等待输入的转发器。
+        std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink()).unwrap();
+        std::process::exit(0);
+    }
+
+    #[test]
+    fn cli_wrapper_reaps_an_input_relay_still_waiting_for_input() {
+        let mut relay = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "codex_startup_patch::tests::cli_helper_process_fixture",
+                "--nocapture",
+            ])
+            .env("CODEY_TEST_CLI_HELPER_RELAY", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(
+            !wait_for_cli_child_exit(&mut relay, std::time::Duration::from_millis(200)).unwrap()
+        );
+
+        let started = std::time::Instant::now();
+        terminate_cli_child(&mut relay, "输入转发器");
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        assert!(relay.try_wait().unwrap().is_some());
     }
 
     #[test]
