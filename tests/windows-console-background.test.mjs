@@ -67,7 +67,7 @@ test("Windows source contract: fatal startup failures remain visible", async () 
 });
 
 test("Windows source contract: background helpers request no-window execution", async () => {
-  const [launcherPlatform, processCleanup, runtimeAppPaths] = await Promise.all([
+  const [launcherPlatform, processCleanup, runtimeAppPaths, runtimeWindowsPackages] = await Promise.all([
     readFile(
       new URL("../backend/src/launcher/platform.rs", import.meta.url),
       "utf8",
@@ -77,6 +77,13 @@ test("Windows source contract: background helpers request no-window execution", 
     readFile(
       new URL(
         "../vendor/CodeyRuntime/crates/codey-runtime-core/src/app_paths.rs",
+        import.meta.url,
+      ),
+      "utf8",
+    ).then(normalizeLineEndings),
+    readFile(
+      new URL(
+        "../vendor/CodeyRuntime/crates/codey-runtime-core/src/app_paths/windows_packages.rs",
         import.meta.url,
       ),
       "utf8",
@@ -92,12 +99,17 @@ test("Windows source contract: background helpers request no-window execution", 
     processCleanup,
     /codey_runtime_core::windows_terminate_process_if_matches/,
   );
+  assert.match(runtimeAppPaths, /packages: windows_packages::NativeWindowsPackageSnapshot/);
   assert.match(
     runtimeAppPaths,
-    /fn registered_codex_packages\(\)[\s\S]*?registered_windows_package_values\(/,
+    /fn registered_codex_app_dirs\(\)[\s\S]*?\.packages\s*\.codex_packages\(\)/,
   );
-  const nativePackages = runtimeAppPaths.match(
-    /#\[cfg\(windows\)\]\s*fn registered_windows_package_values<T>\([\s\S]*?\n\}/,
+  assert.match(
+    runtimeWindowsPackages,
+    /impl Default for NativeWindowsPackageSnapshot \{[\s\S]*?Self::new\(enumerate_registered_windows_packages\)/,
+  );
+  const nativePackages = runtimeWindowsPackages.match(
+    /#\[cfg\(windows\)\]\s*fn enumerate_registered_windows_packages\(\)[\s\S]*?\n\}/,
   )?.[0];
   assert.ok(nativePackages, "Windows 包发现应使用原生枚举");
   assert.match(nativePackages, /PackageManager::new\(\)/);
@@ -105,10 +117,12 @@ test("Windows source contract: background helpers request no-window execution", 
   assert.match(nativePackages, /packages\.First\(\)\.context\([^\n]+\)\?/);
   assert.match(nativePackages, /\.MoveNext\(\)\s*\.context\([^\n]+\)\?/);
   assert.doesNotMatch(nativePackages, /Command::new|CreateProcess|ShellExecute/);
-  assert.doesNotMatch(
-    runtimeAppPaths,
-    /Command::new\(\s*"(?:powershell|pwsh|cmd)(?:\.exe)?"/i,
-  );
+  for (const source of [runtimeAppPaths, runtimeWindowsPackages]) {
+    assert.doesNotMatch(
+      source,
+      /Command::new\(\s*"(?:powershell|pwsh|cmd)(?:\.exe)?"/i,
+    );
+  }
 });
 
 test("Windows source contract: packaged Codex exit uses an OS process wait", async () => {
@@ -130,13 +144,14 @@ test("Windows source contract: packaged Codex exit uses an OS process wait", asy
 
   assert.match(
     watcher,
-    /codey_runtime_core::launcher::wait_for_windows_process_id\(process_id\)/,
+    /codey_runtime_core::launcher::wait_for_windows_process_exit\(process_id\)/,
   );
   assert.doesNotMatch(watcher, /missing_streak/);
   assert.match(
     coreLauncher,
-    /pub async fn wait_for_windows_process_id\(process_id: u32\)/,
+    /pub async fn wait_for_windows_process_exit\(process_id: u32\) -> anyhow::Result<Option<u32>>/,
   );
+  assert.match(watcher, /Ok\(code\) => \{\s*exit_code = code;\s*true/);
   assert.match(coreLauncher, /WaitForSingleObject\(HANDLE\(handle\.as_raw_handle\(\)\), 0\)/);
   assert.match(coreLauncher, /OwnedHandle/);
   assert.doesNotMatch(coreLauncher, /WaitForSingleObject\([^\n]*INFINITE\)/);
