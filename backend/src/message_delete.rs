@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
@@ -896,7 +896,8 @@ fn delete_turns_from_rollout(
     selected: &HashSet<String>,
 ) -> Result<HashSet<String>> {
     let canonical_rollout = canonical_rollout_path(home, rollout_path)?;
-
+    recover_rollout_write(&canonical_rollout)?;
+    let metadata = fs::metadata(&canonical_rollout)?;
     let original = fs::read_to_string(&canonical_rollout)
         .with_context(|| format!("读取会话记录失败：{}", canonical_rollout.display()))?;
     let mut output = String::with_capacity(original.len());
@@ -933,8 +934,13 @@ fn delete_turns_from_rollout(
         return Ok(found);
     }
 
-    rewrite_in_place(&canonical_rollout, output.as_bytes())
-        .with_context(|| format!("写回会话记录失败：{}", canonical_rollout.display()))?;
+    rewrite_if_unchanged(
+        &canonical_rollout,
+        &metadata,
+        original.as_bytes(),
+        output.as_bytes(),
+    )
+    .with_context(|| format!("写回会话记录失败：{}", canonical_rollout.display()))?;
     Ok(found)
 }
 
@@ -1028,14 +1034,178 @@ fn turn_boundary_id(line: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn rewrite_in_place(destination: &Path, contents: &[u8]) -> std::io::Result<()> {
-    // Codex keeps rollout files open in append mode. Replacing the path would
-    // leave that writer attached to an unlinked inode, so preserve the file
-    // identity while updating its contents.
-    let mut file = fs::OpenOptions::new().write(true).open(destination)?;
+fn same_rollout_metadata(original: &fs::Metadata, current: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if original.dev() != current.dev() || original.ino() != current.ino() {
+            return false;
+        }
+    }
+    current.is_file()
+        && original.len() == current.len()
+        && original.modified().ok() == current.modified().ok()
+        && original.created().ok() == current.created().ok()
+}
+
+fn rewrite_if_unchanged(
+    destination: &Path,
+    metadata: &fs::Metadata,
+    original: &[u8],
+    contents: &[u8],
+) -> Result<()> {
+    let temporary = crate::fs_util::unique_temp_path(destination);
+    let recovery_path = rollout_recovery_path(destination);
+    anyhow::ensure!(
+        !recovery_path.exists(),
+        "会话存在待恢复写入，请先恢复后再删除"
+    );
+    let result = (|| -> Result<()> {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut output = options.open(&temporary)?;
+        serde_json::to_writer(
+            &mut output,
+            &RolloutRecovery {
+                version: 1,
+                restoring: false,
+                identity: rollout_identity(metadata),
+                original: std::str::from_utf8(original)?,
+                replacement: std::str::from_utf8(contents)?,
+            },
+        )?;
+        output.sync_all()?;
+        drop(output);
+        let mut current = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(destination)?;
+        current.try_lock_exclusive()?;
+        let mut buffer = [0; 64 * 1024];
+        let mut offset = 0;
+        loop {
+            let count = current.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            anyhow::ensure!(
+                original.get(offset..offset + count) == Some(&buffer[..count]),
+                "会话记录已变化，请重新加载后再删除"
+            );
+            offset += count;
+        }
+        anyhow::ensure!(
+            offset == original.len()
+                && same_rollout_metadata(metadata, &current.metadata()?)
+                && same_rollout_metadata(metadata, &fs::symlink_metadata(destination)?),
+            "会话记录已变化，请重新加载后再删除"
+        );
+        crate::fs_util::persist_temp_file(&temporary, &recovery_path)?;
+        if let Err(error) = overwrite_rollout(&mut current, contents) {
+            drop(current);
+            return match recover_rollout_write(destination) {
+                Ok(()) => Err(error.into()),
+                Err(recovery_error) => Err(anyhow::anyhow!(
+                    "会话写入失败：{error}；恢复失败：{recovery_error:#}；原始数据保存在 {}",
+                    recovery_path.display()
+                )),
+            };
+        }
+        fs::remove_file(&recovery_path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+#[derive(Serialize, Deserialize)]
+struct RolloutRecovery<Text> {
+    version: u32,
+    #[serde(default)]
+    restoring: bool,
+    identity: String,
+    original: Text,
+    replacement: Text,
+}
+
+fn rollout_identity(metadata: &fs::Metadata) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        format!("{}:{}", metadata.dev(), metadata.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        format!("{:?}", metadata.created().ok())
+    }
+}
+
+fn rollout_recovery_path(destination: &Path) -> PathBuf {
+    let name = destination
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
+    destination.with_file_name(format!(".{name}.codey-delete-recovery.json"))
+}
+
+fn overwrite_rollout(file: &mut fs::File, contents: &[u8]) -> std::io::Result<()> {
+    file.seek(SeekFrom::Start(0))?;
     file.set_len(0)?;
     file.write_all(contents)?;
     file.sync_all()
+}
+
+fn recover_rollout_write(destination: &Path) -> Result<()> {
+    let recovery_path = rollout_recovery_path(destination);
+    let recovery = match fs::File::open(&recovery_path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut recovery: RolloutRecovery<String> =
+        serde_json::from_reader(std::io::BufReader::new(recovery))?;
+    anyhow::ensure!(recovery.version == 1, "会话恢复记录版本无效");
+    let mut file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(destination)?;
+    file.try_lock_exclusive()?;
+    anyhow::ensure!(
+        rollout_identity(&file.metadata()?) == recovery.identity,
+        "会话文件身份已变化，保留恢复记录以供检查"
+    );
+    let mut current = Vec::new();
+    (&mut file)
+        .take(recovery.original.len().max(recovery.replacement.len()) as u64 + 1)
+        .read_to_end(&mut current)?;
+    if recovery.restoring {
+        if !current.starts_with(recovery.original.as_bytes()) {
+            anyhow::ensure!(
+                recovery.original.as_bytes().starts_with(&current),
+                "会话恢复期间内容已变化，保留恢复记录以供检查"
+            );
+            overwrite_rollout(&mut file, recovery.original.as_bytes())?;
+        }
+    } else if current != recovery.original.as_bytes()
+        && !current.starts_with(recovery.replacement.as_bytes())
+    {
+        anyhow::ensure!(
+            recovery.replacement.as_bytes().starts_with(&current),
+            "会话内容已变化，保留恢复记录以供检查"
+        );
+        recovery.restoring = true;
+        crate::fs_util::atomic_write_private(&recovery_path, &serde_json::to_vec(&recovery)?)?;
+        overwrite_rollout(&mut file, recovery.original.as_bytes())?;
+    }
+    fs::remove_file(recovery_path)?;
+    Ok(())
 }
 
 fn table_columns(path: &Path, table: &str) -> Result<std::collections::HashSet<String>> {
@@ -2331,6 +2501,95 @@ mod tests {
         let remaining = fs::read_to_string(&rollout).unwrap();
         assert!(!remaining.contains("t1"));
         assert!(remaining.contains("t2"));
+    }
+
+    #[test]
+    fn interrupted_rollout_write_recovers_original_without_losing_completed_appends() {
+        let home = tempdir().unwrap();
+        let path = home.path().join("rollout.jsonl");
+        fs::write(&path, b"original-history").unwrap();
+        let recovery = RolloutRecovery {
+            version: 1,
+            restoring: false,
+            identity: rollout_identity(&fs::metadata(&path).unwrap()),
+            original: "original-history",
+            replacement: "kept-history",
+        };
+        let recovery_path = rollout_recovery_path(&path);
+        for (interrupted, expected) in [
+            ("", "original-history"),
+            ("kept-", "original-history"),
+            ("kept-history\nnew-turn", "kept-history\nnew-turn"),
+        ] {
+            fs::write(&recovery_path, serde_json::to_vec(&recovery).unwrap()).unwrap();
+            fs::write(&path, interrupted).unwrap();
+            recover_rollout_write(&path).unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), expected);
+            assert!(!recovery_path.exists());
+        }
+        fs::write(&recovery_path, serde_json::to_vec(&recovery).unwrap()).unwrap();
+        fs::write(&path, "unrelated-change").unwrap();
+        assert!(recover_rollout_write(&path).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "unrelated-change");
+        assert!(recovery_path.exists());
+    }
+
+    #[test]
+    fn interrupted_recovery_handles_every_prefix_and_preserves_completed_appends() {
+        let home = tempdir().unwrap();
+        let path = home.path().join("rollout.jsonl");
+        let original = "kept-history\nremoved-turn\n";
+        fs::write(&path, original).unwrap();
+        let recovery = RolloutRecovery {
+            version: 1,
+            restoring: true,
+            identity: rollout_identity(&fs::metadata(&path).unwrap()),
+            original,
+            replacement: "kept-history\n",
+        };
+        let recovery_path = rollout_recovery_path(&path);
+        for prefix_length in 0..=original.len() {
+            fs::write(&recovery_path, serde_json::to_vec(&recovery).unwrap()).unwrap();
+            fs::write(&path, &original[..prefix_length]).unwrap();
+            recover_rollout_write(&path).unwrap();
+            assert_eq!(fs::read_to_string(&path).unwrap(), original);
+            assert!(!recovery_path.exists());
+        }
+        fs::write(&recovery_path, serde_json::to_vec(&recovery).unwrap()).unwrap();
+        let appended = format!("{original}new-turn\n");
+        fs::write(&path, &appended).unwrap();
+        recover_rollout_write(&path).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), appended);
+    }
+
+    #[test]
+    fn rewrite_rejects_changed_history_and_preserves_all_records() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("rollout.jsonl");
+        fs::write(&path, b"keep\nremove\n").unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"new-record\n")
+            .unwrap();
+        assert!(rewrite_if_unchanged(&path, &metadata, b"keep\nremove\n", b"keep\n").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"keep\nremove\nnew-record\n");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn rewrite_commits_complete_history_and_rejects_same_length_changes() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("rollout.jsonl");
+        fs::write(&path, b"original").unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        assert!(rewrite_if_unchanged(&path, &metadata, b"different", b"new").is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"original");
+        rewrite_if_unchanged(&path, &metadata, b"original", b"new").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
     }
 
     #[test]
