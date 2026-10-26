@@ -13,7 +13,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::error_log;
 
+#[cfg(any(windows, test))]
+mod app_quit;
 mod service_tier;
+#[cfg(windows)]
+pub(crate) use app_quit::request_app_quit;
 
 const SETTINGS_OVERLAY_LOAD_PATH: &str = "/internal/codey/settings-overlay/load";
 const SESSION_TOOLS_LOAD_PATH: &str = "/internal/codey/session-tools/load";
