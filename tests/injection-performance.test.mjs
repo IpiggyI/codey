@@ -160,9 +160,11 @@ test("renderer core loads session tools after idle time or sidebar use", async (
   assert.match(sessionObserverBody, /addPendingScanRoot\(threadRow\)/);
   assert.match(sessionObserverBody, /syncConversationRichTooltipOpen\(target\)/);
   assert.doesNotMatch(sessionObserverBody, /syncSidebarThreadTimeState\(threadRow\)/);
+  // getSessionId() reads layout; it must not run synchronously per mutation batch.
+  assert.doesNotMatch(sessionObserverBody, /getSessionId\(\)/);
   assert.match(
     sessionObserverBody,
-    /if \(!completionReconcileSessionId\) void reconcileStaleCompletedTask\(\);/,
+    /if \(!completionReconcileSessionId && !completionReconcileCheckTimer\) \{\s*completionReconcileCheckTimer = window\.setTimeout\(\(\) => \{[\s\S]*?void reconcileStaleCompletedTask\(\);[\s\S]*?\}, completionReconcileMutationDelayMs\)/,
   );
   assert.equal(sessionObserverBody.match(/reconcileStaleCompletedTask/g)?.length, 1);
   assert.match(sessionTools, /mutationDispatcher\.subscribe\(\s*handleSessionToolMutations/);

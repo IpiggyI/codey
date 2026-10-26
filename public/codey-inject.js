@@ -75,6 +75,7 @@
   let completionReconcileInFlight = false;
   let completionNextReconcileAt = 0;
   let completionReconcileSessionId = "";
+  let completionReconcileCheckTimer = 0;
   let sidebarActionTooltipTimer = 0;
   let sidebarActionTooltipAnchor = null;
   let threadUpdatedAtFetchTimer = 0;
@@ -138,6 +139,9 @@
   // A lost bridge reply must release the in-flight batch before the next refresh.
   const threadTimestampFetchTimeoutMs = 10_000;
   const completedTaskReconcileIntervalMs = 15_000;
+  // getSessionId() reads layout (getClientRects); calling it inside every
+  // mutation batch forced a synchronous reflow per streamed chunk.
+  const completionReconcileMutationDelayMs = 250;
   const threadTimestampBridgePath = "/session/timestamps";
   const maxPendingThreadTimestampRefs = 200;
   const fallbackSessionExportMaxBytes = 64 * 1024 * 1024;
@@ -4369,7 +4373,12 @@
     codeyTimed("codey-inject.sessionToolMutations", mutations?.length ?? 0, () => handleSessionToolMutationsImpl(mutations));
   const handleSessionToolMutationsImpl = (mutations) => {
     if (disposed) return;
-    if (!completionReconcileSessionId) void reconcileStaleCompletedTask();
+    if (!completionReconcileSessionId && !completionReconcileCheckTimer) {
+      completionReconcileCheckTimer = window.setTimeout(() => {
+        completionReconcileCheckTimer = 0;
+        void reconcileStaleCompletedTask();
+      }, completionReconcileMutationDelayMs);
+    }
     for (const mutation of mutations) {
       const target = mutation.target instanceof HTMLElement
         ? mutation.target
@@ -4543,6 +4552,7 @@
     window.clearTimeout(watcherWakeTimer);
     window.clearTimeout(conversationRichTooltipHandoffTimer);
     window.clearTimeout(threadUpdatedAtFetchTimer);
+    window.clearTimeout(completionReconcileCheckTimer);
     window.clearTimeout(sidebarActionTooltipTimer);
     threadRunningRecheckTimers.forEach((id) => window.clearTimeout(id));
     threadRunningRecheckTimers.clear();
