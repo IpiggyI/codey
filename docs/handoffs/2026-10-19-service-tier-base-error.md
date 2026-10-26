@@ -19,11 +19,11 @@ Codey 控制台显示“系统优化：基础异常”，说明文字为“基�
 | 对象 | 已核实的值与范围 |
 | --- | --- |
 | Windows 源码仓库 | `D:/Development/GitHub/codey`，诊断基线为 `26b3155`。 |
-| WSL 交接仓库 | Ubuntu 中的 `/home/hyy/develop/personal/GitHub/codey`，保存前提交为 `1fe5c57bfb0415ea9a0d20ba8bd77eca087819ee`，`package.json` 版本为 `1.3.0`。 |
+| WSL 交接仓库 | Ubuntu 中的本仓库，保存前提交为 `1fe5c57bfb0415ea9a0d20ba8bd77eca087819ee`，`package.json` 版本为 `1.3.0`。 |
 | WSL 原有改动 | 保存前只有未跟踪的 `.scratch/`，本次未读取、修改或清理其内容。 |
 | 两侧源码关系 | 下表五个生产文件在统一 CRLF 与 LF 后文本完全相同。WSL 中仍存在本次失败的匹配规则；这不等于已在 Linux 运行环境复现。 |
-| 已安装 Codey | `D:/Software/Codey/Codey.exe`，文件版本与产品版本均为 `1.3.0`，主进程 PID 为 `51984`。 |
-| 实际 Codex 安装包 | `C:/Program Files/WindowsApps/OpenAI.Codex_26.1013.4894.0_x64__2p2nqsd0c76g0/app/ChatGPT.exe`，主进程 PID 为 `51012`。日志中的应用版本为 `26.1013.40934`，不等同于商店包版本。 |
+| 已安装 Codey | `<安装目录>/Codey.exe`，文件版本与产品版本均为 `1.3.0`。 |
+| 实际 Codex 安装包 | `C:/Program Files/WindowsApps/OpenAI.Codex_26.1013.4894.0_x64__2p2nqsd0c76g0/app/ChatGPT.exe`。日志中的应用版本为 `26.1013.40934`，不等同于商店包版本。 |
 | 实际主页面 | 调试端口为 `9229`，页面为 `app://-/index.html`，目标标识为 `36033A8DC3BF3E16DD08A7F5A08C91FB`。 |
 | 实际模块 | `app://-/assets/app-initial-5851df3f6cb1.js`。 |
 
@@ -54,7 +54,7 @@ async function x$s(e,t,n,r){try{let i=await S$s(e,t);if(r!==void 0)return Xi(nul
 
 该片段用于辨认本次结构。`x$s`、`S$s`、`Xi`、`_wo`、`Mxo` 等名称均不能硬编码为跨版本接口。读取函数也已发生结构变化，不能将修复收敛为替换一个字段名；后续依赖匹配与补偿语义尚未逐项验证。
 
-6. `C:/Users/Shy/.codex-session-delete/codey-errors.log` 在北京时间 `09:25:02` 记录 `service_tier_renderer` 检查失败；`09:55:21` 与 `11:02:47` 记录 `injection_script_failed`，失败项均为 `service-tier`，目标页面与实时读取一致。日志中另有 CLI 包装器握手超时，不能用该独立错误替代本次已验证的直接原因。
+6. `%USERPROFILE%/.codex-session-delete/codey-errors.log` 在北京时间 `09:25:02` 记录 `service_tier_renderer` 检查失败；`09:55:21` 与 `11:02:47` 记录 `injection_script_failed`，失败项均为 `service-tier`，目标页面与实时读取一致。日志中另有 CLI 包装器握手超时，不能用该独立错误替代本次已验证的直接原因。
 
 ## 源码入口
 
