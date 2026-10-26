@@ -1158,6 +1158,11 @@ impl StartupStageTimings {
         self.previous = now;
     }
 
+    /// Records a branch that ran concurrently inside the current stage.
+    fn branch(&mut self, stage: &'static str, elapsed: std::time::Duration) {
+        self.stages.push((stage, elapsed.as_millis() as u64));
+    }
+
     fn report(&self) {
         let mut detail = serde_json::Map::new();
         for (stage, millis) in &self.stages {
@@ -1216,21 +1221,36 @@ async fn prepare_startup_storage(
     guards: InitialStorageGuards,
     trace_log_write_protection_active: &AtomicBool,
     crashpad_pending_stats: &CrashpadPendingStatsHandle,
+    stage_timings: &mut StartupStageTimings,
 ) -> Result<(StartupStorageState, Option<StartupModelCatalog>)> {
+    let started = Instant::now();
+    let mut stop_codex_done = None;
+    let mut session_maintenance_done = None;
+    let mut model_catalog_done = None;
+    let mut storage_guards_done = None;
     let preparation = async {
         let app_dir = resolve_configured_codex_app_dir(config).await?;
         // Session repair must never race a live Codex writer. Stopping the old
         // runtime first also gives SQLite and rollout buffers a chance to flush
         // before any permanent maintenance is applied.
         prepare_codex_for_launch(&app_dir).await?;
+        stop_codex_done = Some(started.elapsed());
 
         // Keep each task's saved provider. Historical session ownership is left
         // unchanged. The catalog touches separate files, so prepare it alongside
         // session maintenance after Codex has stopped.
-        let (session_maintenance, startup_catalog) =
-            tokio::join!(run_startup_session_maintenance(home), async {
-                prepare_startup_model_catalog(config, home).await.map(Some)
-            });
+        let (session_maintenance, startup_catalog) = tokio::join!(
+            async {
+                let result = run_startup_session_maintenance(home).await;
+                session_maintenance_done = Some(started.elapsed());
+                result
+            },
+            async {
+                let result = prepare_startup_model_catalog(config, home).await.map(Some);
+                model_catalog_done = Some(started.elapsed());
+                result
+            }
+        );
         Ok::<_, anyhow::Error>((
             StartupStorageState {
                 app_dir,
@@ -1239,17 +1259,33 @@ async fn prepare_startup_storage(
             startup_catalog?,
         ))
     };
-    let storage_guards = await_initial_storage_guards(
-        guards.trace,
-        config.disable_trace_log_writes,
-        trace_log_write_protection_active,
-        guards.crashpad,
-        config.protect_crashpad_pending,
-        crashpad_pending_stats,
-    );
+    let storage_guards = async {
+        let result = await_initial_storage_guards(
+            guards.trace,
+            config.disable_trace_log_writes,
+            trace_log_write_protection_active,
+            guards.crashpad,
+            config.protect_crashpad_pending,
+            crashpad_pending_stats,
+        )
+        .await;
+        storage_guards_done = Some(started.elapsed());
+        result
+    };
     // A failed preparation must still finish the already-started blocking
     // guards and publish their status before the caller can retry or exit.
     let (preparation, storage_guards) = tokio::join!(preparation, storage_guards);
+    // Offsets from the stage start: the branches overlap.
+    for (stage, done) in [
+        ("storage.stopCodexDoneMs", stop_codex_done),
+        ("storage.sessionMaintenanceDoneMs", session_maintenance_done),
+        ("storage.modelCatalogDoneMs", model_catalog_done),
+        ("storage.guardsDoneMs", storage_guards_done),
+    ] {
+        if let Some(done) = done {
+            stage_timings.branch(stage, done);
+        }
+    }
     let prepared = preparation?;
     storage_guards?;
     Ok(prepared)
@@ -1675,6 +1711,7 @@ impl CodeyRuntime {
             initial_storage_guards,
             trace_log_write_protection_active,
             &crashpad_pending_stats,
+            &mut stage_timings,
         )
         .await?;
         stage_timings.mark("storageAndCatalogMs");
