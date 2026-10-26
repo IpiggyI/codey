@@ -450,7 +450,7 @@ test("injection status is effective only after the usage subscription exists", a
   assert.equal(entry.error, null);
 });
 
-test("a failed manager discovery reports why usage is not subscribed", async () => {
+test("a manager discovery failure is reported as failed only after it persists", async () => {
   const env = createEnvironment({
     loadSessionController: async () => { throw new Error("当前 Codex 暂不支持会话管理，请稍后重试"); },
   });
@@ -458,6 +458,12 @@ test("a failed manager discovery reports why usage is not subscribed", async () 
   const entry = env.window.__codeyInjectionStatus["composer-usage"];
   assert.equal(env.snapshot().subscribed, false);
   assert.equal(env.snapshot().composerFound, true);
+  // Codex may still be hydrating; a startup status read must not log an error.
+  assert.equal(entry.status, "executed");
+  assert.equal(entry.detail, "正在订阅对话用量（未取得 Codex 会话管理器：当前 Codex 暂不支持会话管理，请稍后重试）");
+  assert.equal(entry.error, null);
+  env.advanceMs(30_000);
+  await flush();
   assert.equal(entry.status, "failed");
   assert.equal(entry.detail, "输入栏用量未订阅");
   assert.equal(entry.error, "未取得 Codex 会话管理器：当前 Codex 暂不支持会话管理，请稍后重试");

@@ -65,6 +65,7 @@
   let disposed = false;
   let usageSelection = null;
   let usageError = null;
+  let subscribeFailingSince = 0;
   let cacheValidMinutes = cacheValidMinutesDefault;
   // Per thread: { status: "ok", at, request } from the rollout's latest model
   // request, or { status: "unknown", reason } when it cannot be read or matched.
@@ -1362,10 +1363,13 @@
         }
         const { managerTargets, targets } = collectPendingNotificationTargets(controller);
         await bindNotificationTargets(targets);
-        if (!boundNotificationTargets.size) {
+        if (boundNotificationTargets.size) {
+          subscribeFailingSince = 0;
+        } else {
           usageError = controllerError
             ? `未取得 Codex 会话管理器：${controllerError}`
             : "未找到对话用量通知入口";
+          subscribeFailingSince ||= Date.now();
         }
         if (managerTargets.some((target) => boundNotificationTargets.has(target))) {
           sessionManagerBound = true;
@@ -1395,16 +1399,21 @@
     return true;
   };
 
-  // Effective means notifications are subscribed. A new conversation without
-  // usage stays effective with the chip hidden; a failed discovery names its cause.
+  // Effective means notifications are subscribed; the status probe reports a
+  // subscribed conversation without usage as inactive. Discovery can fail until
+  // Codex hydrates, so only a failure lasting this long is reported as failed.
+  const subscribeFailureGraceMs = 30_000;
   const publishUsageStatus = () => {
     if (disposed || !ready) return;
     if (!inputElement) {
       publishInjectionStatus("executed", "等待输入栏");
     } else if (boundNotificationTargets.size) {
       publishInjectionStatus("effective", "输入栏用量芯片已就绪");
-    } else if (usageError) {
+    } else if (usageError && subscribeFailingSince
+      && Date.now() - subscribeFailingSince >= subscribeFailureGraceMs) {
       publishInjectionStatus("failed", "输入栏用量未订阅", usageError);
+    } else if (usageError) {
+      publishInjectionStatus("executed", `正在订阅对话用量（${usageError}）`);
     } else {
       publishInjectionStatus("executed", "正在订阅对话用量");
     }
