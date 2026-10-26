@@ -170,6 +170,7 @@ impl Drop for RestartInProgressGuard {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppShutdownReason {
     CodexExited,
+    RuntimeRestartFailed,
 }
 
 /// An unreadable config falls back to defaults for this launch. The broken
