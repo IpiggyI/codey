@@ -560,6 +560,60 @@ test("plugin bridge reports effective only after the runtime method is patched",
   assert.equal(events[0].detail.status, "effective");
 });
 
+test("plugin bridge does not report a frozen native bridge as patched", async () => {
+  const source = await readSource("public/plugin-marketplace-fix.js");
+  const events = [];
+  let retries = 0;
+  const native = () => Promise.resolve({ status: "ok" });
+  const window = {
+    __codeyInjectionStatus: {
+      "plugin-marketplace-compatibility": { status: "pending", detail: null, error: null },
+    },
+    clearTimeout() {},
+    dispatchEvent(event) { events.push(event); },
+    electronBridge: Object.freeze({ sendMessageFromView: native }),
+    setTimeout() { retries += 1; return 1; },
+  };
+  window.window = window;
+  vm.runInNewContext(source, {
+    CustomEvent: class {
+      constructor(type, options = {}) {
+        this.type = type;
+        this.detail = options.detail;
+      }
+    },
+    console,
+    window,
+  });
+  const status = window.__codeyInjectionStatus["plugin-marketplace-compatibility"];
+  assert.equal(window.electronBridge.sendMessageFromView, native);
+  assert.equal(status.status, "inactive");
+  assert.equal(status.detail, "Codex 插件桥接不可替换，桥接兼容未生效");
+  assert.equal(events.at(-1).detail.status, "inactive");
+  assert.equal(retries, 0, "a frozen bridge is not retried");
+});
+
+test("local plugins are merged only into plugin lists, not other nested arrays", async () => {
+  const source = await readSource("public/plugin-marketplace-fix.js");
+  const window = { clearTimeout() {}, dispatchEvent() {}, setTimeout() { return 1; } };
+  window.window = window;
+  vm.runInNewContext(source, { CustomEvent: class {}, console, window });
+  window.__codeyLocalPlugins = [{ id: "local@codey", name: "local", marketplaceName: "codey" }];
+  const patched = window.__codeyPatchPluginResponse({
+    marketplaces: [{
+      name: "openai-curated",
+      plugins: [{ id: "a@openai-curated", name: "a", interface: { capabilities: ["Read"], screenshots: [] } }],
+    }],
+  });
+  assert.equal(patched.marketplaces.length, 1);
+  const [plugin, local] = patched.marketplaces[0].plugins;
+  assert.equal(JSON.stringify(plugin.interface.capabilities), "[\"Read\"]");
+  assert.equal(plugin.interface.screenshots.length, 0);
+  assert.equal(local.id, "local@codey");
+  const flat = window.__codeyPatchPluginResponse([{ id: "remote", name: "remote", hidden: true }]);
+  assert.equal(flat.some((entry) => entry.id === "local@codey"), true);
+});
+
 test("a stalled local plugin refresh cannot block the native marketplace list", async () => {
   const source = await readSource("public/plugin-marketplace-fix.js");
   let timeoutCallback;

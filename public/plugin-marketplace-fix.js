@@ -63,6 +63,7 @@
     depth = 0,
     seen = new WeakMap(),
     budget = { remaining: 512 },
+    key = null,
   ) => {
     if (!value || typeof value !== "object") return value;
     if (seen.has(value)) return seen.get(value);
@@ -78,6 +79,9 @@
         budget.remaining -= 1;
         current.push(mergePlugins(child, depth + 1, seen, budget));
       }
+      // Only plugin lists receive local entries; string arrays such as
+      // capabilities or screenshots and the marketplace list stay intact.
+      if (depth > 0 && key !== "plugins") return current;
       const existing = new Set(current.filter(pluginLike).map((plugin) => plugin.id || `${plugin.name}@${plugin.marketplaceName || ""}`));
       for (const plugin of window.__codeyLocalPlugins || []) {
         const normalized = normalizePlugin(plugin);
@@ -88,11 +92,11 @@
     }
     const output = normalizePlugin(value);
     seen.set(value, output);
-    for (const [key, child] of Object.entries(output)) {
+    for (const [childKey, child] of Object.entries(output)) {
       if (!child || typeof child !== "object") continue;
       if (budget.remaining <= 0) break;
       budget.remaining -= 1;
-      output[key] = mergePlugins(child, depth + 1, seen, budget);
+      output[childKey] = mergePlugins(child, depth + 1, seen, budget, childKey);
     }
     return output;
   };
@@ -253,19 +257,20 @@
   // __codeyEnsurePluginBridge 会重置计数并重新打开 30s 快速窗口。
   const MAX_SLOW_BRIDGE_RETRIES = 20;
   let bridgeSlowRetries = 0;
-  const markPluginBridgeEffective = () => {
+  const publishPluginBridgeStatus = (status, detail) => {
     const entry = window.__codeyInjectionStatus?.["plugin-marketplace-compatibility"];
     if (!entry || entry.status === "failed") return;
-    const changed = entry.status !== "effective" || entry.detail !== "插件市场桥接已接管";
-    entry.status = "effective";
-    entry.detail = "插件市场桥接已接管";
+    const changed = entry.status !== status || entry.detail !== detail;
+    entry.status = status;
+    entry.detail = detail;
     entry.error = null;
     if (changed) {
       window.dispatchEvent(new CustomEvent("codey-injection-status-changed", {
-        detail: { id: "plugin-marketplace-compatibility", status: "effective" },
+        detail: { id: "plugin-marketplace-compatibility", status },
       }));
     }
   };
+  const markPluginBridgeEffective = () => publishPluginBridgeStatus("effective", "插件市场桥接已接管");
   const patchElectronBridge = () => {
     const electronBridge = window.electronBridge;
     if (!electronBridge || typeof electronBridge.sendMessageFromView !== "function") return false;
@@ -299,8 +304,15 @@
       });
     };
     wrapped.__codeyPatched = true;
-    electronBridge.sendMessageFromView = wrapped;
+    try {
+      electronBridge.sendMessageFromView = wrapped;
+    } catch {}
     window.clearTimeout(bridgeRetryTimer);
+    // A frozen bridge ignores the assignment; retrying cannot replace it.
+    if (electronBridge.sendMessageFromView !== wrapped) {
+      publishPluginBridgeStatus("inactive", "Codex 插件桥接不可替换，桥接兼容未生效");
+      return true;
+    }
     markPluginBridgeEffective();
     return true;
   };
