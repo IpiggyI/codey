@@ -289,6 +289,7 @@ async fn paused_assets_are_fulfilled_or_continued_with_rewrite_statistics() {
                         methods.push(method);
                         return methods;
                     }
+                    SessionCommand::RefreshMainContext => panic!("unexpected context refresh"),
                 }
             }
             panic!("paused request was never released");

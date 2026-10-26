@@ -22,6 +22,9 @@ pub(crate) use app_quit::request_app_quit;
 const SETTINGS_OVERLAY_LOAD_PATH: &str = "/internal/codey/settings-overlay/load";
 const SESSION_TOOLS_LOAD_PATH: &str = "/internal/codey/session-tools/load";
 const CDP_INJECTION_TIMEOUT: Duration = Duration::from_secs(30);
+/// 关闭失效桥接所需的最少剩余时间；不足时直接释放，保留已取得的校验错误。
+const BRIDGE_CLOSE_RESERVED: Duration = Duration::from_secs(3);
+const INJECTION_FINISH_MARGIN: Duration = Duration::from_millis(100);
 const CODEY_BRIDGE_SCRIPT: &str = include_str!("../../dist-overlay/inject/codey-bridge.js");
 const MODEL_WHITELIST_INJECT_SCRIPT: &str =
     include_str!("../../dist-overlay/inject/model-whitelist-inject.js");
@@ -558,10 +561,9 @@ pub async fn retry_inject_with_prefetched_target(
     let mut delay = Duration::from_millis(100);
     let phase = Arc::new(AtomicU8::new(InjectionPhase::DiscoverTargets as u8));
     let mut previous_error = None;
-    let mut previous_detail = None;
     let mut stats = InjectionRetryStats::default();
     let mut retained_bridge = None;
-    let last_error = loop {
+    let (last_error, detail) = loop {
         stats.attempts += 1;
         let attempt_started = tokio::time::Instant::now();
         match tokio::time::timeout_at(
@@ -573,6 +575,7 @@ pub async fn retry_inject_with_prefetched_target(
                 handler.clone(),
                 scripts,
                 &phase,
+                deadline,
             ),
         )
         .await
@@ -585,17 +588,16 @@ pub async fn retry_inject_with_prefetched_target(
                 retained_bridge = retained;
                 let current_phase = InjectionPhase::from_raw(phase.load(Ordering::Acquire));
                 stats.record_failure(current_phase, attempt_started.elapsed());
-                previous_detail = Some(injection_failure_detail(&error));
+                let detail = injection_failure_detail(&error);
                 if tokio::time::Instant::now() + delay > deadline {
-                    stats.report(
-                        "noRetryBudget",
-                        started.elapsed(),
-                        previous_detail.as_deref(),
-                    );
-                    break anyhow::anyhow!(
-                        "Codex CDP bridge 注入失败（阶段：{}；{}）",
-                        current_phase.label(),
-                        safe_injection_error_summary(&error)
+                    stats.report("noRetryBudget", started.elapsed(), Some(&detail));
+                    break (
+                        anyhow::anyhow!(
+                            "Codex CDP bridge 注入失败（阶段：{}；{}）",
+                            current_phase.label(),
+                            safe_injection_error_summary(&error)
+                        ),
+                        detail,
                     );
                 }
                 previous_error = Some(safe_injection_error_summary(&error));
@@ -605,27 +607,32 @@ pub async fn retry_inject_with_prefetched_target(
             Err(_) => {
                 let current_phase = InjectionPhase::from_raw(phase.load(Ordering::Acquire));
                 stats.record_failure(current_phase, attempt_started.elapsed());
-                stats.report(
-                    "deadlineExceeded",
+                let detail = injection_deadline_detail(
+                    current_phase,
                     started.elapsed(),
-                    previous_detail.as_deref(),
+                    attempt_started.elapsed(),
+                    deadline.saturating_duration_since(tokio::time::Instant::now()),
                 );
+                stats.report("deadlineExceeded", started.elapsed(), Some(&detail));
                 let previous_error = previous_error
                     .as_deref()
                     .map(|error| format!("；最近一次失败：{error}"))
                     .unwrap_or_default();
-                break anyhow::anyhow!(
-                    "等待 Codex CDP bridge 注入超时（{} ms，阶段：{}{}）",
-                    CDP_INJECTION_TIMEOUT.as_millis(),
-                    current_phase.label(),
-                    previous_error
+                break (
+                    anyhow::anyhow!(
+                        "等待 Codex CDP bridge 注入超时（{} ms，阶段：{}{}）",
+                        CDP_INJECTION_TIMEOUT.as_millis(),
+                        current_phase.label(),
+                        previous_error
+                    ),
+                    detail,
                 );
             }
         }
     };
     Err(InjectionRetryFailure {
         error: last_error,
-        detail: previous_detail,
+        detail: Some(detail),
         final_phase: InjectionPhase::from_raw(phase.load(Ordering::Acquire)),
         reached_bridge_stage: stats.bridge_failures(),
     })
@@ -682,6 +689,21 @@ impl InjectionRetryStats {
 
 fn injection_failure_detail(error: &anyhow::Error) -> String {
     truncate_chars(&format!("{error:#}"), MAX_INJECTION_DETAIL_CHARS)
+}
+
+fn injection_deadline_detail(
+    phase: InjectionPhase,
+    total: Duration,
+    attempt: Duration,
+    remaining: Duration,
+) -> String {
+    format!(
+        "injection deadline exceeded: phase={}; totalMs={}; attemptMs={}; remainingMs={}",
+        phase.key(),
+        total.as_millis(),
+        attempt.as_millis(),
+        remaining.as_millis(),
+    )
 }
 
 fn summarize_cdp_targets(targets: &[CdpTarget]) -> String {
@@ -780,6 +802,7 @@ async fn run_injection_attempt(
     handler: BridgeHandler,
     scripts: &PreparedInjectionScripts,
     phase: &AtomicU8,
+    deadline: tokio::time::Instant,
 ) -> AttemptOutcome {
     let bridge = match retained.filter(|bridge| !bridge.pump.is_finished()) {
         Some(bridge) => bridge,
@@ -795,7 +818,7 @@ async fn run_injection_attempt(
             }
         }
     };
-    match verify_injection(&bridge, scripts, phase).await {
+    match verify_injection(&bridge, scripts, phase, deadline).await {
         Ok(injection_statuses) => AttemptOutcome::Injected(InjectedTarget {
             websocket_url: bridge.websocket_url,
             pump: bridge.pump,
@@ -808,7 +831,14 @@ async fn run_injection_attempt(
                 || target_health_error_requires_rediscovery(&error)
                 || format!("{error:#}").contains("CDP websocket closed before response");
             if invalid {
-                bridge.pump.close().await;
+                if deadline.saturating_duration_since(tokio::time::Instant::now())
+                    >= BRIDGE_CLOSE_RESERVED
+                {
+                    bridge.pump.close().await;
+                } else {
+                    // 临近整轮截止时直接释放泵，避免关闭握手吞掉已取得的校验错误。
+                    drop(bridge.pump);
+                }
                 AttemptOutcome::Retry {
                     error,
                     retained: None,
@@ -907,11 +937,16 @@ async fn verify_injection(
     bridge: &EstablishedInjection,
     scripts: &PreparedInjectionScripts,
     phase: &AtomicU8,
+    deadline: tokio::time::Instant,
 ) -> Result<Arc<[InjectionScriptStatus]>> {
     phase.store(InjectionPhase::VerifyOverlay as u8, Ordering::Release);
-    ensure_settings_overlay_ready(&bridge.websocket_url)
-        .await
-        .with_context(|| format!("验证 Codex renderer {} 的 Codey 浮层失败", bridge.target_id))?;
+    tokio::time::timeout_at(
+        deadline - INJECTION_FINISH_MARGIN,
+        ensure_settings_overlay_ready(&bridge.websocket_url),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("验证 Codey 浮层超时：剩余注入预算已耗尽"))?
+    .with_context(|| format!("验证 Codex renderer {} 的 Codey 浮层失败", bridge.target_id))?;
     codey_runtime_core::bridge::evaluate_script_with_await_promise_timeout(
         &bridge.websocket_url,
         "window.__codeyServiceTierInstallation",
@@ -1600,6 +1635,19 @@ mod tests {
     }
 
     #[test]
+    fn injection_deadline_detail_names_phase_and_remaining_budget() {
+        let detail = injection_deadline_detail(
+            InjectionPhase::VerifyOverlay,
+            CDP_INJECTION_TIMEOUT,
+            CDP_INJECTION_TIMEOUT,
+            Duration::ZERO,
+        );
+        assert!(detail.contains("phase=verifyOverlay"), "{detail}");
+        assert!(detail.contains("attemptMs=30000"), "{detail}");
+        assert!(detail.contains("remainingMs=0"), "{detail}");
+    }
+
+    #[test]
     fn injection_failure_detail_keeps_the_full_bounded_error_chain() {
         let error = anyhow::anyhow!("inner cause").context("outer context");
         assert_eq!(
@@ -1674,10 +1722,19 @@ mod tests {
             disable_pet: false,
         };
         let phase = AtomicU8::new(InjectionPhase::InstallBridge as u8);
+        let deadline = tokio::time::Instant::now() + CDP_INJECTION_TIMEOUT;
         // Port zero cannot serve target discovery: either attempt reconnecting
         // instead of polling the retained bridge makes this scenario fail.
-        let first =
-            run_injection_attempt(Some(retained), None, 0, handler.clone(), &scripts, &phase).await;
+        let first = run_injection_attempt(
+            Some(retained),
+            None,
+            0,
+            handler.clone(),
+            &scripts,
+            &phase,
+            deadline,
+        )
+        .await;
         let AttemptOutcome::Retry {
             retained: Some(retained),
             ..
@@ -1690,7 +1747,8 @@ mod tests {
             "verifyOverlay"
         );
         let second =
-            run_injection_attempt(Some(retained), None, 0, handler, &scripts, &phase).await;
+            run_injection_attempt(Some(retained), None, 0, handler, &scripts, &phase, deadline)
+                .await;
         let AttemptOutcome::Injected(target) = second else {
             panic!("the next poll should use the same bridge");
         };
