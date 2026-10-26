@@ -10,8 +10,8 @@ use anyhow::{Context, bail};
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Sink, SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tokio::sync::Notify;
-use tokio_tungstenite::connect_async;
+use tokio::sync::{Notify, watch};
+use tokio_tungstenite::connect_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
 
 pub const BRIDGE_BINDING_NAME: &str = "codexSessionDeleteV2";
@@ -33,6 +33,8 @@ pub struct BridgePumpHandle {
     task: Option<tokio::task::JoinHandle<()>>,
     closing: Arc<AtomicBool>,
     shutdown: Arc<Notify>,
+    /// 发送端随泵任务一起释放（含被中止），接收端据此得知泵已结束。
+    finished: watch::Receiver<()>,
 }
 
 impl BridgePumpHandle {
@@ -40,6 +42,12 @@ impl BridgePumpHandle {
         self.task
             .as_ref()
             .is_none_or(tokio::task::JoinHandle::is_finished)
+    }
+
+    /// 消息泵结束时返回，看门狗据此立即重建桥接，不必等下一轮巡检。
+    pub async fn finished(&self) {
+        let mut finished = self.finished.clone();
+        while finished.changed().await.is_ok() {}
     }
 
     pub async fn close(mut self) {
@@ -245,6 +253,31 @@ pub async fn install_bridge(
     handler: BridgeHandler,
     new_document_scripts: &[String],
 ) -> anyhow::Result<BridgePumpHandle> {
+    install_bridge_with_options(
+        websocket_url,
+        binding_name,
+        handler,
+        new_document_scripts,
+        BridgeInstallOptions::default(),
+    )
+    .await
+    .map(|(pump, _)| pump)
+}
+
+#[derive(Default)]
+pub struct BridgeInstallOptions<'a> {
+    /// 装桥后在同一会话上执行的就绪探针，省掉校验阶段的额外连接与会话。探针
+    /// 只作确认：执行失败返回 `None`，不影响已装好的桥接。
+    pub readiness_probe: Option<&'a str>,
+}
+
+pub async fn install_bridge_with_options(
+    websocket_url: &str,
+    binding_name: &str,
+    handler: BridgeHandler,
+    new_document_scripts: &[String],
+    options: BridgeInstallOptions<'_>,
+) -> anyhow::Result<(BridgePumpHandle, Option<Value>)> {
     let socket = connect_cdp_websocket(websocket_url).await?;
     let session_token = format!("bridge-{}", next_message_id());
     let mut session = CdpSession::new(socket)
@@ -258,7 +291,8 @@ pub async fn install_bridge(
     session
         .send_command(3, "Runtime.addBinding", json!({ "name": binding_name }))
         .await?;
-    // Chromium runs this session's new-document scripts only while Page is enabled.
+    // 文档脚本只在启用了 Page 域的会话上随新文档执行；不启用时页面重载后
+    // 桥接不会自动恢复，只能等看门狗重新注入。
     session.send_command(4, "Page.enable", json!({})).await?;
 
     // 重复装桥先注销同一 target 上的旧持久脚本：注册标识没有枚举接口，只能由
@@ -317,24 +351,47 @@ pub async fn install_bridge(
         ensure_runtime_evaluate_succeeded(response)?;
     }
 
+    let probe = match options.readiness_probe {
+        Some(script) => session
+            .send_command(
+                next_message_id(),
+                "Runtime.evaluate",
+                runtime_evaluate_params(script),
+            )
+            .await
+            .and_then(ensure_runtime_evaluate_succeeded)
+            .ok(),
+        None => None,
+    };
+
     let closing = Arc::new(AtomicBool::new(false));
     let shutdown = Arc::new(Notify::new());
     let task_closing = Arc::clone(&closing);
     let task_shutdown = Arc::clone(&shutdown);
+    let task_websocket_url = websocket_url.to_owned();
+    let (finished_tx, finished) = watch::channel(());
     let task = tokio::spawn(async move {
+        let _finished = finished_tx;
         if let Err(error) = run_bridge_pump(session, task_closing, task_shutdown).await {
             let _ = crate::diagnostic_log::append_diagnostic_log(
                 "bridge.pump_failed",
-                json!({ "message": error.to_string() }),
+                json!({
+                    "message": format!("{error:#}"),
+                    "websocketUrl": task_websocket_url,
+                }),
             );
         }
     });
 
-    Ok(BridgePumpHandle {
-        task: Some(task),
-        closing,
-        shutdown,
-    })
+    Ok((
+        BridgePumpHandle {
+            task: Some(task),
+            closing,
+            shutdown,
+            finished,
+        },
+        probe,
+    ))
 }
 
 pub fn runtime_evaluate_params(script: &str) -> Value {
@@ -369,6 +426,25 @@ pub type ConnectedCdpSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 pub async fn connect_cdp_websocket(websocket_url: &str) -> anyhow::Result<ConnectedCdpSocket> {
+    connect_cdp_websocket_with_config(websocket_url, None).await
+}
+
+/// 传输整份渲染资产的连接：Chromium 把每条 CDP 消息作为单个 WebSocket 帧发送，
+/// 十几 MB 的 bundle 经 base64 后会超过默认的 16 MiB 帧上限而断开连接。
+pub async fn connect_cdp_websocket_for_bulk_transfer(
+    websocket_url: &str,
+    max_message_bytes: usize,
+) -> anyhow::Result<ConnectedCdpSocket> {
+    let config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(max_message_bytes))
+        .max_frame_size(Some(max_message_bytes));
+    connect_cdp_websocket_with_config(websocket_url, Some(config)).await
+}
+
+async fn connect_cdp_websocket_with_config(
+    websocket_url: &str,
+    config: Option<tokio_tungstenite::tungstenite::protocol::WebSocketConfig>,
+) -> anyhow::Result<ConnectedCdpSocket> {
     let candidates = cdp_websocket_connect_candidates(websocket_url);
     // 候选共享原来的连接总预算，避免回退把单轮代价翻倍后吃掉启动注入窗口。
     let attempt_timeout = cdp_connect_attempt_timeout(candidates.len());
@@ -377,7 +453,7 @@ pub async fn connect_cdp_websocket(websocket_url: &str) -> anyhow::Result<Connec
         // The TLS-capable handshake future is large even for loopback ws://.
         // Keep it out of every enclosing startup future: their nested poll
         // frames can otherwise exhaust the Windows main thread's 1 MiB stack.
-        let connect = Box::pin(connect_async(candidate.as_str()));
+        let connect = Box::pin(connect_async_with_config(candidate.as_str(), config, false));
         match tokio::time::timeout(attempt_timeout, connect).await {
             Ok(Ok((socket, _))) => return Ok(socket),
             Ok(Err(error)) => {
@@ -490,7 +566,6 @@ async fn run_bridge_pump(
     let mut ready = VecDeque::<BridgeCompletion>::new();
     let mut concurrent = FuturesUnordered::<BridgeCallFuture>::new();
     let mut serial = FuturesUnordered::<BridgeCallFuture>::new();
-    let mut git_work = FuturesUnordered::<BridgeCallFuture>::new();
     let mut stream_open = true;
 
     while let Some(message) = binding_calls.pop_front() {
@@ -503,20 +578,11 @@ async fn run_bridge_pump(
     }
 
     loop {
-        while let Some(index) = pending_concurrent.iter().position(|call| {
-            if bridge_path_is_git_work(&call.path) {
-                git_work.len() < 4
-            } else {
-                concurrent.len() < BRIDGE_MAX_CONCURRENT_READ_HANDLERS
-            }
-        }) {
-            let call = pending_concurrent.remove(index).unwrap();
-            let lane = if bridge_path_is_git_work(&call.path) {
-                &mut git_work
-            } else {
-                &mut concurrent
+        while concurrent.len() < BRIDGE_MAX_CONCURRENT_READ_HANDLERS {
+            let Some(call) = pending_concurrent.pop_front() else {
+                break;
             };
-            lane.push(execute_bridge_call(Arc::clone(&handler), call));
+            concurrent.push(execute_bridge_call(Arc::clone(&handler), call));
         }
         if serial.is_empty()
             && let Some(call) = pending_serial.pop_front()
@@ -534,7 +600,6 @@ async fn run_bridge_pump(
         if !stream_open
             && concurrent.is_empty()
             && serial.is_empty()
-            && git_work.is_empty()
             && pending_concurrent.is_empty()
             && pending_serial.is_empty()
         {
@@ -552,11 +617,6 @@ async fn run_bridge_pump(
                 }
             }
             completion = concurrent.next(), if !concurrent.is_empty() => {
-                if let Some(completion) = completion {
-                    ready.push_back(completion);
-                }
-            }
-            completion = git_work.next(), if !git_work.is_empty() => {
                 if let Some(completion) = completion {
                     ready.push_back(completion);
                 }
@@ -653,31 +713,19 @@ fn queue_bridge_dispatch(
     }
 }
 
-fn bridge_path_is_git_work(path: &str) -> bool {
+fn bridge_path_can_run_concurrently(path: &str) -> bool {
     matches!(
         path,
-        "/api/conversation_git_preview"
-            | "/api/conversation_git_push_preview"
-            | "/api/conversation_git_execute"
+        "/settings/get"
+            | "/codex-model-catalog"
+            | "/backend/status"
+            | "/backend/health"
+            | "/account/usage"
+            | "/session/completion-state"
+            | "/api/check_for_updates"
+            | "/session/wake-watcher"
+            | "/plugins/list"
     )
-}
-
-fn bridge_path_can_run_concurrently(path: &str) -> bool {
-    bridge_path_is_git_work(path)
-        || matches!(
-            path,
-            "/settings/get"
-                | "/codex-model-catalog"
-                | "/backend/status"
-                | "/backend/health"
-                | "/account/usage"
-                | "/session/completion-state"
-                | "/api/check_for_updates"
-                | "/session/wake-watcher"
-                | "/plugins/list"
-                | "/api/conversation_git_status"
-                | "/api/conversation_git_cancel"
-        )
 }
 
 fn execute_bridge_call(handler: BridgeHandler, call: BridgeCall) -> BridgeCallFuture {
@@ -794,8 +842,10 @@ where
         params: Value,
         timeout: Duration,
     ) -> anyhow::Result<Value> {
-        self.socket
-            .send(Message::Text(
+        let deadline = tokio::time::Instant::now() + timeout;
+        tokio::time::timeout_at(
+            deadline,
+            self.socket.send(Message::Text(
                 json!({
                     "id": message_id,
                     "method": method,
@@ -803,16 +853,23 @@ where
                 })
                 .to_string()
                 .into(),
-            ))
-            .await
-            .with_context(|| format!("failed to send CDP command {method} id {message_id}"))?;
+            )),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "timed out waiting for CDP command {method} id {message_id} send after {}ms",
+                timeout.as_millis()
+            )
+        })?
+        .with_context(|| format!("failed to send CDP command {method} id {message_id}"))?;
 
-        tokio::time::timeout(timeout, self.wait_for_id(message_id, method.to_string()))
+        tokio::time::timeout_at(deadline, self.wait_for_id(message_id, method.to_string()))
             .await
             .with_context(|| {
                 format!(
-                    "timed out waiting for CDP command {method} id {message_id} response after {}s",
-                    timeout.as_secs()
+                    "timed out waiting for CDP command {method} id {message_id} response after {}ms",
+                    timeout.as_millis()
                 )
             })?
     }
@@ -917,6 +974,259 @@ fn next_message_id() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::task::{Context as TaskContext, Poll};
+
+    use futures_util::Stream;
+    use tokio_tungstenite::tungstenite::Error as WebSocketError;
+
+    type SocketStep<T> = Pin<Box<dyn Future<Output = Result<T, WebSocketError>> + Send>>;
+
+    struct ControlledSocket {
+        send_ready: SocketStep<()>,
+        send_flush: SocketStep<()>,
+        response: Option<SocketStep<Message>>,
+        sent: Vec<Message>,
+    }
+
+    impl ControlledSocket {
+        fn new(response: Value) -> Self {
+            Self {
+                send_ready: Box::pin(async { Ok(()) }),
+                send_flush: Box::pin(async { Ok(()) }),
+                response: Some(Box::pin(async move {
+                    Ok(Message::Text(response.to_string().into()))
+                })),
+                sent: Vec::new(),
+            }
+        }
+    }
+
+    impl Sink<Message> for ControlledSocket {
+        type Error = WebSocketError;
+
+        fn poll_ready(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            self.send_ready.as_mut().poll(cx)
+        }
+
+        fn start_send(mut self: Pin<&mut Self>, message: Message) -> Result<(), Self::Error> {
+            self.sent.push(message);
+            Ok(())
+        }
+
+        fn poll_flush(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            self.send_flush.as_mut().poll(cx)
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut TaskContext<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl Stream for ControlledSocket {
+        type Item = Result<Message, WebSocketError>;
+
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            cx: &mut TaskContext<'_>,
+        ) -> Poll<Option<Self::Item>> {
+            let Some(response) = self.response.as_mut() else {
+                return Poll::Ready(None);
+            };
+            match response.as_mut().poll(cx) {
+                Poll::Ready(result) => {
+                    self.response = None;
+                    Poll::Ready(Some(result))
+                }
+                Poll::Pending => Poll::Pending,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn command_send_times_out_when_readiness_or_flush_never_completes() {
+        for pending_flush in [false, true] {
+            let mut socket = ControlledSocket::new(json!({ "id": 7, "result": {} }));
+            if pending_flush {
+                socket.send_flush = Box::pin(std::future::pending());
+            } else {
+                socket.send_ready = Box::pin(std::future::pending());
+            }
+            let mut session = CdpSession::new(socket);
+            let error = tokio::time::timeout(
+                Duration::from_secs(2),
+                session.send_command_with_timeout(
+                    7,
+                    "Runtime.evaluate",
+                    json!({}),
+                    Duration::from_millis(50),
+                ),
+            )
+            .await
+            .expect("command budget must also bound a pending send")
+            .expect_err("pending send must time out before reading the response");
+
+            assert_eq!(
+                error.to_string(),
+                "timed out waiting for CDP command Runtime.evaluate id 7 send after 50ms"
+            );
+            assert!(
+                error
+                    .downcast_ref::<tokio::time::error::Elapsed>()
+                    .is_some()
+            );
+            assert_eq!(session.socket.sent.len(), usize::from(pending_flush));
+            assert!(session.socket.response.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn command_send_and_response_share_one_deadline() {
+        let mut socket = ControlledSocket::new(json!({ "id": 7, "result": {} }));
+        socket.send_flush = Box::pin(async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok(())
+        });
+        socket.response = Some(Box::pin(async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            Ok(Message::Text(
+                json!({ "id": 7, "result": {} }).to_string().into(),
+            ))
+        }));
+        let mut session = CdpSession::new(socket);
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            session.send_command_with_timeout(
+                7,
+                "Runtime.evaluate",
+                json!({}),
+                Duration::from_millis(250),
+            ),
+        )
+        .await
+        .expect("command must finish within its shared budget")
+        .expect_err("send and response delays must not each receive the full budget");
+
+        assert_eq!(
+            error.to_string(),
+            "timed out waiting for CDP command Runtime.evaluate id 7 response after 250ms"
+        );
+        assert!(
+            error
+                .downcast_ref::<tokio::time::error::Elapsed>()
+                .is_some()
+        );
+        assert_eq!(session.socket.sent.len(), 1);
+        assert!(session.socket.response.is_some());
+    }
+
+    #[tokio::test]
+    async fn command_with_shared_deadline_returns_normal_response() {
+        let response = json!({ "id": 7, "result": { "value": true } });
+        let mut session = CdpSession::new(ControlledSocket::new(response.clone()));
+        let params = json!({ "expression": "true" });
+
+        let result = session
+            .send_command_with_timeout(
+                7,
+                "Runtime.evaluate",
+                params.clone(),
+                Duration::from_secs(1),
+            )
+            .await
+            .expect("normal response should succeed");
+
+        assert_eq!(result, response);
+        assert_eq!(session.socket.sent.len(), 1);
+        let Message::Text(command) = &session.socket.sent[0] else {
+            panic!("CDP command should be sent as text");
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(command).unwrap(),
+            json!({ "id": 7, "method": "Runtime.evaluate", "params": params })
+        );
+    }
+
+    #[tokio::test]
+    async fn command_with_shared_deadline_preserves_send_error_source() {
+        let mut socket = ControlledSocket::new(json!({ "id": 7, "result": {} }));
+        socket.send_flush = Box::pin(async {
+            Err(WebSocketError::Io(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "controlled send failure",
+            )))
+        });
+        let mut session = CdpSession::new(socket);
+
+        let error = session
+            .send_command_with_timeout(7, "Runtime.evaluate", json!({}), Duration::from_secs(1))
+            .await
+            .expect_err("send error should be propagated");
+
+        assert_eq!(
+            error.to_string(),
+            "failed to send CDP command Runtime.evaluate id 7"
+        );
+        assert!(matches!(
+            error.downcast_ref::<WebSocketError>(),
+            Some(WebSocketError::Io(_))
+        ));
+        assert_eq!(error.root_cause().to_string(), "controlled send failure");
+    }
+
+    #[tokio::test]
+    async fn command_with_shared_deadline_preserves_read_error_source() {
+        let mut socket = ControlledSocket::new(json!({ "id": 7, "result": {} }));
+        socket.response = Some(Box::pin(async {
+            Err(WebSocketError::Io(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "controlled read failure",
+            )))
+        }));
+        let mut session = CdpSession::new(socket);
+
+        let error = session
+            .send_command_with_timeout(7, "Runtime.evaluate", json!({}), Duration::from_secs(1))
+            .await
+            .expect_err("read error should be propagated");
+
+        assert_eq!(error.to_string(), "failed to read CDP websocket message");
+        assert!(matches!(
+            error.downcast_ref::<WebSocketError>(),
+            Some(WebSocketError::Io(_))
+        ));
+        assert_eq!(error.root_cause().to_string(), "controlled read failure");
+    }
+
+    #[tokio::test]
+    async fn command_with_shared_deadline_preserves_cdp_error() {
+        let mut session = CdpSession::new(ControlledSocket::new(json!({
+            "id": 7,
+            "error": { "code": -32000, "message": "Runtime disabled" },
+        })));
+
+        let error = session
+            .send_command_with_timeout(7, "Runtime.evaluate", json!({}), Duration::from_secs(1))
+            .await
+            .expect_err("CDP error should be propagated");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("CDP command Runtime.evaluate id 7 failed:"),
+            "{message}"
+        );
+        assert!(message.contains("Runtime disabled"), "{message}");
+        assert!(message.contains("-32000"), "{message}");
+    }
 
     #[test]
     fn cdp_connect_future_keeps_handshake_off_the_startup_stack() {
