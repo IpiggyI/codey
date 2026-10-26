@@ -1,0 +1,215 @@
+{
+  "observedAt": "2026-10-26T02:48:16.621Z",
+  "entry": "app://-/assets/index-340508751504.js",
+  "capabilities": {
+    "session": {
+      "available": false,
+      "code": "codey_capability_unavailable",
+      "message": "当前 Codex 暂不支持会话管理，请稍后重试"
+    },
+    "sidebarDelete": {
+      "available": false,
+      "code": "codey_capability_unavailable",
+      "message": "当前 Codex 暂不支持此功能，请稍后重试"
+    },
+    "deleteMessages": {
+      "available": false,
+      "code": "codey_capability_unavailable",
+      "message": "当前 Codex 暂不支持消息删除，请稍后重试"
+    },
+    "refresh": {
+      "available": false,
+      "code": "codey_capability_unavailable",
+      "message": "当前 Codex 暂不支持会话列表刷新，请稍后重试"
+    },
+    "usage": {
+      "available": false,
+      "code": "codey_capability_unavailable",
+      "message": "当前 Codex 暂不支持官方额度读取，请稍后重试"
+    },
+    "mcpReload": {
+      "available": false,
+      "code": "codey_capability_unavailable",
+      "message": "当前 Codex 暂不支持MCP 配置刷新，请稍后重试"
+    },
+    "reconcile": {
+      "available": false,
+      "code": "codey_capability_unavailable",
+      "message": "当前 Codex 暂不支持完成状态同步，请稍后重试"
+    }
+  },
+  "resources": [
+    {
+      "url": "app://-/assets/app-shared-955d52676f9c.js",
+      "registryLookupCount": 0,
+      "oldResolverFound": false,
+      "newResolverCount": 0
+    },
+    {
+      "url": "app://-/assets/app-initial-438d1df57f70.js",
+      "registryLookupCount": 0,
+      "oldResolverFound": false,
+      "newResolverCount": 1
+    }
+  ],
+  "native": {
+    "type": "function",
+    "hostId": "local",
+    "subscribeType": "function",
+    "currentConversationKnown": true,
+    "storedUsagePresent": true,
+    "storedUsageKeys": [
+      "total",
+      "last",
+      "modelContextWindow"
+    ]
+  },
+  "rows": [
+    {
+      "buttonPresent": true,
+      "rowRect": {
+        "x": 60,
+        "y": 249,
+        "width": 229,
+        "height": 30,
+        "top": 249,
+        "right": 289,
+        "bottom": 279,
+        "left": 60
+      },
+      "buttonRect": {
+        "x": 89,
+        "y": 274,
+        "width": 20,
+        "height": 20,
+        "top": 274,
+        "right": 109,
+        "bottom": 294,
+        "left": 89
+      },
+      "buttonHit": false,
+      "actionParentClass": "contents",
+      "actionParentDisplay": "inline-flex"
+    },
+    {
+      "buttonPresent": true,
+      "rowRect": {
+        "x": 60,
+        "y": 280,
+        "width": 229,
+        "height": 30,
+        "top": 280,
+        "right": 289,
+        "bottom": 310,
+        "left": 60
+      },
+      "buttonRect": {
+        "x": 89,
+        "y": 305,
+        "width": 20,
+        "height": 20,
+        "top": 305,
+        "right": 109,
+        "bottom": 325,
+        "left": 89
+      },
+      "buttonHit": false,
+      "actionParentClass": "contents",
+      "actionParentDisplay": "inline-flex"
+    },
+    {
+      "buttonPresent": true,
+      "rowRect": {
+        "x": 60,
+        "y": 311,
+        "width": 229,
+        "height": 30,
+        "top": 311,
+        "right": 289,
+        "bottom": 341,
+        "left": 60
+      },
+      "buttonRect": {
+        "x": 89,
+        "y": 336,
+        "width": 20,
+        "height": 20,
+        "top": 336,
+        "right": 109,
+        "bottom": 356,
+        "left": 89
+      },
+      "buttonHit": false,
+      "actionParentClass": "contents",
+      "actionParentDisplay": "inline-flex"
+    }
+  ],
+  "usage": {
+    "ready": true,
+    "providerId": "openai",
+    "usageVisible": false,
+    "subscribed": false,
+    "usageError": null,
+    "usageLabel": "",
+    "cacheRemaining": "",
+    "cacheRingVisible": false,
+    "cacheTone": "",
+    "storedUsageRead": "",
+    "cacheAnchor": "",
+    "threadCount": 0
+  },
+  "locale": {
+    "version": 5,
+    "locale": "zh-CN",
+    "rendererAssetPatched": false,
+    "navigatorPatched": true,
+    "statsigClientsPatched": 1,
+    "statsigRootPatched": true,
+    "settingSyncStarted": true,
+    "settingSynced": false,
+    "settingSyncInFlight": false,
+    "settingSyncAttempts": 18,
+    "settingSyncError": "get-setting not implemented in the current Electron process. Restart ChatGPT to load the latest Electron handlers."
+  },
+  "serviceTier": {
+    "status": "ready"
+  },
+  "model": {
+    "loaded": true,
+    "models": [
+      "gpt-6.1-sol",
+      "gpt-6-astra",
+      "gpt-6-sol",
+      "gpt-6-luna",
+      "gpt-5.6-sol",
+      "gpt-5.6-terra",
+      "gpt-5.6-luna"
+    ],
+    "defaultModel": "gpt-6.1-sol"
+  },
+  "modelDelivery": {
+    "revision": 1,
+    "statsigClients": 1,
+    "notifiedClients": 1,
+    "queryClients": 1,
+    "queryEntries": 1,
+    "pendingQueryEntries": 0,
+    "reactContainers": 0,
+    "responsePatchInstalled": true
+  },
+  "pluginBridge": {
+    "frozen": true,
+    "writable": false,
+    "patched": false,
+    "reportedStatus": {
+      "id": "plugin-marketplace-compatibility",
+      "name": "插件市场兼容",
+      "source": "builtin",
+      "status": "effective",
+      "detail": "插件市场桥接已接管",
+      "error": null
+    }
+  },
+  "settingsEntryPresent": true,
+  "accountUsageVisible": true
+}
