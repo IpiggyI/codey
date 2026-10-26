@@ -90,10 +90,6 @@ impl InjectionPhase {
             Self::ReadStatuses => "readStatuses",
         }
     }
-
-    fn is_discovery(self) -> bool {
-        matches!(self, Self::DiscoverTargets | Self::SelectTarget)
-    }
 }
 
 const INJECTION_PHASES: [InjectionPhase; 5] = [
@@ -159,8 +155,8 @@ pub struct InjectedTarget {
 pub struct InjectionRetryFailure {
     error: anyhow::Error,
     detail: Option<String>,
-    final_phase: InjectionPhase,
-    reached_bridge_stage: u32,
+    /// 只要曾成功枚举目标，就保留端点可达的证据。
+    reached_debug_endpoint: bool,
 }
 
 impl InjectionRetryFailure {
@@ -172,8 +168,9 @@ impl InjectionRetryFailure {
         self.detail.as_deref()
     }
 
+    /// 本轮重试均未成功枚举目标。页面暂时缺失或桥接失败不归为端点不可达。
     pub fn debug_endpoint_unreachable(&self) -> bool {
-        self.final_phase.is_discovery() && self.reached_bridge_stage == 0
+        !self.reached_debug_endpoint
     }
 }
 
@@ -630,12 +627,7 @@ pub async fn retry_inject_with_prefetched_target(
             }
         }
     };
-    Err(InjectionRetryFailure {
-        error: last_error,
-        detail: Some(detail),
-        final_phase: InjectionPhase::from_raw(phase.load(Ordering::Acquire)),
-        reached_bridge_stage: stats.bridge_failures(),
-    })
+    Err(stats.into_failure(last_error, detail))
 }
 
 #[derive(Default)]
@@ -651,6 +643,18 @@ impl InjectionRetryStats {
         self.phase_failures[phase as usize] += 1;
         self.failure_expense_ms += cost.as_millis() as u64;
         self.last_failure_phase = Some(phase);
+    }
+
+    fn into_failure(self, error: anyhow::Error, detail: String) -> InjectionRetryFailure {
+        // 进入目标选择就说明枚举已成功；之后再次枚举失败也不能抹去该证据。
+        let reached_debug_endpoint = self.phase_failures[InjectionPhase::SelectTarget as usize..]
+            .iter()
+            .any(|count| *count > 0);
+        InjectionRetryFailure {
+            error,
+            detail: Some(detail),
+            reached_debug_endpoint,
+        }
     }
 
     fn bridge_failures(&self) -> u32 {
@@ -1603,18 +1607,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn endpoint_unreachable_only_when_no_attempt_reached_the_bridge() {
-        let failure = |phase: InjectionPhase, reached_bridge_stage: u32| InjectionRetryFailure {
-            error: anyhow::anyhow!("x"),
-            detail: None,
-            final_phase: phase,
-            reached_bridge_stage,
-        };
-        assert!(failure(InjectionPhase::DiscoverTargets, 0).debug_endpoint_unreachable());
-        assert!(failure(InjectionPhase::SelectTarget, 0).debug_endpoint_unreachable());
-        assert!(!failure(InjectionPhase::DiscoverTargets, 1).debug_endpoint_unreachable());
-        assert!(!failure(InjectionPhase::InstallBridge, 1).debug_endpoint_unreachable());
-        assert!(!failure(InjectionPhase::VerifyOverlay, 2).debug_endpoint_unreachable());
+    fn endpoint_unreachable_only_when_every_attempt_failed_to_enumerate_targets() {
+        for (phases, unreachable) in [
+            (vec![InjectionPhase::DiscoverTargets; 3], true),
+            (vec![InjectionPhase::SelectTarget], false),
+            (
+                vec![
+                    InjectionPhase::SelectTarget,
+                    InjectionPhase::DiscoverTargets,
+                ],
+                false,
+            ),
+            (vec![InjectionPhase::InstallBridge], false),
+            (vec![InjectionPhase::VerifyOverlay], false),
+            (vec![InjectionPhase::ReadStatuses], false),
+            (
+                vec![
+                    InjectionPhase::InstallBridge,
+                    InjectionPhase::DiscoverTargets,
+                ],
+                false,
+            ),
+        ] {
+            let mut stats = InjectionRetryStats::default();
+            for phase in &phases {
+                stats.attempts += 1;
+                stats.record_failure(*phase, Duration::from_millis(10));
+            }
+            let failure = stats.into_failure(anyhow::anyhow!("x"), "detail".to_string());
+            assert_eq!(
+                failure.debug_endpoint_unreachable(),
+                unreachable,
+                "{phases:?}"
+            );
+            assert_eq!(failure.detail(), Some("detail"));
+        }
     }
 
     #[test]
