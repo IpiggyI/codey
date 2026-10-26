@@ -498,8 +498,9 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       "let s=o,c=a?.get(`locale_source`,`IDE`),l=bp(Au.localeOverride);",
       "return {enabled:s,source:c,locale:l}}",
     ].join("");
+    // Current builds resolve the locale in the host-services chunk.
     const patchedLocaleSource = patch(
-      "app://-/assets/app-initial-BHB6SClA.js",
+      "app://-/assets/initialize-app-host-services-b944587b60fb.js",
       localeSource,
     );
     assert.match(
@@ -732,20 +733,26 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       delete globalThis.__CODEY_THREAD_OWNER_DISCOVERY_V2__;
     }
 
+    // Codex 26.1013 shape: the in-progress predicate is a module function used
+    // by getHasInProgressLocalConversation; resume runs through the public
+    // resumeConversation entry.
     const completedReconciliationSource = [
+      "function isRunning(e){return e.inProgress===!0}",
       "class RunningManager{",
-      "constructor(){this.conversation={inProgress:!0,resumeState:`resumed`};",
-      "this.role={role:`owner`};this.revision=1;this.statuses=[`idle`,`idle`];this.events=[];",
-      "this.productPolicy={runtimePolicy:{isLocalConversationInProgress:e=>e.inProgress===!0}};",
+      "constructor(){this.conversation={inProgress:!0,resumeState:`resumed`,cwd:`/repo`};",
+      "this.threadStore={getConversation:()=>this.conversation,getRecentConversationIds:()=>[`thread`]};",
+      "this.role={role:`owner`};this.revision=1;this.statuses=[{type:`idle`},{type:`idle`}];this.events=[];",
       "this.inactiveThreadUnsubscriber={clearConversationStreamOwnership:e=>{this.events.push(`clear:${e}`);this.role=null}}}",
-      "getConversation(){return this.conversation}",
+      "get conversations(){return new Map([[`thread`,this.conversation]])}",
+      "getHostId(){return`local`}",
+      "getConversation(e){return this.threadStore.getConversation(e)}",
       "getConversationStreamRevision(){return this.revision}",
       "getStreamRole(){return this.role}",
-      "async sendRequest(e,t){this.events.push(`read:${e}:${t.threadId}:${t.includeTurns}`);return{thread:{status:this.statuses.shift()??`idle`}}}",
-      "updateConversationState(e,t){this.events.push(`state:${e}`);t(this.conversation)}",
-      "async maybeResumeConversation(e){this.events.push(`resume:${e.conversationId}`);this.conversation.inProgress=!1;this.role={role:`owner`}}",
-      "async resumeConversation(e){await this.maybeResumeConversation(e);return{activeTurnId:null}}",
-      "discardConversationFromCache(e){return this.productPolicy.runtimePolicy.isLocalConversationInProgress(this.conversation)&&this.inactiveThreadUnsubscriber.clearConversationStreamOwnership(e)}",
+      "async sendRequest(e,t){this.events.push(`read:${e}:${t.threadId}:${t.includeTurns}`);return{thread:{status:this.statuses.shift()??{type:`idle`}}}}",
+      "updateConversationState(e,t,n){this.events.push(`state:${e}:${n}`);t(this.conversation)}",
+      "async resumeConversation(e){this.events.push(`resume:${e.conversationId}:${e.workspaceRoots.join()}`);this.conversation.inProgress=!1;this.role={role:`owner`};return{status:`ready`}}",
+      "getHasInProgressLocalConversation({exceptConversationId:e}={}){for(let t of this.threadStore.getRecentConversationIds()){if(t===e)continue;let n=this.conversations.get(t);if(n!=null&&isRunning(n))return!0}return!1}",
+      "releaseOwnedThread(e){this.inactiveThreadUnsubscriber.clearConversationStreamOwnership(e)}",
       "}",
     ].join("");
     const patchedCompletedReconciliationSource = patch(
@@ -759,6 +766,15 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
     const RunningManager = Function(
       `${patchedCompletedReconciliationSource};return RunningManager`,
     )();
+    delete globalThis.__codeyAppServerManagers;
+    const registeredManager = new RunningManager();
+    registeredManager.getConversation("thread");
+    assert.equal(globalThis.__codeyAppServerManagers.get("local"), registeredManager);
+    const disposedManager = new RunningManager();
+    disposedManager.disposed = true;
+    assert.equal(disposedManager.getConversation("thread"), disposedManager.conversation);
+    assert.equal(globalThis.__codeyAppServerManagers.get("local"), registeredManager);
+    delete globalThis.__codeyAppServerManagers;
     const reconcileNativeSetTimeout = globalThis.setTimeout;
     const reconcileDelays = [];
     globalThis.setTimeout = (callback, delay) => {
@@ -768,9 +784,11 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
     };
     try {
       const completedManager = new RunningManager();
+      assert.equal(completedManager.getHasInProgressLocalConversation(), true);
       assert.equal(
         await completedManager.codeyReconcileCompletedConversation({
           conversationId: "thread-completed",
+          workspaceRoots: [],
         }),
         true,
       );
@@ -778,15 +796,15 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
         "read:thread/read:thread-completed:false",
         "read:thread/read:thread-completed:false",
         "clear:thread-completed",
-        "state:thread-completed",
-        "resume:thread-completed",
+        "state:thread-completed:false",
+        "resume:thread-completed:/repo",
       ]);
       assert.deepEqual(reconcileDelays, [250]);
       assert.equal(completedManager.conversation.resumeState, "needs_resume");
       assert.deepEqual(completedManager.role, { role: "owner" });
 
       const activeManager = new RunningManager();
-      activeManager.statuses = ["running"];
+      activeManager.statuses = [{ type: "active" }];
       assert.equal(
         await activeManager.codeyReconcileCompletedConversation({
           conversationId: "thread-running",
@@ -825,6 +843,17 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       );
       assert.deepEqual(idleManager.events, []);
 
+      // A submitted turn the server has not confirmed yet is not stale.
+      const submittingManager = new RunningManager();
+      submittingManager.conversation.unconfirmedTurnSubmissions = [{ terminal: false }];
+      assert.equal(
+        await submittingManager.codeyReconcileCompletedConversation({
+          conversationId: "thread-submitting",
+        }),
+        false,
+      );
+      assert.deepEqual(submittingManager.events, []);
+
       const followerManager = new RunningManager();
       followerManager.role = { role: "follower", ownerClientId: "other-window" };
       assert.equal(
@@ -848,7 +877,6 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       "for(let n of this.activeInteractions.values())",
       "this.recordHeartbeat(n,e,t)},Vcn)}",
       "recordHeartbeat(e,t,n){return [e,t,n]}};",
-      "const rendererProcessCpuPercentAvg=true;",
       "function unrelated(){return beginCpuSampling()}",
     ].join("");
     const patchedInteractionPerformance = patch(

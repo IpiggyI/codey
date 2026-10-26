@@ -1178,6 +1178,7 @@ fn is_patchable_named_asset(url: &str) -> bool {
         "app-initial",
         "app-shared",
         "codex-composer-adapter",
+        "initialize-app-host-services",
         "general-settings",
         "model-list-filter",
         "windows-model-controls",
@@ -1613,6 +1614,20 @@ mod tests {
         ] {
             assert!(!is_patch_candidate_url(rejected), "{rejected}");
         }
+    }
+
+    #[test]
+    fn script_fallback_covers_named_assets_with_page_patches() {
+        // 默认中文界面补丁的锚点在宿主服务初始化资源里。
+        for accepted in [
+            "app://-/assets/app-initial-438d1df57f70.js",
+            "app://-/assets/initialize-app-host-services-b944587b60fb.js?build=1",
+        ] {
+            assert!(is_patchable_named_asset(accepted), "{accepted}");
+        }
+        assert!(!is_patchable_named_asset(
+            "app://-/assets/run-now-18e76f1d0df3.js"
+        ));
     }
 
     #[test]

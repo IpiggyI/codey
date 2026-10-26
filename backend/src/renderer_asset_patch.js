@@ -286,6 +286,19 @@
   const patchCodexRendererAsset = (source) => {
     let patched = source;
     let nativeCustomProviderModelAccess = false;
+    if (!source.includes("/*codey-app-server-manager-registry*/")
+      && source.includes("inactiveThreadUnsubscriber.clearConversationStreamOwnership")
+      && source.includes("getStreamRole(")
+      && source.includes("updateConversationState(")) {
+      // 在原生管理器被读取时登记真实实例，避免依赖模块导出名和 React 结构。
+      // 登记失败不得影响原生读取，也不允许已销毁实例覆盖新管理器。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /getConversation\(([$A-Z_a-z][$\w]*)\)\{return this\.threadStore\.getConversation\(\1\)\}/g,
+        (_match, id) => `getConversation(${id}){/*codey-app-server-manager-registry*/try{if(this.disposed!==true&&this.getHostId()===\`local\`){let __codeyManagers=globalThis.__codeyAppServerManagers;if(__codeyManagers==null)globalThis.__codeyAppServerManagers=__codeyManagers=new Map;if(__codeyManagers instanceof Map)__codeyManagers.set(\`local\`,this)}}catch{}return this.threadStore.getConversation(${id})}`,
+        "app server manager registry",
+      );
+    }
     if (
       source.includes("codex-message-from-view")
       && source.includes("sendMessageFromView")
@@ -391,18 +404,18 @@
     }
     if (
       !source.includes("codeyReconcileCompletedConversation")
-      && source.includes("isLocalConversationInProgress")
+      && source.includes("getHasInProgressLocalConversation(")
       && source.includes("inactiveThreadUnsubscriber.clearConversationStreamOwnership")
-      && source.includes("getConversationStreamRevision")
-      && source.includes("async resumeConversation(")
+      && source.includes("getConversationStreamRevision(")
     ) {
       // 渲染器可能漏掉完成通知，仍保留进行中的轮次和消息流角色。
-      // 两次核对服务端状态，排除并发修订和跟随窗口，再沿重连路径恢复分页历史。
+      // 两次核对服务端状态，排除并发修订、未确认的提交和跟随窗口，再沿重连路径恢复分页历史。
+      // 进行中判定复用 getHasInProgressLocalConversation 已使用的原生函数。
       patched = replaceUniqueRendererGate(
         patched,
-        /async resumeConversation\(([$A-Z_a-z][$\w]*)\)\{await this\.maybeResumeConversation\(\1\);/g,
-        (_match, paramsName) =>
-          `async codeyReconcileCompletedConversation(${paramsName}){let __codeyConversationId=${paramsName}?.conversationId,__codeyConversation=__codeyConversationId==null?null:this.getConversation(__codeyConversationId);if(__codeyConversationId==null||__codeyConversation==null||!this.productPolicy.runtimePolicy.isLocalConversationInProgress(__codeyConversation)||this.getStreamRole(__codeyConversationId)?.role===\`follower\`)return!1;let __codeyRevision=this.getConversationStreamRevision(__codeyConversationId),__codeyReadStatus=async()=>{let __codeyResponse=await this.sendRequest(\`thread/read\`,{threadId:__codeyConversationId,includeTurns:!1}),__codeyStatus=__codeyResponse?.thread?.status;return typeof __codeyStatus===\`string\`?__codeyStatus:__codeyStatus?.type},__codeyStatus=await __codeyReadStatus();if(__codeyStatus!==\`idle\`&&__codeyStatus!==\`error\`)return!1;await new Promise(__codeyResolve=>setTimeout(__codeyResolve,250));if(await __codeyReadStatus()!==__codeyStatus||this.getConversationStreamRevision(__codeyConversationId)!==__codeyRevision)return!1;__codeyConversation=this.getConversation(__codeyConversationId);if(__codeyConversation==null||!this.productPolicy.runtimePolicy.isLocalConversationInProgress(__codeyConversation)||this.getStreamRole(__codeyConversationId)?.role===\`follower\`)return!1;this.inactiveThreadUnsubscriber.clearConversationStreamOwnership(__codeyConversationId);this.updateConversationState(__codeyConversationId,__codeyState=>{__codeyState.resumeState=\`needs_resume\`},!1);await this.maybeResumeConversation(${paramsName});__codeyConversation=this.getConversation(__codeyConversationId);return __codeyConversation!=null&&!this.productPolicy.runtimePolicy.isLocalConversationInProgress(__codeyConversation)}async resumeConversation(${paramsName}){await this.maybeResumeConversation(${paramsName});`,
+        /getHasInProgressLocalConversation\(\{exceptConversationId:([$A-Z_a-z][$\w]*)\}=\{\}\)\{for\(let ([$A-Z_a-z][$\w]*) of this\.threadStore\.getRecentConversationIds\(\)\)\{if\(\2===\1\)continue;let ([$A-Z_a-z][$\w]*)=this\.conversations\.get\(\2\);if\(\3!=null&&([$A-Z_a-z][$\w]*)\(\3\)\)return!0\}return!1\}/g,
+        (match, _exceptName, _idName, _conversationName, inProgressName) =>
+          `async codeyReconcileCompletedConversation(__codeyParams){let __codeyId=__codeyParams?.conversationId,__codeyRunning=()=>{let __codeyConversation=__codeyId==null?null:this.getConversation(__codeyId);return __codeyConversation!=null&&__codeyConversation.unconfirmedTurnSubmissions?.some(e=>e.terminal!==!0)!==!0&&${inProgressName}(__codeyConversation)&&this.getStreamRole(__codeyId)?.role!==\`follower\`};if(!__codeyRunning())return!1;let __codeyRevision=this.getConversationStreamRevision(__codeyId),__codeyReadStatus=async()=>{let __codeyResponse=await this.sendRequest(\`thread/read\`,{threadId:__codeyId,includeTurns:!1}),__codeyStatus=__codeyResponse?.thread?.status;return typeof __codeyStatus===\`string\`?__codeyStatus:__codeyStatus?.type},__codeyStatus=await __codeyReadStatus();if(__codeyStatus!==\`idle\`&&__codeyStatus!==\`systemError\`&&__codeyStatus!==\`error\`)return!1;await new Promise(__codeyResolve=>setTimeout(__codeyResolve,250));if(await __codeyReadStatus()!==__codeyStatus||this.getConversationStreamRevision(__codeyId)!==__codeyRevision||!__codeyRunning())return!1;let __codeyCwd=this.getConversation(__codeyId)?.cwd;this.inactiveThreadUnsubscriber.clearConversationStreamOwnership(__codeyId);this.updateConversationState(__codeyId,__codeyState=>{__codeyState.resumeState=\`needs_resume\`},!1);await this.resumeConversation({...__codeyParams,workspaceRoots:__codeyParams.workspaceRoots?.length?__codeyParams.workspaceRoots:__codeyCwd?[__codeyCwd]:[\`/\`]});let __codeyConversation=this.getConversation(__codeyId);return __codeyConversation!=null&&!${inProgressName}(__codeyConversation)}${match}`,
         "completed thread reconciliation",
       );
     }
@@ -681,8 +694,7 @@
       source.includes("beginCpuSampling") &&
       source.includes(
         "ensureHeartbeat(){this.heartbeatTimer??=setInterval",
-      ) &&
-      source.includes("rendererProcessCpuPercentAvg")
+      )
     ) {
       // Codey 启动时已关闭分析；保留交互生命周期，
       // 去掉会被丢弃的处理器采样和每秒心跳。
@@ -743,7 +755,7 @@
         url.protocol === "app:" &&
         url.pathname.includes("/assets/") &&
         (
-          /\/(?:(?:app-initial|app-shared|codex-composer-adapter|general-settings|model-list-filter|windows-model-controls|use-service-tier-settings|read-service-tier-for-request|subagent-activity-chip-group)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
+          /\/(?:(?:app-initial|app-shared|codex-composer-adapter|initialize-app-host-services|general-settings|model-list-filter|windows-model-controls|use-service-tier-settings|read-service-tier-for-request|subagent-activity-chip-group)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
             url.pathname,
           ) ||
           (
