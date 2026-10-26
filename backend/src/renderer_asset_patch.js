@@ -65,6 +65,26 @@
   // 各渲染器门控相互独立。压缩代码的锚点可能随版本或平台变化；
   // 单个门控失配时记录错误并跳过，继续应用其余门控。
   // 日志附带相邻锚点的可打印源码片段，便于适配现场资源。
+  // 只截取传入的静态资产源码，不读取输入框、会话状态或凭据。
+  // 模型补丁优先记录过滤函数，避免被同一资产里更早的 Fast 控件占满。
+  const rendererModelFilterDiagnosticAnchor =
+    /function\s+[$A-Z_a-z][$\w]*\(\{[^}]{0,1024}\bisCustomModelProvider\s*:[^}]{0,256}\bmodel\s*:[^}]{0,256}\buseHiddenModels\s*:[^}]{0,256}\}\)\s*\{/;
+  const rendererModelGateDiagnosticAnchors = {
+    "model allowlist": [
+      rendererModelFilterDiagnosticAnchor,
+      /[$A-Z_a-z][$\w]*\.has\(\s*[$A-Z_a-z][$\w]*\.model\s*\)/,
+      "useHiddenModels:",
+      "availableModels:",
+      "isCustomModelProvider:",
+    ],
+    "model visibility": [
+      rendererModelFilterDiagnosticAnchor,
+      "amazonBedrock",
+      /[$A-Z_a-z][$\w]*\.hidden\b/,
+      "useHiddenModels:",
+      "isCustomModelProvider:",
+    ],
+  };
   const rendererGateDiagnosticAnchors = [
     "`composer.toggleFastMode`",
     "composer.speedSlashCommand.disableDescription",
@@ -76,15 +96,24 @@
     "includeUltraReasoningEffort",
     "isCustomModelProvider",
   ];
-  const rendererGateFailureExcerpts = (source) => {
+  const rendererGateFailureExcerpts = (source, name) => {
     const excerpts = [];
-    for (const anchor of rendererGateDiagnosticAnchors) {
+    const ranges = [];
+    const anchors = rendererModelGateDiagnosticAnchors[name] ??
+      rendererGateDiagnosticAnchors;
+    for (const anchor of anchors) {
       if (excerpts.length >= 2) break;
-      const index = source.indexOf(anchor);
+      const index = typeof anchor === "string"
+        ? source.indexOf(anchor)
+        : source.search(anchor);
       if (index < 0) continue;
+      if (ranges.some(([start, end]) => index >= start && index < end)) continue;
+      const start = Math.max(0, index - 120);
+      const end = Math.min(source.length, start + 640);
+      ranges.push([start, end]);
       excerpts.push(
         source
-          .slice(Math.max(0, index - 150), index + anchor.length + 190)
+          .slice(start, end)
           .replace(/[^\x20-\x7E]/g, "?"),
       );
     }
@@ -95,7 +124,7 @@
     const message =
       `Codey skipped an incompatible Codex renderer patch: ${name} gate matched ${matchCount} times`;
     const context = { matchCount };
-    const excerpts = rendererGateFailureExcerpts(source);
+    const excerpts = rendererGateFailureExcerpts(source, name);
     if (excerpts.length) context.excerpts = excerpts;
     recordCodeyPatchFailure(`renderer_patch:${name}`, message, context);
     try {
