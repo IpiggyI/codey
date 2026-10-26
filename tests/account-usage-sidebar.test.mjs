@@ -273,7 +273,8 @@ test("app-server rateLimitsByLimitId keeps codex as the summary and lists other 
   // 摘要来自 rateLimitsByLimitId.codex，而不是 rateLimits 或其他额度组。
   assert.match(usage.innerHTML, /周额度[\s\S]*?70%[\s\S]*?5 小时[\s\S]*?90%/);
   assert.equal(usage.dataset.windowCount, "2");
-  assert.match(usage.innerHTML, /class="codey-usage-plan-tag">Plus</);
+  assert.match(usage.innerHTML, /class="codey-usage-plan-tag" data-plan="plus">Plus</);
+  assert.match(usage.innerHTML, /class="codey-usage-detail-row" data-tone="critical" style="--codey-usage-remaining:0"/);
   const summary = usage.innerHTML.slice(0, usage.innerHTML.indexOf("codey-account-usage-details"));
   assert.doesNotMatch(summary, /GPT-5\.3-Codex-Spark/);
   // 其他额度组只出现在详情里，带名称和独立的小标题。
