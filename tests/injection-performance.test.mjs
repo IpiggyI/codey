@@ -237,6 +237,43 @@ test("locale bootstrap patches navigator and Statsig independently from renderer
   assert.equal(firstState.snapshot().statsigClientsPatched, 1);
 });
 
+test("locale bootstrap stops retrying when Codex no longer implements the setting handlers", async () => {
+  const localeSource = await readSource("public/default-chinese-locale.js");
+  const listeners = new Map();
+  const sent = [];
+  const window = {
+    __codeySharedRuntime: { statsigClients: () => [] },
+    addEventListener(type, listener) { listeners.set(type, listener); },
+    removeEventListener(type) { listeners.delete(type); },
+    // Retries need timers; a missing handler must stop without one.
+    setTimeout() { return 1; },
+    clearTimeout() {},
+    electronBridge: {
+      sendMessageFromView(message) {
+        sent.push(message.url);
+        queueMicrotask(() => listeners.get("message")?.({ data: {
+          type: "fetch-response",
+          requestId: message.requestId,
+          responseType: "error",
+          error: "get-setting not implemented in the current Electron process. Restart ChatGPT to load the latest Electron handlers.",
+        } }));
+      },
+    },
+    navigator: {},
+  };
+  window.window = window;
+  vm.runInNewContext(localeSource, { console: { warn() { assert.fail("must not warn for a missing handler"); } }, window });
+  for (let index = 0; index < 20; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  const state = window.__codeyDefaultChineseLocale.snapshot();
+  assert.equal(state.settingSyncUnsupported, true);
+  assert.equal(state.settingSynced, false);
+  assert.equal(state.settingSyncAttempts, 1);
+  assert.deepEqual(sent, ["vscode://codex/get-setting"]);
+  listeners.get("focus")?.();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sent.length, 1);
+});
+
 test("locale bootstrap patches Statsig instances added in place without a 50ms burst", async () => {
   const localeSource = await readSource("public/default-chinese-locale.js");
 
