@@ -133,7 +133,7 @@ impl SessionMetadataCache {
     ) -> HashMap<String, u64> {
         let session_ids = session_ids
             .iter()
-            .map(|session_id| normalize_session_id(session_id).to_string())
+            .map(|session_id| normalize_session_id(session_id))
             .filter(|session_id| !session_id.is_empty())
             .collect::<HashSet<_>>();
         if session_ids.is_empty() {
@@ -147,8 +147,8 @@ impl SessionMetadataCache {
             }
             let unresolved = session_ids
                 .iter()
+                .copied()
                 .filter(|session_id| !timestamps.contains_key(*session_id))
-                .cloned()
                 .collect::<Vec<_>>();
             if unresolved.is_empty() {
                 break;
@@ -233,8 +233,9 @@ impl SessionMetadataCache {
             .into_iter()
             .filter(|path| path.exists())
             .collect::<Vec<_>>();
-        let active = paths.iter().cloned().collect::<HashSet<_>>();
-        self.connections.retain(|path, _| active.contains(path));
+        let active = paths.iter().map(PathBuf::as_path).collect::<HashSet<_>>();
+        self.connections
+            .retain(|path, _| active.contains(path.as_path()));
         paths
     }
 
@@ -248,12 +249,10 @@ impl SessionMetadataCache {
             .connections
             .get(path)
             .is_some_and(|cached| cached.signature == signature);
-        if !is_current {
-            self.connections.remove(path);
-        }
-        if self.connections.contains_key(path) {
+        if is_current {
             return true;
         }
+        self.connections.remove(path);
         let Ok(connection) = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -437,7 +436,7 @@ fn session_rollout_path(connection: &Connection, session_id: &str) -> Result<Opt
 
 fn session_timestamp_rows(
     connection: &Connection,
-    session_ids: &[String],
+    session_ids: &[&str],
 ) -> Result<HashMap<String, u64>> {
     if session_ids.is_empty() {
         return Ok(HashMap::new());
@@ -534,8 +533,8 @@ mod tests {
             .unwrap();
         }
         tx.commit().unwrap();
-        let mut requested = ids.clone();
-        requested.extend([ids[2].clone(), "missing' OR 1=1 --".to_string()]);
+        let mut requested = ids.iter().map(String::as_str).collect::<Vec<_>>();
+        requested.extend([ids[2].as_str(), "missing' OR 1=1 --"]);
         let timestamps = session_timestamp_rows(&connection, &requested).unwrap();
         assert_eq!(timestamps.len(), 403);
         assert!(!timestamps.contains_key(&ids[0]));
@@ -558,6 +557,7 @@ mod tests {
              INSERT INTO threads SELECT 'thread-' || n, n, 1 FROM ids;"
         ).unwrap();
         let ids: Vec<_> = (1..=200).map(|id| format!("thread-{}", id * 23)).collect();
+        let borrowed_ids = ids.iter().map(String::as_str).collect::<Vec<_>>();
         let legacy = || {
             let columns = table_columns(&connection, "threads").unwrap();
             assert!(columns.contains("updated_at"));
@@ -579,7 +579,10 @@ mod tests {
             }
             result
         };
-        assert_eq!(legacy(), session_timestamp_rows(&connection, &ids).unwrap());
+        assert_eq!(
+            legacy(),
+            session_timestamp_rows(&connection, &borrowed_ids).unwrap()
+        );
         let mut before = Vec::new();
         let mut after = Vec::new();
         for sample in 0..9 {
@@ -591,7 +594,7 @@ mod tests {
                 let start = Instant::now();
                 for _ in 0..100 {
                     black_box(if batched {
-                        session_timestamp_rows(&connection, &ids).unwrap()
+                        session_timestamp_rows(&connection, &borrowed_ids).unwrap()
                     } else {
                         legacy()
                     });
@@ -930,6 +933,10 @@ mod tests {
                 "thread-updated-ms".to_string(),
                 "thread-updated".to_string(),
                 "missing".to_string(),
+                " thread-recency-ms ".to_string(),
+                " local: thread-updated ".to_string(),
+                " local: ".to_string(),
+                String::new(),
             ],
         );
 
@@ -938,6 +945,84 @@ mod tests {
         assert_eq!(timestamps["thread-updated-ms"], 22_001);
         assert_eq!(timestamps["thread-updated"], 23_000);
         assert!(!timestamps.contains_key("missing"));
+        assert_eq!(timestamps.len(), 4);
+    }
+
+    // Unix permits removing or replacing a database while a cached connection is open.
+    #[cfg(unix)]
+    #[test]
+    fn clears_missing_legacy_connections_before_timestamp_lookup_stops_early() {
+        let home = tempdir().unwrap();
+        let sqlite = home.path().join("sqlite");
+        fs::create_dir(&sqlite).unwrap();
+        let legacy = home.path().join("state_5.sqlite");
+        for (path, timestamp) in [
+            (sqlite.join("codex-dev.db"), 10),
+            (sqlite.join("secondary.db"), 20),
+            (legacy.clone(), 30),
+        ] {
+            let connection = Connection::open(path).unwrap();
+            connection
+                .execute_batch("CREATE TABLE threads (id TEXT PRIMARY KEY, updated_at INTEGER)")
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO threads VALUES ('shared-thread', ?1)",
+                    [timestamp],
+                )
+                .unwrap();
+        }
+
+        let mut cache = SessionMetadataCache::default();
+        let timestamps = cache.resolve_session_timestamps(
+            home.path(),
+            &["shared-thread".to_string(), "missing".to_string()],
+        );
+        assert_eq!(timestamps["shared-thread"], 10_000);
+        assert_eq!(cache.connections.len(), 3);
+
+        fs::remove_file(&legacy).unwrap();
+        let timestamps =
+            cache.resolve_session_timestamps(home.path(), &["shared-thread".to_string()]);
+        assert_eq!(timestamps["shared-thread"], 10_000);
+        assert!(!cache.connections.contains_key(&legacy));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reopens_a_replaced_database_before_reading_timestamps() {
+        let home = tempdir().unwrap();
+        let path = home.path().join("state_5.sqlite");
+        let replacement = home.path().join("replacement.sqlite");
+        for (path, timestamp) in [(&path, 10), (&replacement, 20)] {
+            let connection = Connection::open(path).unwrap();
+            connection
+                .execute_batch("CREATE TABLE threads (id TEXT PRIMARY KEY, updated_at INTEGER)")
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO threads VALUES ('replaced-thread', ?1)",
+                    [timestamp],
+                )
+                .unwrap();
+        }
+
+        let mut cache = SessionMetadataCache::default();
+        let ids = ["replaced-thread".to_string()];
+        assert_eq!(
+            cache.resolve_session_timestamps(home.path(), &ids)["replaced-thread"],
+            10_000
+        );
+        assert_eq!(
+            cache.resolve_session_timestamps(home.path(), &ids)["replaced-thread"],
+            10_000
+        );
+
+        fs::rename(&replacement, &path).unwrap();
+        assert_eq!(
+            cache.resolve_session_timestamps(home.path(), &ids)["replaced-thread"],
+            20_000
+        );
     }
 
     #[test]
