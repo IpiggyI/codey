@@ -1131,6 +1131,49 @@ struct RuntimeWatcherInputs {
     crashpad_pending_stats: CrashpadPendingStatsHandle,
 }
 
+/// Accumulates per-stage durations for `CodeyRuntime::start` and writes one
+/// `launcher.startup_timings` diagnostic record with the total.
+struct StartupStageTimings {
+    started: Instant,
+    previous: Instant,
+    stages: Vec<(&'static str, u64)>,
+}
+
+impl Default for StartupStageTimings {
+    fn default() -> Self {
+        let started = Instant::now();
+        Self {
+            started,
+            previous: started,
+            stages: Vec::new(),
+        }
+    }
+}
+
+impl StartupStageTimings {
+    fn mark(&mut self, stage: &'static str) {
+        let now = Instant::now();
+        self.stages
+            .push((stage, now.duration_since(self.previous).as_millis() as u64));
+        self.previous = now;
+    }
+
+    fn report(&self) {
+        let mut detail = serde_json::Map::new();
+        for (stage, millis) in &self.stages {
+            detail.insert((*stage).to_string(), serde_json::json!(millis));
+        }
+        detail.insert(
+            "totalMs".to_string(),
+            serde_json::json!(self.started.elapsed().as_millis() as u64),
+        );
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "launcher.startup_timings",
+            serde_json::Value::Object(detail),
+        );
+    }
+}
+
 fn spawn_initial_storage_guards(
     home: &std::path::Path,
     config: &CodeyConfig,
@@ -1612,6 +1655,7 @@ impl CodeyRuntime {
         trace_log_write_protection_active: &AtomicBool,
         crashpad_pending_stats: CrashpadPendingStatsHandle,
     ) -> Result<(Self, oneshot::Receiver<()>)> {
+        let mut stage_timings = StartupStageTimings::default();
         let home = codex_home();
         trace_log_write_protection_active.store(false, Ordering::Release);
         let injection_scripts = cdp::prepare_injection_scripts(
@@ -1622,6 +1666,7 @@ impl CodeyRuntime {
             &config.user_scripts,
         );
         resolve_startup_provider(config)?;
+        stage_timings.mark("startupPreparationMs");
         let initial_storage_guards = spawn_initial_storage_guards(home, config);
         let (storage, startup_catalog) = prepare_startup_storage(
             home,
@@ -1632,6 +1677,7 @@ impl CodeyRuntime {
             &crashpad_pending_stats,
         )
         .await?;
+        stage_timings.mark("storageAndCatalogMs");
         let PreparedProviderState {
             runtime_config,
             runtime_config_overrides,
@@ -1641,6 +1687,7 @@ impl CodeyRuntime {
                 return Err(restore_runtime_config_after_error(home, error).await);
             }
         };
+        stage_timings.mark("providerStateMs");
         let delivered_catalog = startup_catalog.as_ref().map(|catalog| {
             crate::commands::renderer_model_catalog_value(&runtime_config, &catalog.model_state)
         });
@@ -1655,6 +1702,7 @@ impl CodeyRuntime {
                 .await);
             }
         };
+        stage_timings.mark("startupPatchesMs");
         let recovery_app_dir = storage.app_dir.clone();
         let SpawnedRenderer {
             app_dir,
@@ -1680,6 +1728,8 @@ impl CodeyRuntime {
                 );
             }
         };
+        stage_timings.mark("spawnAndInjectMs");
+        stage_timings.report();
         let process_id = spawned.process_id;
         let RuntimeWatchers {
             injection_statuses,

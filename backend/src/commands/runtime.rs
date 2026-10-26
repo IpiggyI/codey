@@ -340,15 +340,31 @@ async fn launch_codey_inner_locked(state: &Arc<AppState>) -> Result<Value, Strin
     if state.runtime.lock().await.is_some() {
         return Ok(json!({"status":"already_running"}));
     }
+    let launch_started = std::time::Instant::now();
     #[cfg(windows)]
     ensure_windows_codex_app_path(state).await?;
+    let resolve_app_path_ms = launch_started.elapsed().as_millis() as u64;
     stop_waiting_webhook_watcher(state).await;
     restore_previous_runtime_state(codex_home())
         .await
         .map_err(|error| format!("恢复上次 Codey 临时 Codex 配置失败：{error}"))?;
+    let restore_preparation_ms = launch_started.elapsed().as_millis() as u64 - resolve_app_path_ms;
+    let routes_started = std::time::Instant::now();
     prepare_routes_for_current_launch(state).await?;
+    let routes_ms = routes_started.elapsed().as_millis() as u64;
     let imported_default_route = super::ensure_default_route_imported(state).await;
     let config = sync_provider_models_for_launch(state, imported_default_route).await;
+    let model_sync_ms = routes_started.elapsed().as_millis() as u64 - routes_ms;
+    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+        "launcher.prelaunch_timings",
+        json!({
+            "resolveAppPathMs": resolve_app_path_ms,
+            "restorePreparationMs": restore_preparation_ms,
+            "prepareRoutesMs": routes_ms,
+            "modelSyncMs": model_sync_ms,
+            "totalMs": launch_started.elapsed().as_millis() as u64,
+        }),
+    );
     let initial_scan_task = if webhook_watcher_should_run(&config) {
         let initial_event_cache = state
             .recent_session_event_cache

@@ -134,7 +134,12 @@ test("Windows and macOS confirm the CLI wrapper before reporting startup success
   assert.match(launcher, /exited = startup_process_exited\(spawned\) => Err\(exited\.into\(\)\)/);
   assert.match(launcher, /result = wait_for_cli_wrapper\(handshake, deadline\) => result/);
   assert.match(launcher, /result = accept_handshake => result,[\s\S]*?result = marker => result/);
-  assert.match(startupPatch, /!running_in_app_container\(\)/);
+  // Windows 只在本次运行记录写入成功后才跳过回环握手。
+  assert.match(startupPatch, /started,\s*cfg!\(windows\),\s*connect_cli_wrapper_handshake,/);
+  assert.match(
+    startupPatch,
+    /let tcp_required = handshake_required && \(!prefer_marker \|\| !marker_written\);/,
+  );
 });
 
 test("Codex CLI wrapper environment does not leak into the real CLI", async () => {
