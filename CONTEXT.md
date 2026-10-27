@@ -79,7 +79,7 @@ Codex 把对话历史替换成摘要以腾出上下文，自动触发和手动 `
 _Avoid_: 压缩轮次
 
 **通知渠道**：
-飞书、企业微信、Telegram、微信 ClawBot 四类消息出口。与 provider 无关。
+飞书、企业微信、Telegram、微信 ClawBot、ntfy 五类消息出口。与 provider 无关。
 
 **FastCtx**：
 随 Codey 分发的文件读取与搜索工具，以 MCP 服务形式提供给 Codex。

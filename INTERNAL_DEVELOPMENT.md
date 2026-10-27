@@ -39,7 +39,7 @@
 ## 配置与数据安全
 
 - Codey 配置单独保存于系统配置目录，保留三份有效滚动备份；`CODEX_HOME` 非空时优先使用。
-- 用户配置（`~/.codex/config.toml`）和 `auth.json` 只读。Codey 不写入、不迁移、不重写用户配置，也不做自动修复。本次运行需要的配置一律通过运行期覆盖传给单次 Codex 进程。
+- 用户配置（`~/.codex/config.toml`）和 `auth.json` 在启动、重启、退出、启动失败清理和旧租约恢复中只读：Codey 不写入、不迁移、不重写，也不做自动修复。只有用户在控制台的显式操作可以写这些文件，且写前备份；目前这类操作只有手动修复插件市场。本次运行需要的配置一律通过运行期覆盖传给单次 Codex 进程。见 [ADR 0002](docs/adr/0002-user-config-is-read-only.md) 的 2026-10-27 收窄修订。
 - Hook 定义与信任状态合成单条 `hooks={…}` 运行期覆盖，信任键使用 `/<session-flags>/config.toml:<事件>:<组索引>:<处理器索引>`，不再写入或备份用户 `hooks.json`。Codex 合并加载用户已有的 Hook 和信任项；旧版已写入的 Hook 通过原有租约恢复路径清理一次。应用与恢复都不改写用户的 provider、MCP、模型或未知字段。
 - 官方账号通过原生登录探针及严格端点、认证检查识别。旧版 ChatGPT 登录态（缺少 `auth_mode` 但 `tokens` 中仍有有效令牌）视为可用。不依据模糊文本或第三方配置中的残留凭据判定已登录。
 - 官方账号端点只认 `https://chatgpt.com/backend-api/codex` 这一形态；带端口、查询、片段或仿冒主机的地址不算官方端点。
@@ -81,16 +81,21 @@ provider、模型和上游格式分别识别。控制台只读展示当前 Codex
 
 ## 控制台与页面增强
 
-- 渲染资源通过独立的 CDP `Fetch` 会话拦截 `app://` 响应。`renderer_asset_patch.js` 在同一 Codex 调试实例的辅助页面上下文中执行纯文本改写，没有辅助页面时使用被拦页面的主上下文。改写后重新交付正文，并删除失效的长度、编码及摘要响应头；单项锚点失配只跳过该项，求值失败则放行原资源。入口文档只用于发现实际脚本资源，不改写文档。
-- 启动客户端前开始目标预取，并尝试在浏览器调试端点启用自动挂载。主页面在首次导航前暂停时，先安装资源拦截和持久文档脚本，再恢复加载。未获得暂停目标时回退到普通页面发现；自动挂载不受支持时不阻断启动。
-- 只有晚连接遇到已完成加载的 `app://` 文档，且会话未观察到入口文档时，才补充重载一次。加载中或尚无上下文时不重载；同一存活会话的后续注入复用覆盖状态。桥接在覆盖检查后安装，并保留启用 `Page` 域的新文档脚本注册，后续重载仍会重新安装页面增强及服务档位兼容脚本。
-- 诊断事件 `early_attach.*` 记录提前挂载与预取结果，`cdp.renderer_asset_patch_summary` 记录会话统计，包括暂停请求、求值资源、改写资源、跳过资源和入口文档数。`renderer_asset_patch.*` 记录上下文、脚本解析改写和请求放行原因；单项补丁失败通过独立绑定写入错误日志。`Debugger` 脚本解析通道异步尝试源码改写，不暂停脚本求值，不能保证早于模块初始化。只有协议明确报告实时编辑不可用时才停止该通道，并放弃进行中的读取与求值；该状态写入统计的 `scriptEditDisabled` 和页面主上下文的 `window.__codeyRendererAssetPatchCapabilities.liveEdit`，主上下文切换或导航后重新写入。该通道失败不能视为资源已改写。
+- 页面资源由浏览器级补丁服务（`renderer_asset_patch.rs`）改写。启动器在启动 Codex 前调用 `start_service`，服务以 25 毫秒间隔重连浏览器调试端点（总预算 60 秒），用一条浏览器级 CDP 连接覆盖全部页面：`Target.setAutoAttach` 以 `waitForDebuggerOnStart` 挂住之后创建的目标，再显式挂上连接前已存在的页面（主窗口常在端点就绪前已创建）。注入路径调用 `ensure_service`，同一端口的服务仍在运行时不做事；看门狗重注入或 Codex 自行重启后由它补拉起服务。服务独立于桥接，失败不阻断注入。
+- 每个页面先启用 `Fetch`（只匹配补丁名单内的 `app://*/assets/<前缀>*` 脚本，入口文档和其余资源不经过 Codey），再放行暂停的页面，因此在首次导航前挂上时能覆盖首个文档。暂停目标一律放行：非页面目标、已登记的重复目标和启用 `Fetch` 失败的目标都立即恢复并分离，不会停在暂停状态。
+- 拦截先在请求阶段按「补丁脚本摘要 + 资源文件名」查磁盘缓存（Codey 数据目录的 `renderer-patch-cache`，上限 96 MiB，只缓存文件名带内容哈希的资源），命中则直接交付。未命中才在响应阶段暂停，取正文后在请求它的页面里执行 `renderer_asset_patch.js` 的纯文本改写入口（最多同时处理 2 份），重新交付并删除失效的长度、编码及摘要响应头。入口缺失时就地安装；单项锚点失配只跳过该项，状态码非 2xx、求值失败或交付失败时放行原资源，失败结果不进缓存。页面里的补丁失败记录随求值结果带回，由 Rust 写入错误日志，不依赖 CDP binding。没有事后改写已加载脚本的通道，资源只能在响应阶段改写。
+- 目标预取（`target_prefetch.rs`）与 Codex 启动并行，每 100 毫秒枚举一次 `/json`，主页面一出现就交给注入，只省掉注入重试循环里第一次枚举的等待，不暂停页面。交接期限取 8 秒与「剩余注入预算减去 3.1 秒校验预留」中较小者；到期仍无目标时取消预取，改走普通页面发现，已找到的目标仍交给注入。
+- 主窗口就绪由装桥会话顺带执行的同步探针确认：读取页面地址、桥接、浮层控制器和模型补丁入口。目标是辅助窗口、或桥接与浮层缺失，需整轮重装；页面仍是空白文档，只保留桥接继续确认。探针摘要写入注入摘要；辅助窗口不算注入成功。
+- 挂上时页面已有 `app://` 地址、且不是在暂停状态收到的，属于晚挂载：不重载，只记 `renderer_asset_patch.late_attach`，页面统计里 `attachedBeforeLoad` 为假且 `patched` 为 0，该窗口本次运行的主 bundle 没有补丁，下次启动恢复。桥接在资源覆盖之外独立安装，并保留启用 `Page` 域的新文档脚本注册，后续重载仍会重新安装页面增强及服务档位兼容脚本。
+- 诊断：`target_prefetch.summary` 记录预取结果、耗时和是否到达调试端点；`cdp.injection_retry_summary` 带预取与就绪探针结果；`cdp.renderer_asset_patch_summary` 记录该页面的补丁统计（`attachedBeforeLoad`、`intercepted`、`patched`、`cacheHits`、`skipped`）；`renderer_asset_patch.*` 记录服务与页面事件（`service_unavailable`、`service_failed`、`auto_attach_failed`、`fetch_enable_failed`、`page_attached`、`late_attach`、`rewrite`、`request_skipped`、`cache_write_failed`）。回归检查：`renderer_asset_patch.rs` 内的 Rust 单元测试用模拟 CDP 服务端验证挂载、恢复、分离和降级决定；`tests/renderer-asset-patch.test.mjs` 与 `tests/codex-renderer-patch.test.mjs` 校验改写文本。这些检查不代替 Windows 实机冷启动验收。
 - CDP 负责桥接、注入及健康检查；就绪校验重试复用仍有效的桥接，安装失败或会话失效时重新发现页面并重建。常驻桥接的消息泵一结束，看门狗立即重建，不等下一轮巡检；页面答复桥接失效后 5 秒复核一次，不再等满 30 秒。页面侧健康检查把 `bridge_reinstalled` 结束的调用和主线程卡顿造成的超时视为无结论，不计入失败；判定中断后每 5 秒复查，点击中断提示前先当场复查一次。配置面板按需加载的请求限时 15 秒，遇到 `bridge_reinstalled` 重发一次，后端超时但页面已生成浮层时照常打开。重装前注销该目标上一批持久文档脚本，并将仍等待的页面调用置为失败，错误码为 `bridge_reinstalled`。后台任务仍在运行时，页面忙或超时保持保守状态；看门狗连续三轮重装都未能枚举页面目标时，把重试间隔从 30 秒放宽到 120 秒，并记录 `bridge.recovery_backoff`；此后相同的端点故障不再重复写错误日志。曾经成功枚举、只是没有可注入页面或桥接失败的轮次不计入。健康检查成功或重装成功后，间隔回到 30 秒，失联计数清零，注入状态恢复为当前桥接的状态。用户脚本在同一文档成功执行后不因恢复重复运行。整轮注入期限到达时，诊断记录所在阶段、总耗时、本轮耗时和剩余时间；浮层校验受整轮期限约束，临近期限时直接释放失效桥接，不等待关闭握手。
 - 前端使用 HeroUI、React Aria 和 Tailwind；内嵌界面通过 Shadow DOM 隔离样式，统一管理主题、焦点、弹层和提示挂载位置。HeroUI 样式按实际渲染的组件逐个导入，新增组件时需同步补充样式入口。
 - 控制台只读展示当前 provider，不提供新增、编辑或删除 provider 的入口，也不提供请求日志页或检查更新入口。
+- 标题栏的「系统设置与偏好」对话框（`src/SystemSettingsDialog.tsx`）只读显示 Codey 版本、Codex 版本和 Codex 目录，不写任何配置。每次打开先调用 `refreshStatus` 重新读取运行状态：读取中显示「读取中…」，失败显示原因，Codex 没有版本时显示「未运行 / 未检测到」。目录路径经 `navigator.clipboard` 复制，复制结果显示 3 秒。运行面板不再显示 Codex 版本与目录。没有设备号一行；配置修复与更新策略行未接入，不放占位。回归检查 `tests/system-settings-dialog.test.mjs`，不代替 Windows 实机验收。
+- 注入的设置入口按钮显示 Codey 应用图标：`public/renderer-inject.js` 里的占位符 `__CODEY_APP_ICON_DATA_URL__` 由 `scripts/build-overlay.mjs` 以 `backend/icons/favicon.png` 内联为数据地址，构建后不应残留占位符。
 - 模型选择器使用分组、搜索及虚拟列表，手动输入保留自定义模型；列表更新通过 QueryClient 发布，避免直接修改共享查询对象。
 - 子代理详情从原生会话控制器异步读取实际模型及思考强度；切换后丢弃旧响应，缺失时显示待获取，不使用父任务或角色默认值代替。
-- 页面补丁按功能锚点和语义定位，匹配失败保留原代码及失败状态。页面侧 `isCodexRendererAssetUrl` 与 Rust 侧 `is_patchable_named_asset` 维护同一份资源名单，后者同时限定脚本解析回退通道。当前包括：`app-initial` 中的管理器登记、完成状态同步（锚定 `getHasInProgressLocalConversation`，两次核对服务端状态并排除并发修订、未确认提交和跟随窗口）、请求跟踪；`app-shared` 中的交互采样与心跳精简；`initialize-app-host-services` 中的默认中文首次渲染。Codex 已移除 `get-setting`/`set-setting` 时，中文脚本识别接口缺失后停止持久语言同步，只保留首次渲染补丁和 navigator、Statsig 补偿，不写用户配置。`performanceStatus` / `performanceDetail` 表达启动健康状态。
+- 页面补丁按功能锚点和语义定位，匹配失败保留原代码及失败状态。页面侧 `isCodexRendererAssetUrl` 与 Rust 侧 `PATCHABLE_ASSET_PREFIXES`（`renderer_asset_patch.rs`）维护同一份资源名单，后者同时生成 `Fetch` 的拦截模式；关闭宠物时再追加 `PET_ASSET_PREFIXES` 中的设置页脚本。当前包括：`app-initial` 中的管理器登记、完成状态同步（锚定 `getHasInProgressLocalConversation`，两次核对服务端状态并排除并发修订、未确认提交和跟随窗口）、请求跟踪；`app-shared` 中的交互采样与心跳精简；`initialize-app-host-services` 中的默认中文首次渲染。Codex 已移除 `get-setting`/`set-setting` 时，中文脚本识别接口缺失后停止持久语言同步，只保留首次渲染补丁和 navigator、Statsig 补偿，不写用户配置。`performanceStatus` / `performanceDetail` 表达启动健康状态。
 
 ## 会话、插件与提示词
 
@@ -117,6 +122,7 @@ provider、模型和上游格式分别识别。控制台只读展示当前 Codex
 ## 账号额度与对话用量
 
 - 侧栏账号额度只认 `auth.json` 里的 ChatGPT 登录和 `showAccountUsageInHeader`，不读取 Codey 配置里的 profiles。开关文案是「额度显示」，语义是控制侧栏底部额度块。页面每 60 秒请求 `/account/usage`，单次超时 8 秒。块挂在 Codex 侧栏贴底 footer 里，插在该容器最后一个子元素之前。
+- 套餐标签由 `accountUsagePlanLabel` 映射：`prolite`、`pro`、`promax` 显示 Pro 100、Pro 200、Pro 500，`pro100` 等紧凑写法按数字，`5x`、`pro5x` 显示 Pro 5x，`pro20x` 显示 Pro 20x，另有 Plus、Free，未知值原样显示。标签带 `data-pro-tier`（100、200、500）属性，三档分别用银、金、紫渐变。回归检查 `tests/account-usage-sidebar.test.mjs`。
 - `/account/usage` 由后端解析后，经 CDP bridge 的 `Runtime.evaluate` 对象字面量交给页面，不经过页面 `JSON.parse`。快照是 camelCase 的 `primary` / `secondary` / `credits`，没有 `rateLimits` 这类解锁标记。页面同时接受 `used_percent` 与 `usedPercent`。刷新失败或快照标为 stale 时，只有额度解锁没有改写解析结果才回退 Codex `account/rateLimits/read`；解锁生效时保留后端数字。
 - `quotaUnlockEnabled` 缺省为 true，旧配置没有该字段时也是打开。为 true 时 `quota-unlock.js` 放进 document-start 注入包，为 false 时不注入。脚本在替换 `JSON.parse` 之前把原函数留在 `window.__codeyNativeJsonParse`。页面 `localStorage` 键 `codeyQuotaUnlock=off` 仍可停用漂白。这个开关在启动时决定是否注入，所以保存后需要重启 Codex。
 - 输入栏不再展示账号窗口、套餐或 Credits。对话用量仍来自 `thread/tokenUsage/updated` 的通知对象；这些对象不含解锁标记键，也不经过被替换的 `JSON.parse`。
@@ -133,7 +139,12 @@ provider、模型和上游格式分别识别。控制台只读展示当前 Codex
 
 ## 通知与诊断
 
-- 飞书、企业微信、Telegram 和微信 ClawBot 共用任务状态及去重机制，最多保存 32 个渠道；已配置渠道同时接收完成、失败和等待介入。送达状态不明时不盲目重发。
+- 飞书、企业微信、Telegram、微信 ClawBot 和 ntfy 五类通知渠道共用任务状态及去重机制，最多保存 32 个；已配置的通知渠道同时接收完成、失败和等待介入。
+- ntfy（`notifications/channels/ntfy.rs`）复用现有字段：服务器地址存在通知渠道配置的 `url`，必须是 HTTPS 根地址（允许端口，拒绝路径、查询、片段和用户信息）；主题存在接收者字段，只允许字母、数字、下划线和连字符，最长 64 字符；访问令牌存在机器人令牌字段，非空时以 Bearer 鉴权，为空不带鉴权头。请求向根地址 POST JSON，正文含主题、标题、消息、优先级和标签，完成与测试优先级为 3，失败与等待介入为 4。响应必须带消息编号，带 `error` 字段时报错。错误文本中的地址与令牌脱敏，后端不把已保存的地址和令牌返回前端。
+- 持久投递：事件先写入 SQLite 队列（Codey 配置所在目录的 `notification-outbox.sqlite3`，同名 `.lock` 文件保证同一时间只有一个进程使用），再由投递任务发送。事件键去重：完成与失败共用同一终止事件键，等待介入按会话、轮次和提问标识区分；已有事件保留首次入队的通知渠道集合。队列只保存会话名等必要元数据和各通知渠道绑定的 SHA-256 摘要（微信 ClawBot 的上下文令牌与同步游标不参与摘要），不保存地址、接收者、凭据和错误正文；已结束的事件保留 7 天用于去重，单条事件上限 16 KiB。
+- 投递任务最多并发 4 条，每个通知渠道同一时间只发一条，认领事务提交后才发起网络请求。发送前核验该通知渠道仍启用、已配置且绑定摘要未变，等待介入还要核验仍未被回答，否则取消。可重试失败按指数退避（1 秒起，加抖动，上限 5 分钟，不小于服务端要求的等待），最多 12 次或存活满 24 小时后放弃。重启后恢复待发项，上次中断时发送中的记录标为送达不明，不自动重发。
+- 会话记录文件事件监听（`pending_approval/file_events.rs`）：`notify` 推荐后端监听会话主目录、`sessions`（递归）和 `sqlite`，macOS 另对已核验的会话记录文件做 kqueue 注册（最多 512 个描述符，不递归）。事件按 50 毫秒合并，路径集合溢出时转为完整扫描。监听健康时，通知扫描只增量读取有变化的会话记录，并保留 60 秒一次的完整扫描作补查；监听出错或要求重新扫描时标为不健康，改为定时轮询（间隔 3 秒起，空闲时逐级放宽到 30 秒）并记录 `notification.watcher_degraded`。
+- 通知回归检查：`backend/src/commands/webhooks/` 下的 `runtime_tests.rs`、`observation_tests.rs`，`notifications/outbox.rs` 内的队列测试，`tests/ntfy-notification-channel.test.mjs`。这些检查不代替真实通知渠道、重启续投和 Windows 实机验收。
 - 等待介入同时识别同步、异步提问；异步 accepted 只表示问题已发布，按实际回答清除等待。
 - Trace 与 Crashpad 分别按设置执行保护和手动清理，复用互斥锁、文件白名单及静默期保护，不处理会话或账号数据；清理失败不将缺失统计显示为零。
 - 构建将前端及注入脚本嵌入 Rust 程序，内容未变时保留产物时间戳以复用增量编译；平台打包及发布由现有脚本和工作流负责。客户端启动和控制台都不读取发布清单。
@@ -194,7 +205,7 @@ macOS 本地调试未签名安装包时，确认来源后可用 `xattr -dr com.a
 ## 维护约束
 
 - 不恢复内置路由。见 [ADR 0001](docs/adr/0001-remove-built-in-router.md)。`local_router_enabled` 缺省为关闭；加载和保存 Codey 配置时若磁盘上仍为 true，按关闭处理。这不是保留路由，只是清掉同步残留的开关。
-- 用户配置只读，永不写入。见 [ADR 0002](docs/adr/0002-user-config-is-read-only.md)。运行期配置及 Hook 定义、信任状态通过 CLI 包装器传递命令行覆盖；仅保留旧版 `hooks.json` 租约的一次性恢复。
+- 用户配置生命周期内只读：启动、重启、退出、启动失败清理和旧租约恢复不写 `config.toml`、`auth.json` 等用户拥有的文件，只有控制台的显式操作可以写，且写前备份。见 [ADR 0002](docs/adr/0002-user-config-is-read-only.md) 及其 2026-10-27 收窄修订。运行期配置及 Hook 定义、信任状态通过 CLI 包装器传递命令行覆盖；仅保留旧版 `hooks.json` 租约的一次性恢复。
 - 按提交挑选跟踪上游，不整段 merge。见 [ADR 0003](docs/adr/0003-track-upstream-by-cherry-pick.md)。与上游的当前差异及原因维护在 [docs/agents/fork-upstream.md](docs/agents/fork-upstream.md)；对照、挑选或跳过上游后必须同步更新该文件，用户可感知的条目同步 README「与上游的差异」。
 - `vendor/CodeyRuntime` 整目录替换，内部未调用代码不删。见 ADR 0003。同步时不要在 vendor 内手工删除未引用模块；backend 只停止调用。
 - 自动更新必须关闭。见 ADR 0003 后果。默认更新源硬编码指向上游发布清单，一次在线更新会把上游正式版装回来，覆盖本分叉。保留 `tests/update-disabled.test.mjs`。
@@ -210,7 +221,8 @@ macOS 本地调试未签名安装包时，确认来源后可用 `xattr -dr com.a
 - 只支持 Codex Electron 桌面客户端；页面和 bundle 大改时可能需要更新补丁与注入适配。不固定安装某一版 Codex。
 - 第三方 provider 只能使用目标服务可表达的能力；无法无损转换的请求会在发送前拒绝。
 - Codex 直连当前 provider，不在本机做跨 provider 容灾，也不会重放已发送请求。
-- 既有“手动修复插件市场”通过运行组件的配置管理器写入用户 `config.toml`，与 ADR 0002 有偏差。本轮桌面插件准备遵守只读边界，未改写该既有修复路径。
+- 手动修复插件市场是 ADR 0002 收窄修订所允许的显式操作：它通过运行组件的配置管理器写 `config.toml`，写前校验新文档，并轮换保留最多 5 份 `config.toml.bak`。桌面插件准备不写用户配置。
+- 系统设置与偏好对话框在拿不到 Codex 目录时回退显示 `/Applications/ChatGPT.app`，Windows 用户会看到这个 macOS 默认路径。
 - 子代理 Hook 用于本地协作约束，不等同于操作系统沙箱。
 - FastCtx 不提供 PDF、MCP Resources 或 shell 工具，这些任务继续使用 Codex 自带能力。
 - 进程内请求日志已随内置路由删除，控制台不再提供该页面。
