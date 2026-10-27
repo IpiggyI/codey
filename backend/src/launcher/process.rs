@@ -229,6 +229,21 @@ fn windows_app_dir_supports_packaged_activation(app_dir: &std::path::Path) -> bo
     codey_runtime_core::app_paths::packaged_app_user_model_id(app_dir).is_some()
 }
 
+pub(super) struct CodexLaunchOptions<'a> {
+    pub gpu_launch_mode: GpuLaunchMode,
+    pub launch_proxy: Option<&'a crate::launch_proxy::CodexLaunchProxy>,
+}
+
+fn apply_launch_proxy(
+    proxy: Option<&crate::launch_proxy::CodexLaunchProxy>,
+    arguments: &mut Vec<String>,
+    environment: &mut Vec<(String, String)>,
+) {
+    let Some(proxy) = proxy else { return };
+    arguments.push(proxy.chromium_argument());
+    environment.extend(proxy.environment());
+}
+
 #[cfg_attr(
     not(windows),
     allow(clippy::ptr_arg, reason = "Windows 启动重试需要替换调用方的应用目录")
@@ -237,13 +252,23 @@ pub(super) async fn spawn_codex(
     app_dir: &mut PathBuf,
     debug_port: u16,
     subagent_gate_active: bool,
-    gpu_launch_mode: GpuLaunchMode,
+    options: CodexLaunchOptions<'_>,
     runtime_config_overrides: &[String],
 ) -> Result<SpawnedCodex> {
     #[cfg(not(any(windows, target_os = "macos")))]
     let _ = (subagent_gate_active, runtime_config_overrides);
-    let runtime_arguments =
-        codex_runtime_arguments(gpu_launch_mode, !cfg!(target_os = "macos"), cfg!(windows));
+    let mut runtime_arguments = codex_runtime_arguments(
+        options.gpu_launch_mode,
+        !cfg!(target_os = "macos"),
+        cfg!(windows),
+    );
+    let mut proxy_environment = Vec::new();
+    apply_launch_proxy(
+        options.launch_proxy,
+        &mut runtime_arguments,
+        &mut proxy_environment,
+    );
+    let launch_proxy_environment = options.launch_proxy.map(|_| proxy_environment);
 
     #[cfg(windows)]
     {
@@ -282,11 +307,15 @@ pub(super) async fn spawn_codex(
                     &runtime_arguments,
                     runtime_config_overrides,
                     subagent_gate_active,
+                    launch_proxy_environment.as_deref(),
                     format!("启动尝试 {attempt}/2：Codex CLI 兼容入口不可用：{error:#}"),
                 )
                 .await;
             };
-            let launch_environment = wrapper.environment.clone();
+            let mut launch_environment = wrapper.environment.clone();
+            if let Some(environment) = &launch_proxy_environment {
+                launch_environment.extend(environment.iter().cloned());
+            }
             // 包装器是唯一入口：受限启动必须带着环境落进 Codex，否则宁可降级。
             let constrained = !runtime_config_overrides.is_empty() || subagent_gate_active;
             let wrapper_environment_required = constrained;
@@ -295,7 +324,7 @@ pub(super) async fn spawn_codex(
                 debug_port,
                 &runtime_arguments,
                 &launch_environment,
-                wrapper_environment_required,
+                wrapper_environment_required || options.launch_proxy.is_some(),
             )
             .await;
             let (mut spawned, wrapper_environment_applied) = match launch {
@@ -432,8 +461,14 @@ pub(super) async fn spawn_codex(
                             "Codex 启动兼容方案未能安装；Codey 集成未启用：{startup_error}"
                         )));
                     }
-                    match spawn_windows_codex(app_dir, debug_port, &runtime_arguments, &[], false)
-                        .await
+                    match spawn_windows_codex(
+                        app_dir,
+                        debug_port,
+                        &runtime_arguments,
+                        launch_proxy_environment.as_deref().unwrap_or(&[]),
+                        options.launch_proxy.is_some(),
+                    )
+                    .await
                     {
                         Ok((mut fallback, _)) => {
                             fallback.performance_status = "degraded".to_string();
@@ -476,10 +511,18 @@ pub(super) async fn spawn_codex(
         // 由 spawn 环境继承。
         let mut spawned_environment = Vec::new();
         if is_app_bundle {
-            add_macos_cli_wrapper(&mut command, &wrapper.environment)
+            add_macos_launch_environment(&mut command, &wrapper.environment)
                 .map_err(recovery::recoverable)?;
         } else {
             spawned_environment = wrapper.environment.clone();
+        }
+        if let Some(environment) = &launch_proxy_environment {
+            if is_app_bundle {
+                add_macos_launch_environment(&mut command, environment)
+                    .map_err(recovery::recoverable)?;
+            } else {
+                spawned_environment.extend(environment.iter().cloned());
+            }
         }
         let mut spawned = spawn_command(command, &spawned_environment)?;
         let startup_result = confirm_cli_wrapper_startup(
@@ -548,7 +591,8 @@ pub(super) async fn spawn_codex(
     #[cfg(not(any(windows, target_os = "macos")))]
     {
         let command = build_codex_command(app_dir, debug_port, &runtime_arguments);
-        let mut spawned = spawn_command(command, &[])?;
+        let mut spawned =
+            spawn_command(command, launch_proxy_environment.as_deref().unwrap_or(&[]))?;
         spawned.performance_status = "ready".to_string();
         spawned.performance_detail = "Codex 启动成功".to_string();
         Ok(spawned)
@@ -1231,7 +1275,7 @@ fn write_macos_cli_wrapper(
 }
 
 #[cfg(target_os = "macos")]
-fn add_macos_cli_wrapper(
+fn add_macos_launch_environment(
     command: &mut Vec<String>,
     environment: &[(String, String)],
 ) -> Result<()> {
@@ -1286,6 +1330,7 @@ async fn launch_windows_codex_without_compatibility(
     runtime_arguments: &[String],
     runtime_config_overrides: &[String],
     subagent_gate_active: bool,
+    launch_proxy_environment: Option<&[(String, String)]>,
     startup_error: String,
 ) -> Result<SpawnedCodex> {
     if !runtime_config_overrides.is_empty() {
@@ -1298,9 +1343,15 @@ async fn launch_windows_codex_without_compatibility(
             "Codex 启动兼容入口不可用；Codey 集成未启用：{startup_error}"
         )));
     }
-    let (mut spawned, _) = spawn_windows_codex(app_dir, debug_port, runtime_arguments, &[], false)
-        .await
-        .with_context(|| format!("Codex 启动设置未能应用，且启动失败：{startup_error}"))?;
+    let (mut spawned, _) = spawn_windows_codex(
+        app_dir,
+        debug_port,
+        runtime_arguments,
+        launch_proxy_environment.unwrap_or(&[]),
+        launch_proxy_environment.is_some(),
+    )
+    .await
+    .with_context(|| format!("Codex 启动设置未能应用，且启动失败：{startup_error}"))?;
     spawned.performance_status = "degraded".to_string();
     spawned.performance_detail =
         "Codex 已启动，但部分启动设置未能应用；页面功能以检测结果为准，下次启动将重试".to_string();
@@ -1654,8 +1705,8 @@ pub(super) async fn prepare_codex_for_launch(app_dir: &std::path::Path) -> Resul
     Ok(())
 }
 
-#[cfg(not(windows))]
-fn spawn_command(command: Vec<String>, environment: &[(String, String)]) -> Result<SpawnedCodex> {
+#[cfg(any(not(windows), test))]
+fn build_spawn_command(command: &[String], environment: &[(String, String)]) -> Result<Command> {
     let executable = command
         .first()
         .ok_or_else(|| anyhow::anyhow!("Codex 启动命令为空"))?;
@@ -1664,9 +1715,14 @@ fn spawn_command(command: Vec<String>, environment: &[(String, String)]) -> Resu
     child_command.envs(environment.iter().map(|(name, value)| (name, value)));
     #[cfg(unix)]
     child_command.process_group(0);
-    let child = child_command
+    Ok(child_command)
+}
+
+#[cfg(not(windows))]
+fn spawn_command(command: Vec<String>, environment: &[(String, String)]) -> Result<SpawnedCodex> {
+    let child = build_spawn_command(&command, environment)?
         .spawn()
-        .with_context(|| format!("启动 Codex 失败：{executable}"))?;
+        .with_context(|| format!("启动 Codex 失败：{}", command[0]))?;
     let process_id = child.id();
     Ok(SpawnedCodex {
         child: Some(child),
@@ -2354,5 +2410,86 @@ mod cli_wrapper_tests {
             stage_windows_cli_runtime(&target, &local_app_data).unwrap(),
             fallback
         );
+    }
+}
+
+#[cfg(test)]
+mod launch_proxy_tests {
+    use super::*;
+
+    #[test]
+    fn launch_proxy_environment_fixture() {
+        if std::env::var_os("CODEY_LAUNCH_PROXY_TEST_ENV").is_some() {
+            let environment = std::env::vars_os().collect::<std::collections::BTreeMap<_, _>>();
+            println!("CODEY_TEST_ENV={environment:?}");
+        }
+    }
+
+    async fn child_environment(mut command: Command) -> String {
+        let output = command.output().await.unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("CODEY_TEST_ENV="))
+            .expect("子进程应输出环境快照")
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn empty_launch_proxy_preserves_all_environment_and_arguments() {
+        for value in ["", "  "] {
+            for populated in [false, true] {
+                let mut environment = vec![
+                    ("CODEX_HOME".into(), "existing-home".into()),
+                    ("CODEY_LAUNCH_PROXY_TEST_ENV".into(), "1".into()),
+                ];
+                if populated {
+                    for key in [
+                        "HTTP_PROXY",
+                        "HTTPS_PROXY",
+                        "ALL_PROXY",
+                        "NO_PROXY",
+                        "http_proxy",
+                        "https_proxy",
+                        "all_proxy",
+                        "no_proxy",
+                    ] {
+                        environment.push((key.into(), format!("inherited-{key}")));
+                    }
+                }
+                let mut arguments = vec![
+                    "--exact".into(),
+                    "launcher::process::launch_proxy_tests::launch_proxy_environment_fixture"
+                        .into(),
+                    "--nocapture".into(),
+                ];
+                let original_environment = environment.clone();
+                let original_arguments = arguments.clone();
+                let proxy = match crate::launch_proxy::CodexLaunchProxy::resolve(value).unwrap() {
+                    Some(plan) => Some(plan.start().await.unwrap()),
+                    None => None,
+                };
+                apply_launch_proxy(proxy.as_ref(), &mut arguments, &mut environment);
+                let executable = std::env::current_exe().unwrap();
+                let mut command = vec![executable.to_str().unwrap().to_string()];
+                command.extend(arguments);
+                let actual = build_spawn_command(&command, &environment).unwrap();
+                let mut expected = Command::new(executable);
+                expected.args(original_arguments).envs(original_environment);
+                assert_eq!(
+                    actual.as_std().get_envs().collect::<Vec<_>>(),
+                    expected.as_std().get_envs().collect::<Vec<_>>(),
+                );
+                assert_eq!(
+                    actual.as_std().get_args().collect::<Vec<_>>(),
+                    expected.as_std().get_args().collect::<Vec<_>>(),
+                );
+                assert!(
+                    child_environment(actual).await == child_environment(expected).await,
+                    "空设置改变了子进程环境",
+                );
+            }
+        }
     }
 }

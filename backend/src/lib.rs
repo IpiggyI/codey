@@ -19,6 +19,8 @@ mod fastctx_route_gate;
 mod fs_util;
 mod hook_io;
 mod http_response;
+mod launch_proxy;
+mod launch_proxy_relay;
 mod launcher;
 mod maintenance_lock;
 mod message_delete;

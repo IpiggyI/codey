@@ -122,3 +122,53 @@ test("launch proxy input lives in the Codex feature policy card", async () => {
   // 带凭据代理的安全影响写在说明里：其他本机进程可免凭据使用。
   assert.match(cardSource, /本机其他进程也能通过它免凭据使用这个代理/);
 });
+
+test("launch proxy reaches Chromium arguments, spawn environment and restart detection", async () => {
+  const [configSource, commandsSource, processSource, proxySource] =
+    await Promise.all([
+      readFile(new URL("backend/src/config.rs", root), "utf8"),
+      readFile(new URL("backend/src/commands.rs", root), "utf8"),
+      readFile(new URL("backend/src/launcher/process.rs", root), "utf8"),
+      readFile(new URL("backend/src/launch_proxy.rs", root), "utf8"),
+    ]);
+
+  assert.match(configSource, /pub codex_launch_proxy: String/);
+  assert.match(configSource, /fn validate_codex_launch_proxy/);
+  assert.match(commandsSource, /validate_codex_launch_proxy\(codex_launch_proxy\)/);
+  assert.match(
+    commandsSource,
+    /applied\.codex_launch_proxy != current\.codex_launch_proxy/,
+  );
+  assert.match(processSource, /proxy\.chromium_argument\(\)/);
+  assert.match(proxySource, /--proxy-server=/);
+  assert.match(proxySource, /"socks5"[\s\S]{0,40}else/);
+  assert.match(proxySource, /"HTTP_PROXY"/);
+  assert.match(proxySource, /"NO_PROXY"/);
+  assert.match(
+    processSource,
+    /launch_proxy_environment[\s\S]*launch_environment.extend/,
+  );
+  assert.match(
+    processSource,
+    /spawn_command\(command, launch_proxy_environment\.as_deref\(\)\.unwrap_or\(&\[\]\)\)/,
+  );
+});
+
+test("credentialed launch proxy goes through the local auth relay", async () => {
+  const [proxySource, relaySource, launcherSource] = await Promise.all([
+    readFile(new URL("backend/src/launch_proxy.rs", root), "utf8"),
+    readFile(new URL("backend/src/launch_proxy_relay.rs", root), "utf8"),
+    readFile(new URL("backend/src/launcher.rs", root), "utf8"),
+  ]);
+
+  // 带凭据的上游解析为中继计划，启动时落成回环地址，客户端与子进程都
+  // 拿不到凭据。
+  assert.match(proxySource, /LaunchProxyPlan::Relayed/);
+  assert.match(proxySource, /fn relayed\(port: u16\)/);
+  assert.match(proxySource, /http:\/\/127\.0\.0\.1:\{port\}/);
+  assert.match(launcherSource, /plan\.start\(\)\.await/);
+  // 中继向上游注入认证：http(s) 走 Proxy-Authorization，socks5 走 RFC 1929。
+  assert.match(relaySource, /Proxy-Authorization/);
+  assert.match(relaySource, /0x02|method.*auth|socks5_negotiate/);
+  assert.match(relaySource, /pub\(crate\) async fn ensure_running/);
+});

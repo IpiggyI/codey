@@ -797,6 +797,37 @@ async fn legacy_subagent_scalars_update_only_the_default_role() {
 }
 
 #[tokio::test]
+async fn codex_launch_proxy_saves_after_validation() {
+    let directory = tempfile::tempdir().unwrap();
+    let initial = CodeyConfig::default();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(initial.clone()),
+        ..AppState::default()
+    });
+    // 带凭据的地址交给本地认证中继，允许保存。
+    let mut payload = serde_json::to_value(&initial).unwrap();
+    payload["codexLaunchProxy"] = json!(" http://user:pass@127.0.0.1:7890 ");
+
+    let result = invoke_api(&state, "save_codey_config", json!({ "config": payload })).await;
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(
+        state.config.read().await.codex_launch_proxy,
+        "http://user:pass@127.0.0.1:7890"
+    );
+
+    // 第一次保存已推进 settings_revision，从当前配置重建请求。
+    let current = state.config.read().await.clone();
+    let mut payload = serde_json::to_value(&current).unwrap();
+    payload["codexLaunchProxy"] = json!(" socks5h://127.0.0.1 ");
+    let result = invoke_api(&state, "save_codey_config", json!({ "config": payload })).await;
+
+    assert_eq!(result["status"], "failed");
+    assert!(result["message"].as_str().unwrap().contains("启动代理"));
+}
+
+#[tokio::test]
 async fn partial_subagent_role_payload_merges_with_existing_roles() {
     let directory = tempfile::tempdir().unwrap();
     let mut initial = CodeyConfig::default();

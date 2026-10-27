@@ -1474,6 +1474,11 @@ async fn save_codey_config_locked(
     config.protect_crashpad_pending = config_input.protect_crashpad_pending;
     config.slim_codex_pet = config_input.slim_codex_pet;
     config.gpu_launch_mode = config_input.gpu_launch_mode;
+    let codex_launch_proxy = config_input.codex_launch_proxy.trim();
+    if !codex_launch_proxy.is_empty() {
+        crate::config::validate_codex_launch_proxy(codex_launch_proxy)?;
+    }
+    config.codex_launch_proxy = codex_launch_proxy.to_string();
     let fast_context_tools_status = current_fast_context_tools_status();
     config.fast_context_tools = embedded_fast_context_tools_enabled(
         config_input.fast_context_tools,
@@ -2145,6 +2150,7 @@ pub(super) fn config_requires_restart_with_route_status(
         || applied.slim_codex_pet != current.slim_codex_pet
         || applied.quota_unlock_enabled != current.quota_unlock_enabled
         || applied.gpu_launch_mode != current.gpu_launch_mode
+        || applied.codex_launch_proxy != current.codex_launch_proxy
         || applied.fast_context_tools != current.fast_context_tools
         || applied.subagent_optimization != current.subagent_optimization
         || applied_models != &RuntimeModelConfig::from_config(current)

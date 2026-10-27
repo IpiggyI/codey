@@ -449,6 +449,59 @@ fn normalize_prompt_optimization_upstream_protocol(value: &str) -> String {
     }
 }
 
+pub(crate) fn validate_outbound_proxy_url(value: &str, label: &str) -> Result<(), String> {
+    let url = reqwest::Url::parse(value)
+        .map_err(|_| format!("{label}不是有效的代理地址（http/https/socks5/socks5h）"))?;
+    if url.host_str().is_none() || !matches!(url.scheme(), "http" | "https" | "socks5" | "socks5h")
+    {
+        return Err(format!("{label}必须是 http、https、socks5 或 socks5h 地址"));
+    }
+    reqwest::Proxy::all(url.clone()).map_err(|_| format!("{label}无法用作代理"))?;
+    let unusable_host = url
+        .host_str()
+        .and_then(|host| {
+            host.trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .ok()
+        })
+        .is_some_and(|ip| match ip {
+            std::net::IpAddr::V4(ip) => {
+                ip.is_unspecified() || ip.is_link_local() || ip.is_broadcast()
+            }
+            std::net::IpAddr::V6(ip) => ip.is_unspecified() || ip.is_unicast_link_local(),
+        });
+    if unusable_host {
+        return Err(format!("{label}不能指向未指定地址或链路本地地址"));
+    }
+    Ok(())
+}
+
+/// Codex 启动代理在通用代理地址校验之外叠加启动约束：
+/// 只允许协议、地址、端口和认证信息；SOCKS 地址必须显式端口，其
+/// RFC 1929 凭据限长 255 字节。凭据不会交给 Chromium 命令行，启动时由
+/// 本地认证中继注入上游。
+pub(crate) fn validate_codex_launch_proxy(value: &str) -> Result<(), String> {
+    validate_outbound_proxy_url(value, "Codex 启动代理")?;
+    let url = reqwest::Url::parse(value).expect("启动代理地址已通过校验");
+    // 非特殊协议（socks5/socks5h）解析出的 path 是空串而非 "/"。
+    if !matches!(url.path(), "" | "/") || url.query().is_some() || url.fragment().is_some() {
+        return Err("Codex 启动代理只能包含协议、地址、端口和认证信息".into());
+    }
+    if matches!(url.scheme(), "socks5" | "socks5h") {
+        if url.port().is_none() {
+            return Err("Codex 启动代理的 SOCKS 地址必须带端口".into());
+        }
+        let username = percent_encoding::percent_decode_str(url.username()).collect::<Vec<u8>>();
+        let password = percent_encoding::percent_decode_str(url.password().unwrap_or_default())
+            .collect::<Vec<u8>>();
+        if crate::launch_proxy_relay::socks_credentials_too_long(&username, &password) {
+            return Err("Codex 启动代理的 SOCKS 用户名或密码不能超过 255 字节".into());
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_outbound_api_url(value: &str, label: &str) -> Result<reqwest::Url, String> {
     let url = reqwest::Url::parse(value).map_err(|_| format!("{label}不是有效的 HTTP(S) 地址"))?;
     if url.host_str().is_none() || !matches!(url.scheme(), "http" | "https") {
@@ -654,6 +707,9 @@ pub struct CodeyConfig {
     /// Codey-managed Codex launch. Disabled by default and ignored on macOS.
     #[serde(default)]
     pub gpu_launch_mode: GpuLaunchMode,
+    /// 下次启动 Codex 时使用的代理；留空保留原有环境。
+    #[serde(default)]
+    pub codex_launch_proxy: String,
     /// Publishes Codey's embedded FastCtx file tools to Codex for the next
     /// runtime. Disabled by default so existing tool behavior is unchanged.
     #[serde(default)]
@@ -777,6 +833,7 @@ impl Default for CodeyConfig {
             protect_crashpad_pending: true,
             slim_codex_pet: true,
             gpu_launch_mode: GpuLaunchMode::Off,
+            codex_launch_proxy: String::new(),
             fast_context_tools: false,
             subagent_optimization: false,
             subagent_model: default_subagent_model(),
@@ -859,6 +916,7 @@ impl CodeyConfig {
         if !self.initial_route_import_completed && !self.looks_like_empty_default_route() {
             self.initial_route_import_completed = true;
         }
+        self.codex_launch_proxy = self.codex_launch_proxy.trim().to_string();
         self.webhook.normalize();
         self.prompt_optimization.normalize();
         self.cache_valid_minutes = self
@@ -2390,6 +2448,63 @@ fn parse_config_contents(contents: &str, path: &Path) -> Result<CodeyConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codex_launch_proxy_rejects_paths_and_portless_socks_but_allows_credentials() {
+        for accepted in [
+            "http://127.0.0.1:7890",
+            "https://proxy.example.com:8443",
+            "https://proxy.example.com",
+            "socks5://127.0.0.1:1080",
+            "socks5h://proxy.example.com:1080",
+            "http://[::1]:7890",
+            &format!("socks5://{}@127.0.0.1:1080", "%ff".repeat(255)),
+            // 凭据交给本地认证中继，不交给 Chromium 命令行。
+            "http://user:pass@proxy.example.com:8080",
+            "socks5://user@127.0.0.1:1080",
+        ] {
+            assert!(validate_codex_launch_proxy(accepted).is_ok(), "{accepted}");
+        }
+        for rejected in [
+            // 只允许协议、地址、端口和认证信息；非特殊协议的 path 解析为空串。
+            "http://127.0.0.1:7890/v1",
+            "socks5://127.0.0.1:1080/v1",
+            "http://127.0.0.1:7890?x=1",
+            "http://127.0.0.1:7890#frag",
+            "http://proxy.example:7890?",
+            "http://proxy.example:7890#",
+            "http://169.254.1.1:7890",
+            "http://255.255.255.255:7890",
+            "http://[::]:7890",
+            "http://[fe80::1]:7890",
+            &format!("socks5://{}@127.0.0.1:1080", "%FF".repeat(256)),
+            &format!("socks5h://user:{}@127.0.0.1:1080", "%41".repeat(256)),
+            // Chromium 需要 host:port，SOCKS 不能省略端口。
+            "socks5://127.0.0.1",
+            "socks5h://proxy.example.com",
+            // RFC 1929 的用户名和密码各限 255 字节。
+            &format!("socks5://{}@127.0.0.1:1080", "u".repeat(256)),
+            // 拒绝不支持的协议和不可用的主机。
+            "ftp://proxy.example.com:21",
+            "127.0.0.1:7890",
+            "http://0.0.0.0:7890",
+        ] {
+            assert!(validate_codex_launch_proxy(rejected).is_err(), "{rejected}");
+        }
+    }
+
+    #[test]
+    fn codex_launch_proxy_defaults_and_normalizes_on_config_roundtrip() {
+        let config = CodeyConfig::default();
+        assert!(config.codex_launch_proxy.is_empty());
+        let mut value = serde_json::to_value(config).unwrap();
+        value.as_object_mut().unwrap().remove("codexLaunchProxy");
+        let mut config: CodeyConfig = serde_json::from_value(value).unwrap();
+        assert!(config.codex_launch_proxy.is_empty());
+        config.codex_launch_proxy = " http://127.0.0.1:7890 ".into();
+        let value = serde_json::to_value(config.normalize()).unwrap();
+        assert_eq!(value["codexLaunchProxy"], "http://127.0.0.1:7890");
+    }
 
     fn named_config(name: &str) -> CodeyConfig {
         let mut config = CodeyConfig::default();

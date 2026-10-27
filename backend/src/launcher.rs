@@ -13,7 +13,7 @@ use codey_runtime_core::launcher::build_codex_command;
 use serde::Serialize;
 use serde_json::Value;
 use tokio::process::Child;
-#[cfg(not(windows))]
+#[cfg(any(not(windows), test))]
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock, oneshot};
 
@@ -51,8 +51,8 @@ pub(crate) use platform::{activate_visible_windows_codex_window, windows_process
 #[cfg(windows)]
 pub(crate) use process::windows_cli_wrapper_target;
 use process::{
-    SpawnedCodex, prepare_codex_for_launch, reap_child_after_cleanup, spawn_codex,
-    spawn_codex_exit_watcher,
+    CodexLaunchOptions, SpawnedCodex, prepare_codex_for_launch, reap_child_after_cleanup,
+    spawn_codex, spawn_codex_exit_watcher,
 };
 #[cfg(test)]
 use process::{codex_runtime_arguments, gpu_launch_arguments};
@@ -1528,6 +1528,20 @@ async fn prepare_startup_patches_with_port_selector(
     Ok(StartupPatchState { debug_port })
 }
 
+async fn with_launch_proxy<T, F>(
+    value: &str,
+    launch: impl FnOnce(Option<crate::launch_proxy::CodexLaunchProxy>) -> F,
+) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    let launch_proxy = match crate::launch_proxy::CodexLaunchProxy::resolve(value)? {
+        Some(plan) => Some(plan.start().await?),
+        None => None,
+    };
+    launch(launch_proxy).await
+}
+
 async fn spawn_and_inject_runtime(
     home: &std::path::Path,
     config: &CodeyConfig,
@@ -1538,61 +1552,67 @@ async fn spawn_and_inject_runtime(
     runtime_config_overrides: &[String],
 ) -> Result<SpawnedRenderer> {
     let spawn_inject_started = Instant::now();
-    // 浏览器级补丁服务先于 Codex 启动；目标枚举与 CLI 包装器握手并行。
-    crate::renderer_asset_patch::start_service(patch.debug_port, config.slim_codex_pet);
-    let target_prefetch = cdp::spawn_injectable_target_prefetch(patch.debug_port);
-    let mut spawned = match spawn_codex(
-        &mut storage.app_dir,
-        patch.debug_port,
-        config.subagent_optimization,
-        config.gpu_launch_mode,
-        runtime_config_overrides,
-    )
+    with_launch_proxy(&config.codex_launch_proxy, |launch_proxy| async move {
+        // 浏览器级补丁服务先于 Codex 启动；目标枚举与 CLI 包装器握手并行。
+        crate::renderer_asset_patch::start_service(patch.debug_port, config.slim_codex_pet);
+        let target_prefetch = cdp::spawn_injectable_target_prefetch(patch.debug_port);
+        let mut spawned = match spawn_codex(
+            &mut storage.app_dir,
+            patch.debug_port,
+            config.subagent_optimization,
+            CodexLaunchOptions {
+                gpu_launch_mode: config.gpu_launch_mode,
+                launch_proxy: launch_proxy.as_ref(),
+            },
+            runtime_config_overrides,
+        )
+        .await
+        {
+            Ok(spawned) => spawned,
+            Err(error) => {
+                target_prefetch.abort();
+                return Err(restore_runtime_config_after_error(home, error).await);
+            }
+        };
+        let codex_spawn_ms = spawn_inject_started.elapsed().as_millis() as u64;
+        let maintenance = MaintenanceStatus {
+            session_status: storage.session_maintenance.status,
+            session_files_fixed: storage.session_maintenance.files_fixed,
+            sqlite_rows_updated: storage.session_maintenance.sqlite_rows_updated,
+            ghost_tasks_pruned: storage.session_maintenance.ghost_tasks_pruned,
+            performance_status: spawned.performance_status.clone(),
+            performance_detail: spawned.performance_detail.clone(),
+        };
+        let child = Arc::new(Mutex::new(spawned.child.take()));
+        let injected_target = inject_initial_renderer(InitialRendererInputs {
+            debug_port: patch.debug_port,
+            handler: handler.clone(),
+            injection_scripts,
+            app_dir: &storage.app_dir,
+            home,
+            spawned: &spawned,
+            child: &child,
+            prefetched_target: target_prefetch,
+        })
+        .await?;
+        let inject_renderer_ms = spawn_inject_started.elapsed().as_millis() as u64 - codex_spawn_ms;
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "launcher.spawn_inject_timings",
+            serde_json::json!({
+                "codexSpawnAndCompatibilityMs": codex_spawn_ms,
+                "rendererInjectionMs": inject_renderer_ms,
+                "totalMs": spawn_inject_started.elapsed().as_millis() as u64,
+            }),
+        );
+        Ok(SpawnedRenderer {
+            app_dir: storage.app_dir,
+            spawned,
+            child,
+            maintenance,
+            injected_target,
+        })
+    })
     .await
-    {
-        Ok(spawned) => spawned,
-        Err(error) => {
-            target_prefetch.abort();
-            return Err(restore_runtime_config_after_error(home, error).await);
-        }
-    };
-    let codex_spawn_ms = spawn_inject_started.elapsed().as_millis() as u64;
-    let maintenance = MaintenanceStatus {
-        session_status: storage.session_maintenance.status,
-        session_files_fixed: storage.session_maintenance.files_fixed,
-        sqlite_rows_updated: storage.session_maintenance.sqlite_rows_updated,
-        ghost_tasks_pruned: storage.session_maintenance.ghost_tasks_pruned,
-        performance_status: spawned.performance_status.clone(),
-        performance_detail: spawned.performance_detail.clone(),
-    };
-    let child = Arc::new(Mutex::new(spawned.child.take()));
-    let injected_target = inject_initial_renderer(InitialRendererInputs {
-        debug_port: patch.debug_port,
-        handler: handler.clone(),
-        injection_scripts,
-        app_dir: &storage.app_dir,
-        home,
-        spawned: &spawned,
-        child: &child,
-        prefetched_target: target_prefetch,
-    })
-    .await?;
-    let inject_renderer_ms = spawn_inject_started.elapsed().as_millis() as u64 - codex_spawn_ms;
-    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
-        "launcher.spawn_inject_timings",
-        serde_json::json!({
-            "codexSpawnAndCompatibilityMs": codex_spawn_ms,
-            "rendererInjectionMs": inject_renderer_ms,
-            "totalMs": spawn_inject_started.elapsed().as_millis() as u64,
-        }),
-    );
-    Ok(SpawnedRenderer {
-        app_dir: storage.app_dir,
-        spawned,
-        child,
-        maintenance,
-        injected_target,
-    })
 }
 
 fn spawn_runtime_watchers(inputs: RuntimeWatcherInputs) -> RuntimeWatchers {
@@ -2116,3 +2136,38 @@ mod app_path_tests;
 
 #[cfg(test)]
 mod model_delivery_test_support;
+
+#[cfg(test)]
+mod launch_proxy_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn launch_proxy_relay_failure_stops_before_spawn_and_environment_injection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.read_exact(&mut [0; 4]).await.unwrap();
+            stream.write_all(&[0x05, 0xff]).await.unwrap();
+        });
+        let mut spawned = false;
+        let mut environment = vec![("HTTP_PROXY".to_string(), "inherited-proxy".to_string())];
+        let original_environment = environment.clone();
+        let value = format!("socks5://user:secret@{address}");
+        let result = with_launch_proxy(&value, |proxy| {
+            spawned = true;
+            if let Some(proxy) = proxy {
+                environment.extend(proxy.environment());
+            }
+            std::future::ready(Ok(()))
+        })
+        .await;
+        let message = format!("{:#}", result.unwrap_err());
+        assert!(message.contains("不接受可用的认证方式"), "{message}");
+        assert!(!message.contains("secret"), "{message}");
+        assert!(!spawned);
+        assert_eq!(environment, original_environment);
+        server.await.unwrap();
+    }
+}
