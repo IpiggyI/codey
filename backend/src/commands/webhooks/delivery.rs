@@ -28,7 +28,7 @@ pub(super) fn binding_hash(channel: &NotificationChannelConfig) -> String {
     // ClawBot 的 context_token 与同步游标自动更新，不代表接收账号改变。
     // bot_token、接收人和服务地址仍纳入摘要，重新绑定后旧队列不能发送给新对象。
     crate::fs_util::sha256_hex(
-        (&serde_json::to_string(&(
+        serde_json::to_string(&(
             channel.kind,
             channel.url.trim(),
             channel.bot_token.trim(),
@@ -39,7 +39,7 @@ pub(super) fn binding_hash(channel: &NotificationChannelConfig) -> String {
                 channel.context_token.trim()
             },
         ))
-        .expect("notification binding serializes"))
+        .expect("notification binding serializes")
             .as_bytes(),
     )
 }

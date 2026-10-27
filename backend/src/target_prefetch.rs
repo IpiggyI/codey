@@ -242,7 +242,16 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = [0; 4096];
-            stream.read(&mut request).await.unwrap();
+            let mut received = 0;
+            loop {
+                assert!(received < request.len(), "request headers exceed buffer");
+                let count = stream.read(&mut request[received..]).await.unwrap();
+                assert_ne!(count, 0, "request ended before headers completed");
+                received += count;
+                if request[..received].windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    break;
+                }
+            }
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]")
                 .await

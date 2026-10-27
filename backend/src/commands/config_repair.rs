@@ -23,33 +23,6 @@ fn record_failure_with(failure: ConfigRepairFailure, log: impl FnOnce(&str, Valu
     message
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn config_repair_failure_is_forwarded_with_stage_and_path() {
-        let temp = tempfile::tempdir().unwrap();
-        let target = temp.path().join("config.toml");
-        let log_file = temp.path().join("errors.log");
-        let failure = ConfigRepairFailure::new("解析配置", &target, "TOML 语法无效");
-        let returned = record_failure_with(failure, |message, context| {
-            std::fs::write(
-                &log_file,
-                serde_json::to_vec(&json!({"error":message, "context":context})).unwrap(),
-            )
-            .unwrap();
-        });
-        let record: Value = serde_json::from_slice(&std::fs::read(log_file).unwrap()).unwrap();
-        assert_eq!(record["context"]["stage"], "解析配置");
-        assert_eq!(
-            record["context"]["targetPath"],
-            target.to_string_lossy().as_ref()
-        );
-        assert_eq!(record["error"], returned);
-    }
-}
-
 pub(super) async fn repair_codex_config(state: &Arc<AppState>) -> Result<Value, String> {
     let path = codex_config::codex_home().join("config.toml");
     // 请求页面关闭后，后台任务仍持有操作锁。
@@ -71,7 +44,7 @@ pub(super) async fn repair_codex_config(state: &Arc<AppState>) -> Result<Value, 
                 "Codex 正在重启或退出，请稍后重试",
             )));
         }
-        let report = tokio::task::spawn_blocking(move || codex_config::repair_codex_config())
+        let report = tokio::task::spawn_blocking(codex_config::repair_codex_config)
             .await
             .map_err(|_| {
                 record_failure(ConfigRepairFailure::new(
@@ -106,4 +79,31 @@ pub(super) async fn check_codex_config() -> Result<Value, String> {
     })
     .await
     .map_err(|_| "配置检查任务异常退出，请重试".to_owned())?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_repair_failure_is_forwarded_with_stage_and_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("config.toml");
+        let log_file = temp.path().join("errors.log");
+        let failure = ConfigRepairFailure::new("解析配置", &target, "TOML 语法无效");
+        let returned = record_failure_with(failure, |message, context| {
+            std::fs::write(
+                &log_file,
+                serde_json::to_vec(&json!({"error":message, "context":context})).unwrap(),
+            )
+            .unwrap();
+        });
+        let record: Value = serde_json::from_slice(&std::fs::read(log_file).unwrap()).unwrap();
+        assert_eq!(record["context"]["stage"], "解析配置");
+        assert_eq!(
+            record["context"]["targetPath"],
+            target.to_string_lossy().as_ref()
+        );
+        assert_eq!(record["error"], returned);
+    }
 }

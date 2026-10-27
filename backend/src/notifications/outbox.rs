@@ -175,7 +175,7 @@ impl Outbox {
                 )
                 .map_err(db_error)?;
             for (channel_id, binding_hash) in seen {
-                let delivery_key = crate::fs_util::sha256_hex((&serde_json::to_string(&(&event_key, channel_id)).expect("string tuple serializes")).as_bytes());
+                let delivery_key = crate::fs_util::sha256_hex(serde_json::to_string(&(&event_key, channel_id)).expect("string tuple serializes").as_bytes());
                 transaction
                     .execute(
                         "INSERT OR IGNORE INTO notification_channels(channel_id, last_claim_seq) VALUES (?1, 0)",
@@ -429,7 +429,7 @@ fn retry_delay_ms(key: &str, attempt: u32, retry_after_ms: Option<u64>) -> u64 {
     let base = 1_000_u64
         .saturating_mul(1_u64 << attempt.saturating_sub(1).min(20))
         .min(MAX_BACKOFF_MS);
-    let digest = crate::fs_util::sha256_hex((&format!("{key}:{attempt}")).as_bytes());
+    let digest = crate::fs_util::sha256_hex(format!("{key}:{attempt}").as_bytes());
     let jitter = u64::from_str_radix(&digest[..16], 16).unwrap_or_default() % (base / 4 + 1);
     base.saturating_add(jitter)
         .min(MAX_BACKOFF_MS)
