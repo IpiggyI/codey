@@ -7,11 +7,13 @@ import {
   IconLoader2 as LoaderCircle,
   IconMessageCircleQuestion,
   IconRefresh as RefreshCw,
+  IconSettings,
   IconX,
 } from "@tabler/icons-react";
 import { invoke } from "./api";
 import { TraceLogModule } from "./TraceLogModule";
 import { ModelPickerDialog } from "./AppDialogs";
+import { SystemSettingsDialog } from "./SystemSettingsDialog";
 import { FeaturePolicyCard, SubagentPolicyCard } from "./FeaturePolicyCard";
 import { ModelSection } from "./ModelSection";
 import { OperationsPanel } from "./OperationsPanel";
@@ -134,6 +136,7 @@ export function App({
   const [portalContainer, setPortalContainer] = useState<HTMLElement | null>(
     null,
   );
+  const [systemSettingsOpen, setSystemSettingsOpen] = useState(false);
   const popupContainer = modalContainer ?? null;
   const noticeController = useAppNoticeController();
   const confirmationController = useConfirmationController();
@@ -172,11 +175,9 @@ export function App({
   const operationsStatus = useMemo(
     () => ({
       running: status.running,
-      codexAppVersion: status.codexAppVersion,
       clientPlatform: status.clientPlatform,
       restartRequired: status.restartRequired,
       restartInProgress: status.restartInProgress,
-      codexAppPath: status.codexAppPath,
       maintenance: status.maintenance,
       injectionScripts: status.injectionScripts,
       fastContextToolsActive: status.fastContextToolsActive,
@@ -188,11 +189,9 @@ export function App({
     }),
     [
       status.running,
-      status.codexAppVersion,
       status.clientPlatform,
       status.restartRequired,
       status.restartInProgress,
-      status.codexAppPath,
       status.maintenance,
       status.injectionScripts,
       status.fastContextToolsActive,
@@ -1074,6 +1073,16 @@ export function App({
 
       <div className="flex min-w-0 items-center gap-4 justify-self-end">
         <div className="flex items-center gap-2">
+          <Button
+            aria-label="系统设置与偏好"
+            className="flex-none"
+            onPress={() => setSystemSettingsOpen(true)}
+            size="icon-sm"
+            title="系统设置与偏好"
+            variant="ghost"
+          >
+            <IconSettings aria-hidden="true" />
+          </Button>
           {embedded && (
             <Button
               aria-label={restartStatusError ? "重新查询状态" : status.running ? "重启 Codex" : "Codex 未运行"}
@@ -1183,7 +1192,6 @@ export function App({
         <div className="page" id="codey-settings-content">
           {/* 最上方：运行状态 (Codex 运行与维护) */}
           <OperationsPanel
-            codexAppPath={config.codexAppPath}
             fastContextToolsStatus={fastContextToolsStatus}
             status={operationsStatus}
             busy={busy}
@@ -1332,6 +1340,16 @@ export function App({
       <ConfirmationDialogHost
         container={portalContainer}
         controller={confirmationController}
+      />
+
+      <SystemSettingsDialog
+        open={systemSettingsOpen}
+        onOpenChange={setSystemSettingsOpen}
+        container={portalContainer}
+        appVersion={status.appVersion}
+        codexAppVersion={status.codexAppVersion}
+        codexAppPath={config.codexAppPath || status.codexAppPath}
+        onRefreshStatus={refreshStatus}
       />
     </main>
   );

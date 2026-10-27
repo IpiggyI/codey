@@ -331,3 +331,132 @@ input:focus-visible,
   margin-left: 0;
 }
 
+
+.system-settings-icon {
+  display: flex;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: rgba(0, 122, 255, 0.1);
+  color: var(--mac-blue);
+}
+
+.system-settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 0;
+  font-size: 14px;
+}
+
+.system-settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 12px;
+  background: var(--mac-gray-bg);
+}
+
+.system-settings-versions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.system-settings-version-cell {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.system-settings-version-cell:first-child {
+  padding-right: 12px;
+  border-right: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.system-settings-version-cell:last-child {
+  padding-left: 12px;
+}
+
+.system-settings-label {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--mac-text-secondary);
+}
+
+.system-settings-value {
+  min-width: 0;
+  overflow: hidden;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--mac-text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.system-settings-error,
+.system-settings-copy-feedback {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.system-settings-path {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.system-settings-path-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.system-settings-path-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--mac-text-secondary);
+}
+
+.system-settings-copy {
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  flex-shrink: 0;
+  color: var(--mac-text-secondary);
+}
+
+.system-settings-path-box {
+  padding: 6px 10px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  background: var(--mac-card-bg);
+}
+
+.system-settings-path-box code {
+  display: block;
+  max-height: 80px;
+  overflow-y: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--mac-text-primary);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
