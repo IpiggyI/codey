@@ -10,6 +10,7 @@ import {
   uniqueModelIds,
 } from "../modelIds";
 import { validateNtfyTopic } from "../notifications/types";
+import { createCodexExtensionsPreview } from "./codexExtensionsMock";
 import { previewOfficialModels, previewUpstreamModels } from "../previewModels";
 import {
   previewCrashpadPendingStats,
@@ -348,10 +349,14 @@ if (import.meta.env.DEV) {
       };
     });
 
+    const extensionsPreview = createCodexExtensionsPreview(previewClientPlatform);
+
     window.__codeyInvokeApi = async (command, args) => {
       console.log(`[Mock API Call] ${command}`, args);
       // Wait a tiny bit to simulate network delay
       await new Promise((resolve) => setTimeout(resolve, 300));
+
+      if (command === "codex_extensions") return extensionsPreview(args?.request as Record<string, unknown>);
 
       if (command === "load_codey_config") {
         return {

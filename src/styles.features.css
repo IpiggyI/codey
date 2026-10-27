@@ -837,3 +837,121 @@
   line-height: 1.5;
   max-width: 320px;
 }
+
+/* MCP 与 Skill 管理页 */
+.codey-card {
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 12px;
+  background: var(--mac-card-bg);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+  overflow: hidden;
+}
+
+.codey-segmented-control {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px;
+  gap: 2px;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.05);
+}
+
+.codey-segmented-item {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--mac-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all 140ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.codey-segmented-item:hover:not(:disabled) {
+  color: var(--mac-text-primary);
+}
+
+.codey-segmented-item.active {
+  background: var(--mac-card-bg);
+  color: var(--mac-text-primary);
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.02);
+}
+
+.codey-segmented-item:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.extension-status-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.extension-status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 6px 0 11px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 999px;
+  background: var(--mac-card-bg);
+  color: var(--mac-text-secondary);
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+  transition: background-color 130ms ease, border-color 130ms ease, color 130ms ease;
+}
+
+.extension-status-chip:hover {
+  border-color: rgba(0, 0, 0, 0.15);
+  color: var(--mac-text-primary);
+}
+
+.extension-status-chip:focus-visible {
+  outline: 2px solid var(--mac-blue);
+  outline-offset: 2px;
+}
+
+.extension-status-chip-count {
+  min-width: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--mac-text-primary) 7%, transparent);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 18px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.extension-status-chip[aria-pressed="true"] {
+  border-color: var(--mac-text-primary);
+  background: var(--mac-text-primary);
+  color: var(--mac-card-bg);
+}
+
+.extension-status-chip[aria-pressed="true"] .extension-status-chip-count {
+  background: color-mix(in srgb, var(--mac-card-bg) 22%, transparent);
+  color: inherit;
+}
+
+.extension-status-chip.is-enabled .extension-status-chip-count {
+  color: var(--mac-green);
+}
+
+.extension-status-chip.is-invalid .extension-status-chip-count {
+  color: var(--mac-red);
+}

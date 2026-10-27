@@ -26,6 +26,7 @@ export const CODEY_API_COMMANDS = [
   "plugin_marketplace_status",
   "repair_plugin_marketplace",
   "prepare_computer_use",
+  "codex_extensions",
   "check_codex_config",
   "repair_codex_config",
 ] as const;

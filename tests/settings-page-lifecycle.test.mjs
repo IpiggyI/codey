@@ -7,7 +7,7 @@ const source = await readFile(new URL("../src/SettingsLayout.tsx", import.meta.u
 const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
 }).outputText;
-const pages = ["overview", "models", "prompt", "subagents"];
+const pages = ["overview", "models", "prompt", "subagents", "mcp", "skills"];
 
 // 与现有组件测试一样，用轻量 hook/组件身份模型验证生命周期，无需 DOM 或新增依赖。
 function layoutHarness() {
@@ -164,13 +164,15 @@ test("hiding the whole layout keeps the models page mounted and restores it with
 test("sidebar lists this fork's core pages in order with glossary-safe titles", () => {
   const harness = layoutHarness();
   const groups = harness.find("div").filter(node => node.props.className === "settings-nav-group-title");
-  assert.deepEqual(groups.map(node => node.props.children), ["核心配置"]);
+  assert.deepEqual(groups.map(node => node.props.children), ["核心配置", "扩展生态"]);
   const labels = harness.find("button").map(node => [node.props.id.replace(/^settings-menu-/, ""), node.props.children[1].props.children]);
   assert.deepEqual(labels, [
     ["overview", "基础功能"],
     ["models", "provider 与模型"],
     ["prompt", "提示词优化"],
     ["subagents", "子代理优化"],
+    ["mcp", "MCP 管理"],
+    ["skills", "Skill 管理"],
   ]);
   assert.doesNotMatch(source, /线路|Codey 插件/);
 });

@@ -1,7 +1,9 @@
 import { useId, useState, type ReactNode } from "react";
 import {
+  IconBook2,
   IconCpu,
   IconLayoutDashboard,
+  IconServer,
   IconSparkles,
   IconUsersGroup,
 } from "@tabler/icons-react";
@@ -12,6 +14,8 @@ const SETTINGS_PAGES = [
   { id: "models", title: "provider 与模型", icon: IconCpu, group: "核心配置" },
   { id: "prompt", title: "提示词优化", icon: IconSparkles, group: "核心配置" },
   { id: "subagents", title: "子代理优化", icon: IconUsersGroup, group: "核心配置" },
+  { id: "mcp", title: "MCP 管理", icon: IconServer, group: "扩展生态" },
+  { id: "skills", title: "Skill 管理", icon: IconBook2, group: "扩展生态" },
 ] as const;
 
 const SETTINGS_GROUPS = [...new Set(SETTINGS_PAGES.map((page) => page.group))];

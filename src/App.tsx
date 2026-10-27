@@ -29,6 +29,7 @@ import { modelIdsEqual, uniqueModelIds } from "./modelIds";
 import { globalDefaultForProvider } from "./modelRoutes";
 import { CodeyBrandMark, SettingsModalShell } from "./SettingsModalShell";
 import { SettingsLayout } from "./SettingsLayout";
+import { CodexExtensionsPage, type ExtensionTransport } from "./features/codex-extensions";
 import { useModelSelection } from "./useModelSelection";
 import type { CrashpadPendingStats, TraceLogStats } from "./traceLogTypes";
 import { useRuntimeStatus } from "./useRuntimeStatus";
@@ -59,6 +60,7 @@ import { Badge, Button } from "./components/ui";
 
 const Check = IconCheck;
 const X = IconX;
+const extensionRequest: ExtensionTransport = (request) => invoke("codex_extensions", { request });
 const FEEDBACK_GROUP_QR_BASE_URL =
   "https://pub-2d17a6a8bc22426a92e297a59f55ccc3.r2.dev/qr.png";
 const UNKNOWN_FAST_CONTEXT_TOOLS_STATUS: FastContextToolsStatus = {
@@ -1357,6 +1359,12 @@ export function App({
               onConfigChange={handleConfigChange}
               onSubagentOptimizationChange={handleSubagentOptimizationChange}
             />
+          ),
+          mcp: (active) => (
+            <CodexExtensionsPage kind="mcp" active={active} request={extensionRequest} container={popupContainer} />
+          ),
+          skills: (active) => (
+            <CodexExtensionsPage kind="skill" active={active} request={extensionRequest} container={popupContainer} />
           ),
         }}
       />
