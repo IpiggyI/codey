@@ -688,6 +688,58 @@ mod tests {
         assert!(!marker.parent().unwrap().exists());
     }
 
+    fn exercise_runtime_config_lifecycle(home: &Path, marker: &Path, check: impl Fn(&str)) {
+        let start = || {
+            apply_isolated_test_runtime_config(
+                home, true, None, true, DEFAULT_SUBAGENT_MODEL,
+                DEFAULT_SUBAGENT_REASONING_EFFORT, None, marker,
+                &marker.with_file_name("codex-backups"),
+            ).unwrap();
+            assert!(marker.is_file());
+        };
+        start();
+        check("启动");
+        assert!(restore_runtime_config_at(home, marker, true).unwrap());
+        check("重启前恢复");
+        start();
+        check("重启后启动");
+        assert!(restore_runtime_config_at(home, marker, true).unwrap());
+        check("退出");
+        start();
+        check("保留租约");
+        assert!(restore_runtime_config_at(home, marker, true).unwrap());
+        check("租约恢复");
+        assert!(!restore_runtime_config_at(home, marker, true).unwrap());
+        check("重复恢复");
+    }
+
+    #[test]
+    fn codex_extensions_lifecycle_preserves_user_project_and_skill_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let (home, marker) = paths(temp.path());
+        let project = temp.path().join("project");
+        let files = [
+            (home.join("config.toml"), b"# user\r\n[mcp_servers.demo]\r\ncommand='example'\r\n".as_slice()),
+            (project.join(".codex/config.toml"), b"# project\n[mcp_servers.local]\ncommand='local'\n".as_slice()),
+            (home.join("skills/demo/SKILL.md"), b"---\nname: demo\ndescription: example\n---\n".as_slice()),
+            (home.join("skills/demo/resources/data.bin"), b"\x00\xffresource".as_slice()),
+            (project.join(".agents/skills/local/SKILL.md"), b"---\nname: local\ndescription: example\n---\n".as_slice()),
+        ];
+        for (path, bytes) in &files {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+        let extensions = marker.with_file_name("codex-extensions");
+        exercise_runtime_config_lifecycle(&home, &marker, |stage| {
+            for (path, bytes) in &files {
+                assert_eq!(fs::read(path).unwrap(), *bytes, "{stage}: {}", path.display());
+            }
+            assert!(!extensions.exists(), "{stage}: 不得创建扩展数据目录");
+            assert!(!extensions.join("backups").exists());
+            assert!(!extensions.join("audit.jsonl").exists());
+        });
+    }
+
     #[test]
     fn codex_config_startup_and_exit_never_call_config_repair() {
         let temp = tempfile::tempdir().unwrap();
@@ -695,21 +747,9 @@ mod tests {
         fs::create_dir_all(&home).unwrap();
         let original = b"# user\nmodel_catalog_json='model-catalogs/codey-official.json'\n";
         fs::write(home.join("config.toml"), original).unwrap();
-        apply_isolated_test_runtime_config(
-            &home,
-            true,
-            None,
-            true,
-            DEFAULT_SUBAGENT_MODEL,
-            DEFAULT_SUBAGENT_REASONING_EFFORT,
-            None,
-            &marker,
-            &marker.with_file_name("codex-backups"),
-        )
-        .unwrap();
-        assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
-        assert!(restore_runtime_config_at(&home, &marker, true).unwrap());
-        assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
+        exercise_runtime_config_lifecycle(&home, &marker, |_| {
+            assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
+        });
         assert!(!marker.with_file_name("config-repair-backups").exists());
         for source in [
             include_str!("../codex_config.rs"),

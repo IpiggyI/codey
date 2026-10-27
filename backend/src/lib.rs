@@ -1,6 +1,7 @@
 mod account_usage;
 mod cdp;
 mod codex_config;
+mod codex_extensions;
 mod codex_config_guidance;
 mod codex_provider;
 mod codex_startup_patch;

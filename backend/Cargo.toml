@@ -27,6 +27,7 @@ async-trait = "0.1"
 base64 = "0.22"
 bytes.workspace = true
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+codey-codex-extensions = { path = "../crates/codey-codex-extensions" }
 codey-runtime-core = { path = "../vendor/CodeyRuntime/crates/codey-runtime-core" }
 codey-runtime-data = { path = "../vendor/CodeyRuntime/crates/codey-runtime-data" }
 directories = "6"
@@ -77,6 +78,8 @@ windows = { version = "0.58", default-features = false, features = [
   "Win32_Storage_FileSystem",
   "Win32_Storage_Packaging_Appx",
   "Win32_System_LibraryLoader",
+  "Win32_System_JobObjects",
+  "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_Com",
   "Win32_System_SystemServices",
   "Win32_System_Threading",

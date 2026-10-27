@@ -1515,7 +1515,7 @@ fn prepared_settings_overlay_load_script() -> Arc<str> {
         .clone()
 }
 
-fn prepared_session_tools_load_script() -> Arc<str> {
+pub(crate) fn prepared_session_tools_load_script() -> Arc<str> {
     SESSION_TOOLS_LOAD_SCRIPT
         .get_or_init(|| Arc::from(session_tools_load_script(CODEY_SESSION_TOOLS_SCRIPT)))
         .clone()

@@ -11,6 +11,7 @@ use std::time::Duration;
 mod config_repair;
 mod diagnostics;
 mod models;
+mod extensions;
 mod plugins;
 mod prompt_optimization;
 mod runtime;
@@ -1100,6 +1101,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         }
         "plugin_marketplace_status" => plugin_marketplace_status().await,
         "check_codex_config" => config_repair::check_codex_config().await,
+        "codex_extensions" => extensions::invoke(state, &args).await,
         "repair_codex_config" => config_repair::repair_codex_config(state).await,
         "repair_plugin_marketplace" => repair_plugin_marketplace().await,
         "prepare_computer_use" => prepare_computer_use().await,
