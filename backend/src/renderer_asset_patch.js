@@ -1,6 +1,6 @@
 // Codex 渲染进程资产源补丁。原本是主进程 protocol.handle 里对 app:// 响应
-// 做改写的纯函数部分；Electron fuse 关闭后主进程注入不可用，改由 CDP Fetch 会话
-// 在响应暂停时逐资产调用 globalThis.__codeyRendererPatchEntry 完成同样的改写。
+// 做改写的纯函数部分；Electron fuse 关闭后主进程注入不可用，改由浏览器级补丁
+// 服务在 Fetch 响应暂停时调用纯函数入口，结果按资产文件名缓存在 Codey 侧。
 // 本文件只依赖页面 JS 环境，不使用任何 Node/Electron API。
 (() => {
   const rendererPatchOptions =
@@ -10,8 +10,7 @@
       : {};
   const disablePet = rendererPatchOptions.disablePet === true;
   const threadOwnerDiscoveryTimeoutMs = 150;
-  // 渲染进程没有 --codey-record-error 子进程可写：补丁失败经 CDP
-  // Runtime.addBinding 暴露的 __codeyPatchLog 回传给 Rust 记录。
+  // 补丁失败由求值表达式收集，经返回值交给 Rust 记录。
   const recordCodeyPatchFailure = (operation, error, context = {}) => {
     try {
       const message = error instanceof Error
@@ -30,15 +29,17 @@
   const rendererPatchFailuresByFingerprint = new Map();
   let activeRendererPatchFailures = null;
   // 指纹只作补丁结果缓存键，不需要加密强度；原主进程版用 sha256，
-  // 页面里用同步 FNV-1a 变体即可，省掉 async crypto.subtle。
+  // 页面里用双路 32 位 FNV-1a，避免逐字符 BigInt 运算。
   const rendererPatchFingerprint = (source) => {
     try {
-      let hash = 0xcbf29ce484222325n;
+      let first = 0x811c9dc5;
+      let second = 0x050c5d1f;
       for (let index = 0; index < source.length; index += 1) {
-        hash ^= BigInt(source.charCodeAt(index));
-        hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+        const code = source.charCodeAt(index);
+        first = Math.imul(first ^ code, 0x01000193);
+        second = Math.imul(second ^ code, 0x5bd1e995);
       }
-      return `${source.length}:${hash.toString(36)}`;
+      return `${source.length}:${(first >>> 0).toString(36)}:${(second >>> 0).toString(36)}`;
     } catch {
       // 指纹仅用于减少重复计算；无法生成时保留兼容行为，避免错误命中缓存。
       return null;
@@ -94,6 +95,10 @@
     "useHiddenModels",
     "availableOptions.length",
     "includeUltraReasoningEffort",
+    "serviceTierAccess:",
+    "supportsIndependentSpeedModes",
+    "getHasInProgressLocalConversation",
+    "electron-app-state-snapshot-request",
     "isCustomModelProvider",
   ];
   const rendererGateFailureExcerpts = (source, name) => {
@@ -718,6 +723,16 @@
         "fast model trigger fallback",
       );
     }
+    if (source.includes("case`electron-app-state-snapshot-request`:")) {
+      // 跳过周期心跳快照，保留卡顿等诊断触发的响应。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(case`electron-app-state-snapshot-request`:\{)(?=[^{}]{0,400}?break ([$A-Z_a-z][$\w]*);[\s\S]{0,400}?collectAppStateSnapshot\(([$A-Z_a-z][$\w]*)\.hostId,\3\.reason\))/g,
+        (_match, prefix, label, messageName) =>
+          `${prefix}if(${messageName}.reason===\`heartbeat\`)break ${label};`,
+        "app state heartbeat snapshot",
+      );
+    }
     if (
       source.includes("activeInteractions=new Map") &&
       source.includes("beginCpuSampling") &&
@@ -742,41 +757,6 @@
     }
     return patched;
   };
-  const discoveredCodexRendererAssets = new Set();
-  const maximumDiscoveredCodexRendererAssets = 128;
-  const rememberCodexRendererAsset = (baseUrl, specifier) => {
-    try {
-      const url = new URL(specifier, baseUrl);
-      if (
-        url.protocol !== "app:" ||
-        !url.pathname.includes("/assets/") ||
-        !/\.(?:c|m)?js$/i.test(url.pathname)
-      ) return;
-      discoveredCodexRendererAssets.delete(url.pathname);
-      discoveredCodexRendererAssets.add(url.pathname);
-      while (
-        discoveredCodexRendererAssets.size >
-        maximumDiscoveredCodexRendererAssets
-      ) {
-        const oldest = discoveredCodexRendererAssets.keys().next().value;
-        if (oldest === undefined) break;
-        discoveredCodexRendererAssets.delete(oldest);
-      }
-    } catch {}
-  };
-  const discoverCodexRendererAssets = (baseUrl, source) => {
-    for (const match of source.matchAll(
-      /\b(?:src|href)\s*=\s*(["'])([^"']+\.(?:c|m)?js(?:[?#][^"']*)?)\1/gi,
-    )) rememberCodexRendererAsset(baseUrl, match[2]);
-  };
-  const isCodexRendererBootstrapUrl = (requestUrl) => {
-    try {
-      const url = new URL(requestUrl);
-      return url.protocol === "app:" && /\/index\.html$/i.test(url.pathname);
-    } catch {
-      return false;
-    }
-  };
   const isCodexRendererAssetUrl = (requestUrl) => {
     try {
       const url = new URL(requestUrl);
@@ -784,7 +764,7 @@
         url.protocol === "app:" &&
         url.pathname.includes("/assets/") &&
         (
-          /\/(?:(?:app-initial|app-shared|codex-composer-adapter|initialize-app-host-services|general-settings|model-list-filter|windows-model-controls|use-service-tier-settings|read-service-tier-for-request|subagent-activity-chip-group)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
+          /\/(?:(?:app-initial|app-primary|app-shared|codex-composer-adapter|initialize-app-host-services|general-settings|model-list-filter|windows-model-controls|use-service-tier-settings|read-service-tier-for-request|subagent-activity-chip-group)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
             url.pathname,
           ) ||
           (
@@ -792,8 +772,7 @@
             /\/(?:(?:appearance-settings|pet-settings|pets-settings)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
               url.pathname,
             )
-          ) ||
-          discoveredCodexRendererAssets.has(url.pathname)
+          )
         )
       );
     } catch {
@@ -801,20 +780,9 @@
     }
   };
   // CDP Fetch 拦截入口：输入响应体文本，返回改写后的文本；null 表示放行原响应。
-  // index.html 只用于发现资产清单，不写回。
   globalThis.__codeyRendererPatchEntry = (requestUrl, source) => {
     try {
       if (typeof requestUrl !== "string" || typeof source !== "string") {
-        return null;
-      }
-      if (isCodexRendererBootstrapUrl(requestUrl)) {
-        try {
-          discoverCodexRendererAssets(requestUrl, source);
-        } catch (error) {
-          recordCodeyPatchFailure("renderer_patch:asset discovery", error, {
-            requestUrl,
-          });
-        }
         return null;
       }
       if (!isCodexRendererAssetUrl(requestUrl)) return null;

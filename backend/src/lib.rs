@@ -12,7 +12,7 @@ mod context_recovery;
 mod crashpad_pending_guard;
 #[cfg(windows)]
 mod desktop_instance;
-mod early_attach;
+mod target_prefetch;
 mod error_log;
 pub mod fastctx;
 mod fastctx_route_gate;

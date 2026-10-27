@@ -843,7 +843,7 @@ struct InitialRendererInputs<'a> {
     home: &'a std::path::Path,
     spawned: &'a SpawnedCodex,
     child: &'a Arc<Mutex<Option<Child>>>,
-    prefetched_target: tokio::task::JoinHandle<Option<crate::early_attach::PrefetchedPage>>,
+    prefetched_target: crate::target_prefetch::PrefetchTask,
 }
 
 async fn inject_initial_renderer(inputs: InitialRendererInputs<'_>) -> Result<cdp::InjectedTarget> {
@@ -1538,7 +1538,8 @@ async fn spawn_and_inject_runtime(
     runtime_config_overrides: &[String],
 ) -> Result<SpawnedRenderer> {
     let spawn_inject_started = Instant::now();
-    // 在启动与 CLI 包装器握手期间预取，首导航前暂停时先装 Fetch 再放行。
+    // 浏览器级补丁服务先于 Codex 启动；目标枚举与 CLI 包装器握手并行。
+    crate::renderer_asset_patch::start_service(patch.debug_port, config.slim_codex_pet);
     let target_prefetch = cdp::spawn_injectable_target_prefetch(patch.debug_port);
     let mut spawned = match spawn_codex(
         &mut storage.app_dir,

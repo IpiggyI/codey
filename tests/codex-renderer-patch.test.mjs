@@ -1018,6 +1018,41 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
     // bundle patched cleanly, so no further skips were logged.
     assert.equal(patchErrors.length, 2);
 
+    const appStateSnapshotSource = [
+      "async function onMessage(e,r,hs){bb467:switch(e.type){",
+      "case`electron-app-state-snapshot-request`:{let t=r.get(`host`,e.hostId);if(t==null)break bb467;",
+      "let n=r.get(`sampler`),i=await n?.collectAppStateSnapshot(e.hostId,e.reason);",
+      "if(i==null)break bb467;",
+      "hs.dispatchMessage(`electron-app-state-snapshot-response`,{requestId:e.requestId,fields:i});break bb467}",
+      "case`other`:break bb467}}",
+    ].join("");
+    const onAppMessage = Function(
+      `${patch("app://-/assets/app-initial-app-state.js", appStateSnapshotSource)};return onMessage`,
+    )();
+    const collectedReasons = [];
+    const snapshotResponses = [];
+    const snapshotStore = {
+      get: (key) => key === "host" ? {} : {
+        async collectAppStateSnapshot(_hostId, reason) {
+          collectedReasons.push(reason);
+          return { reason };
+        },
+      },
+    };
+    const snapshotBridge = {
+      dispatchMessage: (_type, payload) => snapshotResponses.push(payload.requestId),
+    };
+    for (const [requestId, reason] of [["beat", "heartbeat"], ["jank", "main_thread_jank"]]) {
+      await onAppMessage({
+        type: "electron-app-state-snapshot-request",
+        hostId: "local",
+        requestId,
+        reason,
+      }, snapshotStore, snapshotBridge);
+    }
+    assert.deepEqual(collectedReasons, ["main_thread_jank"]);
+    assert.deepEqual(snapshotResponses, ["jank"]);
+
     const productionRendererAsset = process.env.CODEY_RENDERER_ASSET;
     if (productionRendererAsset) {
       const productionSource = await readFile(productionRendererAsset, "utf8");

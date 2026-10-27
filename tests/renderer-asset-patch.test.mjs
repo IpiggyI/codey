@@ -91,28 +91,20 @@ test("the renderer patch loads without Node, Electron or a DOM", async () => {
   assert.equal(patch("app://-/assets/app-shared-current.js", "const untouched=1"), null);
 });
 
-test("bootstrap discovery adds bounded app assets and respects pet options", async () => {
+test("browser interception and the page entry share the local asset list", async () => {
   const { patch } = await loadRendererPatch();
-  const discovered = "app://-/webview/assets/custom-entry.js?version=2";
-  assert.equal(patch(discovered, entitlementSource), null);
-  assert.equal(patch("app://-/webview/index.html", [
-    '<script src="./assets/custom-entry.js?version=1"></script>',
-    '<link href="./assets/preloaded-entry.js" rel="modulepreload">',
-    '<link href="https://example.invalid/assets/external.js" rel="modulepreload">',
-    '<script src="./outside-assets.js"></script>',
-  ].join("")), null);
-  assert.match(patch(discovered, entitlementSource), /function allowed\(e,t\)\{return!0\}/);
-  assert.match(patch("app://-/webview/assets/preloaded-entry.js", entitlementSource), /return!0/);
-  assert.equal(patch("https://example.invalid/assets/external.js", entitlementSource), null);
-  assert.equal(patch("app://-/webview/outside-assets.js", entitlementSource), null);
-  assert.equal(patch("app://-/assets/pets-settings-route-current.js", entitlementSource), null);
+  for (const name of ["app-initial", "app-primary", "app-shared", "codex-composer-adapter",
+    "initialize-app-host-services", "general-settings", "model-list-filter", "windows-model-controls",
+    "use-service-tier-settings", "read-service-tier-for-request", "subagent-activity-chip-group"]) {
+    assert.match(patch(`app://-/assets/${name}-current.js?version=2`, entitlementSource), /return!0/);
+  }
+  assert.equal(patch("app://-/assets/custom-entry.js", entitlementSource), null);
+  assert.equal(patch("https://example.invalid/assets/app-initial.js", entitlementSource), null);
   const slim = await loadRendererPatch({ disablePet: true });
-  assert.match(slim.patch("app://-/assets/pets-settings-route-current.js", entitlementSource), /return!0/);
-  const html = Array.from({ length: 129 }, (_, index) =>
-    `<script src="./assets/discovered-${index}.js"></script>`).join("");
-  patch("app://-/index.html", html);
-  assert.equal(patch("app://-/assets/discovered-0.js", entitlementSource), null);
-  assert.match(patch("app://-/assets/discovered-128.js", entitlementSource), /return!0/);
+  for (const name of ["appearance-settings", "pet-settings", "pets-settings"]) {
+    assert.equal(patch(`app://-/assets/${name}-current.js`, entitlementSource), null);
+    assert.match(slim.patch(`app://-/assets/${name}-current.js`, entitlementSource), /return!0/);
+  }
 });
 
 test("a drifted gate skips only itself and repeated failures stay deduplicated", async () => {

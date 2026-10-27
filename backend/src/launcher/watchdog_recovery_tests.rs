@@ -133,8 +133,7 @@ impl MockCdp {
                             && command["params"]["expression"]
                                 == codey_runtime_core::bridge::bridge_health_check_script();
                         if command["method"] == "Runtime.enable" {
-                            // The asset patch session waits for a default
-                            // context before deciding whether to reload.
+                                    // 启用运行时后发布页面的默认执行上下文。
                             let created = serde_json::json!({
                                 "method": "Runtime.executionContextCreated",
                                 "params": {"context": {"id": 1, "auxData": {"isDefault": true}}},
@@ -148,7 +147,7 @@ impl MockCdp {
                             }
                         }
                         let result = match command["method"].as_str() {
-                            // A loading document never triggers the coverage reload.
+                            // 页面状态查询返回当前文档的加载状态。
                             Some("Runtime.callFunctionOn") => serde_json::json!({
                                 "result": {
                                     "type": "object",
@@ -182,8 +181,25 @@ impl MockCdp {
                                 };
                                 serde_json::json!({"result": {"type": "string", "value": value}})
                             }
-                            // The overlay probe needs a boolean `true`; other
-                            // readiness reads accept any settled value.
+                            // 主窗口就绪探针返回页面状态的 JSON 字符串。
+                            Some("Runtime.evaluate")
+                                if command["params"]["expression"]
+                                    .as_str()
+                                    .is_some_and(|expression| {
+                                        expression.starts_with("JSON.stringify({")
+                                            && expression.contains("overlayError:")
+                                    }) =>
+                            {
+                                let value = serde_json::json!({
+                                    "href": "app://-/index.html",
+                                    "bridge": bridge,
+                                    "overlay": true,
+                                    "modelPatch": true,
+                                    "overlayError": "",
+                                })
+                                .to_string();
+                                serde_json::json!({"result": {"type": "string", "value": value}})
+                            }
                             Some("Runtime.evaluate") => {
                                 serde_json::json!({"result": {"type": "boolean", "value": true}})
                             }

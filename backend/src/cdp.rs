@@ -6,10 +6,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use codey_runtime_core::bridge::{
-    BridgeHandler, BridgePumpHandle, bridge_health_check_script, install_bridge,
+    BridgeHandler, BridgeInstallOptions, BridgePumpHandle, bridge_health_check_script,
+    install_bridge_with_options,
 };
 use codey_runtime_core::cdp::{CdpTarget, list_targets, pick_injectable_codex_page_target};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use codey_runtime_core::bridge::install_bridge;
 
 use crate::error_log;
 
@@ -24,6 +27,10 @@ const SESSION_TOOLS_LOAD_PATH: &str = "/internal/codey/session-tools/load";
 const CDP_INJECTION_TIMEOUT: Duration = Duration::from_secs(30);
 /// 关闭失效桥接所需的最少剩余时间；不足时直接释放，保留已取得的校验错误。
 const BRIDGE_CLOSE_RESERVED: Duration = Duration::from_secs(3);
+const READINESS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const READINESS_PROBE_MIN_BUDGET: Duration = Duration::from_millis(500);
+const MINIMUM_VERIFICATION_BUDGET: Duration = Duration::from_millis(3100);
+const PREFETCH_HANDOFF_BUDGET: Duration = Duration::from_secs(8);
 const INJECTION_FINISH_MARGIN: Duration = Duration::from_millis(100);
 const CODEY_BRIDGE_SCRIPT: &str = include_str!("../../dist-overlay/inject/codey-bridge.js");
 const MODEL_WHITELIST_INJECT_SCRIPT: &str =
@@ -56,7 +63,7 @@ enum InjectionPhase {
     DiscoverTargets,
     SelectTarget,
     InstallBridge,
-    VerifyOverlay,
+    VerifyReadiness,
     ReadStatuses,
 }
 
@@ -65,7 +72,7 @@ impl InjectionPhase {
         match value {
             value if value == Self::SelectTarget as u8 => Self::SelectTarget,
             value if value == Self::InstallBridge as u8 => Self::InstallBridge,
-            value if value == Self::VerifyOverlay as u8 => Self::VerifyOverlay,
+            value if value == Self::VerifyReadiness as u8 => Self::VerifyReadiness,
             value if value == Self::ReadStatuses as u8 => Self::ReadStatuses,
             _ => Self::DiscoverTargets,
         }
@@ -76,7 +83,7 @@ impl InjectionPhase {
             Self::DiscoverTargets => "枚举 CDP 页面",
             Self::SelectTarget => "选择 Codex renderer",
             Self::InstallBridge => "安装 CDP bridge 与注入脚本",
-            Self::VerifyOverlay => "验证 Codey 浮层",
+            Self::VerifyReadiness => "确认页面注入就绪",
             Self::ReadStatuses => "读取注入状态",
         }
     }
@@ -86,7 +93,7 @@ impl InjectionPhase {
             Self::DiscoverTargets => "discoverTargets",
             Self::SelectTarget => "selectTarget",
             Self::InstallBridge => "installBridge",
-            Self::VerifyOverlay => "verifyOverlay",
+            Self::VerifyReadiness => "verifyReadiness",
             Self::ReadStatuses => "readStatuses",
         }
     }
@@ -96,7 +103,7 @@ const INJECTION_PHASES: [InjectionPhase; 5] = [
     InjectionPhase::DiscoverTargets,
     InjectionPhase::SelectTarget,
     InjectionPhase::InstallBridge,
-    InjectionPhase::VerifyOverlay,
+    InjectionPhase::VerifyReadiness,
     InjectionPhase::ReadStatuses,
 ];
 
@@ -521,10 +528,8 @@ fn append_guarded_script(
     }
 }
 
-pub fn spawn_injectable_target_prefetch(
-    debug_port: u16,
-) -> tokio::task::JoinHandle<Option<crate::early_attach::PrefetchedPage>> {
-    crate::early_attach::spawn_early_attach_prefetch(debug_port, CDP_INJECTION_TIMEOUT)
+pub fn spawn_injectable_target_prefetch(debug_port: u16) -> crate::target_prefetch::PrefetchTask {
+    crate::target_prefetch::spawn_target_prefetch(debug_port, CDP_INJECTION_TIMEOUT)
 }
 
 pub async fn retry_inject_with_scripts(
@@ -539,7 +544,7 @@ pub async fn retry_inject_with_prefetched_target(
     debug_port: u16,
     handler: BridgeHandler,
     scripts: &PreparedInjectionScripts,
-    prefetched_target: Option<tokio::task::JoinHandle<Option<crate::early_attach::PrefetchedPage>>>,
+    prefetched_target: Option<crate::target_prefetch::PrefetchTask>,
 ) -> std::result::Result<InjectedTarget, InjectionRetryFailure> {
     // Renderer asset preparation on newer Windows Codex builds can consume
     // more than ten seconds before the first injectable page appears. Keep
@@ -547,28 +552,19 @@ pub async fn retry_inject_with_prefetched_target(
     // hard startup deadline.
     let started = tokio::time::Instant::now();
     let deadline = started + CDP_INJECTION_TIMEOUT;
-    // 预取仅消费一次；超时显式取消，避免后台任务继续持有暂停页面。
-    let mut prefetched_page = match prefetched_target {
-        Some(mut handle) => match tokio::time::timeout_at(deadline, &mut handle).await {
-            Ok(Ok(page)) => page,
-            Ok(Err(error)) => {
-                let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
-                    "early_attach.prefetch_failed",
-                    serde_json::json!({ "message": error.to_string() }),
-                );
-                None
-            }
-            Err(_) => {
-                handle.abort();
-                None
-            }
-        },
+    let mut stats = InjectionRetryStats::default();
+    // 先限时交接预取，给常规枚举、桥接安装与确认留下预算。
+    let mut prefetched_target = match prefetched_target {
+        Some(prefetch) => {
+            let (target, diagnostics) = prefetch.wait(prefetch_handoff_deadline(started, deadline)).await;
+            stats.prefetch = Some(diagnostics);
+            target
+        }
         None => None,
     };
     let mut delay = Duration::from_millis(100);
     let phase = Arc::new(AtomicU8::new(InjectionPhase::DiscoverTargets as u8));
-    let mut previous_error = None;
-    let mut stats = InjectionRetryStats::default();
+    let mut previous_error = stats.prefetch.as_ref().and_then(|prefetch| prefetch.last_discovery_error.clone());
     let mut retained_bridge = None;
     let (last_error, detail) = loop {
         stats.attempts += 1;
@@ -577,7 +573,7 @@ pub async fn retry_inject_with_prefetched_target(
             deadline,
             run_injection_attempt(
                 retained_bridge.take(),
-                prefetched_page.take(),
+                prefetched_target.take(),
                 debug_port,
                 handler.clone(),
                 scripts,
@@ -587,7 +583,8 @@ pub async fn retry_inject_with_prefetched_target(
         )
         .await
         {
-            Ok(AttemptOutcome::Injected(target)) => {
+            Ok(AttemptOutcome::Injected { target, readiness }) => {
+                stats.readiness = Some(readiness);
                 stats.report("injected", started.elapsed(), None);
                 return Ok(target);
             }
@@ -596,7 +593,14 @@ pub async fn retry_inject_with_prefetched_target(
                 let current_phase = InjectionPhase::from_raw(phase.load(Ordering::Acquire));
                 stats.record_failure(current_phase, attempt_started.elapsed());
                 let detail = injection_failure_detail(&error);
-                if tokio::time::Instant::now() + delay > deadline {
+                let retry_budget = if matches!(current_phase, InjectionPhase::VerifyReadiness) {
+                    delay + MINIMUM_VERIFICATION_BUDGET
+                } else { delay };
+                if tokio::time::Instant::now() + retry_budget > deadline {
+                    if let Some(bridge) = retained_bridge.take().filter(|bridge| !bridge.pump.is_finished()) {
+                        stats.report("acceptedUnverified", started.elapsed(), Some(&detail));
+                        return Ok(bridge.into_injected(scripts.statuses_with_error("启动确认未完成，等待后台复核注入状态")));
+                    }
                     stats.report("noRetryBudget", started.elapsed(), Some(&detail));
                     break (
                         anyhow::anyhow!(
@@ -640,8 +644,18 @@ pub async fn retry_inject_with_prefetched_target(
     Err(stats.into_failure(last_error, detail))
 }
 
+fn prefetch_handoff_deadline(
+    started: tokio::time::Instant,
+    deadline: tokio::time::Instant,
+) -> tokio::time::Instant {
+    let remaining = deadline.saturating_duration_since(started);
+    started + PREFETCH_HANDOFF_BUDGET.min(remaining.saturating_sub(MINIMUM_VERIFICATION_BUDGET))
+}
+
 #[derive(Default)]
 struct InjectionRetryStats {
+    prefetch: Option<crate::target_prefetch::PrefetchDiagnostics>,
+    readiness: Option<serde_json::Value>,
     attempts: u32,
     phase_failures: [u32; INJECTION_PHASES.len()],
     failure_expense_ms: u64,
@@ -659,7 +673,8 @@ impl InjectionRetryStats {
         // 进入目标选择就说明枚举已成功；之后再次枚举失败也不能抹去该证据。
         let reached_debug_endpoint = self.phase_failures[InjectionPhase::SelectTarget as usize..]
             .iter()
-            .any(|count| *count > 0);
+            .any(|count| *count > 0)
+            || self.prefetch.as_ref().is_some_and(|prefetch| prefetch.reached_debug_endpoint);
         InjectionRetryFailure {
             error,
             detail: Some(detail),
@@ -688,6 +703,8 @@ impl InjectionRetryStats {
             "cdp.injection_retry_summary",
             serde_json::json!({
                 "outcome": outcome,
+                "prefetch": self.prefetch,
+                "readiness": self.readiness,
                 "attempts": self.attempts,
                 "discoveryFailures": self.phase_failures[..=InjectionPhase::SelectTarget as usize].iter().sum::<u32>(),
                 "bridgeFailures": self.bridge_failures(),
@@ -790,6 +807,10 @@ fn safe_injection_error_summary(error: &anyhow::Error) -> String {
         "CDP 命令未在单次响应预算内完成".to_string()
     } else if normalized.contains("codey 内嵌配置面板注入失败") {
         "Codey 浮层未就绪".to_string()
+    } else if normalized.contains("codex 辅助窗口") {
+        "注入目标是 Codex 辅助窗口，已改选主窗口".to_string()
+    } else if normalized.contains("尚未完成首次导航") {
+        "Codex 页面尚未完成首次导航".to_string()
     } else {
         "内部注入尝试失败".to_string()
     }
@@ -799,10 +820,124 @@ struct EstablishedInjection {
     target_id: String,
     websocket_url: Arc<str>,
     pump: BridgePumpHandle,
+    /// 装桥会话上顺带执行的就绪探针结果，只供首轮确认使用。
+    install_probe: Option<serde_json::Value>,
+}
+
+impl EstablishedInjection {
+    fn into_injected(self, injection_statuses: Arc<[InjectionScriptStatus]>) -> InjectedTarget {
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "cdp.renderer_asset_patch_summary",
+            serde_json::json!({ "targetId": self.target_id,
+                "patchSession": crate::renderer_asset_patch::page_stats(&self.target_id) }),
+        );
+        InjectedTarget {
+            websocket_url: self.websocket_url,
+            pump: self.pump,
+            injection_statuses,
+        }
+    }
+}
+
+/// 确认阶段的失败需要区分恢复方式：页面暂时无法应答或仍在首次导航时只要保留
+/// 桥接继续确认；注入脚本缺失、装到辅助窗口或 CDP 连接失效时才需要整轮重装。
+#[derive(Debug)]
+struct VerifyFailure {
+    reinstall: bool,
+    error: anyhow::Error,
+}
+
+impl VerifyFailure {
+    fn retain(error: anyhow::Error) -> Self {
+        Self {
+            reinstall: false,
+            error,
+        }
+    }
+
+    fn reinstall(error: anyhow::Error) -> Self {
+        Self {
+            reinstall: true,
+            error,
+        }
+    }
+}
+
+/// 装桥后的就绪探针：同步读取，不等待页面里的任何 Promise。
+const READINESS_PROBE_SCRIPT: &str = r#"JSON.stringify({
+  href: String(location.href),
+  bridge: typeof window.__codexSessionDeleteBridge === "function",
+  overlay: typeof window.__codeySettingsOverlay?.toggle === "function",
+  modelPatch: typeof window.__codeyModelWhitelistPatch?.apply === "function",
+  overlayError: String(window.__codeyOverlayError || "").slice(0, 300),
+})"#;
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct ReadinessProbe {
+    href: String,
+    bridge: bool,
+    overlay: bool,
+    model_patch: bool,
+    overlay_error: String,
+}
+
+impl ReadinessProbe {
+    fn from_response(response: &serde_json::Value) -> Result<Self> {
+        let payload = runtime_value(response)
+            .and_then(serde_json::Value::as_str)
+            .context("就绪探针未返回可解析结果")?;
+        serde_json::from_str(payload).context("解析就绪探针结果失败")
+    }
+
+    fn summary(&self) -> serde_json::Value {
+        serde_json::json!({
+            "url": safe_target_url_shape(&self.href),
+            "modelPatch": self.model_patch,
+        })
+    }
+}
+
+/// 根据探针结果判定这轮注入：辅助窗口与脚本缺失都需要重装，尚未导航只需等待。
+fn judge_readiness(probe: ReadinessProbe) -> std::result::Result<ReadinessProbe, VerifyFailure> {
+    if codey_runtime_core::cdp::is_auxiliary_codex_window_url(&probe.href) {
+        return Err(VerifyFailure::reinstall(anyhow::anyhow!(
+            "注入目标是 Codex 辅助窗口（{}），需要重新选择主窗口",
+            safe_target_url_shape(&probe.href)
+        )));
+    }
+    let href = probe.href.trim();
+    if !(probe.bridge && probe.overlay) {
+        if href.is_empty() || href.eq_ignore_ascii_case("about:blank") {
+            return Err(VerifyFailure::retain(anyhow::anyhow!(
+                "Codex 页面尚未完成首次导航"
+            )));
+        }
+        let message = if probe.overlay_error.is_empty() {
+            "未生成浮层控制器"
+        } else {
+            probe.overlay_error.as_str()
+        };
+        // 浮层由加载器脚本同步生成，缺失说明注入脚本没在当前文档执行，只能重装。
+        return Err(VerifyFailure::reinstall(anyhow::anyhow!(
+            "Codey 内嵌配置面板注入失败：{message}"
+        )));
+    }
+    if href.is_empty() || href.eq_ignore_ascii_case("about:blank") {
+        // 脚本已在初始空白文档执行，文档脚本会覆盖随后提交的应用文档；但目标
+        // 是否主窗口要等真实地址出现才能确认。
+        return Err(VerifyFailure::retain(anyhow::anyhow!(
+            "Codex 页面尚未完成首次导航"
+        )));
+    }
+    Ok(probe)
 }
 
 enum AttemptOutcome {
-    Injected(InjectedTarget),
+    Injected {
+        target: InjectedTarget,
+        readiness: serde_json::Value,
+    },
     Retry {
         error: anyhow::Error,
         retained: Option<EstablishedInjection>,
@@ -811,17 +946,20 @@ enum AttemptOutcome {
 
 async fn run_injection_attempt(
     retained: Option<EstablishedInjection>,
-    prefetched_page: Option<crate::early_attach::PrefetchedPage>,
+    prefetched_target: Option<CdpTarget>,
     debug_port: u16,
     handler: BridgeHandler,
     scripts: &PreparedInjectionScripts,
     phase: &AtomicU8,
     deadline: tokio::time::Instant,
 ) -> AttemptOutcome {
-    let bridge = match retained.filter(|bridge| !bridge.pump.is_finished()) {
+    let mut bridge = match retained.filter(|bridge| !bridge.pump.is_finished()) {
         Some(bridge) => bridge,
+        // 没有可复用的桥接（首轮，或上一轮留下的桥接泵已随页面导航/目标关闭
+        // 而结束）时回到发现阶段整轮重建。
         None => {
-            match establish_injection(debug_port, prefetched_page, handler, scripts, phase).await {
+            match establish_injection(debug_port, prefetched_target, handler, scripts, phase).await
+            {
                 Ok(bridge) => bridge,
                 Err(error) => {
                     return AttemptOutcome::Retry {
@@ -832,66 +970,69 @@ async fn run_injection_attempt(
             }
         }
     };
-    match verify_injection(&bridge, scripts, phase, deadline).await {
-        Ok(injection_statuses) => AttemptOutcome::Injected(InjectedTarget {
-            websocket_url: bridge.websocket_url,
-            pump: bridge.pump,
-            injection_statuses,
-        }),
-        Err(error) => {
-            // Poll readiness on the installed bridge; only a failed CDP session
-            // needs target discovery and script registration again.
-            let invalid = bridge.pump.is_finished()
-                || target_health_error_requires_rediscovery(&error)
-                || format!("{error:#}").contains("CDP websocket closed before response");
-            if invalid {
-                if deadline.saturating_duration_since(tokio::time::Instant::now())
-                    >= BRIDGE_CLOSE_RESERVED
-                {
-                    bridge.pump.close().await;
-                } else {
-                    // 临近整轮截止时直接释放泵，避免关闭握手吞掉已取得的校验错误。
-                    drop(bridge.pump);
-                }
-                AttemptOutcome::Retry {
-                    error,
-                    retained: None,
-                }
-            } else {
-                AttemptOutcome::Retry {
-                    error,
-                    retained: Some(bridge),
-                }
+    match verify_injection(&mut bridge, phase, deadline).await {
+        Ok(probe) => {
+            phase.store(InjectionPhase::ReadStatuses as u8, Ordering::Release);
+            // 状态探测只用于诊断，不进启动关键路径：桥接与浮层已证明注入可用，
+            // 真实状态由界面请求时的 refresh_injection_statuses 补齐。
+            AttemptOutcome::Injected {
+                target: bridge.into_injected(scripts.statuses_with_error("启动后复核注入状态")),
+                readiness: probe.summary(),
             }
         }
+        Err(failure) if failure.reinstall || bridge.pump.is_finished()
+            || target_health_error_requires_rediscovery(&failure.error)
+            || format!("{:#}", failure.error).contains("CDP websocket closed before response") => {
+            // 确认端明确要求重建：显式关掉这条会话（其文档脚本随会话注销），
+            // 下一轮从头装桥。
+            if deadline.saturating_duration_since(tokio::time::Instant::now()) >= BRIDGE_CLOSE_RESERVED {
+                bridge.pump.close().await;
+            } else {
+                // 临近整轮截止时直接释放泵，避免关闭握手吞掉已取得的确认错误。
+                drop(bridge.pump);
+            }
+            AttemptOutcome::Retry {
+                error: failure.error,
+                retained: None,
+            }
+        }
+        Err(failure) => AttemptOutcome::Retry {
+            error: failure.error,
+            retained: Some(bridge),
+        },
     }
 }
 
 async fn establish_injection(
     debug_port: u16,
-    prefetched_page: Option<crate::early_attach::PrefetchedPage>,
+    prefetched_target: Option<CdpTarget>,
     handler: BridgeHandler,
     scripts: &PreparedInjectionScripts,
     phase: &AtomicU8,
 ) -> Result<EstablishedInjection> {
+    // 补丁服务通常在 Codex 启动前已拉起；看门狗重注入或 Codex 自行重启后
+    // 由这里补上。服务独立于桥接，失败不阻断注入。
+    crate::renderer_asset_patch::ensure_service(debug_port, scripts.disable_pet);
     phase.store(InjectionPhase::DiscoverTargets as u8, Ordering::Release);
-    let (target, hold) = match prefetched_page {
-        Some(crate::early_attach::PrefetchedPage::Paused { target, hold }) => (target, Some(hold)),
-        Some(crate::early_attach::PrefetchedPage::Ready { target }) => (target, None),
+    // 握手窗口内已锁定目标：两个发现阶段视作已过，直接建连。
+    let target = match prefetched_target {
+        Some(target) => {
+            phase.store(InjectionPhase::SelectTarget as u8, Ordering::Release);
+            target
+        }
         None => {
             let targets = list_targets(debug_port)
                 .await
                 .context("枚举 Codex CDP 页面失败")?;
-            let target = pick_injectable_codex_page_target(&targets).with_context(|| {
+            phase.store(InjectionPhase::SelectTarget as u8, Ordering::Release);
+            pick_injectable_codex_page_target(&targets).with_context(|| {
                 format!(
                     "没有找到可注入的 Codex renderer；CDP targets={}",
                     summarize_cdp_targets(&targets)
                 )
-            })?;
-            (target, None)
+            })?
         }
     };
-    phase.store(InjectionPhase::SelectTarget as u8, Ordering::Release);
     let websocket_url: Arc<str> = Arc::from(
         target
             .web_socket_debugger_url
@@ -900,43 +1041,14 @@ async fn establish_injection(
     );
     let handler = with_lazy_loaders(handler, websocket_url.clone());
     phase.store(InjectionPhase::InstallBridge as u8, Ordering::Release);
-    // 拦截先落位再恢复首导航；晚连接覆盖重载完成后才安装桥接。
-    let patch_result = crate::renderer_asset_patch::install_renderer_asset_patch(
-        &websocket_url,
-        scripts.disable_pet,
-        hold.is_some(),
-    )
-    .await;
-    if let Some(hold) = hold {
-        hold.resume().await;
-    }
-    match patch_result {
-        Ok(session) => {
-            if let Err(error) = session.ensure_document_coverage().await {
-                error_log::record_failure_async(
-                    "injection_patch_coverage_failed",
-                    "ensure_document_coverage",
-                    format!("{error:#}"),
-                    serde_json::json!({ "websocketUrl": websocket_url.as_ref() }),
-                )
-                .await;
-            }
-        }
-        Err(error) => {
-            error_log::record_failure_async(
-                "injection_patch_session_failed",
-                "install_renderer_asset_patch",
-                format!("{error:#}"),
-                serde_json::json!({ "websocketUrl": websocket_url.as_ref() }),
-            )
-            .await;
-        }
-    }
-    let pump = install_bridge(
+    let (pump, install_probe) = install_bridge_with_options(
         &websocket_url,
         codey_runtime_core::bridge::BRIDGE_BINDING_NAME,
         handler,
         &scripts.scripts,
+        BridgeInstallOptions {
+            readiness_probe: Some(READINESS_PROBE_SCRIPT),
+        },
     )
     .await
     .with_context(|| format!("向 Codex renderer {} 安装 CDP bridge 失败", target.id))?;
@@ -944,44 +1056,54 @@ async fn establish_injection(
         target_id: target.id,
         websocket_url,
         pump,
+        install_probe,
     })
 }
 
+/// 启动确认桥接与浮层在当前文档可用，且页面是主窗口。
 async fn verify_injection(
-    bridge: &EstablishedInjection,
-    scripts: &PreparedInjectionScripts,
+    bridge: &mut EstablishedInjection,
     phase: &AtomicU8,
     deadline: tokio::time::Instant,
-) -> Result<Arc<[InjectionScriptStatus]>> {
-    phase.store(InjectionPhase::VerifyOverlay as u8, Ordering::Release);
-    tokio::time::timeout_at(
-        deadline - INJECTION_FINISH_MARGIN,
-        ensure_settings_overlay_ready(&bridge.websocket_url),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("验证 Codey 浮层超时：剩余注入预算已耗尽"))?
-    .with_context(|| format!("验证 Codex renderer {} 的 Codey 浮层失败", bridge.target_id))?;
-    codey_runtime_core::bridge::evaluate_script_with_await_promise_timeout(
-        &bridge.websocket_url,
-        "window.__codeyServiceTierInstallation",
-        true,
-        Duration::from_secs(25),
-    )
-    .await
-    .context("等待服务档位兼容状态失败")?;
-    // Status probing is diagnostic-only. Keep it out of the critical startup
-    // path: the bridge and overlay checks above prove injection is usable, and
-    // the existing refresh_injection_statuses command fills in the real state
-    // once the UI asks for it.
-    phase.store(InjectionPhase::ReadStatuses as u8, Ordering::Release);
-    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
-        "cdp.renderer_asset_patch_summary",
-        serde_json::json!({
-            "targetId": bridge.target_id,
-            "patchSession": crate::renderer_asset_patch::session_stats(&bridge.websocket_url),
-        }),
+) -> std::result::Result<ReadinessProbe, VerifyFailure> {
+    phase.store(InjectionPhase::VerifyReadiness as u8, Ordering::Release);
+    let response = match bridge.install_probe.take() {
+        Some(response) => response,
+        None => probe_readiness(&bridge.websocket_url, deadline)
+            .await
+            .map_err(|error| VerifyFailure::retain(error.context("确认页面注入就绪失败")))?,
+    };
+    let probe = ReadinessProbe::from_response(&response).map_err(VerifyFailure::retain)?;
+    judge_readiness(probe)
+}
+
+/// 独立连接上的就绪探针，预算受整轮截止时间约束。超时说明页面忙或仍在
+/// 导航，调用方保留桥接稍后重探，不会因此重装。
+async fn probe_readiness(
+    websocket_url: &str,
+    deadline: tokio::time::Instant,
+) -> Result<serde_json::Value> {
+    let budget = deadline
+        .saturating_duration_since(tokio::time::Instant::now())
+        .saturating_sub(INJECTION_FINISH_MARGIN)
+        .min(READINESS_PROBE_TIMEOUT);
+    anyhow::ensure!(
+        budget >= READINESS_PROBE_MIN_BUDGET,
+        "剩余注入预算不足以完成就绪确认（remainingMs={}）",
+        budget.as_millis()
     );
-    Ok(scripts.statuses_with_error("启动后复核注入状态"))
+    tokio::time::timeout(
+        budget,
+        codey_runtime_core::bridge::evaluate_script_with_await_promise_timeout(
+            websocket_url,
+            READINESS_PROBE_SCRIPT,
+            false,
+            budget,
+        ),
+    )
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|response| response)
 }
 
 impl PreparedInjectionScripts {
@@ -1531,30 +1653,6 @@ fn session_tools_load_script(script: &str) -> String {
     )
 }
 
-async fn ensure_settings_overlay_ready(websocket_url: &str) -> Result<()> {
-    let ready = codey_runtime_core::bridge::evaluate_script(
-        websocket_url,
-        r#"typeof window.__codeySettingsOverlay === "object"
-          && typeof window.__codeySettingsOverlay.toggle === "function""#,
-    )
-    .await
-    .context("检查 Codey 内嵌配置面板状态失败")?;
-    if runtime_value(&ready).and_then(serde_json::Value::as_bool) == Some(true) {
-        return Ok(());
-    }
-
-    let error = codey_runtime_core::bridge::evaluate_script(
-        websocket_url,
-        r#"String(window.__codeyOverlayError || "未生成浮层控制器")"#,
-    )
-    .await
-    .context("读取 Codey 内嵌配置面板异常失败")?;
-    let message = runtime_value(&error)
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("未知错误");
-    anyhow::bail!("Codey 内嵌配置面板注入失败：{message}")
-}
-
 fn runtime_value(response: &serde_json::Value) -> Option<&serde_json::Value> {
     response
         .get("result")
@@ -1625,6 +1723,182 @@ mod health_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn prefetch_reachability_survives_failed_injection_discovery() {
+        let mut prefetch = crate::target_prefetch::PrefetchDiagnostics::default();
+        prefetch.reached_debug_endpoint = true;
+        let mut stats = InjectionRetryStats {
+            prefetch: Some(prefetch),
+            ..Default::default()
+        };
+        stats.record_failure(InjectionPhase::DiscoverTargets, Duration::ZERO);
+        assert!(!stats.into_failure(anyhow::anyhow!("unavailable"), String::new())
+            .debug_endpoint_unreachable());
+    }
+
+    #[test]
+    fn prefetch_handoff_leaves_time_for_injection() {
+        let started = tokio::time::Instant::now();
+        let deadline = started + CDP_INJECTION_TIMEOUT;
+        let handoff = prefetch_handoff_deadline(started, deadline);
+        assert_eq!(handoff - started, Duration::from_secs(8));
+        let tight = started + Duration::from_secs(5);
+        assert!(tight - prefetch_handoff_deadline(started, tight) >= MINIMUM_VERIFICATION_BUDGET);
+    }
+
+    fn probe(href: &str, ready: bool) -> ReadinessProbe {
+        ReadinessProbe {
+            href: href.to_string(),
+            bridge: ready,
+            overlay: ready,
+            model_patch: ready,
+            overlay_error: String::new(),
+        }
+    }
+
+    #[test]
+    fn readiness_accepts_only_a_ready_main_window() {
+        let ready = judge_readiness(probe("app://-/index.html", true)).unwrap();
+        assert_eq!(
+            ready.summary(),
+            serde_json::json!({"url": "app://-/index.html", "modelPatch": true})
+        );
+        // 模型补丁缺失只影响增强，不阻断注入。
+        let mut without_patch = probe("app://-/index.html?initialRoute=%2Flocal%2Fx", true);
+        without_patch.model_patch = false;
+        assert!(judge_readiness(without_patch).is_ok());
+
+        for href in [
+            "app://-/detached-window.html?initialRoute=%2Fdetached-window",
+            "app://-/index.html?initialRoute=%2Fhotkey-window",
+        ] {
+            let failure = judge_readiness(probe(href, true)).unwrap_err();
+            assert!(failure.reinstall, "{href}");
+            assert_eq!(
+                safe_injection_error_summary(&failure.error),
+                "注入目标是 Codex 辅助窗口，已改选主窗口"
+            );
+        }
+
+        // 首次导航尚未提交：保留桥接等待，不重装。
+        for (href, ready) in [("about:blank", true), ("", false), ("ABOUT:BLANK", false)] {
+            let failure = judge_readiness(probe(href, ready)).unwrap_err();
+            assert!(!failure.reinstall, "{href}");
+            assert_eq!(
+                safe_injection_error_summary(&failure.error),
+                "Codex 页面尚未完成首次导航"
+            );
+        }
+
+        let mut missing_overlay = probe("app://-/index.html", true);
+        missing_overlay.overlay = false;
+        missing_overlay.overlay_error = "TypeError: boom".to_string();
+        let failure = judge_readiness(missing_overlay).unwrap_err();
+        assert!(failure.reinstall);
+        assert!(failure.error.to_string().contains("TypeError: boom"));
+        assert_eq!(
+            safe_injection_error_summary(&failure.error),
+            "Codey 浮层未就绪"
+        );
+    }
+
+    #[test]
+    fn readiness_probe_script_reports_page_state_synchronously() {
+        let harness = r#"
+const assert = require('node:assert/strict');
+const vm = require('node:vm');
+const script = JSON.parse(process.argv[1]);
+const run = (window, href) => JSON.parse(vm.runInContext(script, vm.createContext({
+  window, location: { href },
+})));
+const empty = run({}, "about:blank");
+assert.deepEqual(empty, {
+  href: "about:blank", bridge: false, overlay: false, modelPatch: false, overlayError: "",
+});
+const ready = run({
+  __codexSessionDeleteBridge() {},
+  __codeySettingsOverlay: { toggle() {} },
+  __codeyModelWhitelistPatch: { apply() {} },
+  __codeyOverlayError: "x".repeat(400),
+}, "app://-/index.html");
+assert.equal(ready.bridge && ready.overlay && ready.modelPatch, true);
+assert.equal(ready.overlayError.length, 300);
+assert.equal(run({ __codeySettingsOverlay: null }, "app://-/index.html").overlay, false);
+"#;
+        let output = std::process::Command::new("node")
+            .args([
+                "-e",
+                harness,
+                &serde_json::to_string(READINESS_PROBE_SCRIPT).unwrap(),
+            ])
+            .output()
+            .expect("Node should run the readiness probe harness");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn readiness_probe_reads_one_synchronous_evaluate() {
+        use futures_util::{SinkExt, StreamExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let message = socket.next().await.unwrap().unwrap();
+            let request: serde_json::Value =
+                serde_json::from_str(message.to_text().unwrap()).unwrap();
+            assert_eq!(request["method"], "Runtime.evaluate");
+            assert_eq!(request["params"]["awaitPromise"], false);
+            assert_eq!(request["params"]["expression"], READINESS_PROBE_SCRIPT);
+            let value = serde_json::json!({
+                "href": "app://-/index.html", "bridge": true, "overlay": true,
+            })
+            .to_string();
+            socket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    serde_json::json!({"id": request["id"], "result": {"result": {"value": value}}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+        });
+        let response = probe_readiness(
+            &format!("ws://{address}"),
+            tokio::time::Instant::now() + CDP_INJECTION_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        let probe = judge_readiness(ReadinessProbe::from_response(&response).unwrap()).unwrap();
+        assert!(!probe.model_patch);
+    }
+
+    #[tokio::test]
+    async fn readiness_probe_with_insufficient_budget_fails_before_connecting() {
+        let error = probe_readiness(
+            "ws://127.0.0.1:9/devtools/page/never",
+            tokio::time::Instant::now() + READINESS_PROBE_MIN_BUDGET,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("剩余注入预算不足"), "{error:#}");
+        let detail = injection_deadline_detail(
+            InjectionPhase::VerifyReadiness,
+            CDP_INJECTION_TIMEOUT,
+            CDP_INJECTION_TIMEOUT,
+            Duration::ZERO,
+        );
+        assert!(detail.contains("phase=verifyReadiness"));
+        assert!(detail.contains("attemptMs=30000"));
+        assert!(detail.contains("remainingMs=0"));
+    }
+
+
 
     #[test]
     fn endpoint_unreachable_only_when_every_attempt_failed_to_enumerate_targets() {
@@ -1639,7 +1913,7 @@ mod tests {
                 false,
             ),
             (vec![InjectionPhase::InstallBridge], false),
-            (vec![InjectionPhase::VerifyOverlay], false),
+            (vec![InjectionPhase::VerifyReadiness], false),
             (vec![InjectionPhase::ReadStatuses], false),
             (
                 vec![
@@ -1670,7 +1944,7 @@ mod tests {
         stats.record_failure(InjectionPhase::DiscoverTargets, Duration::from_millis(10));
         stats.record_failure(InjectionPhase::SelectTarget, Duration::from_millis(20));
         stats.record_failure(InjectionPhase::InstallBridge, Duration::from_millis(30));
-        stats.record_failure(InjectionPhase::VerifyOverlay, Duration::from_millis(40));
+        stats.record_failure(InjectionPhase::VerifyReadiness, Duration::from_millis(40));
         stats.record_failure(InjectionPhase::ReadStatuses, Duration::from_millis(50));
         assert_eq!(stats.phase_failures, [1, 1, 1, 1, 1]);
         assert_eq!(stats.bridge_failures(), 3);
@@ -1684,12 +1958,12 @@ mod tests {
     #[test]
     fn injection_deadline_detail_names_phase_and_remaining_budget() {
         let detail = injection_deadline_detail(
-            InjectionPhase::VerifyOverlay,
+            InjectionPhase::VerifyReadiness,
             CDP_INJECTION_TIMEOUT,
             CDP_INJECTION_TIMEOUT,
             Duration::ZERO,
         );
-        assert!(detail.contains("phase=verifyOverlay"), "{detail}");
+        assert!(detail.contains("phase=verifyReadiness"), "{detail}");
         assert!(detail.contains("attemptMs=30000"), "{detail}");
         assert!(detail.contains("remainingMs=0"), "{detail}");
     }
@@ -1730,7 +2004,10 @@ mod tests {
                 .await
                 .unwrap();
             }
-            for value in [json!(false), json!("not ready"), json!(true), Value::Null] {
+            for value in [
+                json!({"href":"about:blank", "bridge":true, "overlay":true}).to_string(),
+                json!({"href":"app://-/index.html", "bridge":true, "overlay":true}).to_string(),
+            ] {
                 let (stream, _) = listener.accept().await.unwrap();
                 let mut probe = accept_async(stream).await.unwrap();
                 let command = probe.next().await.unwrap().unwrap();
@@ -1750,7 +2027,7 @@ mod tests {
             while pump.next().await.is_some() {}
         });
         let handler = bridge_handler(|_, _| async { json!({"status": "ok"}) });
-        let pump = install_bridge(
+        let pump = codey_runtime_core::bridge::install_bridge(
             &url,
             codey_runtime_core::bridge::BRIDGE_BINDING_NAME,
             handler.clone(),
@@ -1762,6 +2039,7 @@ mod tests {
             target_id: "page-1".into(),
             websocket_url: url.into(),
             pump,
+            install_probe: None,
         };
         let scripts = PreparedInjectionScripts {
             scripts: Arc::from([]),
@@ -1791,12 +2069,12 @@ mod tests {
         };
         assert_eq!(
             InjectionPhase::from_raw(phase.load(Ordering::Acquire)).key(),
-            "verifyOverlay"
+            "verifyReadiness"
         );
         let second =
             run_injection_attempt(Some(retained), None, 0, handler, &scripts, &phase, deadline)
                 .await;
-        let AttemptOutcome::Injected(target) = second else {
+        let AttemptOutcome::Injected { target, .. } = second else {
             panic!("the next poll should use the same bridge");
         };
         target.close().await;
