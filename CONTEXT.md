@@ -5,7 +5,7 @@ Codex 桌面客户端的增强启动器。本分叉只做运行期增强，不�
 ## 配置与所有权
 
 **用户配置**：
-用户自己编写的 `~/.codex/config.toml`，以及他并列保存的模板文件。Codey 只读，永不写入。
+用户自己编写的 `~/.codex/config.toml`，以及用户并列保存的模板文件。Codey 在启动、重启、退出等生命周期中只读；只有用户在控制台的显式操作才写，写前备份。见 [ADR 0002](docs/adr/0002-user-config-is-read-only.md)。
 _Avoid_: Codex 配置、线路配置
 
 **运行期覆盖**：
@@ -23,8 +23,12 @@ _Avoid_: 临时文件、运行时配置
 _Avoid_: 线路、route
 
 **官方账号**：
-`~/.codex/auth.json` 里的 ChatGPT 登录态。它与任何 provider 的 `base_url` 无关——一个 id 叫 `official` 的 provider 不是官方账号，一个指向自建中转的 provider 也可能使用官方账号鉴权。
+`~/.codex/auth.json` 里的 ChatGPT 登录态。它与任何 provider 的 `base_url` 无关——一个 id 叫 `official` 的 provider 不是官方账号，一个指向自建中转的 provider 也可能使用官方账号鉴权。Codey 的账号库可以保存多个官方账号，同一时间只有写进 `auth.json` 的那一个生效。
 _Avoid_: 官方线路、openai provider
+
+**渠道**：
+用户可以切换的请求去向，是用户配置中的一个 provider，或者一个官方账号。同一时间只有一个渠道生效；切换渠道要重启 Codex；同一个会话不能更换渠道。
+_Avoid_: 线路、路由
 
 **内置路由**：
 上游 v0.9.0 引入、本分叉已移除的本机代理。本词只用于描述历史行为和清理残留。
