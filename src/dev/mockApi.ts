@@ -9,6 +9,7 @@ import {
   modelKey,
   uniqueModelIds,
 } from "../modelIds";
+import { validateNtfyTopic } from "../notifications/types";
 import { previewOfficialModels, previewUpstreamModels } from "../previewModels";
 import {
   previewCrashpadPendingStats,
@@ -28,6 +29,7 @@ if (import.meta.env.DEV) {
       backup: "https://backup.example.invalid/v1",
       feishu: "https://webhook.example.invalid/feishu/preview-only",
       wecom: "https://webhook.example.invalid/wecom/preview-only?key=preview",
+      ntfy: "https://ntfy.example.invalid",
     } as const;
     type PreviewProfile = {
       id: string;
@@ -129,6 +131,21 @@ if (import.meta.env.DEV) {
             contextTokenConfigured: false,
             clearContextToken: false,
             chatId: "preview-chat-id",
+          },
+          {
+            id: "preview-ntfy",
+            kind: "ntfy" as const,
+            enabled: true,
+            url: previewEndpoints.ntfy,
+            urlConfigured: true,
+            clearUrl: false,
+            botToken: "",
+            botTokenConfigured: false,
+            clearBotToken: false,
+            contextToken: "",
+            contextTokenConfigured: false,
+            clearContextToken: false,
+            chatId: "preview-ntfy-topic",
           },
         ],
       },
@@ -375,7 +392,9 @@ if (import.meta.env.DEV) {
                     (channel.sessionStatus !== "expired" &&
                       channel.urlConfigured &&
                       channel.contextTokenConfigured))
-                : channel.urlConfigured),
+                : channel.kind === "ntfy"
+                  ? channel.urlConfigured && !validateNtfyTopic(channel.chatId)
+                  : channel.urlConfigured),
           ).length;
         return {
           running: true,
@@ -848,7 +867,9 @@ if (import.meta.env.DEV) {
               (channel.kind !== "wechatClaw" ||
                 (channel.url?.trim() && channel.contextToken?.trim())),
           )
-          : Boolean(channel?.url?.trim());
+          : channel?.kind === "ntfy"
+            ? Boolean(channel.url?.trim()) && !validateNtfyTopic(channel.chatId ?? "")
+            : Boolean(channel?.url?.trim());
         return configured
           ? { status: "ok", eventId: "preview-notification-test" }
           : { status: "failed", message: "请先完成渠道配置" };

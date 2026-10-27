@@ -2055,7 +2055,9 @@ fn redacted_config_at(
     public.webhook.url.clear();
     for channel in &mut public.webhook.channels {
         channel.url_configured = !channel.url.trim().is_empty();
-        channel.url.clear();
+        if channel.kind != crate::notifications::NotificationChannelKind::Ntfy {
+            channel.url.clear();
+        }
         channel.bot_token_configured = !channel.bot_token.trim().is_empty();
         channel.bot_token.clear();
         channel.context_token_configured = !channel.context_token.trim().is_empty();

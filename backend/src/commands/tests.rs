@@ -224,7 +224,7 @@ async fn session_metadata_cache_operations_are_serialized_in_blocking_workers() 
 }
 
 #[test]
-fn renderer_settings_keep_api_keys_and_clear_notification_secrets() {
+fn renderer_settings_keep_editable_credentials_and_clear_notification_secrets() {
     let mut config = CodeyConfig::default();
     config.prompt_optimization.api_key = "optimizer-secret".to_string();
     config.hide_full_access_warning = true;
@@ -257,6 +257,15 @@ fn renderer_settings_keep_api_keys_and_clear_notification_secrets() {
         ..NotificationChannelConfig::default()
     });
 
+    config.webhook.channels.push(NotificationChannelConfig {
+        id: "ntfy-1".to_string(),
+        kind: crate::notifications::NotificationChannelKind::Ntfy,
+        url: "https://ntfy.example.com".to_string(),
+        bot_token: "ntfy-access-secret".to_string(),
+        chat_id: "codey-topic".to_string(),
+        ..NotificationChannelConfig::default()
+    });
+
     let public = serde_json::to_value(redacted_config(&config)).unwrap();
 
     assert_eq!(public["promptOptimization"]["apiKey"], "");
@@ -276,6 +285,15 @@ fn renderer_settings_keep_api_keys_and_clear_notification_secrets() {
         public["webhook"]["channels"][3]["contextTokenConfigured"],
         true
     );
+    assert_eq!(
+        public["webhook"]["channels"][4]["url"],
+        "https://ntfy.example.com"
+    );
+    assert_eq!(public["webhook"]["channels"][4]["urlConfigured"], true);
+    assert_eq!(public["webhook"]["channels"][4]["botToken"], "");
+    assert_eq!(public["webhook"]["channels"][4]["botTokenConfigured"], true);
+    assert_eq!(public["webhook"]["channels"][4]["chatId"], "codey-topic");
+    assert!(!public.to_string().contains("ntfy-access-secret"));
     assert!(!public.to_string().contains("optimizer-secret"));
     assert!(!public.to_string().contains("feishu-secret"));
     assert!(!public.to_string().contains("telegram-secret"));
