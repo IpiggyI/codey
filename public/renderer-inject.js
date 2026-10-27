@@ -41,10 +41,7 @@
   const railProfileLabelPattern = /个人资料|账户|账号|profile|account/i;
   const bootstrapProbeSelector = `${headerSelector}, ${sidebarSelector}, ${navigationRailSelector}`;
   const settingsIcon = `
-    <svg viewBox="0 0 350 350" aria-hidden="true" focusable="false">
-      <rect x="0" y="0" width="350" height="350" rx="34" fill="#fff" stroke="none"></rect>
-      <path d="M70 301c-16 0-24-18-13-30l73-77c8-8 8-20 0-28L65 101C50 86 57 61 78 57c9-2 18 1 25 8l91 91c18 18 18 46 0 64l-66 66c-6 6-2 15 7 15h183" fill="none" stroke="currentColor" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"></path>
-    </svg>
+    <img class="codey-settings-icon" src="__CODEY_APP_ICON_DATA_URL__" alt="" aria-hidden="true" draggable="false">
   `;
   let sessionToolsLoadPromise = null;
   let scanTimer = 0;
@@ -97,13 +94,13 @@
       #${buttonId} { --codey-icon-size: 16px; --codey-icon-color: currentColor; -webkit-app-region: no-drag !important; pointer-events: auto !important; position: relative; z-index: 2147483641; display: inline-grid; place-items: center; flex: 0 0 auto; width: 32px; height: 32px; border: 0; border-radius: 12.5px; padding: 0; margin-inline-start: 8px; margin-inline-end: 18px; background: transparent; color: inherit; cursor: pointer; opacity: .86; user-select: none; transition: background .15s ease, opacity .15s ease, transform .15s ease; }
       #${buttonId}[data-codey-header-actions="true"] { width: 28px; height: 28px; margin-inline-start: 0; margin-inline-end: 6px; }
       #${buttonId}[data-codey-rail-slot="true"] { --codey-icon-size: 20px; box-sizing: border-box; flex: 0 0 auto; width: 36px; height: 36px; margin: 0; border-radius: 12.5px; color: color-mix(in srgb, CanvasText 52%, transparent); }
-      #${buttonId}[data-codey-rail-slot="true"] svg { width: 20px; height: 20px; }
+      #${buttonId}[data-codey-rail-slot="true"] .codey-settings-icon { width: 20px; height: 20px; }
       #${buttonId}[data-codey-rail-slot="true"]:hover { color: CanvasText; }
       #${buttonId}[data-codey-rail-slot="true"]::after { top: 4px; right: 4px; }
       #${buttonId}:hover { background: rgba(127, 127, 127, .14); opacity: 1; }
       #${buttonId}:active { transform: translateY(1px); }
       #${buttonId}:focus-visible { outline: 2px solid rgba(139, 151, 255, .72); outline-offset: 2px; }
-      #${buttonId} svg { display: block; flex: 0 0 auto; width: var(--codey-icon-size); height: var(--codey-icon-size); fill: none; stroke: var(--codey-icon-color); stroke-width: 22; stroke-linecap: round; stroke-linejoin: round; }
+      #${buttonId} .codey-settings-icon { display: block; flex: 0 0 auto; width: var(--codey-icon-size); height: var(--codey-icon-size); object-fit: contain; }
       #${buttonId} .codey-settings-label { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
       #${buttonId} .codey-runtime-badge { position: absolute; top: -2px; right: -2px; display: grid; width: 13px; height: 13px; place-items: center; border: 2px solid Canvas; border-radius: 999px; background: #ff453a; color: #fff; font: 800 9px/1 -apple-system, BlinkMacSystemFont, sans-serif; opacity: 0; transform: scale(.65); transition: opacity .15s ease, transform .15s ease; pointer-events: none; }
       #${buttonId}[data-codey-runtime-state="unavailable"] { background: rgba(255, 69, 58, .12); color: #ff453a; opacity: 1; }
@@ -122,6 +119,9 @@
       #${accountUsageId} .codey-usage-window-label { min-width: 0; overflow: hidden; color: var(--codey-usage-muted); font-size: 10px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
       #${accountUsageId} .codey-usage-plan-tag { flex: 0 0 auto; overflow: hidden; max-width: 44%; border: 1px solid color-mix(in srgb, #0a84ff 32%, transparent); border-radius: 999px; padding: 1px 6px; background: color-mix(in srgb, #0a84ff 13%, transparent); color: light-dark(#0068cc, #69b1ff); font-size: 9px; font-weight: 600; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
       #${accountUsageId} .codey-usage-plan-tag[data-plan="plus"] { border-color: light-dark(#a4d4c8, #37695e); background: light-dark(#e6f5f1, #193d37); color: light-dark(#0f766e, #91d6c1); }
+      #${accountUsageId} .codey-usage-plan-tag[data-pro-tier="100"] { border-color: light-dark(#cbd5e1, #64748b); background: linear-gradient(135deg, light-dark(#f8fafc, #394452), light-dark(#e2e8f0, #262e39)); color: light-dark(#475569, #dbe4ef); box-shadow: inset 0 1px 0 rgb(255 255 255 / .18); }
+      #${accountUsageId} .codey-usage-plan-tag[data-pro-tier="200"] { border-color: light-dark(#d6b86b, #8f7035); background: linear-gradient(135deg, light-dark(#fff8e7, #4b3b1f), light-dark(#f2dfb0, #302719)); color: light-dark(#78530e, #f2d58d); box-shadow: inset 0 1px 0 rgb(255 255 255 / .24); }
+      #${accountUsageId} .codey-usage-plan-tag[data-pro-tier="500"] { border-color: light-dark(#b89654, #c6a663); background: linear-gradient(135deg, light-dark(#49305f, #59406e), light-dark(#25182f, #302039)); color: light-dark(#f8e5af, #ffe9b0); box-shadow: inset 0 1px 0 rgb(255 234 184 / .24), 0 1px 3px rgb(37 28 54 / .15); }
       #${accountUsageId} .codey-usage-value { flex: 0 0 auto; margin-inline-start: auto; padding: 1px 6px; border-radius: 999px; background: var(--codey-usage-accent-bg); color: var(--codey-usage-accent); font-size: 10px; font-variant-numeric: tabular-nums; font-weight: 650; white-space: nowrap; }
       #${accountUsageId} .codey-usage-meter { display: block; box-sizing: border-box; width: 100%; height: 3px; min-height: 3px; max-height: 3px; margin-top: 6px; overflow: hidden; border-radius: 999px; background: var(--codey-usage-track); contain: size; line-height: 0; }
       #${accountUsageId} .codey-usage-meter > span { display: block; box-sizing: border-box; width: 100%; height: 100%; border-radius: inherit; background: var(--codey-usage-accent); transform: scaleX(var(--codey-usage-remaining)); transform-origin: left center; }
@@ -820,18 +820,19 @@
   const accountUsagePlanLabel = (planType) => {
     const raw = String(planType || "").trim();
     if (!raw) return "";
-    const compact = raw.toLowerCase().replace(/[\s_$-]+/g, "");
-    if (compact === "5x" || compact.includes("pro5x") || compact.includes("pro100")) {
-      return "Pro 5x";
-    }
-    if (compact === "pro" || compact.includes("pro20x") || compact.includes("pro200")) {
-      return "Pro 20x";
-    }
-    if (compact.includes("plus")) return "Plus";
-    if (compact.includes("free")) return "Free";
-    return raw
-      .replace(/[_-]+/g, " ")
-      .replace(/\b\w/g, (character) => character.toUpperCase());
+    const normalized = raw.toLowerCase();
+    if (normalized === "prolite") return "Pro 100";
+    if (normalized === "pro") return "Pro 200";
+    if (normalized === "promax") return "Pro 500";
+    const compact = normalized.replace(/[\s_$-]+/g, "");
+    if (compact === "pro100") return "Pro 100";
+    if (compact === "pro200") return "Pro 200";
+    if (compact === "pro500") return "Pro 500";
+    if (compact === "5x" || compact === "pro5x") return "Pro 5x";
+    if (compact === "pro20x") return "Pro 20x";
+    if (normalized === "plus") return "Plus";
+    if (normalized === "free") return "Free";
+    return raw;
   };
 
   const accountUsageResetLabel = (resetsAt) => {
@@ -932,6 +933,7 @@
 
   const accountUsageWindowSegment = (window, kind, plan = "") => {
     if (!window || accountUsageWindowKind(window) !== kind) return null;
+    const proTier = /^Pro (100|200|500)$/.exec(plan)?.[1];
     const remaining = Math.max(0, Math.min(100, 100 - Number(window.usedPercent)));
     const roundedRemaining = Math.round(remaining);
     const label = kind === "weekly" ? "周额度" : "5 小时";
@@ -944,7 +946,7 @@
       html: `
         <span class="codey-usage-segment" data-window="${kind}" data-tone="${tone}" style="--codey-usage-remaining:${remaining / 100}">
           <span class="codey-usage-overview">
-            ${plan ? `<span class="codey-usage-plan-tag"${plan === "Plus" ? ' data-plan="plus"' : ""}>${escapeAccountUsageText(plan)}</span>` : ""}
+            ${plan ? `<span class="codey-usage-plan-tag"${plan === "Plus" ? ' data-plan="plus"' : ""}${proTier ? ` data-pro-tier="${proTier}"` : ""}>${escapeAccountUsageText(plan)}</span>` : ""}
             <span class="codey-usage-window-label">${label}</span>
             <span class="codey-usage-value">${roundedRemaining}%</span>
           </span>

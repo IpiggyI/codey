@@ -222,6 +222,8 @@ test("mounts above the native help entry in the navigation rail footer", () => {
   assert.equal(button.parentElement, stack);
   assert.equal(button.dataset.codeyRailSlot, "true");
   assert.equal(button.hasAttribute("data-codey-native-slot"), false);
+  assert.match(button.innerHTML, /<img class="codey-settings-icon" src="__CODEY_APP_ICON_DATA_URL__"/);
+  assert.doesNotMatch(button.innerHTML, /<svg/);
   assert.equal(stack.children[0], button, "the Codey entry sits above the help entry");
   assert.equal(button.nextElementSibling, helpSlot);
   assert.equal(document.getElementById("codey-settings-button-measure"), null);
