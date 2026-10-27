@@ -407,25 +407,37 @@ async fn assert_watcher_delivery_after_recovery(runtime_failure: bool, init_fail
     let server = MockWebhookServer::start(vec!["200 OK"]).await;
     let state = channel_delivery_test_state(directory.path(), vec![server.channel("channel")]);
     let home = notification_codex_home(&state);
-    fs::create_dir_all(home.join("sessions")).unwrap();
     let rollout = home.join("sessions/rollout-session.jsonl");
-    fs::write(
-        &rollout,
-        "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn\"}}\n",
-    )
-    .unwrap();
-    let db = rusqlite::Connection::open(home.join("state_5.sqlite")).unwrap();
-    db.execute_batch("CREATE TABLE threads(id TEXT PRIMARY KEY, rollout_path TEXT, archived INTEGER, updated_at INTEGER);").unwrap();
-    db.execute(
-        "INSERT INTO threads VALUES (?1, ?2, 0, ?3)",
-        rusqlite::params![
-            "session",
-            rollout.to_string_lossy(),
-            unix_timestamp_seconds()
-        ],
-    )
-    .unwrap();
-    drop(db);
+    let prepare_scan = {
+        let home = home.clone();
+        let rollout = rollout.clone();
+        move || {
+            fs::create_dir_all(home.join("sessions")).unwrap();
+            fs::write(
+                &rollout,
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\",\"turn_id\":\"turn\"}}\n",
+            )
+            .unwrap();
+            let db = rusqlite::Connection::open(home.join("state_5.sqlite")).unwrap();
+            db.execute_batch("CREATE TABLE threads(id TEXT PRIMARY KEY, rollout_path TEXT, archived INTEGER, updated_at INTEGER);").unwrap();
+            db.execute(
+                "INSERT INTO threads VALUES (?1, ?2, 0, ?3)",
+                rusqlite::params![
+                    "session",
+                    rollout.to_string_lossy(),
+                    unix_timestamp_seconds()
+                ],
+            )
+            .unwrap();
+            drop(db);
+            start_recent_session_scan_at(Default::default(), home.clone())
+        }
+    };
+    let scan = if init_failure {
+        None
+    } else {
+        Some(prepare_scan())
+    };
     // 模拟重启时仍在队列中、但当前 rollout 已无对应提问的等待通知。
     notify_webhook_waiting(
         &state,
@@ -434,21 +446,19 @@ async fn assert_watcher_delivery_after_recovery(runtime_failure: bool, init_fail
     )
     .await
     .unwrap();
-    let scan = start_recent_session_scan_at(Default::default(), home.clone());
-    let hidden_home = directory.path().join("hidden-codex");
-    let scan = if init_failure {
-        let baseline = await_recent_session_scan(scan).await;
-        fs::rename(&home, &hidden_home).unwrap();
-        let state = Arc::clone(&state);
-        let home = home.clone();
-        RecentSessionScanTask::new(tokio::spawn(async move {
-            // 监听已因主目录缺失而失败，补查开始前恢复可读取的会话数据。
-            state.notification_watcher_started.notified().await;
-            fs::rename(hidden_home, home).unwrap();
-            baseline
-        }))
-    } else {
+    let scan = if let Some(scan) = scan {
         scan
+    } else {
+        assert!(
+            !home.exists(),
+            "watcher initialization must see a missing home"
+        );
+        let state = Arc::clone(&state);
+        RecentSessionScanTask::new(tokio::spawn(async move {
+            // 主目录缺失使监听初始化失败，随后创建会话数据供降级轮询读取。
+            state.notification_watcher_started.notified().await;
+            await_recent_session_scan(prepare_scan()).await
+        }))
     };
     start_waiting_webhook_watcher(&state, scan).await;
     tokio::time::timeout(Duration::from_secs(5), async {

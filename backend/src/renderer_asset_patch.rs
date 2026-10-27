@@ -1191,15 +1191,23 @@ mod tests {
         let body = service.expect("Fetch.getResponseBody").await;
         service.reply(&body, json!({ "body": source })).await;
         let evaluate = service.expect("Runtime.evaluate").await;
+        let expression_path = temp.path().join("expression.js");
+        std::fs::write(
+            &expression_path,
+            evaluate["params"]["expression"].as_str().unwrap(),
+        )
+        .unwrap();
         let output = std::process::Command::new("node")
             .args(["-e", r#"
 const vm = require('node:vm');
-const result = vm.runInNewContext(process.argv[1], { URL, console });
+const expression = require('node:fs').readFileSync(process.argv[1], 'utf8');
+const result = vm.runInNewContext(expression, { URL, console });
 const locale = vm.runInNewContext(result.patched + ';resolveLocale({get:()=>false},()=>"en-US",{})');
 require('node:assert/strict').equal(locale.locale, 'zh-CN');
 require('node:assert/strict').equal(locale.enabled, true);
 process.stdout.write(JSON.stringify(result));
-"#, evaluate["params"]["expression"].as_str().unwrap()])
+"#])
+            .arg(&expression_path)
             .output().unwrap();
         assert!(
             output.status.success(),
