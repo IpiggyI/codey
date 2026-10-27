@@ -57,8 +57,8 @@ pub use runtime::{
     schedule_migrate_codey_router_sessions, schedule_restart_codey_runtime, stop_codey_runtime,
 };
 use webhooks::{
-    WaitingLedgerState, WebhookNotificationState, initial_waiting_notifications,
-    sync_waiting_webhook_watcher, test_notification_channel,
+    WaitingLedgerState, initial_waiting_notifications, sync_waiting_webhook_watcher,
+    test_notification_channel,
 };
 use wechat_claw::{
     WechatClawLoginState, WechatClawSessionGuard, WechatClawSyncHandle,
@@ -111,6 +111,12 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     #[cfg(test)]
     pub webhook_http_client_override: Option<reqwest::Client>,
+    #[cfg(test)]
+    notification_codex_home: Option<PathBuf>,
+    #[cfg(test)]
+    notification_watcher_failure: AtomicBool,
+    #[cfg(test)]
+    notification_watcher_started: Notify,
     wechat_claw_login_http_client: reqwest::Client,
     account_usage_cache: Mutex<account_usage::AccountUsageCache>,
     pub runtime: Mutex<Option<Arc<CodeyRuntime>>>,
@@ -129,10 +135,15 @@ pub struct AppState {
     session_titles: RwLock<HashMap<String, String>>,
     session_metadata_cache: BlockingMutex<session_metadata::SessionMetadataCache>,
     completion_probe_cache: BlockingMutex<pending_approval::RecentSessionEventCache>,
+    notification_title_cache: BlockingMutex<webhooks::NotificationTitleCache>,
+    notification_title_query: Arc<tokio::sync::Semaphore>,
     #[cfg(test)]
     session_metadata_cache_contended: Notify,
-    webhook_notifications: Mutex<WebhookNotificationState>,
     persisted_waiting_notifications: Mutex<WaitingLedgerState>,
+    notification_waiting_snapshot: RwLock<webhooks::WaitingNotificationSnapshot>,
+    notification_outbox: tokio::sync::OnceCell<crate::notifications::outbox::Outbox>,
+    notification_delivery_wake: Notify,
+    notification_delivery_stop: watch::Sender<bool>,
     recent_session_event_cache: Mutex<Option<pending_approval::RecentSessionEventCache>>,
     wechat_claw_logins: Mutex<WechatClawLoginState>,
     wechat_claw_sync: Mutex<Option<WechatClawSyncHandle>>,
@@ -141,7 +152,7 @@ pub struct AppState {
     waiting_watcher_shutdown: Mutex<Option<oneshot::Sender<()>>>,
     waiting_watcher_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     waiting_watcher_sync: Mutex<()>,
-    session_scan_wake: Notify,
+    session_scan_wake: Arc<Notify>,
     restart_settled: Notify,
     codey_router_migrate_report: RwLock<Option<crate::codey_router_session_migrate::MigrateReport>>,
     #[cfg(test)]
@@ -206,7 +217,12 @@ fn load_config_or_defaults(store: &ConfigStore) -> (CodeyConfig, Option<String>)
 
 impl Default for AppState {
     fn default() -> Self {
-        let store = ConfigStore::default();
+        Self::with_store(ConfigStore::default())
+    }
+}
+
+impl AppState {
+    fn with_store(store: ConfigStore) -> Self {
         let (config, config_load_error) = load_config_or_defaults(&store);
         let protect_crashpad_pending = config.protect_crashpad_pending;
         let persisted_waiting_notifications = initial_waiting_notifications(&store, &[]);
@@ -225,6 +241,12 @@ impl Default for AppState {
                 .expect("shared Codey HTTP client should be constructible"),
             #[cfg(test)]
             webhook_http_client_override: None,
+            #[cfg(test)]
+            notification_codex_home: None,
+            #[cfg(test)]
+            notification_watcher_failure: AtomicBool::new(false),
+            #[cfg(test)]
+            notification_watcher_started: Notify::new(),
             wechat_claw_login_http_client: wechat_claw_login_http_client(),
             account_usage_cache: Mutex::new(account_usage::AccountUsageCache::default()),
             runtime: Mutex::new(None),
@@ -247,12 +269,15 @@ impl Default for AppState {
             completion_probe_cache: BlockingMutex::new(
                 pending_approval::RecentSessionEventCache::default(),
             ),
+            notification_title_cache: BlockingMutex::new(Default::default()),
+            notification_title_query: Arc::new(tokio::sync::Semaphore::new(1)),
             #[cfg(test)]
             session_metadata_cache_contended: Notify::new(),
-            webhook_notifications: Mutex::new(WebhookNotificationState::from_settled(
-                persisted_waiting_notifications.iter().cloned(),
-            )),
             persisted_waiting_notifications: Mutex::new(persisted_waiting_notifications),
+            notification_waiting_snapshot: RwLock::new(Default::default()),
+            notification_outbox: tokio::sync::OnceCell::new(),
+            notification_delivery_wake: Notify::new(),
+            notification_delivery_stop: watch::channel(false).0,
             recent_session_event_cache: Mutex::new(Some(
                 pending_approval::RecentSessionEventCache::default(),
             )),
@@ -263,7 +288,7 @@ impl Default for AppState {
             waiting_watcher_shutdown: Mutex::new(None),
             waiting_watcher_task: Mutex::new(None),
             waiting_watcher_sync: Mutex::new(()),
-            session_scan_wake: Notify::new(),
+            session_scan_wake: Arc::new(Notify::new()),
             restart_settled: Notify::new(),
             codey_router_migrate_report: RwLock::new(None),
             #[cfg(test)]
@@ -897,18 +922,6 @@ fn persisted_config_changed(previous: &CodeyConfig, next: &CodeyConfig) -> bool 
     previous.current_provider_snapshot = None;
     next.current_provider_snapshot = None;
     previous != next
-}
-
-async fn resolve_session_name_cached(
-    state: &Arc<AppState>,
-    home: PathBuf,
-    session_id: String,
-    preferred_title: Option<String>,
-) -> Result<String, String> {
-    with_session_metadata_cache(state, "读取通知会话名称", move |cache| {
-        cache.resolve_session_name_with_preferred(&home, &session_id, preferred_title.as_deref())
-    })
-    .await
 }
 
 pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Value {
