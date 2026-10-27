@@ -74,6 +74,7 @@ export type Config = {
   protectCrashpadPending: boolean;
   slimCodexPet: boolean;
   gpuLaunchMode: "off" | "disableGpu" | "disableGpuRasterization";
+  codexLaunchProxy: string;
   fastContextTools: boolean;
   subagentOptimization: boolean;
   subagentModel: string;

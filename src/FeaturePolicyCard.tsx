@@ -1,5 +1,12 @@
 import { memo, type CSSProperties } from "react";
-import { IconAdjustmentsHorizontal, IconInfoCircle, IconUsersGroup } from "@tabler/icons-react";
+import {
+  IconAdjustmentsHorizontal,
+  IconHelpCircle,
+  IconInfoCircle,
+  IconNetwork,
+  IconUsersGroup,
+  IconX,
+} from "@tabler/icons-react";
 
 import type {
   Config,
@@ -10,6 +17,7 @@ import { Card, Table } from "@heroui/react";
 import {
   Button,
   Badge,
+  Input,
   Select,
   Switch,
   Tooltip,
@@ -21,6 +29,7 @@ import {
 } from "./subagentModels";
 import { surfaceCardPaddingClass } from "./uiClasses";
 import { SETTINGS_OVERLAY_Z_INDEX } from "./overlay.constants";
+import { codexLaunchProxyHasCredentials, validateCodexLaunchProxy } from "./urlValidation";
 
 const GPU_LAUNCH_MODES = [
   { value: "off", label: "关闭" },
@@ -330,6 +339,44 @@ type FeaturePolicyCardProps = {
   onConfigChange: (config: Config) => void;
 };
 
+const LAUNCH_PROXY_CODE_CLASS =
+  "rounded bg-[rgb(var(--codey-ink-rgb,0,0,0))]/10 px-1 py-0.5 font-mono text-[11px]";
+
+const LAUNCH_PROXY_TOOLTIP_CONTENT = (
+  <div className="space-y-1.5 text-xs text-left leading-relaxed">
+    <div className="font-semibold">Codex 启动代理格式与说明</div>
+    <div>
+      支持协议：
+      {["http://", "https://", "socks5://", "socks5h://"].map((scheme, index) => (
+        <span key={scheme}>
+          {index > 0 ? "、" : null}
+          <code className={LAUNCH_PROXY_CODE_CLASS}>{scheme}</code>
+        </span>
+      ))}
+    </div>
+    <div>
+      限制说明：认证可用 http://用户名:密码@主机:端口 形式；SOCKS 代理必须指定端口；https:// 表示用 TLS 连接代理本身。
+    </div>
+    <div className="pt-0.5">
+      <div className="font-semibold text-[11px] opacity-80">常见示例：</div>
+      <div className="mt-0.5 space-y-0.5 font-mono text-[11px] opacity-90">
+        <div>http://127.0.0.1:7890</div>
+        <div>http://user:pass@127.0.0.1:7890</div>
+        <div>socks5://127.0.0.1:1080</div>
+      </div>
+    </div>
+    <div className="border-t border-current/15 pt-1 text-[11px]">
+      <div className="font-semibold">带用户名密码的安全影响</div>
+      <div className="opacity-80">
+        Codey 会在本机回环地址启动认证中继，替 Codex 向代理服务器认证。中继运行期间，本机其他进程也能通过它免凭据使用这个代理。
+      </div>
+    </div>
+    <div className="text-[11px] opacity-80">
+      客户端与 app-server 经此代理访问网络，重启 Codex 后生效；本地路由与额度查询不受影响。
+    </div>
+  </div>
+);
+
 function FeaturePolicyCardComponent({
   config,
   fastContextToolsStatus,
@@ -338,6 +385,9 @@ function FeaturePolicyCardComponent({
   isBusy,
   onConfigChange,
 }: FeaturePolicyCardProps) {
+  const launchProxy = config.codexLaunchProxy ?? "";
+  const launchProxyError = validateCodexLaunchProxy(launchProxy);
+  const launchProxyCredentialed = codexLaunchProxyHasCredentials(launchProxy);
   const configuredGpuLaunchModeIndex = GPU_LAUNCH_MODES.findIndex(
     ({ value }) => value === config.gpuLaunchMode,
   );
@@ -372,229 +422,305 @@ function FeaturePolicyCardComponent({
   );
 
   return (
-    <section className="secondary-section" aria-labelledby="runtime-title">
-      <div className="section-title compact">
-        <div className="section-heading">
-          <span className="section-icon" aria-hidden="true">
-            <IconAdjustmentsHorizontal size={15} />
-          </span>
-          <div>
-            <h2 id="runtime-title">Codex 功能策略</h2>
-            <p>按需精简客户端模块和界面行为。</p>
+    <>
+      <section className="secondary-section launch-proxy-section" aria-labelledby="launch-proxy-title">
+        <div className="section-title compact">
+          <div className="section-heading">
+            <span className="section-icon" aria-hidden="true">
+              <IconNetwork size={15} />
+            </span>
+            <div>
+              <div className="launch-proxy-title-row">
+                <h2 id="launch-proxy-title">Codex 启动代理</h2>
+                <Tooltip content={LAUNCH_PROXY_TOOLTIP_CONTENT} position="top">
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    className="launch-proxy-info-btn"
+                    aria-label="Codex 启动代理格式与说明"
+                  >
+                    <IconHelpCircle size={14} aria-hidden="true" />
+                  </Button>
+                </Tooltip>
+              </div>
+              <p>客户端与 app-server 经此代理访问网络，重启 Codex 后生效；本地路由与额度查询不受影响。</p>
+            </div>
           </div>
         </div>
-      </div>
-      <Card className={`secondary-card runtime-card ${surfaceCardPaddingClass}`}>
-        <div className="feature-grid">
-          {/* GPU 渲染模式：占满整行全宽，仅 Windows 客户端展示 */}
-          {isWindowsClient && (
-            <div
-              className={`feature-card gpu-mode-card full-width-card ${gpuLaunchMode.value !== "off" ? "active" : ""}`}
+        <Card className={`secondary-card launch-proxy-card ${surfaceCardPaddingClass}`}>
+          <Input
+            id="codex-launch-proxy-input"
+            aria-label="Codex 启动代理"
+            aria-invalid={Boolean(launchProxyError)}
+            aria-describedby={
+              launchProxyError
+                ? "codex-launch-proxy-error"
+                : launchProxyCredentialed
+                  ? "codex-launch-proxy-credentials"
+                  : undefined
+            }
+            value={launchProxy}
+            disabled={isBusy}
+            placeholder="留空不走代理，例如 http://127.0.0.1:7890"
+            spellCheck={false}
+            rightSection={
+              launchProxy ? (
+                <button
+                  type="button"
+                  className="flex h-5 w-5 cursor-pointer items-center justify-center rounded-full text-[var(--codey-muted,#8e8e93)] hover:bg-[rgb(var(--codey-ink-rgb,0,0,0))]/5 hover:text-[var(--codey-text,#1d1d1f)] transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+                  disabled={isBusy}
+                  onClick={() => onConfigChange({ ...config, codexLaunchProxy: "" })}
+                  aria-label="清空代理设置"
+                  title="清空代理设置"
+                >
+                  <IconX size={12} aria-hidden="true" />
+                </button>
+              ) : undefined
+            }
+            onChange={(event) =>
+              onConfigChange({ ...config, codexLaunchProxy: event.target.value })
+            }
+          />
+          {launchProxyError ? (
+            <small
+              id="codex-launch-proxy-error"
+              className="launch-proxy-note is-error"
+              role="alert"
             >
-              <div className="feature-card-header">
-                <div className="feature-card-title">
-                  <strong>GPU 渲染模式</strong>
-                  <Badge variant="warning">实验性</Badge>
+              {launchProxyError}
+            </small>
+          ) : launchProxyCredentialed ? (
+            <small id="codex-launch-proxy-credentials" className="launch-proxy-note">
+              带用户名密码的代理由本机回环中继认证；中继运行期间，本机其他进程也能免凭据使用这个代理。
+            </small>
+          ) : null}
+        </Card>
+      </section>
+
+      <section className="secondary-section" aria-labelledby="runtime-title">
+        <div className="section-title compact">
+          <div className="section-heading">
+            <span className="section-icon" aria-hidden="true">
+              <IconAdjustmentsHorizontal size={15} />
+            </span>
+            <div>
+              <h2 id="runtime-title">Codex 功能策略</h2>
+              <p>按需精简客户端模块和界面行为。</p>
+            </div>
+          </div>
+        </div>
+        <Card className={`secondary-card runtime-card ${surfaceCardPaddingClass}`}>
+          <div className="feature-grid">
+            {/* GPU 渲染模式：占满整行全宽，仅 Windows 客户端展示 */}
+            {isWindowsClient && (
+              <div
+                className={`feature-card gpu-mode-card full-width-card ${gpuLaunchMode.value !== "off" ? "active" : ""}`}
+              >
+                <div className="feature-card-header">
+                  <div className="feature-card-title">
+                    <strong>GPU 渲染模式</strong>
+                    <Badge variant="warning">实验性</Badge>
+                  </div>
+                </div>
+                <div className="feature-card-body gpu-mode-card-body">
+                  <fieldset
+                    className="gpu-mode-fieldset"
+                    disabled={isBusy}
+                    aria-describedby="gpu-launch-mode-description"
+                  >
+                    <legend className="sr-only">Codex GPU 启动模式</legend>
+                    <div className="gpu-mode-slider" style={gpuLaunchModeStyle}>
+                      <span className="gpu-mode-slider-thumb" aria-hidden="true" />
+                      {GPU_LAUNCH_MODES.map((mode) => (
+                        <label
+                          key={mode.value}
+                          className={`gpu-mode-option ${gpuLaunchMode.value === mode.value ? "selected" : ""}`}
+                        >
+                          <input
+                            type="radio"
+                            name="codey-gpu-launch-mode"
+                            value={mode.value}
+                            checked={gpuLaunchMode.value === mode.value}
+                            onChange={() =>
+                              onConfigChange({
+                                ...config,
+                                gpuLaunchMode: mode.value,
+                              })
+                            }
+                          />
+                          <span>{mode.label}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </fieldset>
+                  <small id="gpu-launch-mode-description" aria-live="polite">
+                    {gpuLaunchMode.value === "disableGpu"
+                      ? "启动 Codex 时附加 --disable-gpu；可能增加 CPU 占用"
+                      : gpuLaunchMode.value === "disableGpuRasterization"
+                        ? "启动 Codex 时附加 --disable-gpu-rasterization；仅将栅格化移到 CPU"
+                        : "保持 Codex 默认 GPU 渲染，不附加诊断参数"}
+                  </small>
                 </div>
               </div>
-              <div className="feature-card-body gpu-mode-card-body">
-                <fieldset
-                  className="gpu-mode-fieldset"
-                  disabled={isBusy}
-                  aria-describedby="gpu-launch-mode-description"
-                >
-                  <legend className="sr-only">Codex GPU 启动模式</legend>
-                  <div className="gpu-mode-slider" style={gpuLaunchModeStyle}>
-                    <span className="gpu-mode-slider-thumb" aria-hidden="true" />
-                    {GPU_LAUNCH_MODES.map((mode) => (
-                      <label
-                        key={mode.value}
-                        className={`gpu-mode-option ${gpuLaunchMode.value === mode.value ? "selected" : ""}`}
-                      >
-                        <input
-                          type="radio"
-                          name="codey-gpu-launch-mode"
-                          value={mode.value}
-                          checked={gpuLaunchMode.value === mode.value}
-                          onChange={() =>
-                            onConfigChange({
-                              ...config,
-                              gpuLaunchMode: mode.value,
-                            })
-                          }
-                        />
-                        <span>{mode.label}</span>
-                      </label>
-                    ))}
-                  </div>
-                </fieldset>
-                <small id="gpu-launch-mode-description" aria-live="polite">
-                  {gpuLaunchMode.value === "disableGpu"
-                    ? "启动 Codex 时附加 --disable-gpu；可能增加 CPU 占用"
-                    : gpuLaunchMode.value === "disableGpuRasterization"
-                      ? "启动 Codex 时附加 --disable-gpu-rasterization；仅将栅格化移到 CPU"
-                      : "保持 Codex 默认 GPU 渲染，不附加诊断参数"}
-                </small>
-              </div>
-            </div>
-          )}
+            )}
 
-          <div
-            className={`feature-card ${config.slimCodexPet ? "active" : ""}`}
-          >
-            <div className="feature-card-header">
-              <strong>精简 Codex 宠物模块</strong>
-              <Switch
-                checked={config.slimCodexPet}
-                disabled={isBusy}
-                onCheckedChange={(checked) =>
-                  onConfigChange({ ...config, slimCodexPet: checked })
-                }
-                aria-label="精简 Codex 宠物模块"
-              />
-            </div>
-            <div className="feature-card-body">
-              <small>
-                {config.slimCodexPet
-                  ? "已收起宠物并取消隐藏窗口预热；语音功能仍按需启用"
-                  : "保留 Codex 宠物的完整功能"}
-              </small>
-            </div>
-          </div>
-
-          <div
-            className={`feature-card ${fastContextToolsEnabled ? "active" : ""}`}
-          >
-            <div className="feature-card-header">
-              <div className="feature-card-title">
-                <strong>FastCtx 上下文工具</strong>
-                <Badge variant="secondary">v0.2.6</Badge>
-              </div>
-              {fastctxStatusBlocksEmbedded ? (
-                <Tooltip
-                  content={fastctxBlockedReason}
-                  position="top"
-                >
-                  <span
-                    className="fastctx-disabled-switch-tooltip"
-                    tabIndex={0}
-                    aria-label={fastctxBlockedReason}
-                  >
-                    {fastContextToolsSwitch}
-                  </span>
-                </Tooltip>
-              ) : (
-                fastContextToolsSwitch
-              )}
-            </div>
-            <div className="feature-card-body">
-              <small>
-                {fastctxStatusBlocksEmbedded
-                  ? fastContextToolsStatus.detectionFailed
-                    ? "暂时无法确认 FastCtx 状态，内置工具保持关闭"
-                    : "已检测到已配置的 FastCtx，Codey 不会重复加载内置工具"
-                  : config.fastContextTools
-                    ? "下次启动加载 Codey 内置 FastCtx 文件工具"
-                    : "保持 Codex 默认文件工具，不加载额外 MCP"}
-              </small>
-            </div>
-          </div>
-
-          <div
-            className={`feature-card ${config.disableTraceLogWrites ? "active" : ""}`}
-          >
-            <div className="feature-card-header">
-              <strong>Trace 日志写盘保护</strong>
-              <Switch
-                checked={config.disableTraceLogWrites}
-                disabled={isBusy}
-                onCheckedChange={(checked) =>
-                  onConfigChange({
-                    ...config,
-                    disableTraceLogWrites: checked,
-                  })
-                }
-                aria-label="启用 Codex Trace 日志写盘保护"
-              />
-            </div>
-            <div className="feature-card-body">
-              <small>阻止Trace日志持续写入数据库影响硬盘寿命</small>
-            </div>
-          </div>
-
-          {isMacClient && (
             <div
-              className={`feature-card ${config.protectCrashpadPending ? "active" : ""}`}
+              className={`feature-card ${config.slimCodexPet ? "active" : ""}`}
             >
               <div className="feature-card-header">
-                <strong>Crashpad 磁盘保护</strong>
+                <strong>精简 Codex 宠物模块</strong>
                 <Switch
-                  checked={config.protectCrashpadPending}
+                  checked={config.slimCodexPet}
                   disabled={isBusy}
                   onCheckedChange={(checked) =>
-                    onConfigChange({
-                      ...config,
-                      protectCrashpadPending: checked,
-                    })}
-                  aria-label="启用 Codex Crashpad 磁盘保护"
+                    onConfigChange({ ...config, slimCodexPet: checked })
+                  }
+                  aria-label="精简 Codex 宠物模块"
                 />
               </div>
               <div className="feature-card-body">
                 <small>
-                  {config.protectCrashpadPending
-                    ? "待处理崩溃报告超过安全上限时自动收敛，并保留最近写入"
-                    : "仅显示占用和提供手动清理，不执行自动容量保护"}
+                  {config.slimCodexPet
+                    ? "已收起宠物并取消隐藏窗口预热；语音功能仍按需启用"
+                    : "保留 Codex 宠物的完整功能"}
                 </small>
               </div>
             </div>
-          )}
 
-          <div
-            className={`feature-card ${config.hideFullAccessWarning ? "active" : ""}`}
-          >
-            <div className="feature-card-header">
-              <strong>屏蔽完全访问安全提示</strong>
-              <Switch
-                checked={config.hideFullAccessWarning}
-                disabled={isBusy}
-                onCheckedChange={(checked) =>
-                  onConfigChange({ ...config, hideFullAccessWarning: checked })
-                }
-                aria-label="屏蔽完全访问安全提示"
-              />
+            <div
+              className={`feature-card ${fastContextToolsEnabled ? "active" : ""}`}
+            >
+              <div className="feature-card-header">
+                <div className="feature-card-title">
+                  <strong>FastCtx 上下文工具</strong>
+                  <Badge variant="secondary">v0.2.6</Badge>
+                </div>
+                {fastctxStatusBlocksEmbedded ? (
+                  <Tooltip
+                    content={fastctxBlockedReason}
+                    position="top"
+                  >
+                    <span
+                      className="fastctx-disabled-switch-tooltip"
+                      tabIndex={0}
+                      aria-label={fastctxBlockedReason}
+                    >
+                      {fastContextToolsSwitch}
+                    </span>
+                  </Tooltip>
+                ) : (
+                  fastContextToolsSwitch
+                )}
+              </div>
+              <div className="feature-card-body">
+                <small>
+                  {fastctxStatusBlocksEmbedded
+                    ? fastContextToolsStatus.detectionFailed
+                      ? "暂时无法确认 FastCtx 状态，内置工具保持关闭"
+                      : "已检测到已配置的 FastCtx，Codey 不会重复加载内置工具"
+                    : config.fastContextTools
+                      ? "下次启动加载 Codey 内置 FastCtx 文件工具"
+                      : "保持 Codex 默认文件工具，不加载额外 MCP"}
+                </small>
+              </div>
             </div>
-            <div className="feature-card-body">
-              <small>
-                {config.hideFullAccessWarning
-                  ? "自动隐藏完全访问模式的原生安全提示"
-                  : "保留 Codex 原生安全提示"}
-              </small>
+
+            <div
+              className={`feature-card ${config.disableTraceLogWrites ? "active" : ""}`}
+            >
+              <div className="feature-card-header">
+                <strong>Trace 日志写盘保护</strong>
+                <Switch
+                  checked={config.disableTraceLogWrites}
+                  disabled={isBusy}
+                  onCheckedChange={(checked) =>
+                    onConfigChange({
+                      ...config,
+                      disableTraceLogWrites: checked,
+                    })
+                  }
+                  aria-label="启用 Codex Trace 日志写盘保护"
+                />
+              </div>
+              <div className="feature-card-body">
+                <small>阻止Trace日志持续写入数据库影响硬盘寿命</small>
+              </div>
+            </div>
+
+            {isMacClient && (
+              <div
+                className={`feature-card ${config.protectCrashpadPending ? "active" : ""}`}
+              >
+                <div className="feature-card-header">
+                  <strong>Crashpad 磁盘保护</strong>
+                  <Switch
+                    checked={config.protectCrashpadPending}
+                    disabled={isBusy}
+                    onCheckedChange={(checked) =>
+                      onConfigChange({
+                        ...config,
+                        protectCrashpadPending: checked,
+                      })}
+                    aria-label="启用 Codex Crashpad 磁盘保护"
+                  />
+                </div>
+                <div className="feature-card-body">
+                  <small>
+                    {config.protectCrashpadPending
+                      ? "待处理崩溃报告超过安全上限时自动收敛，并保留最近写入"
+                      : "仅显示占用和提供手动清理，不执行自动容量保护"}
+                  </small>
+                </div>
+              </div>
+            )}
+
+            <div
+              className={`feature-card ${config.hideFullAccessWarning ? "active" : ""}`}
+            >
+              <div className="feature-card-header">
+                <strong>屏蔽完全访问安全提示</strong>
+                <Switch
+                  checked={config.hideFullAccessWarning}
+                  disabled={isBusy}
+                  onCheckedChange={(checked) =>
+                    onConfigChange({ ...config, hideFullAccessWarning: checked })
+                  }
+                  aria-label="屏蔽完全访问安全提示"
+                />
+              </div>
+              <div className="feature-card-body">
+                <small>
+                  {config.hideFullAccessWarning
+                    ? "自动隐藏完全访问模式的原生安全提示"
+                    : "保留 Codex 原生安全提示"}
+                </small>
+              </div>
+            </div>
+
+            <div
+              className={`feature-card ${config.quotaUnlockEnabled ? "active" : ""}`}
+            >
+              <div className="feature-card-header">
+                <strong>额度用尽后仍可发送</strong>
+                <Switch
+                  checked={config.quotaUnlockEnabled}
+                  disabled={isBusy}
+                  onCheckedChange={(checked) =>
+                    onConfigChange({ ...config, quotaUnlockEnabled: checked })
+                  }
+                  aria-label="额度用尽后仍可发送"
+                />
+              </div>
+              <div className="feature-card-body">
+                <small>
+                  官方额度耗尽后不锁定输入框，便于切换到 API 登录继续对话；关闭后需重启
+                </small>
+              </div>
             </div>
           </div>
-
-          <div
-            className={`feature-card ${config.quotaUnlockEnabled ? "active" : ""}`}
-          >
-            <div className="feature-card-header">
-              <strong>额度用尽后仍可发送</strong>
-              <Switch
-                checked={config.quotaUnlockEnabled}
-                disabled={isBusy}
-                onCheckedChange={(checked) =>
-                  onConfigChange({ ...config, quotaUnlockEnabled: checked })
-                }
-                aria-label="额度用尽后仍可发送"
-              />
-            </div>
-            <div className="feature-card-body">
-              <small>
-                官方额度耗尽后不锁定输入框，便于切换到 API 登录继续对话；关闭后需重启
-              </small>
-            </div>
-          </div>
-        </div>
-      </Card>
-    </section>
+        </Card>
+      </section>
+    </>
   );
 }
 

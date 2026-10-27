@@ -181,6 +181,7 @@ if (import.meta.env.DEV) {
       protectCrashpadPending: true,
       slimCodexPet: true,
       gpuLaunchMode: "off" as const,
+      codexLaunchProxy: "",
       fastContextTools: false,
       subagentOptimization: false,
       subagentModel: "gpt-5.6-terra",

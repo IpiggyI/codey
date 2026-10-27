@@ -165,7 +165,8 @@
   white-space: nowrap;
 }
 
-.subagent-role-info-btn {
+.subagent-role-info-btn,
+.launch-proxy-info-btn {
   height: 16px;
   width: 16px;
   min-height: 0;
@@ -174,8 +175,35 @@
   color: #8e8e93;
 }
 
-.subagent-role-info-btn:hover {
+.subagent-role-info-btn:hover,
+.launch-proxy-info-btn:hover {
   color: #007aff;
+}
+
+.launch-proxy-section {
+  margin-bottom: 24px;
+}
+
+.launch-proxy-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.launch-proxy-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.launch-proxy-note {
+  color: #6e6e73;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.launch-proxy-note.is-error {
+  color: #d70015;
 }
 
 .subagent-policy-callout {
