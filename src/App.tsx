@@ -137,6 +137,7 @@ export function App({
     null,
   );
   const [systemSettingsOpen, setSystemSettingsOpen] = useState(false);
+  const [configRepairNotice, setConfigRepairNotice] = useState<{ tone: "info" | "success" | "error"; text: string } | null>(null);
   const popupContainer = modalContainer ?? null;
   const noticeController = useAppNoticeController();
   const confirmationController = useConfirmationController();
@@ -735,6 +736,52 @@ export function App({
         "当前 Codex 客户端将被关闭并由 Codey 自动重新拉起，正在执行的本地任务会被中断。",
       confirmLabel: "重启 Codex",
       run: () => void restartCodex(),
+    });
+  }
+
+  function askRepairCodexConfig() {
+    if (isBusy) return;
+    setConfirmation({
+      action: "repair-codex-config",
+      title: "修复 Codex 配置？",
+      description: "将检查配置文件及相关路径，修改已有配置前自动备份，并修复能够确认的问题。修复成功后，请从 Codey 重启 Codex 使修改生效。",
+      confirmLabel: "确认修复",
+      run: () => void repairCodexConfig(),
+    });
+  }
+
+  async function repairCodexConfig() {
+    await runOperation("repair-codex-config", async () => {
+      const report = (notice: { tone: "info" | "success" | "error"; text: string }) => {
+        setConfigRepairNotice(notice);
+        setNotice(notice);
+      };
+      report({ tone: "info", text: "正在检查并修复 Codex 配置…" });
+      try {
+        const result = await invoke<{
+          message: string;
+          configPath: string;
+          repaired: boolean;
+          backupPath?: string | null;
+        }>("repair_codex_config");
+        const summary = result.message || (result.repaired
+          ? "Codex 配置已修复"
+          : "Codex 配置检查通过，无需修改");
+        const restartHint = "修复成功，请从 Codey 重启 Codex 使修改生效。";
+        const backupPath = result.backupPath ? String(result.backupPath) : null;
+        // 后端消息已含重启提示或备份位置时不再重复追加
+        report({
+          tone: "success",
+          text: [
+            result.repaired && !summary.includes("重启 Codex") ? restartHint : null,
+            summary,
+            `配置文件：${result.configPath}`,
+            backupPath && !summary.includes(backupPath) ? `备份文件：${backupPath}` : null,
+          ].filter(Boolean).join("\n"),
+        });
+      } catch (error) {
+        report({ tone: "error", text: `Codex 配置修复未完成：${errorText(error)}。请查看 Codey 错误日志；连接中断时可重新检查执行结果。` });
+      }
     });
   }
 
@@ -1350,6 +1397,10 @@ export function App({
         codexAppVersion={status.codexAppVersion}
         codexAppPath={config.codexAppPath || status.codexAppPath}
         onRefreshStatus={refreshStatus}
+        isBusy={isBusy}
+        busy={busy}
+        onRepairCodexConfig={askRepairCodexConfig}
+        configRepairNotice={configRepairNotice}
       />
     </main>
   );

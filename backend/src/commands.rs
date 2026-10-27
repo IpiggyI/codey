@@ -8,6 +8,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
+mod config_repair;
 mod diagnostics;
 mod models;
 mod plugins;
@@ -1098,6 +1099,8 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
             }
         }
         "plugin_marketplace_status" => plugin_marketplace_status().await,
+        "check_codex_config" => config_repair::check_codex_config().await,
+        "repair_codex_config" => config_repair::repair_codex_config(state).await,
         "repair_plugin_marketplace" => repair_plugin_marketplace().await,
         "prepare_computer_use" => prepare_computer_use().await,
         _ => Err(format!("未知 Codey API 命令：{command}")),

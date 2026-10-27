@@ -3,7 +3,9 @@ import {
   IconCheck,
   IconCopy,
   IconFolder,
+  IconLoader2 as LoaderCircle,
   IconSettings,
+  IconTool,
 } from "@tabler/icons-react";
 
 import {
@@ -31,6 +33,11 @@ export type SystemSettingsDialogProps = {
   codexAppPath?: string;
   /** 打开对话框时重新读取运行状态；只读，不写任何配置。 */
   onRefreshStatus: () => Promise<unknown>;
+  isBusy: boolean;
+  busy: string | null;
+  /** 点击后由 App 先弹出确认框；确认前不向后端发送任何命令。 */
+  onRepairCodexConfig: () => void;
+  configRepairNotice?: { tone: "info" | "success" | "error"; text: string } | null;
 };
 
 type CopyState = "idle" | "copied" | "error";
@@ -43,6 +50,10 @@ function SystemSettingsDialogComponent({
   codexAppVersion,
   codexAppPath,
   onRefreshStatus,
+  isBusy,
+  busy,
+  onRepairCodexConfig,
+  configRepairNotice,
 }: SystemSettingsDialogProps) {
   const [reading, setReading] = useState(true);
   const [readError, setReadError] = useState<string | null>(null);
@@ -116,7 +127,7 @@ function SystemSettingsDialogComponent({
             <div className="min-w-0 flex-1">
               <DialogTitle>系统设置与偏好</DialogTitle>
               <DialogDescription>
-                查看 Codey 与 Codex 的版本和本地路径。
+                查看 Codey 与 Codex 的版本和本地路径，维护 Codex 配置。
               </DialogDescription>
             </div>
           </div>
@@ -191,6 +202,41 @@ function SystemSettingsDialogComponent({
                 </p>
               )}
             </div>
+          </div>
+
+          {/* Codex 配置维护：修复前必须经使用者确认 */}
+          <div className="system-settings-card">
+            <div className="flex items-center justify-between gap-3">
+              <span className="system-settings-label">修复 Codex 配置</span>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={isBusy}
+                onPress={onRepairCodexConfig}
+                className="shrink-0 whitespace-nowrap"
+              >
+                {busy === "repair-codex-config" ? (
+                  <LoaderCircle className="animate-spin" size={14} aria-hidden="true" />
+                ) : (
+                  <IconTool size={14} aria-hidden="true" />
+                )}
+                <span>{busy === "repair-codex-config" ? "修复中…" : "修复"}</span>
+              </Button>
+            </div>
+            {configRepairNotice && (
+              <p
+                role="status"
+                className={`system-settings-error whitespace-pre-line ${
+                  configRepairNotice.tone === "error"
+                    ? "text-danger"
+                    : configRepairNotice.tone === "success"
+                      ? "text-success"
+                      : ""
+                }`}
+              >
+                {configRepairNotice.text}
+              </p>
+            )}
           </div>
         </div>
 

@@ -160,7 +160,7 @@ const settle = () => new Promise(setImmediate);
 
 // 渲染对话框并模拟「打开 -> 读取运行状态」：run() 执行打开时的副作用，render() 重新取树。
 function openDialog(overrides = {}) {
-  const calls = { refresh: 0, openChange: [] };
+  const calls = { refresh: 0, repair: 0, openChange: [] };
   const harness = loadDialog();
   const props = {
     open: true,
@@ -170,6 +170,10 @@ function openDialog(overrides = {}) {
     codexAppVersion: "0.4.0",
     codexAppPath: "C:\\Codex\\Codex.exe",
     onRefreshStatus: async () => { calls.refresh += 1; },
+    isBusy: false,
+    busy: null,
+    onRepairCodexConfig: () => { calls.repair += 1; },
+    configRepairNotice: null,
     ...overrides,
   };
   const render = () => {
@@ -361,19 +365,226 @@ test("重新打开对话框时清除上一次的复制反馈", async (t) => {
   assert.deepEqual(statusLines(dialog.render()), []);
 });
 
-test("对话框不含设备号行，也没有配置修复与更新策略入口", async () => {
+test("对话框不含设备号行，也没有更新策略入口", async () => {
   const dialog = openDialog();
   dialog.runEffect();
   await settle();
   const text = textContent(dialog.render());
   assert.doesNotMatch(text, /设备号|尚未登记/);
-  assert.doesNotMatch(text, /修复|更新策略|稳定版|实验版|不检查/);
+  assert.doesNotMatch(text, /更新策略|稳定版|实验版|不检查/);
   assert.equal(byLabel(dialog.render(), "复制设备号").length, 0);
   assert.equal(byLabel(dialog.render(), "重新读取设备号").length, 0);
-  assert.equal(byText(dialog.render(), "修复").length, 0);
 
   assert.doesNotMatch(dialogSource, /machine|device|设备号|get_device/i);
-  assert.doesNotMatch(dialogSource, /repair|修复|Tabs|更新策略|UpdatePolicy/);
+  assert.doesNotMatch(dialogSource, /Tabs|更新策略|UpdatePolicy/);
+});
+
+test("对话框提供「修复 Codex 配置」行与「修复」按钮，按下只通知 App，不自行发送命令", async () => {
+  const dialog = openDialog();
+  dialog.runEffect();
+  await settle();
+  const tree = dialog.render();
+  assert.match(textContent(tree), /修复 Codex 配置/);
+  const [repair] = byText(tree, "修复");
+  assert.ok(repair, "必须有「修复」按钮");
+  assert.equal(elementType(repair), ui.Button);
+  assert.equal(elementProps(repair).disabled, false);
+  // 只有 onPress 同时覆盖鼠标与键盘。
+  assert.equal(elementProps(repair).onClick, undefined);
+  assert.equal(dialog.calls.repair, 0);
+  elementProps(repair).onPress();
+  assert.equal(dialog.calls.repair, 1);
+});
+
+test("修复进行中：按钮显示「修复中…」并禁用，其他操作忙碌时同样禁用", async () => {
+  const running = openDialog({ isBusy: true, busy: "repair-codex-config" });
+  running.runEffect();
+  await settle();
+  const runningTree = running.render();
+  const [button] = byText(runningTree, "修复中…");
+  assert.ok(button, "忙碌时按钮文案为「修复中…」");
+  assert.equal(elementProps(button).disabled, true);
+  assert.equal(byText(runningTree, "修复").length, 0);
+
+  const other = openDialog({ isBusy: true, busy: "save" });
+  other.runEffect();
+  await settle();
+  const [idle] = byText(other.render(), "修复");
+  assert.ok(idle, "其他操作忙碌时仍显示「修复」");
+  assert.equal(elementProps(idle).disabled, true);
+});
+
+test("修复结果按原文显示：成功与失败各自带 role=status，未修复时没有结果行", async () => {
+  const none = openDialog();
+  none.runEffect();
+  await settle();
+  assert.deepEqual(statusLines(none.render()), []);
+
+  const success = "修复成功，请从 Codey 重启 Codex 使修改生效。\n已创建配置文件；备份位置：C:\\Codey\\backup\\config.toml";
+  const ok = openDialog({ configRepairNotice: { tone: "success", text: success } });
+  ok.runEffect();
+  await settle();
+  assert.deepEqual(statusLines(ok.render()), [success]);
+
+  const failure = "Codex 配置修复未完成：解析配置失败，第 3 行 TOML 语法无效。请查看 Codey 错误日志；连接中断时可重新检查执行结果。";
+  const bad = openDialog({ configRepairNotice: { tone: "error", text: failure } });
+  bad.runEffect();
+  await settle();
+  const [line] = collectElements(
+    bad.render(),
+    (e) => elementProps(e).role === "status" && textContent(e) === failure,
+  );
+  assert.ok(line, "失败原因必须原样显示");
+  assert.match(elementProps(line).className, /text-danger/);
+});
+
+// 从 App.tsx 取出确认与修复两个函数，接上桩后真实执行，验证「未确认不发送」。
+function loadRepairFlow(invoke) {
+  const sourceFile = ts.createSourceFile("App.tsx", appSource, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
+  const picked = [];
+  const visit = (node) => {
+    if (
+      ts.isFunctionDeclaration(node) &&
+      ["askRepairCodexConfig", "repairCodexConfig"].includes(node.name?.text)
+    ) {
+      picked.push(node.getText(sourceFile));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  assert.equal(picked.length, 2, "App.tsx 必须同时包含 askRepairCodexConfig 与 repairCodexConfig");
+  const compile = (code) => ts.transpileModule(code, {
+    compilerOptions: { module: ts.ModuleKind.None, target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const { errorText } = (() => {
+    const module = { exports: {} };
+    new Function("exports", "module", ts.transpileModule(
+      readFileSync(fileURLToPath(new URL("../src/appUtils.ts", import.meta.url)), "utf8"),
+      { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
+    ).outputText)(module.exports, module);
+    return module.exports;
+  })();
+  const log = { confirmations: [], notices: [], repairNotices: [], busy: [] };
+  const build = new Function(
+    "invoke", "isBusy", "setConfirmation", "setNotice", "setConfigRepairNotice", "runOperation", "errorText",
+    `${compile(picked.join("\n"))}\nreturn { askRepairCodexConfig, repairCodexConfig };`,
+  );
+  const flow = build(
+    invoke,
+    false,
+    (confirmation) => log.confirmations.push(confirmation),
+    (notice) => log.notices.push(notice),
+    (notice) => log.repairNotices.push(notice),
+    async (name, action) => {
+      log.busy.push(name);
+      await action();
+    },
+    errorText,
+  );
+  return { ...flow, log };
+}
+
+test("修复流程：确认前不调用 repair_codex_config，确认后才发送", async () => {
+  const sent = [];
+  const flow = loadRepairFlow(async (command, args) => {
+    sent.push([command, args]);
+    return { message: "已创建配置文件", configPath: "C:\\Users\\a\\.codex\\config.toml", repaired: true, backupPath: null };
+  });
+  flow.askRepairCodexConfig();
+  await settle();
+  assert.deepEqual(sent, [], "未确认时不得发送命令");
+  assert.deepEqual(flow.log.busy, [], "未确认时不得进入忙碌状态");
+  assert.equal(flow.log.confirmations.length, 1);
+  const [confirmation] = flow.log.confirmations;
+  assert.equal(confirmation.action, "repair-codex-config");
+  assert.equal(confirmation.title, "修复 Codex 配置？");
+  assert.equal(confirmation.confirmLabel, "确认修复");
+  assert.match(confirmation.description, /修改已有配置前自动备份/);
+  assert.match(confirmation.description, /从 Codey 重启 Codex/);
+
+  confirmation.run();
+  await settle();
+  assert.deepEqual(sent, [["repair_codex_config", undefined]]);
+  assert.deepEqual(flow.log.busy, ["repair-codex-config"]);
+});
+
+test("修复流程：成功时显示后端消息与配置路径，备份位置在消息或 backupPath 中原样出现", async () => {
+  const message = "已创建配置文件。备份位置：C:\\Codey\\backup\\config.toml";
+  const flow = loadRepairFlow(async () => ({
+    message,
+    configPath: "C:\\Users\\a\\.codex\\config.toml",
+    repaired: true,
+    backupPath: null,
+  }));
+  flow.askRepairCodexConfig();
+  flow.log.confirmations[0].run();
+  await settle();
+  const [progress, done] = flow.log.repairNotices;
+  assert.deepEqual(progress, { tone: "info", text: "正在检查并修复 Codex 配置…" });
+  assert.equal(done.tone, "success");
+  assert.ok(done.text.includes(message), "后端消息必须原样显示");
+  assert.ok(done.text.startsWith("修复成功，请从 Codey 重启 Codex 使修改生效。"));
+  assert.ok(done.text.includes("配置文件：C:\\Users\\a\\.codex\\config.toml"));
+  assert.deepEqual(flow.log.notices, flow.log.repairNotices);
+});
+
+test("修复流程：后端消息已含备份位置与重启提示时，备份路径和重启提示各只出现一次", async () => {
+  const backup = "C:\\Codey\\backup\\config.toml.bak";
+  const message = `配置修复完成，请从 Codey 重启 Codex；原文件备份：${backup}`;
+  const flow = loadRepairFlow(async () => ({
+    message,
+    configPath: "C:\\Users\\a\\.codex\\config.toml",
+    repaired: true,
+    backupPath: backup,
+  }));
+  flow.askRepairCodexConfig();
+  flow.log.confirmations[0].run();
+  await settle();
+  const done = flow.log.repairNotices.at(-1);
+  assert.equal(done.tone, "success");
+  assert.ok(done.text.includes(message), "后端消息必须原样显示");
+  assert.equal(done.text.split(backup).length - 1, 1, "备份路径只能出现一次");
+  assert.equal(done.text.split("重启 Codex").length - 1, 1, "重启提示只能出现一次");
+});
+
+test("修复流程：无需修改时不提示重启，失败时显示后端返回的错误", async () => {
+  const unchanged = loadRepairFlow(async () => ({
+    message: "",
+    configPath: "C:\\c.toml",
+    repaired: false,
+    backupPath: "C:\\b.toml",
+  }));
+  unchanged.askRepairCodexConfig();
+  unchanged.log.confirmations[0].run();
+  await settle();
+  const ok = unchanged.log.repairNotices.at(-1);
+  assert.equal(ok.tone, "success");
+  assert.doesNotMatch(ok.text, /请从 Codey 重启 Codex/);
+  assert.ok(ok.text.includes("Codex 配置检查通过，无需修改"));
+  assert.ok(ok.text.includes("备份文件：C:\\b.toml"));
+
+  const reason = "解析配置：第 3 行 TOML 语法无效（C:\\c.toml）";
+  const failing = loadRepairFlow(async () => { throw new Error(reason); });
+  failing.askRepairCodexConfig();
+  failing.log.confirmations[0].run();
+  await settle();
+  const bad = failing.log.repairNotices.at(-1);
+  assert.equal(bad.tone, "error");
+  assert.ok(bad.text.includes(reason), "后端错误消息必须原样显示");
+  assert.match(bad.text, /^Codex 配置修复未完成：/);
+  assert.deepEqual(failing.log.notices.at(-1), bad);
+});
+
+test("App 把修复入口接到对话框，api 白名单与确认动作类型包含修复命令", async () => {
+  assert.match(appSource, /onRepairCodexConfig=\{askRepairCodexConfig\}/);
+  assert.match(appSource, /configRepairNotice=\{configRepairNotice\}/);
+  assert.match(appSource, /isBusy=\{isBusy\}\s+busy=\{busy\}\s+onRepairCodexConfig/);
+  // 修复命令只出现在 repairCodexConfig 内；运行面板不再提供第二个入口。
+  assert.equal(appSource.match(/"repair_codex_config"/g)?.length, 1);
+  assert.doesNotMatch(operationsSource, /repair_codex_config|onRepairCodexConfig|修复 Codex 配置/);
+  const [api, types] = await Promise.all([readSource("src/api.ts"), readSource("src/App.types.ts")]);
+  assert.match(api, /"repair_codex_config",\n\] as const/);
+  assert.match(types, /\| "repair-codex-config"/);
 });
 
 test("对话框只读：不引入 invoke，唯一的外部调用是只读的状态刷新回调", () => {

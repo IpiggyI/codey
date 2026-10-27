@@ -29,7 +29,10 @@ use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Val
 
 mod fastctx;
 mod fs_io;
+mod repair;
 mod runtime_role_transaction;
+
+pub(crate) use repair::{ConfigRepairFailure, check_codex_config, repair_codex_config};
 
 use fastctx::{
     apply_fastctx_guidance_to_table, arguments_have_codey_fastctx_marker,

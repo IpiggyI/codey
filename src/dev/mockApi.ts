@@ -24,6 +24,7 @@ if (import.meta.env.DEV) {
       new URLSearchParams(window.location.search).get("platform") === "windows"
         ? "windows"
         : "macos";
+    const configRepairPreview = new URLSearchParams(window.location.search).get("configRepair");
     const previewEndpoints = {
       primary: "https://primary.example.invalid/v1",
       backup: "https://backup.example.invalid/v1",
@@ -838,6 +839,16 @@ if (import.meta.env.DEV) {
           modelState: previewModelState,
           restartRequired: false,
           modelHotReloaded: true,
+        };
+      }
+      if (command === "repair_codex_config") {
+        await new Promise((resolve) => setTimeout(resolve, 1800));
+        if (configRepairPreview === "failure") throw new Error("预览：无法写入配置目录，已记录错误日志");
+        return {
+          message: configRepairPreview === "unchanged" ? "Codex 配置检查通过，无需修改" : "Codex 配置已修复",
+          configPath: "/preview/.codex/config.toml",
+          repaired: configRepairPreview !== "unchanged",
+          backupPath: null,
         };
       }
       if (command === "restart_codey") {

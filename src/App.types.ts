@@ -216,6 +216,7 @@ export type Confirmation = {
     | "discard-settings"
     | "clear"
     | "restart"
+    | "repair-codex-config"
     | "delete-notification-channel"
     | "migrate-codey-router-sessions";
   title: string;
