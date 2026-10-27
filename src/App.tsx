@@ -28,6 +28,7 @@ import { formatBytes } from "./formatters";
 import { modelIdsEqual, uniqueModelIds } from "./modelIds";
 import { globalDefaultForProvider } from "./modelRoutes";
 import { CodeyBrandMark, SettingsModalShell } from "./SettingsModalShell";
+import { SettingsLayout } from "./SettingsLayout";
 import { useModelSelection } from "./useModelSelection";
 import type { CrashpadPendingStats, TraceLogStats } from "./traceLogTypes";
 import { useRuntimeStatus } from "./useRuntimeStatus";
@@ -1066,6 +1067,10 @@ export function App({
     );
   }
 
+  // 已保存的配置需重启生效时，重启按钮提示等待重启。
+  const waitingForRestart = !restartStatusError && status.running
+    && !status.restartInProgress && busy !== "restart" && status.restartRequired === true;
+
   const configHeaderContent = (
     <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-5 max-[760px]:grid-cols-[minmax(0,1fr)_auto_auto] max-[760px]:gap-2.5">
       <div className="flex min-w-0 items-center gap-3 justify-self-start max-[760px]:gap-2">
@@ -1132,7 +1137,7 @@ export function App({
           </Button>
           {embedded && (
             <Button
-              aria-label={restartStatusError ? "重新查询状态" : status.running ? "重启 Codex" : "Codex 未运行"}
+              aria-label={restartStatusError ? "重新查询状态" : waitingForRestart ? "等待重启 Codex，点击重启以应用配置" : status.running ? "重启 Codex" : "Codex 未运行"}
               className="max-[520px]:w-8! max-[520px]:px-0!"
               disabled={isBusy || (!restartStatusError && (status.restartInProgress || !status.running))}
               onPress={handleRestartCodex}
@@ -1145,7 +1150,7 @@ export function App({
                 <RefreshCw aria-hidden="true" />
               )}
               <span className="max-[520px]:hidden">
-                {restartStatusError ? "重新查询状态" : status.running ? "重启 Codex" : "未运行"}
+                {restartStatusError ? "重新查询状态" : waitingForRestart ? "等待重启" : status.running ? "重启 Codex" : "未运行"}
               </span>
             </Button>
           )}
@@ -1190,7 +1195,19 @@ export function App({
       className={`app-shell${embedded ? " embedded" : ""}`}
       ref={setPortalContainer}
     >
-      <a className="skip-link" href="#codey-settings-content">
+      <a
+        className="skip-link"
+        href="#codey-settings-content"
+        onClick={(event) => {
+          // 页内锚点无法跨越 ShadowRoot，直接在当前控制台内移动焦点。
+          const target = event.currentTarget
+            .closest(".app-shell")
+            ?.querySelector<HTMLElement>("#codey-settings-content");
+          if (!target) return;
+          event.preventDefault();
+          target.focus();
+        }}
+      >
         跳至设置内容
       </a>
 
@@ -1235,25 +1252,69 @@ export function App({
         </header>
       )}
 
-      <div className="page-scroll">
-        <div className="page" id="codey-settings-content">
-          {/* 最上方：运行状态 (Codex 运行与维护) */}
-          <OperationsPanel
-            fastContextToolsStatus={fastContextToolsStatus}
-            status={operationsStatus}
-            busy={busy}
-            isBusy={isBusy}
-            pluginMarketplaceStatus={pluginMarketplaceStatus}
-            onRepairPluginMarketplace={handleRepairPluginMarketplace}
-            computerUseNotice={computerUseNotice}
-            onPrepareComputerUse={handlePrepareComputerUse}
-            onRestart={handleRestartCodex}
-            restartStatusUnknown={Boolean(restartStatusError)}
-            showRestartAction={!embedded}
-          />
+      <SettingsLayout
+        sections={{
+          overview: (
+            <>
+              <OperationsPanel
+                fastContextToolsStatus={fastContextToolsStatus}
+                status={operationsStatus}
+                busy={busy}
+                isBusy={isBusy}
+                pluginMarketplaceStatus={pluginMarketplaceStatus}
+                onRepairPluginMarketplace={handleRepairPluginMarketplace}
+                computerUseNotice={computerUseNotice}
+                onPrepareComputerUse={handlePrepareComputerUse}
+                onRestart={handleRestartCodex}
+                restartStatusUnknown={Boolean(restartStatusError)}
+                showRestartAction={!embedded}
+              />
 
-          {/* 当前 provider 与模型：单独一行展示 */}
-          <div className="full-row-section">
+              {/* Codex 功能策略（含启动代理） */}
+              <div className="full-row-section">
+                <FeaturePolicyCard
+                  config={config}
+                  fastContextToolsStatus={fastContextToolsStatus}
+                  isMacClient={status.clientPlatform === "macos"}
+                  isWindowsClient={status.clientPlatform === "windows"}
+                  popupContainer={popupContainer}
+                  tooltipContainer={portalContainer}
+                  isBusy={isBusy}
+                  onConfigChange={handleConfigChange}
+                />
+              </div>
+
+              {/* 消息通知：每个渠道 item 占一半 */}
+              <div className="full-row-section">
+                <NotificationChannelsCard
+                  config={config}
+                  container={portalContainer}
+                  popupContainer={popupContainer}
+                  isBusy={isBusy}
+                  onAddChannel={handleAddNotificationChannel}
+                  onChannelChange={handleNotificationChannelChange}
+                  onRequestRemoveChannel={handleRequestRemoveNotificationChannel}
+                />
+              </div>
+
+              {/* 诊断存储保护 */}
+              <div className="full-row-section">
+                <TraceLogModule
+                  stats={status.traceLogStats}
+                  crashpadStats={status.crashpadPendingStats}
+                  crashpadSupported={status.clientPlatform === "macos"}
+                  traceProtectionEnabled={config.disableTraceLogWrites}
+                  crashpadProtectionEnabled={config.protectCrashpadPending}
+                  clearBusy={busy === "clear-trace-logs"}
+                  refreshing={busy === "refresh-trace-stats"}
+                  disabled={isBusy}
+                  onClear={handleClearTraceLogs}
+                  onRefresh={handleRefreshTraceLogStats}
+                />
+              </div>
+            </>
+          ),
+          models: (
             <ModelSection
               config={config}
               currentProviderSnapshot={currentProviderSnapshot}
@@ -1274,81 +1335,31 @@ export function App({
               routerSessionDiagnosis={routerSessionDiagnosis}
               onMigrateRouterSessions={askMigrateRouterSessions}
             />
-          </div>
-
-          {/* 提示词优化 与 Codey 子代理角色与调度增强：放在一行 */}
-          <div className="prompt-subagent-grid">
-            {/* 左侧：提示词优化 */}
-            <div className="prompt-column">
-              <PromptOptimizationCard
-                config={config}
-                currentProviderSnapshot={currentProviderSnapshot}
-                officialAccountAvailable={status.officialAccountAvailable === true}
-                isBusy={isBusy}
-                popupContainer={popupContainer}
-                onConfigChange={handleConfigChange}
-                onNotice={setNotice}
-              />
-            </div>
-
-            {/* 右侧：Codey 子代理角色与调度增强 */}
-            <div className="subagent-column">
-              <SubagentPolicyCard
-                config={config}
-                popupContainer={popupContainer}
-                tooltipContainer={portalContainer}
-                isBusy={isBusy}
-                subagentModelOptions={subagentModelOptions}
-                onConfigChange={handleConfigChange}
-                onSubagentOptimizationChange={handleSubagentOptimizationChange}
-              />
-            </div>
-          </div>
-
-          {/* Codex 功能策略：整行排列 */}
-          <div className="full-row-section">
-            <FeaturePolicyCard
+          ),
+          prompt: (
+            <PromptOptimizationCard
               config={config}
-              fastContextToolsStatus={fastContextToolsStatus}
-              isMacClient={status.clientPlatform === "macos"}
-              isWindowsClient={status.clientPlatform === "windows"}
+              currentProviderSnapshot={currentProviderSnapshot}
+              officialAccountAvailable={status.officialAccountAvailable === true}
+              isBusy={isBusy}
+              popupContainer={popupContainer}
+              onConfigChange={handleConfigChange}
+              onNotice={setNotice}
+            />
+          ),
+          subagents: (
+            <SubagentPolicyCard
+              config={config}
               popupContainer={popupContainer}
               tooltipContainer={portalContainer}
               isBusy={isBusy}
+              subagentModelOptions={subagentModelOptions}
               onConfigChange={handleConfigChange}
+              onSubagentOptimizationChange={handleSubagentOptimizationChange}
             />
-          </div>
-
-          {/* 消息通知：整行排列，每个渠道 item 占一半 */}
-          <div className="full-row-section">
-            <NotificationChannelsCard
-              config={config}
-              container={portalContainer}
-              popupContainer={popupContainer}
-              isBusy={isBusy}
-              onAddChannel={handleAddNotificationChannel}
-              onChannelChange={handleNotificationChannelChange}
-              onRequestRemoveChannel={handleRequestRemoveNotificationChannel}
-            />
-          </div>
-
-          {/* 诊断存储保护：整行独占排布 */}
-          <div className="full-row-section">
-            <TraceLogModule
-              stats={status.traceLogStats}
-              crashpadStats={status.crashpadPendingStats}
-              crashpadSupported={status.clientPlatform === "macos"}
-              traceProtectionEnabled={config.disableTraceLogWrites}
-              crashpadProtectionEnabled={config.protectCrashpadPending}
-              clearBusy={busy === "clear-trace-logs"}
-              refreshing={busy === "refresh-trace-stats"}
-              disabled={isBusy}
-              onClear={handleClearTraceLogs}
-              onRefresh={handleRefreshTraceLogStats}
-            />
-          </div>
-        </div>
-      </div>
+          ),
+        }}
+      />
 
       <NoticeToast
         autoDismissEnabled
