@@ -964,6 +964,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
     let result = match command {
         "list_official_accounts"
         | "start_official_account_login"
+        | "submit_official_account_login_callback"
         | "poll_official_account_login"
         | "cancel_official_account_login"
         | "import_current_codex_login"

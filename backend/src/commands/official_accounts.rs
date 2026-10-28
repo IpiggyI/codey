@@ -22,6 +22,15 @@ pub(super) async fn invoke(
 ) -> Result<Value, String> {
     match command {
         "start_official_account_login" => start_login(state).await,
+        "submit_official_account_login_callback" => {
+            submit_login_callback(
+                state,
+                &string_argument(args, "loginId")?,
+                &string_argument(args, "callbackUrl")?,
+                home,
+            )
+            .await
+        }
         "poll_official_account_login" => {
             poll_login(state, &string_argument(args, "loginId")?, home).await
         }
@@ -104,6 +113,8 @@ async fn start_login(state: &Arc<AppState>) -> Result<Value, String> {
         .await
         .map_err(|e| e.to_string())?;
     let auth_url = session.auth_url.clone();
+    let callback_listening = session.callback_listening;
+    let callback_error = session.callback_error.clone();
     let login_id = uuid::Uuid::new_v4().to_string();
     logins.insert(login_id.clone(), session);
     drop(logins);
@@ -112,7 +123,8 @@ async fn start_login(state: &Arc<AppState>) -> Result<Value, String> {
         .await
         .map_err(|_| "打开浏览器任务异常退出")?;
     Ok(
-        json!({"status":"wait","loginId":login_id,"authUrl":auth_url,"browserOpened":browser_opened}),
+        json!({"status":"wait","loginId":login_id,"authUrl":auth_url,"browserOpened":browser_opened,
+            "callbackListening":callback_listening,"callbackError":callback_error}),
     )
 }
 
@@ -147,19 +159,38 @@ async fn poll_login(state: &Arc<AppState>, id: &str, home: &Path) -> Result<Valu
             return Ok(json!({"status":"expired","message":"登录已过期或已取消，请重新添加账号"}));
         };
         let phase = session.phase();
-        if !matches!(phase, LoginPhase::Waiting) {
+        if !matches!(phase, LoginPhase::Waiting | LoginPhase::Exchanging) {
             logins.remove(id);
         }
         phase
     };
     match phase {
-        LoginPhase::Waiting => Ok(json!({"status":"wait"})),
+        LoginPhase::Waiting | LoginPhase::Exchanging => Ok(json!({"status":"wait"})),
         LoginPhase::Failed(message) => Ok(json!({"status":"failed","message":message})),
         LoginPhase::Completed(account) => {
             let _guard = state.official_account_lock.lock().await;
             add_account(state, *account, home)
         }
     }
+}
+
+async fn submit_login_callback(
+    state: &Arc<AppState>,
+    id: &str,
+    callback_url: &str,
+    home: &Path,
+) -> Result<Value, String> {
+    let mut logins = state.official_account_logins.lock().await;
+    logins.remove_expired();
+    let session = logins.get(id).ok_or("登录已过期或已取消，请重新添加账号")?;
+    let account = session
+        .submit_callback(callback_url)
+        .await
+        .map_err(|e| e.to_string())?;
+    logins.remove(id);
+    drop(logins);
+    let _guard = state.official_account_lock.lock().await;
+    add_account(state, account, home)
 }
 
 pub(super) async fn switch_account(
@@ -272,6 +303,197 @@ pub(super) async fn store_usage(
 mod tests {
     use super::*;
     use crate::official_accounts::Account;
+
+    struct CallbackExchange(std::sync::atomic::AtomicUsize);
+
+    #[async_trait::async_trait]
+    impl oauth::TokenExchange for CallbackExchange {
+        async fn exchange(&self, grant: Value) -> anyhow::Result<Value> {
+            assert_eq!(grant["grant_type"], "authorization_code");
+            assert_eq!(grant["redirect_uri"], "http://localhost:1455/auth/callback");
+            assert!(!grant["code_verifier"].as_str().unwrap().is_empty());
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(json!({"access_token":"fake-access", "account_id":"pasted-account"}))
+        }
+    }
+
+    #[tokio::test]
+    async fn commands_official_account_oauth_paste_validates_and_consumes_once() {
+        for prefix in ["http://localhost:1455/auth/callback?", "", "?"] {
+            let (_dir, home, state, _) = fixture();
+            let exchange = Arc::new(CallbackExchange(std::sync::atomic::AtomicUsize::new(0)));
+            let held = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .unwrap();
+            let session =
+                oauth::start_login_on_port(exchange.clone(), held.local_addr().unwrap().port())
+                    .await
+                    .unwrap();
+            assert!(!session.callback_listening);
+            assert!(
+                session
+                    .callback_error
+                    .as_deref()
+                    .unwrap()
+                    .contains("已被占用")
+            );
+            let auth = reqwest::Url::parse(&session.auth_url).unwrap();
+            let expected = auth
+                .query_pairs()
+                .find(|(key, _)| key == "state")
+                .unwrap()
+                .1
+                .into_owned();
+            state
+                .official_account_logins
+                .lock()
+                .await
+                .insert("paste".into(), session);
+            let before = state.official_accounts().payload(&home).unwrap();
+            for (query, message) in [
+                ("code=fake&state=wrong".to_string(), "状态校验失败"),
+                (
+                    format!("error=denied&error_description=用户拒绝&state={expected}"),
+                    "用户拒绝",
+                ),
+                (format!("state={expected}"), "缺少授权码"),
+            ] {
+                let error = invoke(
+                    &state,
+                    "submit_official_account_login_callback",
+                    &json!({"loginId":"paste", "callbackUrl":query}),
+                    &home,
+                )
+                .await
+                .unwrap_err();
+                assert!(error.contains(message), "{error}");
+                assert_eq!(exchange.0.load(std::sync::atomic::Ordering::SeqCst), 0);
+                assert_eq!(state.official_accounts().payload(&home).unwrap(), before);
+                assert_eq!(
+                    poll_login(&state, "paste", &home).await.unwrap()["status"],
+                    "wait"
+                );
+            }
+            let args = json!({"loginId":"paste", "callbackUrl":format!("{prefix}code=fake&state={expected}")});
+            let result = invoke(
+                &state,
+                "submit_official_account_login_callback",
+                &args,
+                &home,
+            )
+            .await
+            .unwrap();
+            assert_eq!(result["accounts"].as_array().unwrap().len(), 2);
+            assert!(result["accountId"].is_string());
+            assert_eq!(
+                poll_login(&state, "paste", &home).await.unwrap()["status"],
+                "expired"
+            );
+            let saved = state.official_accounts().payload(&home).unwrap();
+            assert!(
+                invoke(
+                    &state,
+                    "submit_official_account_login_callback",
+                    &args,
+                    &home
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(exchange.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(state.official_accounts().payload(&home).unwrap(), saved);
+        }
+    }
+
+    #[tokio::test]
+    async fn commands_official_account_oauth_unknown_cancelled_reject_paste() {
+        let (_dir, home, state, _) = fixture();
+        let session = oauth::start_login_on_port(
+            Arc::new(CallbackExchange(std::sync::atomic::AtomicUsize::new(0))),
+            0,
+        )
+        .await
+        .unwrap();
+        state
+            .official_account_logins
+            .lock()
+            .await
+            .insert("cancelled".into(), session);
+        invoke(
+            &state,
+            "cancel_official_account_login",
+            &json!({"loginId":"cancelled"}),
+            &home,
+        )
+        .await
+        .unwrap();
+        for id in ["unknown", "cancelled"] {
+            assert!(
+                submit_login_callback(&state, id, "code=fake", &home)
+                    .await
+                    .unwrap_err()
+                    .contains("已过期或已取消")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn commands_official_account_oauth_listener_wins_before_paste_or_poll() {
+        let (_dir, home, state, _) = fixture();
+        let exchange = Arc::new(CallbackExchange(std::sync::atomic::AtomicUsize::new(0)));
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let session = oauth::start_login_with_listener(exchange.clone(), Ok(listener));
+        let auth = reqwest::Url::parse(&session.auth_url).unwrap();
+        let expected = auth
+            .query_pairs()
+            .find(|(key, _)| key == "state")
+            .unwrap()
+            .1
+            .into_owned();
+        state
+            .official_account_logins
+            .lock()
+            .await
+            .insert("listener".into(), session);
+        let query = format!("code=fake&state={expected}");
+        let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        socket
+            .write_all(
+                format!("GET /auth/callback?{query} HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .unwrap();
+        let mut response = String::new();
+        tokio::time::timeout(Duration::from_secs(2), socket.read_to_string(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"));
+        let before = state.official_accounts().payload(&home).unwrap();
+        assert!(
+            submit_login_callback(&state, "listener", &query, &home)
+                .await
+                .is_err()
+        );
+        assert_eq!(state.official_accounts().payload(&home).unwrap(), before);
+        let result = poll_login(&state, "listener", &home).await.unwrap();
+        assert_eq!(result["accounts"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            poll_login(&state, "listener", &home).await.unwrap()["status"],
+            "expired"
+        );
+        assert!(
+            submit_login_callback(&state, "listener", &query, &home)
+                .await
+                .is_err()
+        );
+        assert_eq!(exchange.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 
     fn fixture() -> (tempfile::TempDir, PathBuf, Arc<AppState>, String) {
         let dir = tempfile::tempdir().unwrap();

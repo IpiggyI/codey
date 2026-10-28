@@ -257,6 +257,23 @@ function pollHarness(responses) {
   return { poll, calls, timers, outcomes, tick };
 }
 
+test("登录会话：同一次登录只收尾一次，旧登录和关闭之后的结果被拒绝", () => {
+  const session = requests.createLoginSession();
+  assert.equal(session.active(), null);
+  assert.equal(session.finish("login-1"), false, "没有进行中的登录");
+  session.begin("login-1");
+  assert.equal(session.active(), "login-1");
+  assert.equal(session.finish("login-1"), true, "第一个到达的结果收尾");
+  assert.equal(session.finish("login-1"), false, "之后到达的结果被拒绝");
+  assert.equal(session.active(), null);
+
+  session.begin("login-1");
+  session.begin("login-2");
+  assert.equal(session.finish("login-1"), false, "被新登录替换的旧登录");
+  session.clear();
+  assert.equal(session.finish("login-2"), false, "关闭对话框之后");
+});
+
 test("登录轮询：等待时继续轮询，成功后停止", async () => {
   const { poll, calls, timers, outcomes, tick } = pollHarness((_id, count) =>
     count < 3 ? { status: "wait" } : payload([account("new")], { accountId: "new" }));

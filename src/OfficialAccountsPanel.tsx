@@ -10,7 +10,7 @@ import type {
   OfficialUsageWindow,
 } from "./App.types";
 import { Badge, Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./components/ui";
-import type { UsageView } from "./officialAccountsRequests";
+import { createLoginSession, type UsageView } from "./officialAccountsRequests";
 import { useOfficialAccountLoginPoll } from "./useOfficialAccountLoginPoll";
 import { useOfficialAccounts } from "./useOfficialAccounts";
 
@@ -21,7 +21,25 @@ export const SWITCH_TIP = "切换会把 Codex 的登录改写为该账号，并�
 export const SESSION_NOTICE =
   "已切换官方账号。在之前账号下开始的对话可能无法在新账号下继续；继续对话失败时，请新开对话。";
 
-type LoginStart = { loginId: string; authUrl: string; browserOpened: boolean; expiresAt: number };
+type LoginStart = {
+  loginId: string;
+  authUrl: string;
+  browserOpened: boolean;
+  // 回调端口无法监听时为 false，登录只能靠粘贴回调地址完成；callbackError 是后端给出的原因。
+  callbackListening: boolean;
+  callbackError: string | null;
+  expiresAt: number;
+};
+
+function loginDescription(login: LoginStart | null) {
+  if (login?.callbackListening === false) {
+    return "请在浏览器中打开下方链接并完成 ChatGPT 登录，然后把回调地址粘贴到下方提交。";
+  }
+  if (login?.browserOpened === false) {
+    return "未能自动打开浏览器。请复制下方链接，在浏览器中打开并完成 ChatGPT 登录。";
+  }
+  return "已在浏览器打开 ChatGPT 登录页。完成登录后，账号会自动加入列表。";
+}
 
 export function normalizePlan(plan?: string) {
   const value = plan?.trim().toLowerCase() || "";
@@ -137,6 +155,11 @@ function OfficialAccountsPanelComponent({
   // 关闭登录对话框或卸载面板时递增，使在途的开始登录请求作废。
   const [loginAttempt] = useState(() => ({ current: 0 }));
   const [loginError, setLoginError] = useState("");
+  // 轮询成功、提交回调地址成功和关闭对话框谁先到谁收尾，之后到达的结果被忽略。
+  const [loginSession] = useState(createLoginSession);
+  const [callbackInput, setCallbackInput] = useState("");
+  const [callbackError, setCallbackError] = useState("");
+  const [callbackSubmitting, setCallbackSubmitting] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [manualInput, setManualInput] = useState("");
   const [manualError, setManualError] = useState("");
@@ -151,11 +174,15 @@ function OfficialAccountsPanelComponent({
   useOfficialAccountLoginPoll({
     loginId: login?.loginId,
     onSuccess: (result) => {
+      const loginId = loginSession.active();
+      if (loginId === null || !loginSession.finish(loginId)) return;
       accountsChanged(result);
       setLogin(null);
       onNotice({ tone: "success", text: "官方账号已添加" });
     },
-    onFailure: setLoginError,
+    onFailure: (message) => {
+      if (loginSession.active() !== null) setLoginError(message);
+    },
   });
 
   useEffect(() => () => {
@@ -174,6 +201,8 @@ function OfficialAccountsPanelComponent({
     const attempt = ++loginAttempt.current;
     setPending("login");
     setLoginError("");
+    setCallbackInput("");
+    setCallbackError("");
     try {
       const result = await invoke<Omit<LoginStart, "expiresAt">>("start_official_account_login");
       if (attempt !== loginAttempt.current) {
@@ -181,6 +210,7 @@ function OfficialAccountsPanelComponent({
         await cancelLogin(result.loginId);
         return;
       }
+      loginSession.begin(result.loginId);
       setLogin({ ...result, expiresAt: Date.now() + LOGIN_VALID_MS });
     } catch (error) {
       onNotice({ tone: "error", text: errorText(error) });
@@ -192,8 +222,10 @@ function OfficialAccountsPanelComponent({
   async function closeLogin() {
     const current = login;
     loginAttempt.current += 1;
+    loginSession.clear();
     setLogin(null);
     setLoginError("");
+    setCallbackError("");
     if (current) await cancelLogin(current.loginId);
   }
 
@@ -204,6 +236,31 @@ function OfficialAccountsPanelComponent({
       onNotice({ tone: "success", text: "已复制登录链接" });
     } catch {
       onNotice({ tone: "info", text: "无法访问剪贴板，请手动复制登录链接" });
+    }
+  }
+
+  // 提交成功与轮询成功等价；失败只在对话框内显示原因，登录保持打开，可以重新粘贴。
+  async function submitCallback() {
+    const current = login;
+    const callbackUrl = callbackInput.trim();
+    if (!current || !callbackUrl || callbackSubmitting) return;
+    setCallbackSubmitting(true);
+    setCallbackError("");
+    try {
+      const result = await invoke<OfficialAccountsResult>("submit_official_account_login_callback", {
+        loginId: current.loginId,
+        callbackUrl,
+      });
+      // 账号已经由后端写入；对话框已被关闭或已由轮询收尾时只同步列表。
+      accountsChanged(result);
+      if (loginSession.finish(current.loginId)) {
+        setLogin(null);
+        onNotice({ tone: "success", text: "官方账号已添加" });
+      }
+    } catch (error) {
+      if (loginSession.active() === current.loginId) setCallbackError(errorText(error));
+    } finally {
+      setCallbackSubmitting(false);
     }
   }
 
@@ -408,15 +465,49 @@ function OfficialAccountsPanelComponent({
         <DialogContent container={popupContainer}>
           <DialogHeader>
             <DialogTitle>添加官方账号</DialogTitle>
-            <DialogDescription>
-              {login?.browserOpened === false
-                ? "未能自动打开浏览器。请复制下方链接，在浏览器中打开并完成 ChatGPT 登录。"
-                : "已在浏览器打开 ChatGPT 登录页。完成登录后，账号会自动加入列表。"}
-            </DialogDescription>
+            <DialogDescription>{loginDescription(login)}</DialogDescription>
           </DialogHeader>
           <div className="grid gap-2">
-            {login?.browserOpened === false ? (
-              <code className="block break-all rounded bg-[#f2f2f4] p-2 text-xs">{login.authUrl}</code>
+            {login?.callbackListening === false ? (
+              <small role="alert" className="text-xs text-[#9a6700]">
+                无法自动完成登录{login.callbackError ? `：${login.callbackError}` : ""}
+              </small>
+            ) : null}
+            {login ? (
+              <code className="block select-text break-all rounded bg-[#f2f2f4] p-2 text-xs">{login.authUrl}</code>
+            ) : null}
+            {login && !loginError ? (
+              <div className="grid gap-1">
+                <small className="text-xs text-[#6e6e73]">
+                  在浏览器中完成授权后，浏览器会跳转到以 http://localhost:1455/auth/callback 开头的地址。
+                  如果该页面没有自动完成，或打不开，请从浏览器地址栏复制完整地址，粘贴到下方。
+                </small>
+                <textarea
+                  aria-label="回调地址"
+                  autoComplete="off"
+                  className="min-h-[72px] resize-y font-mono text-xs"
+                  disabled={callbackSubmitting}
+                  placeholder="http://localhost:1455/auth/callback?code=…"
+                  spellCheck={false}
+                  value={callbackInput}
+                  onChange={(event) => {
+                    setCallbackInput(event.target.value);
+                    if (callbackError) setCallbackError("");
+                  }}
+                />
+                {callbackError ? <small role="alert" className="text-xs text-[#c4271c]">{callbackError}</small> : null}
+                <div>
+                  <Button
+                    variant={login.callbackListening === false ? undefined : "outline"}
+                    size="sm"
+                    disabled={callbackInput.trim() === "" || callbackSubmitting}
+                    loading={callbackSubmitting}
+                    onPress={() => void submitCallback()}
+                  >
+                    提交回调地址
+                  </Button>
+                </div>
+              </div>
             ) : null}
             {loginError ? (
               <small role="alert" className="text-xs text-[#c4271c]">{loginError}</small>

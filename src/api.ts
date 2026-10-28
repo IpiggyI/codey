@@ -13,6 +13,7 @@ export const CODEY_API_COMMANDS = [
   "import_official_account_credential",
   "start_official_account_login",
   "poll_official_account_login",
+  "submit_official_account_login_callback",
   "cancel_official_account_login",
   "set_default_official_account",
   "remove_official_account",

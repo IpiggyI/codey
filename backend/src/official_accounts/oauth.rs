@@ -19,7 +19,7 @@ const LOGIN_TIMEOUT: Duration = Duration::from_secs(600);
 const MAX_CALLBACK_REQUEST_BYTES: usize = 16 * 1024;
 
 #[async_trait::async_trait]
-pub(super) trait TokenExchange: Send + Sync {
+pub(crate) trait TokenExchange: Send + Sync {
     async fn exchange(&self, grant: Value) -> Result<Value>;
 }
 
@@ -44,27 +44,38 @@ impl TokenExchange for reqwest::Client {
 
 impl Drop for LoginSession {
     fn drop(&mut self) {
-        self.task.abort();
+        self.cancel();
     }
 }
 
 #[derive(Clone)]
 pub enum LoginPhase {
     Waiting,
+    Exchanging,
     Completed(Box<Account>),
     Failed(String),
 }
 
 pub struct LoginSession {
     pub auth_url: String,
+    pub callback_listening: bool,
+    pub callback_error: Option<String>,
     created_at: Instant,
-    phase: Arc<Mutex<LoginPhase>>,
-    task: tokio::task::JoinHandle<()>,
+    callback: Arc<LoginCallback>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+struct LoginCallback {
+    phase: Mutex<LoginPhase>,
+    state: String,
+    verifier: String,
+    client: Arc<dyn TokenExchange>,
 }
 
 impl LoginSession {
     pub fn phase(&self) -> LoginPhase {
-        self.phase
+        self.callback
+            .phase
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
@@ -75,7 +86,69 @@ impl LoginSession {
     }
 
     pub fn cancel(&self) {
-        self.task.abort();
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
+
+    pub async fn submit_callback(&self, input: &str) -> Result<Account> {
+        ensure!(!self.expired(), "登录已过期或已取消，请重新添加账号");
+        let input = input.trim();
+        let params = if input.starts_with("http://") || input.starts_with("https://") {
+            let url = reqwest::Url::parse(input).map_err(|_| anyhow!("登录回调地址无效"))?;
+            query_params(url.query().unwrap_or_default())
+        } else {
+            query_params(input.trim_start_matches('?'))
+        };
+        let code = self.callback.claim(&params)?;
+        self.cancel();
+        self.callback.exchange(&code).await
+    }
+}
+
+impl LoginCallback {
+    fn claim(&self, params: &HashMap<String, String>) -> Result<String> {
+        let mut phase = self
+            .phase
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        ensure!(
+            matches!(*phase, LoginPhase::Waiting),
+            "登录回调已处理或正在处理"
+        );
+        ensure!(
+            params.get("state") == Some(&self.state),
+            "登录状态校验失败，请重新开始登录"
+        );
+        if params.contains_key("error") {
+            bail!(
+                "官方登录授权失败：{}",
+                params
+                    .get("error_description")
+                    .or_else(|| params.get("error"))
+                    .map(String::as_str)
+                    .unwrap_or("授权被拒绝")
+            );
+        }
+        let code = params
+            .get("code")
+            .filter(|code| !code.is_empty())
+            .context("登录回调缺少授权码")?
+            .clone();
+        *phase = LoginPhase::Exchanging;
+        Ok(code)
+    }
+
+    async fn exchange(&self, code: &str) -> Result<Account> {
+        let result = exchange_code(self.client.as_ref(), code, &self.verifier).await;
+        *self
+            .phase
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = match &result {
+            Ok(account) => LoginPhase::Completed(Box::new(account.clone())),
+            Err(error) => LoginPhase::Failed(error.to_string()),
+        };
+        result
     }
 }
 
@@ -100,7 +173,9 @@ impl LoginSessions {
     pub async fn cancel_all(&mut self) {
         for (_, mut session) in self.sessions.drain() {
             session.cancel();
-            let _ = (&mut session.task).await;
+            if let Some(task) = session.task.take() {
+                let _ = task.await;
+            }
         }
     }
 
@@ -164,41 +239,64 @@ async fn bind_callback_listener(port: u16) -> Result<TcpListener> {
 }
 
 pub async fn start_login(client: reqwest::Client) -> Result<LoginSession> {
-    let listener = bind_callback_listener(OAUTH_CALLBACK_PORT).await?;
+    start_login_on_port(Arc::new(client), OAUTH_CALLBACK_PORT).await
+}
+
+pub(crate) async fn start_login_on_port(
+    client: Arc<dyn TokenExchange>,
+    port: u16,
+) -> Result<LoginSession> {
+    let listener = bind_callback_listener(port).await;
+    Ok(start_login_with_listener(client, listener))
+}
+
+pub(crate) fn start_login_with_listener(
+    client: Arc<dyn TokenExchange>,
+    listener: Result<TcpListener>,
+) -> LoginSession {
+    let callback_error = listener.as_ref().err().map(ToString::to_string);
     let pkce = pkce_pair();
     let state = uuid::Uuid::new_v4().simple().to_string();
     let auth_url = build_authorize_url(&state, &pkce.challenge);
-    let phase = Arc::new(Mutex::new(LoginPhase::Waiting));
-    let task_phase = Arc::clone(&phase);
-    let task = tokio::spawn(async move {
-        let outcome = tokio::time::timeout(
-            LOGIN_TIMEOUT,
-            run_callback_server(listener, Arc::new(client), state, pkce.verifier),
-        )
-        .await;
-        let next = match outcome {
-            Ok(Ok(record)) => LoginPhase::Completed(Box::new(record)),
-            Ok(Err(error)) => LoginPhase::Failed(format!("{error:#}")),
-            Err(_) => LoginPhase::Failed("登录等待超时，请重新开始添加账号".to_string()),
-        };
-        *task_phase
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+    let callback = Arc::new(LoginCallback {
+        phase: Mutex::new(LoginPhase::Waiting),
+        state,
+        verifier: pkce.verifier,
+        client,
     });
-    Ok(LoginSession {
+    let task_callback = Arc::clone(&callback);
+    let task = listener.ok().map(|listener| {
+        tokio::spawn(async move {
+            let outcome = tokio::time::timeout(
+                LOGIN_TIMEOUT,
+                run_callback_server(listener, Arc::clone(&task_callback)),
+            )
+            .await;
+            let next = match outcome {
+                Ok(Ok(())) => return,
+                Ok(Err(error)) => LoginPhase::Failed(format!("{error:#}")),
+                Err(_) => LoginPhase::Failed("登录等待超时，请重新开始添加账号".to_string()),
+            };
+            let mut phase = task_callback
+                .phase
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if matches!(*phase, LoginPhase::Waiting | LoginPhase::Exchanging) {
+                *phase = next;
+            }
+        })
+    });
+    LoginSession {
         auth_url,
+        callback_listening: task.is_some(),
+        callback_error,
         created_at: Instant::now(),
-        phase,
+        callback,
         task,
-    })
+    }
 }
 
-async fn run_callback_server(
-    listener: TcpListener,
-    client: Arc<dyn TokenExchange>,
-    expected_state: String,
-    verifier: String,
-) -> Result<Account> {
+async fn run_callback_server(listener: TcpListener, callback: Arc<LoginCallback>) -> Result<()> {
     loop {
         let (mut socket, _) = listener.accept().await.context("接受登录回调连接失败")?;
         let request = match read_request_head(&mut socket).await {
@@ -214,33 +312,31 @@ async fn run_callback_server(
             continue;
         };
         let params = query_params(query.trim_start_matches('?'));
-        if params.get("state").map(String::as_str) != Some(expected_state.as_str()) {
-            let _ = write_response(
-                &mut socket,
-                400,
-                "登录状态校验失败，请回到 Codey 重新开始。",
-            )
-            .await;
-            continue;
-        }
-        if params.contains_key("error") {
-            let _ = write_response(&mut socket, 200, "登录已取消，可关闭此页面。").await;
-            bail!("OpenAI 登录被拒绝，请重新授权");
-        }
-        let Some(code) = params.get("code").filter(|code| !code.is_empty()) else {
-            let _ = write_response(&mut socket, 400, "缺少授权码，请回到 Codey 重新开始。").await;
-            continue;
+        let code = match callback.claim(&params) {
+            Ok(code) => code,
+            Err(error) => {
+                let _ = write_response(
+                    &mut socket,
+                    400,
+                    "登录回调无效或已处理，请回到 Codey 查看。",
+                )
+                .await;
+                if params.contains_key("error") && params.get("state") == Some(&callback.state) {
+                    return Err(error);
+                }
+                continue;
+            }
         };
-        let exchanged = exchange_code(client.as_ref(), code, &verifier).await;
+        let exchanged = callback.exchange(&code).await;
         match exchanged {
-            Ok(record) => {
+            Ok(_) => {
                 let _ = write_response(
                     &mut socket,
                     200,
                     "登录成功，账号已添加到 Codey，可关闭此页面。",
                 )
                 .await;
-                return Ok(record);
+                return Ok(());
             }
             Err(error) => {
                 let _ =
@@ -497,5 +593,44 @@ mod tests {
         let error = bind_callback_listener(port).await.unwrap_err().to_string();
         assert!(error.contains("已被占用"));
         assert!(error.contains("WSL") && error.contains("Docker") && error.contains("netstat"));
+        let mut session = start_login_on_port(Arc::new(FakeExchange), port)
+            .await
+            .unwrap();
+        assert!(!session.callback_listening);
+        assert_eq!(session.callback_error.as_deref(), Some(error.as_str()));
+        assert!(matches!(session.phase(), LoginPhase::Waiting));
+        assert!(session.task.is_none());
+        session.created_at = Instant::now() - LOGIN_TIMEOUT - Duration::from_secs(1);
+        assert!(
+            session
+                .submit_callback("code=fake&state=wrong")
+                .await
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("已过期")
+        );
+    }
+
+    #[tokio::test]
+    async fn official_account_oauth_paste_stops_listener_and_rejects_second_claim() {
+        let listener = bind_callback_listener(0).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let session = start_login_with_listener(Arc::new(FakeExchange), Ok(listener));
+        assert!(session.callback_listening);
+        assert!(session.callback_error.is_none());
+        let query = format!("code=fake&state={}", session.callback.state);
+        session.submit_callback(&query).await.unwrap();
+        assert!(session.submit_callback(&query).await.is_err());
+        assert!(session.callback.claim(&query_params(&query)).is_err());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !session.task.as_ref().unwrap().is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(tokio::net::TcpStream::connect(address).await.is_err());
+        assert!(matches!(session.phase(), LoginPhase::Completed(_)));
     }
 }

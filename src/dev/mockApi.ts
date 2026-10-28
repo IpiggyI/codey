@@ -32,6 +32,7 @@ const OFFICIAL_ACCOUNT_COMMANDS = new Set<string>([
   "import_official_account_credential",
   "start_official_account_login",
   "poll_official_account_login",
+  "submit_official_account_login_callback",
   "cancel_official_account_login",
   "set_default_official_account",
   "remove_official_account",
@@ -55,6 +56,8 @@ if (import.meta.env.DEV) {
     const previewCodexConfigModel = new URLSearchParams(window.location.search).get("codexConfigModel")?.trim() || null;
     // ?officialBrowser=0 预览未能自动打开浏览器时显示授权地址。
     const officialBrowserPreview = new URLSearchParams(window.location.search).get("officialBrowser") !== "0";
+    // ?officialCallback=0 预览登录回调端口被占用：开始登录后只能粘贴回调地址完成。
+    const officialCallbackPreview = new URLSearchParams(window.location.search).get("officialCallback") !== "0";
     const previewEndpoints = {
       primary: "https://primary.example.invalid/v1",
       backup: "https://backup.example.invalid/v1",
@@ -299,6 +302,11 @@ if (import.meta.env.DEV) {
     let previewUsageGeneration = 0;
     const previewUsageGenerations = new Map<string, number>();
     const previewLogins = new Map<string, number>();
+    const previewLoginState = (loginId: string) => `preview-state-${loginId}`;
+    const addPreviewBrowserAccount = () => {
+      const n = previewAccounts.length + 1;
+      return upsertPreviewAccount({ id: `preview-browser-${n}`, accountId: `acct-browser-${n}`, addedAt: Math.floor(Date.now() / 1000), invalid: false, isDefault: false, email: `browser${n}@example.invalid`, planType: "pro" });
+    };
     const previewSwitchDisabledReason = officialSwitchDisabledPreview
       ? "Codex 凭据存储不是 file 模式，不能导入当前登录或切换官方账号"
       : null;
@@ -771,7 +779,14 @@ if (import.meta.env.DEV) {
           previewLogins.clear();
           const loginId = `preview-login-${Date.now()}`;
           previewLogins.set(loginId, 0);
-          return { status: "wait", loginId, authUrl: "https://auth.example.invalid/oauth/authorize?preview=1", browserOpened: officialBrowserPreview };
+          return {
+            status: "wait",
+            loginId,
+            authUrl: `https://auth.example.invalid/oauth/authorize?preview=1&state=${previewLoginState(loginId)}`,
+            browserOpened: officialBrowserPreview,
+            callbackListening: officialCallbackPreview,
+            callbackError: officialCallbackPreview ? null : "登录回调端口 127.0.0.1:1455 已被其他程序占用，无法自动完成登录",
+          };
         }
         if (command === "poll_official_account_login") {
           const loginId = stringArgument("loginId");
@@ -783,7 +798,22 @@ if (import.meta.env.DEV) {
             return { status: "wait" };
           }
           previewLogins.delete(loginId);
-          return upsertPreviewAccount({ id: `preview-browser-${previewAccounts.length + 1}`, accountId: `acct-browser-${previewAccounts.length + 1}`, addedAt: Math.floor(Date.now() / 1000), invalid: false, isDefault: false, email: `browser${previewAccounts.length + 1}@example.invalid`, planType: "pro" });
+          return addPreviewBrowserAccount();
+        }
+        if (command === "submit_official_account_login_callback") {
+          const loginId = stringArgument("loginId");
+          if (!loginId) return failed("缺少参数：loginId");
+          const callbackUrl = stringArgument("callbackUrl");
+          if (!callbackUrl) return failed("请粘贴浏览器地址栏里的完整回调地址");
+          if (!previewLogins.has(loginId)) return failed("登录已过期或已结束，请重新添加账号");
+          // 回调地址可以是完整地址，也可以只有问号后面的参数。
+          const query = callbackUrl.includes("?") ? callbackUrl.slice(callbackUrl.indexOf("?") + 1) : callbackUrl;
+          const params = new URLSearchParams(query.split("#")[0]);
+          if (params.get("state") !== previewLoginState(loginId)) return failed("回调地址与本次登录不匹配，请复制本次登录后浏览器打开的完整地址");
+          if (params.get("error")) return failed("授权被拒绝，请重新开始登录");
+          if (!params.get("code")) return failed("回调地址里没有授权码，请复制浏览器地址栏里的完整地址");
+          previewLogins.delete(loginId);
+          return addPreviewBrowserAccount();
         }
         if (command === "cancel_official_account_login") {
           const loginId = stringArgument("loginId");

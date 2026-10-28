@@ -21,6 +21,26 @@ type LoginPollResult =
 
 export const LOGIN_POLL_INTERVAL_MS = 1500;
 
+// 同一次浏览器登录只收尾一次：轮询成功、提交回调地址成功和关闭对话框谁先到谁生效，
+// 之后到达的结果一律忽略。
+export function createLoginSession() {
+  let active: string | null = null;
+  return {
+    begin(loginId: string) {
+      active = loginId;
+    },
+    active: () => active,
+    finish(loginId: string) {
+      if (active !== loginId) return false;
+      active = null;
+      return true;
+    },
+    clear() {
+      active = null;
+    },
+  };
+}
+
 const pickAccount = (raw: OfficialAccount): OfficialAccount => ({
   id: raw.id,
   accountId: raw.accountId,

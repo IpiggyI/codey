@@ -24,6 +24,9 @@ const viewOf = (accounts, overrides = {}) => ({
   ...overrides,
 });
 const listResult = (accounts) => ({ status: "ok", ...viewOf(accounts) });
+const started = (loginId, authUrl = "https://auth.example.invalid/authorize", overrides = {}) => ({
+  status: "wait", loginId, authUrl, browserOpened: true, callbackListening: true, callbackError: null, ...overrides,
+});
 
 function panel({ view = viewOf([account("cur", { isDefault: true, planType: "plus" }), account("other", { planType: "prolite" })]), invoke } = {}) {
   const ui = autoStubModule("ui");
@@ -214,7 +217,7 @@ test("粘贴凭据：提交去除首尾空白的输入，格式错误时在对�
 
 test("浏览器登录：未打开浏览器时显示授权地址与有效期，成功后关闭并刷新渠道列表", async () => {
   const { render, buttons, calls, poll } = panel({ invoke: (command) => command === "start_official_account_login"
-    ? { status: "wait", loginId: "login-1", authUrl: "https://auth.example.invalid/authorize", browserOpened: false }
+    ? { ...started("login-1", "https://auth.example.invalid/authorize"), browserOpened: false }
     : { status: "ok" } });
   elementProps(buttons(render(), "浏览器登录添加")[0]).onPress();
   await flush();
@@ -246,14 +249,14 @@ test("浏览器登录：重新开始的请求返回前关闭对话框，晚到�
   const loginDialog = (tree) => collectElements(tree, (node) =>
     elementType(node) === ui.Dialog && textContent(node).includes("添加官方账号"))[0];
   elementProps(buttons(render(), "浏览器登录添加")[0]).onPress();
-  starts[0]({ status: "wait", loginId: "login-1", authUrl: "https://auth.example.invalid/1", browserOpened: true });
+  starts[0](started("login-1", "https://auth.example.invalid/1"));
   await flush();
   render();
   poll().onFailure("登录等待超时，请重新开始添加账号");
   elementProps(buttons(render(), "重新开始")[0]).onPress();
   elementProps(loginDialog(render())).onOpenChange(false);
   await flush();
-  starts[1]({ status: "wait", loginId: "login-2", authUrl: "https://auth.example.invalid/2", browserOpened: true });
+  starts[1](started("login-2", "https://auth.example.invalid/2"));
   await flush();
   const tree = render();
   assert.equal(elementProps(loginDialog(tree)).open, false, "晚到的响应不打开对话框");
@@ -262,13 +265,148 @@ test("浏览器登录：重新开始的请求返回前关闭对话框，晚到�
   assert.deepEqual(cancelled, ["login-1", "login-2"]);
 });
 
+// 开始登录并返回对话框相关的查找函数；submit 决定回调地址提交的结果。
+async function loginDialog({ start = {}, submit } = {}) {
+  const harness = panel({ invoke: (command, args) => {
+    if (command === "start_official_account_login") return started("login-1", "https://auth.example.invalid/authorize", start);
+    if (command === "submit_official_account_login_callback") return submit(args);
+    return { status: "ok" };
+  } });
+  elementProps(harness.buttons(harness.render(), "浏览器登录添加")[0]).onPress();
+  await flush();
+  const dialog = (tree) => collectElements(tree, (node) =>
+    elementType(node) === harness.ui.Dialog && textContent(node).includes("添加官方账号"))[0];
+  const field = (tree) => collectElements(tree, (node) => node.type === "textarea" && node.props["aria-label"] === "回调地址")[0];
+  const type = (value) => elementProps(field(harness.render())).onChange({ target: { value } });
+  const alerts = (tree) => collectElements(dialog(tree), (node) => node.props.role === "alert").map(textContent);
+  const submitButton = (tree) => harness.exactButton(tree, "提交回调地址");
+  return { ...harness, dialog, field, type, alerts, submitButton };
+}
+const CALLBACK = "http://localhost:1455/auth/callback?code=one-time-code-value&state=abc";
+
+test("浏览器登录：浏览器已打开时也显示可复制的授权链接和复制按钮", async () => {
+  const { render, exactButton } = await loginDialog();
+  const tree = render();
+  const text = textContent(tree);
+  assert.ok(text.includes("https://auth.example.invalid/authorize"));
+  assert.ok(text.includes("已在浏览器打开 ChatGPT 登录页"));
+  assert.ok(text.includes("账号会自动加入列表"));
+  assert.ok(exactButton(tree, "复制登录链接"));
+});
+
+test("浏览器登录：始终提供回调地址输入框和说明，空输入或提交中时提交按钮禁用", async () => {
+  let release;
+  const { render, field, type, submitButton } = await loginDialog({
+    submit: () => new Promise((resolve) => { release = resolve; }),
+  });
+  const text = textContent(render());
+  assert.ok(text.includes("http://localhost:1455/auth/callback"));
+  assert.ok(text.includes("地址栏"));
+  assert.ok(field(render()), "有回调地址输入框");
+  assert.equal(elementProps(submitButton(render())).disabled, true, "空输入时禁用");
+  type("   ");
+  assert.equal(elementProps(submitButton(render())).disabled, true, "只有空白时禁用");
+  type(CALLBACK);
+  assert.equal(elementProps(submitButton(render())).disabled, false);
+  elementProps(submitButton(render())).onPress();
+  await flush();
+  assert.equal(elementProps(submitButton(render())).disabled, true, "提交中禁用");
+  assert.equal(elementProps(field(render())).disabled, true, "提交中输入框禁用");
+  release(listResult([account("new")]));
+  await flush();
+});
+
+test("浏览器登录：回调端口无法监听时说明无法自动完成、显示后端原因，粘贴提交成为主要操作", async () => {
+  const reason = "登录回调端口已被其他程序占用";
+  const { render, type, submitButton } = await loginDialog({ start: { callbackListening: false, callbackError: reason } });
+  const tree = render();
+  const text = textContent(tree);
+  assert.ok(text.includes("无法自动完成登录"));
+  assert.ok(text.includes(reason));
+  assert.doesNotMatch(text, /自动加入列表/, "不再承诺自动加入账号");
+  type(CALLBACK);
+  assert.notEqual(elementProps(submitButton(render())).variant, "outline", "提交按钮是主要按钮");
+  const listening = await loginDialog();
+  assert.equal(elementProps(listening.submitButton(listening.render())).variant, "outline");
+  assert.doesNotMatch(textContent(listening.render()), /无法自动完成登录/);
+});
+
+test("浏览器登录：提交回调地址成功后与轮询成功一样收尾，晚到的轮询结果被忽略", async () => {
+  const { render, calls, poll, dialog, type, submitButton } = await loginDialog({
+    submit: () => listResult([account("new")]),
+  });
+  render();
+  const stale = poll();
+  assert.equal(stale.loginId, "login-1");
+  type(`  ${CALLBACK}  `);
+  elementProps(submitButton(render())).onPress();
+  await flush();
+  const submits = calls.invoke.filter((call) => call.command === "submit_official_account_login_callback");
+  assert.deepEqual(submits, [{ command: "submit_official_account_login_callback", args: { loginId: "login-1", callbackUrl: CALLBACK } }]);
+  const tree = render();
+  assert.equal(elementProps(dialog(tree)).open, false, "成功后关闭对话框");
+  assert.equal(poll().loginId, undefined, "成功后停止轮询");
+  assert.equal(calls.apply.length, 1);
+  assert.equal(calls.changed, 1);
+  assert.deepEqual(calls.notices, [{ tone: "success", text: "官方账号已添加" }]);
+  assert.equal(calls.invoke.some((call) => call.command === "cancel_official_account_login"), false);
+
+  stale.onSuccess(listResult([account("late")]));
+  stale.onFailure("登录已过期，请重新开始");
+  render();
+  assert.equal(calls.apply.length, 1, "晚到的轮询成功不再接纳账号");
+  assert.equal(calls.changed, 1);
+  assert.equal(calls.notices.length, 1, "不重复提示");
+  assert.deepEqual(collectElements(render(), (node) => node.props.role === "alert"), [], "晚到的轮询失败不显示");
+  assert.doesNotMatch(JSON.stringify(calls.notices), /one-time-code-value/, "提示不回显回调地址");
+});
+
+test("浏览器登录：提交回调地址失败时显示后端消息并保持登录打开，可以重新粘贴", async () => {
+  let reply = () => { throw new Error("回调地址与本次登录不匹配"); };
+  const { render, calls, poll, dialog, alerts, type, submitButton } = await loginDialog({ submit: () => reply() });
+  type(CALLBACK);
+  elementProps(submitButton(render())).onPress();
+  await flush();
+  const tree = render();
+  assert.equal(elementProps(dialog(tree)).open, true, "失败时对话框保持打开");
+  assert.ok(alerts(tree).includes("回调地址与本次登录不匹配"));
+  assert.equal(poll().loginId, "login-1", "登录和轮询继续");
+  assert.equal(calls.invoke.some((call) => call.command === "cancel_official_account_login"), false, "失败不取消登录");
+  assert.equal(calls.changed, 0);
+  assert.equal(calls.notices.length, 0);
+  assert.equal(elementProps(submitButton(tree)).disabled, false, "输入保留，可再次提交");
+
+  reply = () => listResult([account("new")]);
+  elementProps(submitButton(render())).onPress();
+  await flush();
+  assert.equal(elementProps(dialog(render())).open, false);
+  assert.equal(calls.changed, 1);
+  assert.deepEqual(alerts(render()), []);
+});
+
+test("浏览器登录：重新开始后输入框和上一次的提交错误被清空", async () => {
+  const { render, buttons, poll, alerts, field, type, submitButton } = await loginDialog({
+    submit: () => { throw new Error("回调地址缺少授权码"); },
+  });
+  type(CALLBACK);
+  elementProps(submitButton(render())).onPress();
+  await flush();
+  poll().onFailure("登录等待超时，请重新开始添加账号");
+  assert.equal(field(render()), undefined, "登录失败后不再提供输入框");
+  elementProps(buttons(render(), "重新开始")[0]).onPress();
+  await flush();
+  const tree = render();
+  assert.equal(elementProps(field(tree)).value, "");
+  assert.deepEqual(alerts(tree), []);
+});
+
 test("浏览器登录：取消时调用后端取消并停止轮询", async () => {
   const { render, buttons, calls, poll } = panel({ invoke: (command) => command === "start_official_account_login"
-    ? { status: "wait", loginId: "login-2", authUrl: "https://auth.example.invalid/a", browserOpened: true }
+    ? started("login-2", "https://auth.example.invalid/a")
     : { status: "ok" } });
   elementProps(buttons(render(), "浏览器登录添加")[0]).onPress();
   await flush();
-  assert.doesNotMatch(textContent(render()), /auth\.example\.invalid/, "已打开浏览器时不显示授权地址");
+  assert.match(textContent(render()), /auth\.example\.invalid\/a/, "已打开浏览器时也显示授权地址");
   elementProps(buttons(render(), "取消")[0]).onPress();
   await flush();
   render();
