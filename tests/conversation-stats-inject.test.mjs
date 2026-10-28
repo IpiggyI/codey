@@ -187,6 +187,7 @@ const createEnvironment = (options = {}) => {
     return timer;
   };
   const sandbox = {
+    Symbol,
     console: { warn: () => {}, error: console.error, log: console.log },
     Date: TestDate,
     document,
