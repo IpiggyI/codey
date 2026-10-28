@@ -636,6 +636,10 @@ impl RouteRequestLogConfig {
 #[serde(rename_all = "camelCase")]
 pub struct CodeyConfig {
     #[serde(default)]
+    pub selected_channel_id: Option<String>,
+    #[serde(default)]
+    pub default_models_by_channel: BTreeMap<String, String>,
+    #[serde(default)]
     pub settings_revision: u64,
     /// Retained from upstream as a catalog/API branch flag. This fork deleted
     /// the in-process gateway; missing values and loaded configs stay disabled.
@@ -811,6 +815,8 @@ impl Default for CodeyConfig {
         let profile = ProviderProfile::new("默认配置");
         Self {
             settings_revision: 0,
+            selected_channel_id: None,
+            default_models_by_channel: BTreeMap::new(),
             local_router_enabled: false,
             route_request_log: RouteRequestLogConfig::default(),
             active_profile_id: profile.id.clone(),
@@ -1615,6 +1621,15 @@ impl CodeyConfig {
     }
 
     pub fn default_model(&self) -> Option<&str> {
+        if let Some(id) = &self.selected_channel_id
+            && self
+                .current_provider_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.channel_id.as_ref() == Some(id))
+            && let Some(model) = self.default_models_by_channel.get(id)
+        {
+            return Some(model.as_str());
+        }
         let model = self.default_model.trim();
         (!model.is_empty()).then_some(model)
     }

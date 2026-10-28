@@ -1781,6 +1781,34 @@ mod tests {
     }
 
     #[test]
+    fn channels_wrapper_discards_desktop_provider_and_model() {
+        let (home, config) = crate::channels::tests::selected_fixture();
+        let overrides = crate::channels::runtime_overrides(home.path(), &config).unwrap();
+        let args = [
+            "app-server",
+            "-c",
+            "model_provider=old",
+            "--config=model=old",
+            "--config",
+            "model_provider=also-old",
+        ]
+        .map(OsString::from);
+        let actual = rewrite_app_server_args(&args, &overrides).unwrap();
+        assert_eq!(
+            actual,
+            vec![
+                OsString::from("app-server"),
+                OsString::from("-c"),
+                OsString::from("analytics.enabled=false"),
+                OsString::from("-c"),
+                OsString::from(&overrides[0]),
+                OsString::from("-c"),
+                OsString::from(&overrides[1]),
+            ]
+        );
+    }
+
+    #[test]
     fn cli_wrapper_drops_stale_wsl_only_runtime_overrides() {
         let overrides = [
             "__CODEY_WSL_ONLY__:hooks={PreToolUse=[]}",

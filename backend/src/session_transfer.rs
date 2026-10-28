@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
-use crate::codex_config::current_model_provider;
 use crate::fs_util::timestamp_millis;
 use crate::sqlite_util::table_columns;
 
@@ -285,10 +284,25 @@ pub fn append_import_transfer_chunk(
     })
 }
 
+#[cfg(test)]
 pub fn finish_import_transfer(
     home: &Path,
     project_path: &str,
     transfer_id: &str,
+) -> Result<SessionImportResult> {
+    finish_import_transfer_for_config(
+        home,
+        project_path,
+        transfer_id,
+        &crate::config::CodeyConfig::default(),
+    )
+}
+
+pub(crate) fn finish_import_transfer_for_config(
+    home: &Path,
+    project_path: &str,
+    transfer_id: &str,
+    config: &crate::config::CodeyConfig,
 ) -> Result<SessionImportResult> {
     let transfer_lock = import_transfer_lock(transfer_id)?;
     let _transfer_guard = transfer_lock
@@ -313,7 +327,13 @@ pub fn finish_import_transfer(
         let mut reader = BufReader::with_capacity(64 * 1024, file);
         let bundle = read_session_bundle_metadata(&mut reader)
             .context("数据文件不是有效的 Codey 会话 JSON")?;
-        import_session_bundle(home, project_path, bundle, JsonStringReader::new(reader))
+        import_session_bundle(
+            home,
+            project_path,
+            bundle,
+            JsonStringReader::new(reader),
+            config,
+        )
     })();
     let _ = fs::remove_file(&path);
     result
@@ -370,6 +390,7 @@ fn import_session_bundle<R: BufRead>(
     project_path: &str,
     bundle: SessionBundleMetadata,
     rollout: JsonStringReader<R>,
+    config: &crate::config::CodeyConfig,
 ) -> Result<SessionImportResult> {
     if bundle.format != SESSION_BUNDLE_FORMAT {
         anyhow::bail!("不支持的数据文件：缺少 Codey 会话格式标记");
@@ -393,7 +414,7 @@ fn import_session_bundle<R: BufRead>(
         project_path
     };
     let project = canonical_project_path(project_path)?;
-    let provider_id = current_model_provider(home)?;
+    let provider_id = crate::codex_provider::current_provider_id_for_config(home, config)?;
 
     let original_id = bundle
         .thread
@@ -1583,6 +1604,18 @@ mod tests {
 
     #[test]
     fn imports_stamp_the_current_model_provider() {
+        check_import_provider("model_provider = \"gs\"\n", "gs");
+    }
+
+    #[test]
+    fn imports_stamp_the_same_profile_provider_as_other_features() {
+        check_import_provider(
+            "model_provider='root'\nprofile='work'\n[profiles.work]\nmodel_provider='gs'\n",
+            "gs",
+        );
+    }
+
+    fn check_import_provider(contents: &str, expected: &str) {
         let source = tempdir().unwrap();
         let source_project = tempdir().unwrap();
         let source_id = "01900000-0000-7000-8000-000000000011";
@@ -1597,11 +1630,7 @@ mod tests {
             seed_project.path(),
             "已有会话",
         );
-        fs::write(
-            target.path().join("config.toml"),
-            "model_provider = \"gs\"\n",
-        )
-        .unwrap();
+        fs::write(target.path().join("config.toml"), contents).unwrap();
         let imported_project = tempdir().unwrap();
         let imported = import_via_chunks(
             target.path(),
@@ -1618,12 +1647,18 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .unwrap();
-        assert_eq!(provider, "gs");
+        assert_eq!(provider, expected);
+        assert_eq!(
+            provider,
+            crate::codex_provider::current_provider_snapshot(target.path())
+                .unwrap()
+                .id
+        );
         let rollout = fs::read_to_string(rollout_path).unwrap();
         let session_meta: Value = serde_json::from_str(rollout.lines().next().unwrap()).unwrap();
         assert_eq!(
             session_meta["payload"]["model_provider"].as_str(),
-            Some("gs")
+            Some(expected)
         );
     }
 

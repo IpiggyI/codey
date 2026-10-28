@@ -39,6 +39,8 @@ pub struct CurrentProvider {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderSnapshot {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<String>,
     #[serde(flatten)]
     identity: CurrentProviderSnapshot,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -80,6 +82,7 @@ impl From<CurrentProviderSnapshot> for ProviderSnapshot {
     fn from(identity: CurrentProviderSnapshot) -> Self {
         Self {
             identity,
+            channel_id: None,
             supports_remote_compaction: None,
             external_web_access: None,
             capability_warning: None,
@@ -205,16 +208,37 @@ pub fn current_provider(codex_home: &Path) -> Result<CurrentProvider> {
     Ok(local_provider(codex_home)?.provider)
 }
 
+pub(crate) fn current_provider_for_config(
+    codex_home: &Path,
+    config: &CodeyConfig,
+) -> Result<CurrentProvider> {
+    Ok(local_provider_for_config(codex_home, AuthProbePolicy::Strict, config)?.provider)
+}
+
+pub(crate) fn current_provider_id_for_config(home: &Path, config: &CodeyConfig) -> Result<String> {
+    let loaded = ConfigManager::new(home.join("config.toml")).load()?;
+    Ok(crate::channels::resolve(home, loaded.document(), config)?.provider_id)
+}
+
 /// Read-only snapshot of the user-owned `config.toml` current provider.
 /// Never writes `config.toml`. Parse or schema failures are returned as errors
 /// so the caller can refuse to start instead of auto-correcting.
+#[cfg(test)]
 pub fn current_provider_snapshot(codex_home: &Path) -> Result<ProviderSnapshot> {
+    current_provider_snapshot_for_config(codex_home, &CodeyConfig::default())
+}
+
+pub(crate) fn current_provider_snapshot_for_config(
+    codex_home: &Path,
+    codey: &CodeyConfig,
+) -> Result<ProviderSnapshot> {
     let config_path = codex_home.join("config.toml");
     let config = ConfigManager::new(&config_path)
         .load()
         .context("解析 Codex 用户配置失败")?;
     let document = config.document();
-    let provider_id = active_provider_id(document).to_string();
+    let resolution = crate::channels::resolve(codex_home, document, codey)?;
+    let provider_id = resolution.provider_id;
     let table = provider_table(document, &provider_id);
     let base_url = table
         .and_then(|provider| provider.get("base_url"))
@@ -236,7 +260,15 @@ pub fn current_provider_snapshot(codex_home: &Path) -> Result<ProviderSnapshot> 
         read_auth_probe(
             &codex_home.join("auth.json"),
             "auto",
-            AuthProbePolicy::Strict,
+            if resolution
+                .channel_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("provider:"))
+            {
+                AuthProbePolicy::Lenient
+            } else {
+                AuthProbePolicy::Strict
+            },
         )?
         .value
     } else {
@@ -249,6 +281,7 @@ pub fn current_provider_snapshot(codex_home: &Path) -> Result<ProviderSnapshot> 
         eprintln!("{warning}");
     }
     Ok(ProviderSnapshot {
+        channel_id: resolution.channel_id,
         identity: CurrentProviderSnapshot::from_parts(
             provider_id,
             normalized,
@@ -286,11 +319,20 @@ pub struct PromptOptimizationProviderOverlay {
     pub message: String,
 }
 
+#[cfg(test)]
 pub fn prompt_optimization_provider_overlay_with_env(
     codex_home: &Path,
     env: &impl Fn(&str) -> Option<String>,
 ) -> Result<PromptOptimizationProviderOverlay> {
-    let snapshot = current_provider_snapshot(codex_home)?;
+    prompt_optimization_provider_overlay_for_config(codex_home, &CodeyConfig::default(), env)
+}
+
+pub(crate) fn prompt_optimization_provider_overlay_for_config(
+    codex_home: &Path,
+    codey: &CodeyConfig,
+    env: &impl Fn(&str) -> Option<String>,
+) -> Result<PromptOptimizationProviderOverlay> {
+    let snapshot = current_provider_snapshot_for_config(codex_home, codey)?;
     if snapshot.uses_official_account_auth {
         return Ok(PromptOptimizationProviderOverlay {
             upstream_protocol: crate::config::UPSTREAM_PROTOCOL_OPENAI_RESPONSES.to_string(),
@@ -376,15 +418,34 @@ pub fn prompt_optimization_provider_overlay_with_env(
     })
 }
 
+#[cfg(test)]
 pub fn current_provider_model_sync(codex_home: &Path) -> Result<CurrentProviderModelSync> {
     current_provider_model_sync_with_env(codex_home, &|name| std::env::var(name).ok())
 }
 
+pub(crate) fn current_provider_model_sync_for_config(
+    codex_home: &Path,
+    config: &CodeyConfig,
+) -> Result<CurrentProviderModelSync> {
+    current_provider_model_sync_for_config_with_env(codex_home, config, &|name| {
+        std::env::var(name).ok()
+    })
+}
+
+#[cfg(test)]
 pub(crate) fn current_provider_model_sync_with_env(
     codex_home: &Path,
     env: &impl Fn(&str) -> Option<String>,
 ) -> Result<CurrentProviderModelSync> {
-    let snapshot = current_provider_snapshot(codex_home)?;
+    current_provider_model_sync_for_config_with_env(codex_home, &CodeyConfig::default(), env)
+}
+
+pub(crate) fn current_provider_model_sync_for_config_with_env(
+    codex_home: &Path,
+    codey: &CodeyConfig,
+    env: &impl Fn(&str) -> Option<String>,
+) -> Result<CurrentProviderModelSync> {
+    let snapshot = current_provider_snapshot_for_config(codex_home, codey)?;
     let config_path = codex_home.join("config.toml");
     let config = ConfigManager::new(&config_path)
         .load()
@@ -443,7 +504,7 @@ pub fn sync_current_third_party_provider(
     config: &CodeyConfig,
     codex_home: &Path,
 ) -> Result<(CodeyConfig, ProviderStatus)> {
-    let snapshot = local_provider(codex_home)?;
+    let snapshot = local_provider_for_config(codex_home, AuthProbePolicy::Strict, config)?;
     if snapshot.provider.official {
         bail!("当前 Codex 配置是官方账号，不自动导入为第三方 provider");
     }
@@ -522,10 +583,19 @@ fn local_provider_with_auth_policy(
     codex_home: &Path,
     auth_policy: AuthProbePolicy,
 ) -> Result<LocalProviderSnapshot> {
+    local_provider_for_config(codex_home, auth_policy, &CodeyConfig::default())
+}
+
+fn local_provider_for_config(
+    codex_home: &Path,
+    auth_policy: AuthProbePolicy,
+    codey: &CodeyConfig,
+) -> Result<LocalProviderSnapshot> {
     let config_path = codex_home.join("config.toml");
     let config = ConfigManager::new(&config_path).load()?;
     let document = config.document();
-    let provider_id = active_provider_id(document);
+    let resolved = crate::channels::resolve(codex_home, document, codey)?;
+    let provider_id = resolved.provider_id.as_str();
     let table = provider_table(document, provider_id);
     let mut base_url = table
         .and_then(|provider| provider.get("base_url"))
@@ -552,6 +622,15 @@ fn local_provider_with_auth_policy(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("auto");
+    let auth_policy = if resolved
+        .channel_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("provider:"))
+    {
+        AuthProbePolicy::Lenient
+    } else {
+        auth_policy
+    };
     let auth = read_auth_probe(&auth_path, auth_store, auth_policy)?;
     let official =
         uses_official_account_auth(document, provider_id, table, &base_url, auth.value.as_ref());
@@ -659,7 +738,7 @@ fn read_auth_probe(
     })
 }
 
-fn active_provider_id(document: &DocumentMut) -> &str {
+pub(crate) fn configured_provider_id(document: &DocumentMut) -> &str {
     let profile = document
         .get("profile")
         .and_then(Item::as_str)
@@ -770,6 +849,21 @@ fn uses_official_account_auth(
             != Some(false)
         && matches!(auth_mode, None | Some("chatgpt"))
         && auth_json_api_key(provider_id, provider, auth).is_none()
+}
+
+pub(crate) fn official_channel_available(document: &DocumentMut, auth: &Value) -> bool {
+    let table = provider_table(document, BUILTIN_OPENAI_PROVIDER_ID);
+    let base_url = table
+        .and_then(|provider| provider.get("base_url"))
+        .and_then(Item::as_str)
+        .unwrap_or_default();
+    uses_official_account_auth(
+        document,
+        BUILTIN_OPENAI_PROVIDER_ID,
+        table,
+        base_url,
+        Some(auth),
+    )
 }
 
 fn auth_json_api_key(
@@ -1098,7 +1192,7 @@ impl ProviderAuthCommand {
     }
 }
 
-fn auth_has_chatgpt_tokens(auth: &Value) -> bool {
+pub(crate) fn auth_has_chatgpt_tokens(auth: &Value) -> bool {
     (matches!(auth.get("auth_mode"), None | Some(Value::Null))
         || auth.get("auth_mode").and_then(Value::as_str) == Some("chatgpt"))
         && auth

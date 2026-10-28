@@ -32,8 +32,9 @@ pub async fn fetch_route_models(
 
     let home = codex_home().to_path_buf();
     let sync_home = home.clone();
+    let channel_config = config.clone();
     let sync = tokio::task::spawn_blocking(move || {
-        codex_provider::current_provider_model_sync(&sync_home)
+        codex_provider::current_provider_model_sync_for_config(&sync_home, &channel_config)
     })
     .await
     .map_err(|error| format!("解析当前 provider 模型同步配置任务异常退出：{error}"))?

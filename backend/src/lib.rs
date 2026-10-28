@@ -1,5 +1,6 @@
 mod account_usage;
 mod cdp;
+mod channels;
 mod codex_config;
 mod codex_extensions;
 mod codex_config_guidance;

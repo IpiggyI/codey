@@ -56,14 +56,25 @@ pub async fn save_default_model(
     } else {
         target.upstream_model.clone()
     };
-    config.default_model = stored_default.clone();
+    let channel_id = config
+        .current_provider_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.channel_id.clone());
+    let channel_default = channel_id.is_some();
+    if let Some(id) = channel_id {
+        config
+            .default_models_by_channel
+            .insert(id, stored_default.clone());
+    } else {
+        config.default_model = stored_default.clone();
+    }
     // `active_profile_id` remains a compatibility projection for older features.
     // The model default is authoritative and therefore owns that projection.
     if let Some(profile) = target_profile {
         config.active_profile_id = profile.id;
     }
     config = config.normalize();
-    if !config.local_router_enabled {
+    if !config.local_router_enabled && !channel_default {
         config.default_model = stored_default;
     }
     config.settings_revision = config.settings_revision.saturating_add(1);
@@ -250,7 +261,7 @@ pub(crate) fn current_model_state(
     config: &CodeyConfig,
 ) -> Result<model_catalog::ModelSelectionState, String> {
     if !config.local_router_enabled {
-        let provider = codex_provider::current_provider(codex_home())
+        let provider = codex_provider::current_provider_for_config(codex_home(), config)
             .map_err(|error| format!("读取当前 Codex 线路失败：{error:#}"))?;
         return native_model_state_for_provider(config, &provider, codex_home());
     }

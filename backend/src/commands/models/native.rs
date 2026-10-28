@@ -140,7 +140,7 @@ pub(crate) fn native_subagent_model_state(
     config: &CodeyConfig,
     home: &std::path::Path,
 ) -> Result<model_catalog::ModelSelectionState, String> {
-    let provider = codex_provider::current_provider(home)
+    let provider = codex_provider::current_provider_for_config(home, config)
         .map_err(|error| format!("读取当前 Codex 线路失败：{error:#}"))?;
     native_model_state_for_provider(config, &provider, home)
 }
@@ -170,9 +170,9 @@ pub(crate) fn reconcile_subagent_models_for_mode(
 
 #[allow(dead_code)]
 pub(crate) async fn current_provider_status_async(
-    _config: &CodeyConfig,
+    config: &CodeyConfig,
 ) -> Result<codex_provider::ProviderStatus, String> {
-    let provider = current_codex_provider().await?;
+    let provider = current_codex_provider(config).await?;
     Ok(codex_provider::ProviderStatus {
         changed: false,
         provider,

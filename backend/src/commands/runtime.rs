@@ -81,6 +81,14 @@ pub(super) async fn runtime_status_with_options(
     state: &Arc<AppState>,
     refresh_injection_status: bool,
 ) -> Result<Value, String> {
+    runtime_status_at(state, refresh_injection_status, codex_home()).await
+}
+
+async fn runtime_status_at(
+    state: &Arc<AppState>,
+    refresh_injection_status: bool,
+    home: &std::path::Path,
+) -> Result<Value, String> {
     let runtime = state.runtime.lock().await.clone();
     // 先在无锁状态取运行时模型基线，再持配置读锁做同步比较：读守卫跨
     // await 会让排队写者阻塞所有新的桥接请求。
@@ -97,6 +105,13 @@ pub(super) async fn runtime_status_with_options(
         None => false,
     };
     let config = state.config.read().await;
+    let channel_notice = if config.selected_channel_id.is_some() {
+        crate::channels::list(home, &config)
+            .map_err(|error| error.to_string())?
+            .notice
+    } else {
+        None
+    };
     let snapshot = config.current_provider_snapshot.as_ref();
     let active_provider_id = snapshot
         .map(|snapshot| snapshot.id.clone())
@@ -152,6 +167,7 @@ pub(super) async fn runtime_status_with_options(
         "appVersion": env!("CARGO_PKG_VERSION"),
         "clientPlatform": current_update_platform(),
         "activeProviderId": active_provider_id,
+        "channelNotice": channel_notice,
         "officialAccountAvailable": official_account_available,
         "officialAccountStatus": official_account_status,
         "restartRequired": restart_required,
@@ -217,6 +233,24 @@ pub(super) async fn runtime_status_with_options(
         );
     }
     Ok(status)
+}
+
+#[tokio::test]
+async fn channels_runtime_status_surfaces_missing_selection_notice() {
+    let (home, mut config) = crate::channels::tests::fixture();
+    config.selected_channel_id = Some("provider:removed".into());
+    let state = Arc::new(AppState {
+        store: crate::config::ConfigStore::new(home.path().join("codey.json")),
+        config: tokio::sync::RwLock::new(config),
+        ..AppState::default()
+    });
+    state.request_shutdown();
+    let status = runtime_status_at(&state, false, home.path()).await.unwrap();
+    assert!(status["channelNotice"].as_str().unwrap().contains("回退"));
+    state.config.write().await.selected_channel_id = None;
+    assert!(
+        runtime_status_at(&state, false, home.path()).await.unwrap()["channelNotice"].is_null()
+    );
 }
 
 async fn codex_app_version_for_status(
@@ -988,3 +1022,18 @@ mod tests {
 
 #[cfg(test)]
 mod version_cache_tests;
+
+#[tokio::test]
+async fn channels_runtime_status_ignores_malformed_official_login_for_provider() {
+    let (home, config) = crate::channels::tests::selected_fixture();
+    std::fs::write(home.path().join("auth.json"), "{half-written").unwrap();
+    let state = Arc::new(AppState {
+        store: crate::config::ConfigStore::new(home.path().join("codey.json")),
+        config: tokio::sync::RwLock::new(config),
+        ..AppState::default()
+    });
+    state.request_shutdown();
+    let status = runtime_status_at(&state, false, home.path()).await.unwrap();
+    assert_eq!(status["activeProviderId"], "b.dot");
+    assert!(status["channelNotice"].is_null());
+}

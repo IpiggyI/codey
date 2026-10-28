@@ -8,6 +8,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
+mod channels;
 mod config_apply;
 mod config_repair;
 mod diagnostics;
@@ -508,8 +509,14 @@ impl AppState {
                 let transfer_id = bridge_string(&payload, "transferId");
                 let project_path = bridge_string(&payload, "projectPath");
                 let home = codex_home();
+                let config = self.config.read().await.clone();
                 blocking_value("完成会话导入", move || {
-                    session_transfer::finish_import_transfer(home, &project_path, &transfer_id)
+                    session_transfer::finish_import_transfer_for_config(
+                        home,
+                        &project_path,
+                        &transfer_id,
+                        &config,
+                    )
                 })
                 .await
             }
@@ -706,8 +713,9 @@ pub(super) async fn prepare_routes_for_current_launch(state: &Arc<AppState>) -> 
     let home = codex_home().to_path_buf();
     let snapshot_home = home.clone();
     let model_home = home.clone();
+    let channel_config = state.config.read().await.clone();
     let snapshot = tokio::task::spawn_blocking(move || {
-        crate::codex_provider::current_provider_snapshot(&snapshot_home)
+        crate::codex_provider::current_provider_snapshot_for_config(&snapshot_home, &channel_config)
     })
     .await
     .map_err(|error| format!("读取当前 Codex provider 快照的任务异常退出：{error}"))?
@@ -948,6 +956,9 @@ fn persisted_config_changed(previous: &CodeyConfig, next: &CodeyConfig) -> bool 
 
 pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Value {
     let result = match command {
+        "list_channels" => channels::list_channels(state).await,
+        "select_channel" => channels::change_channel(state, &args, false).await,
+        "set_channel_default_model" => channels::change_channel(state, &args, true).await,
         "load_codey_config" => load_codey_config(state).await,
         "save_codey_config" => match codey_config_save_input(&args) {
             Ok(input) => save_codey_config_input(state, input).await,
@@ -1211,8 +1222,9 @@ pub async fn load_codey_config(state: &Arc<AppState>) -> Result<Value, String> {
     };
     if config.current_provider_snapshot.is_none() {
         let home = codex_home().to_path_buf();
+        let channel_config = config.clone();
         let snapshot = tokio::task::spawn_blocking(move || {
-            crate::codex_provider::current_provider_snapshot(&home)
+            crate::codex_provider::current_provider_snapshot_for_config(&home, &channel_config)
         })
         .await
         .map_err(|error| format!("读取当前 Codex provider 快照的任务异常退出：{error}"))?
@@ -1261,7 +1273,7 @@ pub(super) async fn ensure_default_route_imported(state: &Arc<AppState>) -> bool
     {
         return false;
     }
-    let current_provider = match current_codex_provider_for_initial_import().await {
+    let current_provider = match current_codex_provider_for_initial_import(&config).await {
         Ok(provider) => provider,
         Err(error) => {
             error_log::record_failure(
@@ -1298,10 +1310,12 @@ pub(super) async fn ensure_default_route_imported(state: &Arc<AppState>) -> bool
     }
 }
 
-async fn current_codex_provider_for_initial_import()
--> Result<codex_provider::CurrentProvider, String> {
+async fn current_codex_provider_for_initial_import(
+    config: &CodeyConfig,
+) -> Result<codex_provider::CurrentProvider, String> {
     let home = codex_home().to_path_buf();
-    tokio::task::spawn_blocking(move || codex_provider::current_provider(&home))
+    let config = config.clone();
+    tokio::task::spawn_blocking(move || codex_provider::current_provider_for_config(&home, &config))
         .await
         .map_err(|error| format!("读取当前 Codex provider 任务异常退出：{error}"))?
         .map_err(|error| format!("读取当前 Codex provider 失败：{error:#}"))
@@ -2060,7 +2074,7 @@ fn redacted_config_at(
     let api_key_configured = !config.prompt_optimization.api_key.trim().is_empty();
     public.prompt_optimization.api_key_configured = api_key_configured;
     public.prompt_optimization.api_key.clear();
-    let overlay = prompt_optimization::current_prompt_optimization_overlay(codex_home, env);
+    let overlay = prompt_optimization::current_prompt_optimization_overlay(codex_home, config, env);
     let official_login_available = prompt_optimization::official_login_available(codex_home);
     prompt_optimization::apply_prompt_optimization_overlay(
         &mut public.prompt_optimization,
@@ -2117,6 +2131,10 @@ pub(super) fn config_requires_restart_with_route_status(
     current: &CodeyConfig,
 ) -> bool {
     provider_route_restart_required
+        || applied.selected_channel_id != current.selected_channel_id
+        || applied.selected_channel_id.as_ref().is_some_and(|id| {
+            applied.default_models_by_channel.get(id) != current.default_models_by_channel.get(id)
+        })
         || applied.codex_app_path != current.codex_app_path
         || applied.user_scripts != current.user_scripts
         || applied.slim_codex_pet != current.slim_codex_pet

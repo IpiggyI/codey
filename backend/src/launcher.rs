@@ -124,7 +124,15 @@ impl RuntimeModelConfig {
                 .declared_official_models_by_provider
                 .clone(),
             upstream_models_by_provider: config.upstream_models_by_provider.clone(),
-            default_model: config.default_model.clone(),
+            default_model: if config
+                .current_provider_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.channel_id.is_some())
+            {
+                config.default_model().unwrap_or_default().to_string()
+            } else {
+                config.default_model.clone()
+            },
         }
     }
 }
@@ -632,6 +640,7 @@ async fn prepare_codex_startup_state(
     for selection in subagent_roles.values_mut() {
         selection.model = runtime_subagent_model(&selection.model, &subagent_catalog);
     }
+    let channel_config = config.clone();
     let runtime_config = tokio::task::spawn_blocking(move || {
         apply_runtime_router_config(
             &runtime_config_home,
@@ -645,6 +654,7 @@ async fn prepare_codex_startup_state(
                 subagent_roles: Some(&subagent_roles),
                 subagent_catalog,
             },
+            &channel_config,
         )
     })
     .await
@@ -1468,6 +1478,7 @@ async fn prepare_native_runtime_state(
                     &native_subagent_config,
                 ),
             },
+            &native_subagent_config,
         )
     })
     .await

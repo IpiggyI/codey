@@ -44,7 +44,11 @@ pub(crate) fn runtime_supports_current_routes_for_hot_reload(
     applied: &CodeyConfig,
     current: &CodeyConfig,
 ) -> bool {
-    if applied.local_router_enabled != current.local_router_enabled {
+    if applied.local_router_enabled != current.local_router_enabled
+        || applied.selected_channel_id != current.selected_channel_id
+        || (current.selected_channel_id.is_some()
+            && applied.current_provider_snapshot != current.current_provider_snapshot)
+    {
         return false;
     }
     // Renderer refresh cannot change the app-server's resolved context budget.
@@ -177,7 +181,7 @@ fn renderer_model_catalog_value_with_catalog_dir(
     if !config.local_router_enabled {
         let mut catalog = renderer_native_model_catalog_value(model_state);
         catalog["legacy_model_aliases"] = json!(config.model_alias_history);
-        let provider = codex_provider::current_provider(home).ok();
+        let provider = codex_provider::current_provider_for_config(home, config).ok();
         let provider_id = provider
             .as_ref()
             .map(|provider| provider.id.clone())
