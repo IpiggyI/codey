@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 
@@ -31,6 +31,27 @@ struct Session {
     socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
     id: u64,
     breakpoint: Option<String>,
+}
+
+struct InstallAttempt<'a> {
+    target_id: &'a str,
+    started: Instant,
+    phase: &'static str,
+}
+
+impl InstallAttempt<'_> {
+    fn record(&self, phase: &str, error: Option<&anyhow::Error>) {
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "service_tier_renderer",
+            json!({
+                "targetId": self.target_id,
+                "phase": phase,
+                "reachedPhase": self.phase,
+                "elapsedMs": self.started.elapsed().as_millis() as u64,
+                "error": error.map(|error| format!("{error:#}")),
+            }),
+        );
+    }
 }
 
 impl Session {
@@ -86,7 +107,7 @@ impl Session {
         .await
     }
 
-    async fn apply(&mut self) -> Result<()> {
+    async fn apply(&mut self, attempt: &mut InstallAttempt<'_>) -> Result<()> {
         self.command("Debugger.enable", json!({})).await?;
         let prepared = self.command("Runtime.evaluate", json!({
             "expression": format!("(async()=>{{{PREPARE};return codeyPrepareServiceTier()}})()"),
@@ -102,6 +123,8 @@ impl Session {
         {
             return Ok(());
         }
+        attempt.phase = "bind";
+        attempt.record("bind", None);
         self.bind(&holder).await
     }
 
@@ -176,6 +199,21 @@ fn object_id(response: &Value) -> Result<String> {
 }
 
 pub(super) async fn install(websocket_url: &str) -> Result<()> {
+    let mut attempt = InstallAttempt {
+        target_id: websocket_url.rsplit('/').next().unwrap_or(""),
+        started: Instant::now(),
+        phase: "prepare",
+    };
+    attempt.record("prepare", None);
+    let result = install_attempt(websocket_url, &mut attempt).await;
+    attempt.record(
+        if result.is_ok() { "ready" } else { "failed" },
+        result.as_ref().err(),
+    );
+    result
+}
+
+async fn install_attempt(websocket_url: &str, attempt: &mut InstallAttempt<'_>) -> Result<()> {
     let socket = codey_runtime_core::bridge::connect_cdp_websocket(websocket_url)
         .await
         .context("连接服务档位调试入口失败")?;
@@ -184,7 +222,7 @@ pub(super) async fn install(websocket_url: &str) -> Result<()> {
         id: 0,
         breakpoint: None,
     };
-    let result = tokio::time::timeout(Duration::from_secs(15), session.apply())
+    let result = tokio::time::timeout(Duration::from_secs(15), session.apply(attempt))
         .await
         .context("服务档位补偿超时")
         .and_then(|result| result);

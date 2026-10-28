@@ -261,10 +261,29 @@ pub fn prepare_injection_scripts(
             "service-tier",
             "服务档位兼容",
             service_tier::LOADER,
-            r#"(() => {
+            r#"(async () => {
               const state = window.__codeyServiceTierStatus;
-              if (state?.status === "ready") return "服务档位读取与模型校验已应用";
-              if (state?.status === "failed") throw new Error(state.error);
+              try {
+                const urls = [...new Set([...document.querySelectorAll('script[src],link[rel="modulepreload"][href]')]
+                  .map(element => element.src || element.href)
+                  .concat(performance.getEntriesByType("resource").map(entry => entry.name))
+                  .filter(url => /\/app-initial[^/]*\.js(?:[?#]|$)/.test(url)))];
+                if (urls.length === 1) {
+                  const module = await import(urls[0]);
+                  const readers = [...new Set(Object.values(module))].filter(value =>
+                    typeof value === "function" && value.__codeyServiceTier === 1
+                    && value.name === "codeyReadServiceTier");
+                  if (readers.length === 1) {
+                    if (state) { state.status = "ready"; delete state.error; }
+                    return "服务档位读取与模型校验已应用";
+                  }
+                }
+              } catch (error) {
+                throw new Error(state?.error || String(error));
+              }
+              if (state?.status === "failed" || state?.status === "ready") {
+                throw new Error(state.error || "服务档位读取函数或安装标记不存在");
+              }
               return "";
             })()"#.to_string(),
             Internal,
@@ -1354,12 +1373,13 @@ fn injection_status_snapshot_script(descriptors: &[InjectionScriptDescriptor]) -
         r#"(async () => {{
   const registry = window.__codeyInjectionStatus || Object.create(null);
   const probes = {probes};
-  const verify = () => {{
+  const verify = async () => {{
     for (const [id, probe] of Object.entries(probes)) {{
       const entry = registry[id];
-      if (!entry || !["executed", "effective", "inactive"].includes(entry.status)) continue;
+      if (!entry || (!["executed", "effective", "inactive"].includes(entry.status)
+        && !(id === "service-tier" && entry.status === "failed"))) continue;
       try {{
-        const evidence = probe();
+        const evidence = await probe();
         const structured = evidence && typeof evidence === "object"
           && Object.prototype.hasOwnProperty.call(evidence, "effective");
         const effective = structured ? evidence.effective === true : Boolean(evidence);
@@ -1367,11 +1387,13 @@ fn injection_status_snapshot_script(descriptors: &[InjectionScriptDescriptor]) -
         const detail = structured ? evidence.detail : evidence;
         if (effective) {{
           entry.status = "effective";
+          if (id === "service-tier") delete entry.error;
         }} else if (inactive) {{
           entry.status = "inactive";
         }}
         if (detail) entry.detail = String(detail);
       }} catch (error) {{
+        if (id === "service-tier" && entry.status === "failed" && entry.error) continue;
         entry.status = "failed";
         entry.error = String(error instanceof Error
           ? `${{error.name}}: ${{error.message}}`
@@ -1381,11 +1403,11 @@ fn injection_status_snapshot_script(descriptors: &[InjectionScriptDescriptor]) -
   }};
   const hasPendingProbe = () => Object.keys(probes)
     .some((id) => registry[id]?.status === "executed");
-  verify();
+  await verify();
   for (const delay of [50, 200, 750]) {{
     if (!hasPendingProbe()) break;
     await new Promise((resolve) => setTimeout(resolve, delay));
-    verify();
+    await verify();
   }}
   return JSON.stringify(Object.values(registry));
 }})()"#

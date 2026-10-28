@@ -11,6 +11,52 @@ const planner = await readFile(new URL("../backend/src/cdp/service_tier.js", imp
 const plan = (source) => runInNewContext(`${planner};codeyServiceTierExpression`)(source);
 const native = `${shared};${fixture};const Xi=Xat,Tr=Uat,We=Wat,Lee=Yat;`;
 
+const cdp = await readFile(new URL("../backend/src/cdp.rs", import.meta.url), "utf8");
+const tierProbe = cdp.match(/service_tier::LOADER,\s*r#"([\s\S]*?)"#/)[1];
+const snapshot = cdp.match(/fn injection_status_snapshot_script[\s\S]*?r#"([\s\S]*?)"#/)[1]
+  .replaceAll("{{", "{").replaceAll("}}", "}")
+  .replace("{probes}", `{"service-tier":()=>(${tierProbe}),other:()=>{throw Error('must not run')}}`)
+  .replaceAll("{MAX_INJECTION_ERROR_CHARS}", "500");
+
+for (const [name, source, installed] of [
+  ["installed", "function codeyReadServiceTier(){};codeyReadServiceTier.__codeyServiceTier=1;export {codeyReadServiceTier}", true],
+  ["missing marker", "export function codeyReadServiceTier(){}", false],
+  ["missing reader", "export const other={__codeyServiceTier:1}", false],
+  ["wrong reader", "function other(){};other.__codeyServiceTier=1;export {other}", false],
+  ["module error", "throw Error('module unavailable')", false],
+]) {
+  test(`failed service-tier refresh checks actual installation: ${name}`, async () => {
+    const url = `data:text/javascript,${encodeURIComponent(source)}#/app-initial-test.js`;
+    const window = {
+      __codeyServiceTierStatus: {status: "failed", error: "original prepare failure"},
+      __codeyInjectionStatus: {
+        "service-tier": {id: "service-tier", status: "failed", error: "original prepare failure"},
+        other: {id: "other", status: "failed", error: "unrelated"},
+      },
+    };
+    const document = {querySelectorAll: () => [{src: url}]};
+    const run = new Function("window", "document", "performance", `return ${snapshot}`);
+    await run(window, document, {getEntriesByType: () => []});
+    const entry = window.__codeyInjectionStatus["service-tier"];
+    assert.equal(entry.status, installed ? "effective" : "failed");
+    assert.equal(window.__codeyServiceTierStatus.status, installed ? "ready" : "failed");
+    if (installed) assert.equal(entry.error, undefined);
+    else assert.equal(entry.error, "original prepare failure");
+    assert.equal(window.__codeyInjectionStatus.other.error, "unrelated");
+  });
+}
+
+test("refresh rejects a saved ready state without the installed reader", async () => {
+  const window = {
+    __codeyServiceTierStatus: {status: "ready"},
+    __codeyInjectionStatus: {"service-tier": {id: "service-tier", status: "effective"}},
+  };
+  const run = new Function("window", "document", "performance", `return ${snapshot}`);
+  await run(window, {querySelectorAll: () => []}, {getEntriesByType: () => []});
+  assert.equal(window.__codeyInjectionStatus["service-tier"].status, "failed");
+  assert.match(window.__codeyInjectionStatus["service-tier"].error, /读取函数或安装标记不存在/);
+});
+
 test("native independent tier reads and selection share model validation", async () => {
   const expression = plan(fixture);
   const env = serviceTierEnvironment();
