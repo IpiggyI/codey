@@ -111,6 +111,8 @@ test("desktop release jobs reuse prebuilt assets and compile only release binari
 
 test("local releases run the same locked Rust checks", () => {
   const releaseScript = fs.readFileSync(new URL("../scripts/release.mjs", import.meta.url), "utf8");
+  assert.match(releaseScript, /\["update", "--workspace"\]/);
+  assert.doesNotMatch(releaseScript, /generate-lockfile/);
   assert.match(releaseScript, /\["fmt", "--all", "--", "--check"\]/);
   assert.match(releaseScript, /\["test", "--workspace", "--locked"\]/);
   assert.match(releaseScript, /\["clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"\]/);

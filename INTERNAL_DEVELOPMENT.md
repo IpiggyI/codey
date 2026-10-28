@@ -212,6 +212,8 @@ macOS 本地调试未签名安装包时，确认来源后可用 `xattr -dr com.a
 
     pnpm run release -- <version>
 
+发布脚本只用 `cargo update --workspace` 更新 Cargo.lock 中工作区各 crate 的版本，第三方依赖版本保持不变。
+
 默认要求工作区干净。确实要把现有改动纳入发布时使用 `--include-existing-changes`；只在本地创建标签时使用 `--no-push`。
 
 `v*` 标签会并行打出 macOS arm64 与 Windows x64 安装包，并同时运行 macOS 检查，然后把安装包附加到 GitHub Release。本分叉不向客户端分发在线更新：安装包只通过 GitHub Release 和 Actions 产物提供，客户端启动和控制台都不会检查、下载或安装更新。发布标签版本必须与项目版本一致。分叉的版本号自行递增，不跟随上游。本地把上游标签取到 `upstream/` 标签命名空间（`remote.upstream.fetch` 含 `+refs/tags/*:refs/tags/upstream/*`，`remote.upstream.tagopt` 为 `--no-tags`），因此分叉标签不会与上游标签撞名。每次发布在 README 和 GitHub Release 说明里写明这次同步到的上游版本。
