@@ -105,7 +105,7 @@ impl CodexLaunchProxy {
     }
 }
 
-/// `NO_PROXY` 保留已有绕过规则并合并回环地址，保证本地路由、CDP 与 CLI
+/// `NO_PROXY` 保留已有绕过规则并合并回环地址，保证 CDP 与 CLI
 /// 握手始终直连。
 fn proxy_environment(url: &str) -> Vec<(String, String)> {
     let mut environment = vec![
@@ -145,7 +145,7 @@ fn proxy_environment(url: &str) -> Vec<(String, String)> {
     environment
 }
 
-/// 保留已有绕过规则并追加回环地址。本地路由、CDP 和 CLI 握手终结在
+/// 保留已有绕过规则并追加回环地址。CDP 和 CLI 握手终结在
 /// Codey 的回环监听上，这一跳必须留在代理之外。
 pub(crate) fn merge_loopback_no_proxy(existing: Option<&str>) -> String {
     const LOOPBACK: [&str; 3] = ["127.0.0.1", "localhost", "::1"];

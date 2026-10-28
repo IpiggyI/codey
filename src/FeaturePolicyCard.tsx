@@ -372,7 +372,7 @@ const LAUNCH_PROXY_TOOLTIP_CONTENT = (
       </div>
     </div>
     <div className="text-[11px] opacity-80">
-      客户端与 app-server 经此代理访问网络，重启 Codex 后生效；本地路由与额度查询不受影响。
+      客户端与 app-server 经此代理访问网络，重启 Codex 后生效；Codey 与 Codex 之间的本机连接和额度查询不经过代理。
     </div>
   </div>
 );
@@ -443,7 +443,7 @@ function FeaturePolicyCardComponent({
                   </Button>
                 </Tooltip>
               </div>
-              <p>客户端与 app-server 经此代理访问网络，重启 Codex 后生效；本地路由与额度查询不受影响。</p>
+              <p>客户端与 app-server 经此代理访问网络，重启 Codex 后生效；Codey 与 Codex 之间的本机连接和额度查询不经过代理。</p>
             </div>
           </div>
         </div>
