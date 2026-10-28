@@ -84,6 +84,8 @@ export type Config = {
   showAccountUsageInHeader: boolean;
   quotaUnlockEnabled: boolean;
   cacheValidMinutes: number;
+  selectedChannelId: string | null;
+  defaultModelsByChannel: Record<string, string>;
 };
 
 export type OfficialModelState = {
@@ -163,6 +165,7 @@ export type RuntimeStatus = {
   crashpadDiskProtectionActive?: boolean;
   traceLogStats?: TraceLogStats;
   crashpadPendingStats?: CrashpadPendingStats;
+  channelNotice?: string | null;
 };
 
 export type PluginMarketplaceStatus = {
@@ -189,6 +192,32 @@ export type CurrentProviderSnapshot = {
   wireApi: string;
   usesOfficialAccountAuth: boolean;
   ownershipKey: string;
+  channelId?: string;
+};
+
+export type ChannelEntry = {
+  id: string;
+  kind: "provider" | "official";
+  providerId: string;
+  displayName: string;
+  defaultModel: string | null;
+  current: boolean;
+  available: boolean;
+  unavailableReason: string | null;
+};
+
+export type ChannelList = {
+  channels: ChannelEntry[];
+  selectedChannelId: string | null;
+  effectiveProviderId: string;
+  notice: string | null;
+};
+
+export type ChannelMutationResult = {
+  status: "ok";
+  channelList: ChannelList;
+  settingsRevision: number;
+  restartRequired: boolean;
 };
 
 export type ProviderStatus = {

@@ -8,6 +8,7 @@ import {
 } from "@tabler/icons-react";
 
 import type {
+  ChannelList,
   Config,
   CurrentProviderSnapshot,
   ModelContextConfig,
@@ -28,6 +29,7 @@ import {
   Input,
   Switch,
 } from "./components/ui";
+import { ChannelSection } from "./ChannelSection";
 import { ModelOrderEditor } from "./components/ModelOrderEditor";
 import { modelIdsEqual, modelKey, uniqueModelIds } from "./modelIds";
 import { globalDefaultForProvider } from "./modelRoutes";
@@ -87,6 +89,14 @@ type ModelSectionProps = {
   onSaveModelOrder: (models: string[], mode: "official" | "manual") => Promise<boolean>;
   routerSessionDiagnosis: RouterSessionDiagnosis | null;
   onMigrateRouterSessions: (targetProvider: string) => void;
+  channelList: ChannelList | null;
+  channelLoadError: string | null;
+  channelActionError: string | null;
+  channelVersionConflict: boolean;
+  channelNotice: string | null;
+  onSelectChannel: (channelId: string | null, defaultModel?: string) => void;
+  onSetChannelDefaultModel: (channelId: string, model: string) => void;
+  onRefreshChannels: () => void;
 };
 
 type RouteModelGroup = {
@@ -115,6 +125,14 @@ function ModelSectionComponent({
   onSaveModelOrder,
   routerSessionDiagnosis,
   onMigrateRouterSessions,
+  channelList,
+  channelLoadError,
+  channelActionError,
+  channelVersionConflict,
+  channelNotice,
+  onSelectChannel,
+  onSetChannelDefaultModel,
+  onRefreshChannels,
 }: ModelSectionProps) {
   const [officialEditorOpen, setOfficialEditorOpen] = useState(false);
   const [officialModelDraft, setOfficialModelDraft] = useState<string[]>([]);
@@ -252,6 +270,20 @@ function ModelSectionComponent({
           </Button>
         </div>
       </div>
+
+      <ChannelSection
+        channelList={channelList}
+        loadError={channelLoadError}
+        actionError={channelActionError}
+        versionConflict={channelVersionConflict}
+        notice={channelNotice}
+        modelOptions={modelGroups[0]?.models ?? []}
+        popupContainer={popupContainer}
+        disabled={dirty || isBusy}
+        onSelect={onSelectChannel}
+        onSetDefaultModel={onSetChannelDefaultModel}
+        onRefresh={onRefreshChannels}
+      />
 
       {currentProviderSnapshot ? (
         <aside

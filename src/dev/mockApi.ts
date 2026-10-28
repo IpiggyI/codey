@@ -1,7 +1,14 @@
 // Development-only preview data and a mock Codey bridge API. Loaded from
 // main.tsx via a dynamic import that only exists in Vite dev builds, so this
 // module never ships in the production overlay.
-import type { ProviderStatus, Config, ConfigApplyStatus, ModelState } from "../App.types";
+import type {
+  ChannelEntry,
+  ChannelList,
+  ProviderStatus,
+  Config,
+  ConfigApplyStatus,
+  ModelState,
+} from "../App.types";
 import {
   AUTO_REVIEW_MODEL,
   includesModelId,
@@ -26,6 +33,7 @@ if (import.meta.env.DEV) {
         ? "windows"
         : "macos";
     const configRepairPreview = new URLSearchParams(window.location.search).get("configRepair");
+    const channelFallbackPreview = new URLSearchParams(window.location.search).get("channelFallback") === "1";
     const previewEndpoints = {
       primary: "https://primary.example.invalid/v1",
       backup: "https://backup.example.invalid/v1",
@@ -206,6 +214,9 @@ if (import.meta.env.DEV) {
       showAccountUsageInHeader: true,
       quotaUnlockEnabled: true,
       cacheValidMinutes: 30,
+      // ?channelFallback=1 预览所选渠道已从用户配置中删除时的回退提示。
+      selectedChannelId: channelFallbackPreview ? "provider:removed" : null,
+      defaultModelsByChannel: {},
     };
     let previewModelState: ModelState = {
       officialModels: previewOfficialModels.map((model) => ({
@@ -239,14 +250,61 @@ if (import.meta.env.DEV) {
     const previewCurrentProviderSnapshot = () => {
       const profile = activePreviewProfile();
       const id = profile ? routeProviderId(profile) : "openai";
+      // 没有有效所选渠道时省略 channelId，不发 null。
+      const selected = previewConfig.selectedChannelId;
+      const channelId = previewChannelCatalog.some((entry) => entry.id === selected && entry.available)
+        ? selected
+        : null;
       return {
         id,
         baseUrl: (profile?.baseUrl || "").replace(/\/+$/, ""),
         wireApi: "responses",
         usesOfficialAccountAuth: profile?.authMode === "officialAccount",
         ownershipKey: id,
+        ...(channelId ? { channelId } : {}),
       };
     };
+    const CHANNEL_FALLBACK_NOTICE = "所选渠道已不可用，已回退到用户配置的默认 provider。";
+    const channelVersionConflictMessage = "Codey 设置已被其他操作更新，请刷新后重试";
+    // 预览用的渠道目录：两个 provider、一个缺少密钥的 provider、官方账号和一个无法选择的官方占位。
+    const previewChannelCatalog = [
+      { id: "provider:primary", kind: "provider", providerId: "primary", displayName: "主中转", available: true, unavailableReason: null },
+      { id: "provider:backup", kind: "provider", providerId: "backup", displayName: "备用中转 (Claude)", available: true, unavailableReason: null },
+      { id: "provider:offline", kind: "provider", providerId: "offline", displayName: "离线中转", available: false, unavailableReason: "环境变量 OFFLINE_API_KEY 未设置" },
+      { id: "official:preview-account", kind: "official", providerId: "openai", displayName: "官方账号", available: true, unavailableReason: null },
+      { id: "official:unavailable", kind: "official", providerId: "openai", displayName: "官方账号（未登录）", available: false, unavailableReason: "没有可用的官方账号登录" },
+    ] as const;
+    // 预览里“正在运行的 Codex”所用的渠道与模型，重启后与当前渠道对齐。
+    const previewChannelRunKey = () => {
+      const list = previewChannelList();
+      const current = list.channels.find((entry) => entry.current);
+      return `${current?.id ?? ""}|${current?.defaultModel ?? ""}`;
+    };
+    let previewChannelRunning = "";
+    const previewChannelList = (): ChannelList => {
+      const selected = previewConfig.selectedChannelId;
+      const found = previewChannelCatalog.find((entry) => entry.id === selected);
+      const effective = found ?? previewChannelCatalog[0];
+      const channels: ChannelEntry[] = previewChannelCatalog.map((entry) => ({
+        ...entry,
+        defaultModel: previewConfig.defaultModelsByChannel[entry.id] ?? null,
+        current: entry.id === effective.id,
+      }));
+      return {
+        channels,
+        selectedChannelId: selected,
+        effectiveProviderId: effective.providerId,
+        notice: selected !== null && !found ? CHANNEL_FALLBACK_NOTICE : null,
+      };
+    };
+    previewChannelRunning = previewChannelRunKey();
+    const channelRestartRequired = () => previewChannelRunKey() !== previewChannelRunning;
+    const previewChannelMutationResult = () => ({
+      status: "ok",
+      channelList: previewChannelList(),
+      settingsRevision: previewConfig.settingsRevision,
+      restartRequired: channelRestartRequired(),
+    });
     const previewModelStateForProfile = (profile: PreviewProfile): ModelState => {
       const providerId = routeProviderId(profile);
       const official = profile.authMode === "officialAccount";
@@ -415,8 +473,9 @@ if (import.meta.env.DEV) {
           appVersion: "0.2.0",
           codexAppVersion: "26.601.21317",
           clientPlatform: previewClientPlatform,
-          restartRequired: false,
+          restartRequired: channelRestartRequired(),
           restartInProgress: false,
+          channelNotice: previewChannelList().notice,
           activeProfileId: previewActiveProfileId,
           activeProfileName:
             previewRoutes.find(
@@ -583,6 +642,9 @@ if (import.meta.env.DEV) {
             clearApiKey: false,
           },
           settingsRevision: previewConfig.settingsRevision + 1,
+          // 普通保存不改渠道字段，渠道变更走专用命令。
+          selectedChannelId: previewConfig.selectedChannelId,
+          defaultModelsByChannel: previewConfig.defaultModelsByChannel,
         };
         refreshPreviewModelState();
         previewConfigApply = {
@@ -601,6 +663,67 @@ if (import.meta.env.DEV) {
           },
           restartRequired: false,
         };
+      }
+      if (command === "list_channels") return previewChannelList();
+      if (command === "set_channel_default_model" || command === "select_channel") {
+        const failed = (message: string) => ({ status: "failed", message });
+        // 参数校验与错误文案对齐后端 argument()，包括 serde 的类型错误描述。
+        const describe = (value: unknown) =>
+          value === null ? "null"
+            : typeof value === "string" ? `string "${value}"`
+            : typeof value === "boolean" ? `boolean \`${value}\``
+            : typeof value === "number" ? (Number.isInteger(value) ? `integer \`${value}\`` : `floating point \`${value}\``)
+            : Array.isArray(value) ? "sequence" : "map";
+        const argumentError = (name: string, detail: string) => failed(`参数 ${name} 无效：${detail}`);
+        if (!("expectedRevision" in args)) return failed("缺少参数：expectedRevision");
+        const revision = args.expectedRevision;
+        if (typeof revision !== "number" || !Number.isInteger(revision)) {
+          return argumentError("expectedRevision", `invalid type: ${describe(revision)}, expected u64`);
+        }
+        if (revision < 0) {
+          return argumentError("expectedRevision", `invalid value: integer \`${revision}\`, expected u64`);
+        }
+        if (revision !== previewConfig.settingsRevision) {
+          return failed(channelVersionConflictMessage);
+        }
+        if (!("channelId" in args)) return failed("缺少参数：channelId");
+        const rawId = args.channelId;
+        const setDefault = command === "set_channel_default_model";
+        if (typeof rawId !== "string" && !(rawId === null && !setDefault)) {
+          return argumentError("channelId", `invalid type: ${describe(rawId)}, expected a string`);
+        }
+        const channelId = rawId as string | null;
+        const entry = previewChannelCatalog.find((candidate) => candidate.id === channelId && candidate.available);
+        if (setDefault) {
+          if (!("model" in args)) return failed("缺少参数：model");
+          if (typeof args.model !== "string") {
+            return argumentError("model", `invalid type: ${describe(args.model)}, expected a string`);
+          }
+          const model = args.model.trim();
+          if (!model) return failed("渠道默认模型不能为空");
+          if (!entry) return failed("所选渠道不可用");
+          previewConfig = {
+            ...previewConfig,
+            settingsRevision: previewConfig.settingsRevision + 1,
+            defaultModelsByChannel: { ...previewConfig.defaultModelsByChannel, [entry.id]: model },
+          };
+          return previewChannelMutationResult();
+        }
+        if (channelId !== null) {
+          if (!entry) return failed("所选渠道不可用");
+          if (!previewConfig.defaultModelsByChannel[entry.id]?.trim()) {
+            return failed("请先为渠道设置默认模型");
+          }
+        }
+        previewConfig = {
+          ...previewConfig,
+          settingsRevision: previewConfig.settingsRevision + 1,
+          selectedChannelId: channelId,
+        };
+        const effectiveProviderId = previewChannelList().effectiveProviderId;
+        previewActiveProfileId = previewRoutes.find((profile) => routeProviderId(profile) === effectiveProviderId)?.id
+          ?? "primary";
+        return previewChannelMutationResult();
       }
       if (command === "sync_current_provider") {
         return {
@@ -869,6 +992,7 @@ if (import.meta.env.DEV) {
         };
       }
       if (command === "restart_codey") {
+        previewChannelRunning = previewChannelRunKey();
         return { status: "restarting" };
       }
       if (command === "codey_router_session_diagnosis") {

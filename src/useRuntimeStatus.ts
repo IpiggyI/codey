@@ -25,6 +25,8 @@ function reportStatusRefreshFailure(error: unknown) {
 type UseRuntimeStatusOptions = {
   active: boolean;
   embedded: boolean;
+  // 每个被接纳的运行状态响应（含后台轮询）都会调用一次，过期或未激活的响应不会。
+  onStatusResponse?: (next: RuntimeStatus) => void;
 };
 
 type RuntimeStatusFlight = {
@@ -35,6 +37,7 @@ type RuntimeStatusFlight = {
 export function useRuntimeStatus({
   active,
   embedded,
+  onStatusResponse,
 }: UseRuntimeStatusOptions) {
   const [status, setStatus] = useState<RuntimeStatus>({ running: false });
   const [restartStatusError, setRestartStatusError] = useState<string | null>(null);
@@ -47,6 +50,8 @@ export function useRuntimeStatus({
   const requestGenerationRef = useRef(0);
   const activeRef = useRef(active);
   activeRef.current = active;
+  const onStatusResponseRef = useRef(onStatusResponse);
+  onStatusResponseRef.current = onStatusResponse;
 
   const requestRuntimeStatus = useCallback(
     (shouldRefreshInjectionStatus: boolean): Promise<RuntimeStatus> => {
@@ -65,6 +70,7 @@ export function useRuntimeStatus({
             configApplyRef.current = reconcileConfigApply(configApplyRef.current, next.configApply);
             setStatus((current) => reconcileRuntimeStatus(current, next));
             setRestartStatusError(null);
+            onStatusResponseRef.current?.(next);
           }
           return next;
         });

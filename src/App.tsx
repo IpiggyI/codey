@@ -25,6 +25,7 @@ import {
 import type { NotificationChannel } from "./notifications";
 import { errorText, withTimeout } from "./appUtils";
 import { formatBytes } from "./formatters";
+import { createChannelController, noticeAfterChannelChange, type ChannelOutcome } from "./channels";
 import { modelIdsEqual, uniqueModelIds } from "./modelIds";
 import { globalDefaultForProvider } from "./modelRoutes";
 import { CodeyBrandMark, SettingsModalShell } from "./SettingsModalShell";
@@ -55,6 +56,7 @@ import {
 import { useStableEvent } from "./useStableEvent";
 import type {
   AppProps,
+  ChannelList,
   ConfigApplyStatus,
   CurrentProviderSnapshot,
   ProviderStatus,
@@ -65,12 +67,15 @@ import type {
   ModelState,
   PluginMarketplaceStatus,
   RouterSessionDiagnosis,
+  RuntimeStatus,
   TraceLogCleanup,
 } from "./App.types";
 import { Badge, Button } from "./components/ui";
 
 const Check = IconCheck;
 const X = IconX;
+const CHANNEL_RESTART_DESCRIPTION =
+  "渠道已切换，重启 Codex 后新渠道才会生效。当前 Codex 客户端将被关闭并由 Codey 自动重新拉起，正在执行的本地任务会被中断。";
 const extensionRequest: ExtensionTransport = (request) => invoke("codex_extensions", { request });
 const FEEDBACK_GROUP_QR_BASE_URL =
   "https://pub-2d17a6a8bc22426a92e297a59f55ccc3.r2.dev/qr.png";
@@ -127,11 +132,16 @@ export function App({
   const [loadFailed, setLoadFailed] = useState(false);
   const persistedConfigRef = useRef<Config | null>(null);
   const loadGenerationRef = useRef(0);
+  // 渠道控制器在运行状态 hook 之后创建，经稳定事件转交。
+  const handleStatusResponse = useStableEvent(
+    (next: RuntimeStatus) => channelController.noteStatusNotice(next.channelNotice ?? null),
+  );
   const { status, setStatus, refreshStatus, refreshStatusForLoad,
     restartStatusError, setRestartStatusError, acceptConfigApply, configApplyError, retryConfigApply } =
     useRuntimeStatus({
       active: !embedded || modalVisible,
       embedded,
+      onStatusResponse: handleStatusResponse,
     });
   const [pluginMarketplaceStatus, setPluginMarketplaceStatus] =
     useState<PluginMarketplaceStatus | null>(null);
@@ -141,6 +151,12 @@ export function App({
   );
   const [currentProviderSnapshot, setCurrentProviderSnapshot] =
     useState<CurrentProviderSnapshot | null>(null);
+  const [channelList, setChannelList] = useState<ChannelList | null>(null);
+  const [channelNotice, setChannelNotice] = useState<string | null>(null);
+  const [channelLoadError, setChannelLoadError] = useState<string | null>(null);
+  const [channelActionError, setChannelActionError] = useState<string | null>(null);
+  const [channelVersionConflict, setChannelVersionConflict] = useState(false);
+  const [restartPromptPending, setRestartPromptPending] = useState(false);
   const [routerSessionDiagnosis, setRouterSessionDiagnosis] =
     useState<RouterSessionDiagnosis | null>(null);
   const [fastContextToolsStatus, setFastContextToolsStatus] =
@@ -264,12 +280,34 @@ export function App({
     setNotice,
   });
 
+  const adoptChannelConfig = useStableEvent(
+    (next: Config, restartRequired: boolean) => applyCommandResult({ config: next, restartRequired }),
+  );
+  const channelController = useMemo(
+    () => createChannelController({
+      call: invoke,
+      readConfig: () => persistedConfigRef.current,
+      adopt: adoptChannelConfig,
+      setChannelList,
+      setChannelNotice,
+      askRestart: () => setRestartPromptPending(true),
+    }),
+    [adoptChannelConfig],
+  );
+
   useEffect(() => {
     void load();
     return () => {
       loadGenerationRef.current += 1;
     };
   }, []);
+
+  // 渠道切换要求重启时，等操作结束、界面用上最新状态后再走既有的重启确认。
+  useEffect(() => {
+    if (!restartPromptPending || isBusy) return;
+    setRestartPromptPending(false);
+    askRestartCodex(CHANNEL_RESTART_DESCRIPTION);
+  }, [restartPromptPending, isBusy]);
 
   async function load() {
     const generation = ++loadGenerationRef.current;
@@ -310,6 +348,7 @@ export function App({
         refreshStatusForLoad(),
         refreshPluginMarketplaceStatus(),
         refreshRouterSessionDiagnosis(),
+        refreshChannels(),
       ]);
       if (!current()) return;
       const lastMigration = diagnosis?.lastMigration;
@@ -332,6 +371,68 @@ export function App({
       setLoadFailed(true);
       setNotice({ tone: "error", text: errorText(error) });
     }
+  }
+
+  function reportChannelOutcome(outcome: ChannelOutcome) {
+    if (outcome.kind === "stale") return false;
+    if (outcome.kind === "failed") {
+      setChannelActionError(outcome.message);
+      setChannelVersionConflict(outcome.conflict);
+      setNotice({ tone: "error", text: outcome.message });
+      return false;
+    }
+    setChannelActionError(null);
+    setChannelVersionConflict(false);
+    return true;
+  }
+
+  async function refreshChannels() {
+    const outcome = await channelController.refresh();
+    if (outcome.kind === "failed") {
+      setChannelLoadError(outcome.message);
+    } else if (outcome.kind === "applied") {
+      setChannelLoadError(null);
+      setChannelActionError(null);
+      setChannelVersionConflict(false);
+    }
+  }
+
+  // 渠道变更后当前 provider 随之变化，重新读取一次以免页面显示旧 provider；失败由调用方提示。
+  async function refreshProviderAfterChannelChange() {
+    const result = await invoke<
+      ConfigCommandResult & { currentProviderSnapshot?: CurrentProviderSnapshot | null }
+    >("load_codey_config");
+    if (!applyRouteResult(result)) return;
+    if (result.currentProviderSnapshot === undefined) setCurrentProviderSnapshot(null);
+    await refreshStatus().catch(() => undefined);
+  }
+
+  async function switchChannel(channelId: string | null, defaultModel?: string) {
+    if (dirty || isBusy) return;
+    await runOperation("switch-channel", async () => {
+      const outcome = await channelController.select(channelId, defaultModel);
+      if (!reportChannelOutcome(outcome)) return;
+      setNotice(await noticeAfterChannelChange(refreshProviderAfterChannelChange, {
+        tone: "info",
+        text: outcome.kind === "applied" && outcome.restartRequired
+          ? "已切换渠道，重启 Codex 后生效"
+          : "已切换渠道",
+      }));
+    });
+  }
+
+  async function saveChannelDefaultModel(channelId: string, model: string) {
+    if (dirty || isBusy) return;
+    await runOperation("save-channel-default-model", async () => {
+      const outcome = await channelController.setDefaultModel(channelId, model);
+      if (!reportChannelOutcome(outcome)) return;
+      setNotice(await noticeAfterChannelChange(
+        refreshProviderAfterChannelChange,
+        outcome.kind === "applied" && outcome.restartRequired
+          ? { tone: "info", text: "已保存渠道默认模型，重启 Codex 后生效" }
+          : { tone: "success", text: "已保存渠道默认模型" },
+      ));
+    });
   }
 
   async function refreshRouterSessionDiagnosis() {
@@ -494,6 +595,7 @@ export function App({
       }>("sync_current_provider");
       if (!applyCommandResult(result)) return;
       if (result.currentProviderSnapshot === undefined) setCurrentProviderSnapshot(null);
+      void refreshChannels();
       setNotice({
         tone: result.restartRequired ? "info" : "success",
         text: result.restartRequired
@@ -670,6 +772,8 @@ export function App({
         restartRequired?: boolean;
       }>("save_default_model", { model });
       if (!applyRouteResult(result)) return;
+      // 已选渠道时该命令写入渠道默认模型，渠道列表随之刷新。
+      void refreshChannels();
       if (result.configApply) {
         setNotice(configApplyNotice(result.configApply));
         return;
@@ -745,7 +849,9 @@ export function App({
     });
   }
 
-  function askRestartCodex() {
+  function askRestartCodex(
+    description = "当前 Codex 客户端将被关闭并由 Codey 自动重新拉起，正在执行的本地任务会被中断。",
+  ) {
     if (restartStatusError) {
       void runOperation("restart", async () => {
         const next = await refreshStatus();
@@ -761,8 +867,7 @@ export function App({
     setConfirmation({
       action: "restart",
       title: "重启 Codex？",
-      description:
-        "当前 Codex 客户端将被关闭并由 Codey 自动重新拉起，正在执行的本地任务会被中断。",
+      description,
       confirmLabel: "重启 Codex",
       run: () => void restartCodex(),
     });
@@ -1002,7 +1107,7 @@ export function App({
   const handlePrepareComputerUse = useStableEvent(
     () => void prepareComputerUse(),
   );
-  const handleRestartCodex = useStableEvent(askRestartCodex);
+  const handleRestartCodex = useStableEvent(() => askRestartCodex());
   const handleConfigChange = useStableEvent(editConfig);
   const handleAddNotificationChannel = useStableEvent(addNotificationChannel);
   const handleNotificationChannelChange = useStableEvent(
@@ -1040,6 +1145,15 @@ export function App({
   const handleSetRouteDefaultModel = useStableEvent((model: string) => {
     void setRouteDefaultModel(model);
   });
+  const handleSelectChannel = useStableEvent(
+    (channelId: string | null, defaultModel?: string) => void switchChannel(channelId, defaultModel),
+  );
+  const handleSetChannelDefaultModel = useStableEvent(
+    (channelId: string, model: string) => void saveChannelDefaultModel(channelId, model),
+  );
+  const handleRefreshChannels = useStableEvent(
+    () => void runOperation("reload-config", load),
+  );
   const handleClearTraceLogs = useStableEvent(askClearTraceLogs);
   const handleRefreshTraceLogStats = useStableEvent(
     () => void refreshTraceLogStats(),
@@ -1379,6 +1493,14 @@ export function App({
               onSaveModelOrder={saveModelOrder}
               routerSessionDiagnosis={routerSessionDiagnosis}
               onMigrateRouterSessions={askMigrateRouterSessions}
+              channelList={channelList}
+              channelLoadError={channelLoadError}
+              channelActionError={channelActionError}
+              channelVersionConflict={channelVersionConflict}
+              channelNotice={channelNotice}
+              onSelectChannel={handleSelectChannel}
+              onSetChannelDefaultModel={handleSetChannelDefaultModel}
+              onRefreshChannels={handleRefreshChannels}
             />
           ),
           prompt: (

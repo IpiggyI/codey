@@ -25,6 +25,7 @@ test("official settings use effective availability and save only the displayed c
     "@tabler/icons-react": components,
     "@heroui/react": components,
     "./components/ui": components,
+    "./ChannelSection": components,
     "./components/ModelOrderEditor": components,
     "./modelIds": await loadTypeScriptModule(new URL("../src/modelIds.ts", import.meta.url)),
     "./modelRoutes": { globalDefaultForProvider: (config) => config.defaultModel },
