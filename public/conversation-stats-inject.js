@@ -192,8 +192,6 @@
       ${styleScope} .codey-cs-heading { display: flex; align-items: center; gap: 8px; padding-bottom: 11px; margin-bottom: 10px; border-bottom: 1px solid var(--cs-line); }
       ${styleScope} .codey-cs-heading strong { font-size: 13px; font-weight: 550; white-space: nowrap; }
       ${styleScope} .codey-cs-heading-total { margin-left: auto; font-size: 13px; text-align: right; }
-      ${styleScope} .codey-cs-section { margin: 8px 0 2px; padding-top: 8px; border-top: 1px solid var(--cs-line); color: var(--cs-muted); font-size: 11px; }
-      ${styleScope} .codey-cs-heading + .codey-cs-section { margin-top: 0; padding-top: 0; border-top: 0; }
       ${styleScope} dl { margin: 0; }
       ${styleScope} .codey-cs-detail-row { display: flex; justify-content: space-between; gap: 14px; padding: 4px 0; }
       ${styleScope} dt { color: var(--cs-muted); }
@@ -206,18 +204,20 @@
     document.documentElement.appendChild(style);
   };
 
-  // 卡片按表定稿：每张最多七行，分节标题不计行。
+  // 卡片按表定稿：每张一个无分节标题的行列表，同类项相邻，时间相关项放在一起。
   const cards = [
     ["activity", "最近一轮统计", [
-      ["", [["modelDuration", "模型用时"], ["toolDuration", "工具调用用时"], ["turnSpeed", "平均速度（本轮）"], ["turnReasoning", "本轮推理"]]],
-      ["最近一次请求", [["requestSpeed", "速度"], ["requestDuration", "用时"]]],
+      ["modelDuration", "模型用时"], ["toolDuration", "工具调用用时"], ["requestDuration", "最近一次用时"],
+      ["turnSpeed", "平均速度（本轮）"], ["requestSpeed", "最近一次速度"], ["turnReasoning", "本轮推理"],
     ]],
     ["tokens", "Token 用量", [
-      ["会话累计", [["sessionCacheRate", "缓存命中"], ["uncachedInputTokens", "未缓存输入"], ["cachedInputTokens", "缓存读取"], ["outputTokens", "输出"]]],
-      ["最近一次请求", [["requestCacheRate", "缓存命中"], ["requestTokens", "未缓存输入 / 输出 / 缓存读取"], ["cacheRemaining", "缓存剩余时间"]]],
+      ["sessionCacheRate", "会话缓存命中"], ["requestCacheRate", "最近一次缓存命中"],
+      ["uncachedInputTokens", "未缓存输入"], ["cachedInputTokens", "缓存读取"], ["outputTokens", "输出"],
     ]],
     ["session", "会话", [
-      ["", [["account", "账号"], ["startedAt", "开始时间"], ["lastReplyAt", "上次回复"], ["context", "上下文"], ["compactionCount", "压缩次数"], ["cost", "会话费用估算"]]],
+      ["account", "账号"], ["startedAt", "开始时间"], ["lastReplyAt", "上次回复"], ["cacheRemaining", "缓存剩余时间"],
+      ["context", "上下文"], ["requestTokens", "最近一次 未缓存 / 输出 / 缓存读取"],
+      ["compactionCount", "压缩次数"], ["cost", "会话费用估算"],
     ]],
   ];
 
@@ -261,7 +261,7 @@
         element.setAttribute("aria-hidden", "true");
         return element;
       };
-      for (const [kind, title, sections] of cards) {
+      for (const [kind, title, fields] of cards) {
         const button = make("button", `codey-cs-summary codey-cs-${kind}-summary`, "", groups);
         button.type = "button";
         button.setAttribute("aria-expanded", "false");
@@ -282,7 +282,7 @@
           refs.cost.hidden = true;
           refs.costSeparator = separator(button);
           refs.costSeparator.hidden = true;
-          refs.compaction = make("span", "codey-cs-metric codey-cs-compaction", "压缩 — 次", button);
+          refs.contextSummary = make("span", "codey-cs-metric codey-cs-context", "上下文 —", button);
         }
         const panel = make("section", "codey-cs-details", "", overlay);
         panel.id = `${barId}-${kind}`;
@@ -296,17 +296,14 @@
           refs.fields.totalTokens = make("span", "codey-cs-heading-total", "—", heading);
           refs.fields.totalTokens.setAttribute("data-field", "totalTokens");
         }
-        for (const [sectionTitle, fields] of sections) {
-          if (sectionTitle) make("div", "codey-cs-section", sectionTitle, panel);
-          const list = make("dl", "", "", panel);
-          for (const [key, label] of fields) {
-            const row = make("div", "codey-cs-detail-row", "", list);
-            row.setAttribute("data-row", key);
-            make("dt", "", label, row);
-            refs.rows[key] = row;
-            refs.fields[key] = make("dd", "", "—", row);
-            refs.fields[key].setAttribute("data-field", key);
-          }
+        const list = make("dl", "", "", panel);
+        for (const [key, label] of fields) {
+          const row = make("div", "codey-cs-detail-row", "", list);
+          row.setAttribute("data-row", key);
+          make("dt", "", label, row);
+          refs.rows[key] = row;
+          refs.fields[key] = make("dd", "", "—", row);
+          refs.fields[key].setAttribute("data-field", key);
         }
         refs.notes[kind] = make("p", `codey-cs-note codey-cs-${kind}-note`, "", panel);
         refs.buttons[kind] = button;
@@ -568,13 +565,16 @@
     setText(refs.fields.startedAt, finite(request?.sessionStartedAt) ? formatDateTime(request.sessionStartedAt) : "—");
     setText(refs.fields.lastReplyAt, request ? formatDateTime(anchor.at) : "—");
     const contextKnown = usage?.contextUsedTokens !== undefined && usage.contextWindowTokens > 0;
+    const contextPercent = contextKnown
+      ? `${decimal((usage.contextUsedTokens / usage.contextWindowTokens) * 100, 1)}%` : "";
     setText(refs.fields.context, contextKnown
-      ? `${decimal((usage.contextUsedTokens / usage.contextWindowTokens) * 100, 1)}% (${formatTokenCount(usage.contextUsedTokens)}/${formatTokenCount(usage.contextWindowTokens)})`
+      ? `${contextPercent} (${formatTokenCount(usage.contextUsedTokens)}/${formatTokenCount(usage.contextWindowTokens)})`
       : "—");
+    const contextSummary = contextKnown ? `上下文 ${contextPercent} · ${formatTokenCount(usage.contextUsedTokens)}` : "上下文 —";
+    setText(refs.contextSummary, contextSummary);
     const compaction = Number.isInteger(request?.compactionCount) && request.compactionCount >= 0
       ? String(request.compactionCount) : "—";
     setText(refs.fields.compactionCount, compaction);
-    setText(refs.compaction, `压缩 ${compaction} 次`);
     // 费用只来自用量通知里的费用字段，不按单价换算。
     const cost = usage?.totalCostUsd;
     const costKnown = cost !== undefined;
@@ -583,7 +583,7 @@
     setHidden(refs.costSeparator, !costKnown);
     setText(refs.fields.cost, costKnown ? `$${cost.toFixed(3)}` : "—");
     setText(refs.cost, costKnown ? `≈$${cost.toFixed(2)}` : "");
-    return { compaction, cost: costKnown ? refs.cost.textContent : "" };
+    return { contextSummary, cost: costKnown ? refs.cost.textContent : "" };
   };
 
   const render = (anchor) => {
@@ -679,10 +679,10 @@
     const activityNote = turn ? "一次提问为一轮，步数为该轮的模型请求次数。" : "暂无可识别的最近一轮。";
     const toolNote = finite(turn?.toolDurationMs) ? "工具调用用时按时间区间合并，并行调用不重复计算。" : "";
     setText(refs.notes.activity, `${pendingNote}${activityNote}${toolNote}${speedNote}。`);
-    setText(refs.notes.tokens, `${pendingNote}${sourceNote}缓存剩余时间按控制台中的缓存有效时间估算。`);
+    setText(refs.notes.tokens, `${pendingNote}${sourceNote}`);
     refs.buttons.activity.setAttribute("aria-label", `会话总轮数 ${count(data.turnCount)} 轮，最近一轮统计 ${count(turn?.stepCount)} 步，本轮平均速度 ${speedText}，${status}。${speedNote}。查看统计详情`);
     refs.buttons.tokens.setAttribute("aria-label", `Token 用量，${scopeLabel} ${refs.total.textContent}，缓存命中 ${rate}，${status}。查看统计详情`);
-    refs.buttons.session.setAttribute("aria-label", `会话，${session.cost ? `费用估算 ${session.cost}，` : ""}压缩 ${session.compaction} 次。查看会话详情`);
+    refs.buttons.session.setAttribute("aria-label", `会话，${session.cost ? `费用估算 ${session.cost}，` : ""}${session.contextSummary}。查看会话详情`);
     bar.dataset.running = running ? "true" : "false";
     bar.dataset.state = state;
     positionPanel();

@@ -338,20 +338,16 @@ const assertExpanded = (env, expanded, kind = "activity") => {
   assert.equal(summary(env, kind).getAttribute("aria-expanded"), String(expanded));
   assert.equal(panel(env, kind).hidden, !expanded);
 };
-// 卡片结构：[分节标题, [行名...]]，行名不含隐藏行。
+// 卡片结构：按显示顺序的行名，不含隐藏行；卡片里没有分节标题。
 const cardStructure = (env, kind) => {
-  const sections = [];
-  let current = ["", []];
+  const rows = [];
   for (const child of panel(env, kind).children) {
-    if (child.className === "codey-cs-section") {
-      if (current[0] || current[1].length) sections.push(current);
-      current = [child.textContent, []];
-    } else if (child.tagName === "DL") {
-      for (const row of child.children) if (!row.hidden) current[1].push(row.children[0].textContent);
+    assert.notEqual(child.className, "codey-cs-section", `${kind} has no section sub-heading`);
+    if (child.tagName === "DL") {
+      for (const row of child.children) if (!row.hidden) rows.push(row.children[0].textContent);
     }
   }
-  sections.push(current);
-  return sections;
+  return rows;
 };
 const localDateTime = (ms) => new Date(ms).toLocaleString("sv-SE");
 
@@ -409,23 +405,26 @@ test("renders three buttons and the agreed cards for a full payload", async () =
     assert.equal(bar.querySelectorAll(".codey-cs-summary").length, 3);
     assert.equal(buttonText(env, "activity"), "4 轮 · 2 步 · 188 tok/s");
     assert.equal(buttonText(env, "tokens"), "132k tok · 缓存命中 93%");
-    assert.equal(buttonText(env, "session"), "压缩 1 次");
+    assert.equal(buttonText(env, "session"), "上下文 10.3% · 36.4k");
     assert.deepEqual(cardStructure(env, "activity"), [
-      ["", ["模型用时", "工具调用用时", "平均速度（本轮）", "本轮推理"]],
-      ["最近一次请求", ["速度", "用时"]],
+      "模型用时", "工具调用用时", "最近一次用时", "平均速度（本轮）", "最近一次速度", "本轮推理",
     ]);
     assert.deepEqual(cardStructure(env, "tokens"), [
-      ["会话累计", ["缓存命中", "未缓存输入", "缓存读取", "输出"]],
-      ["最近一次请求", ["缓存命中", "未缓存输入 / 输出 / 缓存读取", "缓存剩余时间"]],
+      "会话缓存命中", "最近一次缓存命中", "未缓存输入", "缓存读取", "输出",
     ]);
     assert.deepEqual(cardStructure(env, "session"), [
-      ["", ["账号", "开始时间", "上次回复", "上下文", "压缩次数"]],
+      "账号", "开始时间", "上次回复", "缓存剩余时间", "上下文",
+      "最近一次 未缓存 / 输出 / 缓存读取", "压缩次数",
     ]);
+    for (const key of ["cacheRemaining", "requestTokens"]) {
+      assert.equal(panel(env, "session").querySelector(`[data-row="${key}"]`)?.getAttribute("data-row"), key);
+      assert.equal(panel(env, "tokens").querySelector(`[data-row="${key}"]`), null, `${key} left the tokens card`);
+    }
     for (const kind of ["activity", "tokens", "session"]) {
       assert.equal(panel(env, kind).querySelector("strong").textContent,
         { activity: "最近一轮统计", tokens: "Token 用量", session: "会话" }[kind]);
       const rows = panel(env, kind).querySelectorAll("dt");
-      assert.ok(rows.length <= 7, kind);
+      assert.equal(rows.length, { activity: 6, tokens: 5, session: 8 }[kind], kind);
       assert.ok(rows.every((row) => !/TTFT|首 token/i.test(row.textContent)), `${kind} has no TTFT row`);
     }
     assert.equal(field(bar, "modelDuration"), "10秒");
@@ -449,6 +448,10 @@ test("renders three buttons and the agreed cards for a full payload", async () =
     assert.equal(field(bar, "context"), "10.3% (36.4k/353.4k)");
     assert.equal(field(bar, "compactionCount"), "1");
     assert.equal(env.calls.some((call) => call.path === "/session/last-model-request"), false);
+    assert.doesNotMatch(bar.__codeyCs.notes.tokens.textContent, /缓存剩余时间/);
+    assert.equal(bar.__codeyCs.notes.session.textContent, "");
+    assert.doesNotMatch(summary(env, "session").getAttribute("aria-label"), /压缩/);
+    assert.match(summary(env, "session").getAttribute("aria-label"), /上下文 10\.3% · 36\.4k/);
   } finally {
     env.dispose();
   }
@@ -485,7 +488,7 @@ test("a payload with nulls shows — for every value it cannot read", async () =
     const bar = env.bar();
     assert.equal(buttonText(env, "activity"), "— 轮 · — 步 · 生成中");
     assert.equal(buttonText(env, "tokens"), "— · 缓存命中 —");
-    assert.equal(buttonText(env, "session"), "压缩 — 次");
+    assert.equal(buttonText(env, "session"), "上下文 —");
     // 工具仍在运行时后端给 null，显示 —。
     for (const name of ["modelDuration", "toolDuration", "turnReasoning", "requestSpeed", "requestDuration",
       "totalTokens", "sessionCacheRate", "uncachedInputTokens", "cachedInputTokens", "outputTokens",
@@ -549,17 +552,18 @@ test("cost shows only when the usage carries a cost field", async () => {
     await flushTimers(30);
     env.notify(tokenUsageMessage());
     await flushTimers(30);
-    assert.equal(buttonText(env, "session"), "压缩 1 次");
+    assert.equal(buttonText(env, "session"), "上下文 10.3% · 36.4k");
     assert.equal(rowHidden(env.bar(), "cost"), true);
-    assert.equal(cardStructure(env, "session")[0][1].includes("会话费用估算"), false);
+    assert.equal(cardStructure(env, "session").includes("会话费用估算"), false);
     env.notify(tokenUsageMessage("conversation-1", { total: { totalCostUsd: 1.2834 } }));
     await flushTimers(30);
-    assert.equal(buttonText(env, "session"), "≈$1.28 · 压缩 1 次");
+    assert.equal(buttonText(env, "session"), "≈$1.28 · 上下文 10.3% · 36.4k");
     assert.equal(rowHidden(env.bar(), "cost"), false);
     assert.equal(field(env.bar(), "cost"), "$1.283");
-    assert.match(summary(env, "session").getAttribute("aria-label"), /费用估算 ≈\$1\.28/);
+    assert.match(summary(env, "session").getAttribute("aria-label"), /费用估算 ≈\$1\.28，上下文 10\.3% · 36\.4k/);
     assert.deepEqual(cardStructure(env, "session"), [
-      ["", ["账号", "开始时间", "上次回复", "上下文", "压缩次数", "会话费用估算"]],
+      "账号", "开始时间", "上次回复", "缓存剩余时间", "上下文",
+      "最近一次 未缓存 / 输出 / 缓存读取", "压缩次数", "会话费用估算",
     ]);
   } finally {
     env.dispose();
@@ -607,7 +611,7 @@ test("a session switch clears the previous conversation's numbers at once", asyn
     assertExpanded(env, false, "session");
     assert.equal(metric(bar, "total"), "—");
     assert.equal(metric(bar, "activity"), "— 轮 · — 步");
-    assert.equal(buttonText(env, "session"), "压缩 — 次");
+    assert.equal(buttonText(env, "session"), "上下文 —");
     for (const name of ["modelDuration", "requestSpeed", "requestCacheRate", "requestTokens", "cacheRemaining",
       "startedAt", "lastReplyAt", "context", "compactionCount", "totalTokens"]) {
       assert.equal(field(bar, name), "—", name);
@@ -1403,7 +1407,7 @@ test("preserves reported zero values", async () => {
     assert.equal(metric(env.bar(), "cache-rate"), "0%");
     assert.equal(metric(env.bar(), "speed"), "0.0 tok/s");
     assert.equal(field(env.bar(), "toolDuration"), "0秒");
-    assert.equal(buttonText(env, "session"), "压缩 0 次");
+    assert.equal(field(env.bar(), "compactionCount"), "0");
   } finally {
     env.dispose();
   }
