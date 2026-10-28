@@ -460,6 +460,8 @@ mod tests {
     use super::*;
 
     fn paths(root: &Path) -> (PathBuf, PathBuf) {
+        // 系统临时目录可能位于符号链接下（macOS 的 /var 指向 /private/var），检查会拒绝这样的配置目录。
+        let root = root.canonicalize().unwrap();
         (root.join("codex"), root.join("codey/codex-lease.json"))
     }
 
