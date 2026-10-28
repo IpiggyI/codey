@@ -1920,6 +1920,100 @@ experimental_bearer_token = "upstream-secret-token"
 }
 
 #[test]
+fn channels_no_selection_keeps_the_exact_legacy_override_list() {
+    let (home, config) = crate::channels::tests::fixture();
+    let state = tempfile::tempdir().unwrap();
+    let marker = state.path().join("lease.json");
+    let backup_root = state.path().join("backups");
+    let options = || RouterApplyOptions {
+        model_catalog_path: None,
+        default_model: Some("legacy-model"),
+        fastctx_command: None,
+        subagent_optimization: false,
+        subagent_model: DEFAULT_SUBAGENT_MODEL,
+        subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
+        subagent_roles: None,
+        subagent_catalog: Default::default(),
+        marker: &marker,
+        backup_root: &backup_root,
+    };
+    let legacy = apply_isolated_runtime_router_config(home.path(), options()).unwrap();
+    restore_runtime_config_at(home.path(), &marker, true).unwrap();
+    let current =
+        apply_isolated_runtime_router_config_for_channels(home.path(), options(), &config).unwrap();
+    assert_eq!(
+        current.runtime_config_overrides,
+        legacy.runtime_config_overrides
+    );
+    assert_eq!(
+        current.runtime_config_overrides.join("\0").as_bytes(),
+        legacy.runtime_config_overrides.join("\0").as_bytes()
+    );
+    restore_runtime_config_at(home.path(), &marker, true).unwrap();
+}
+
+#[test]
+fn channels_switch_launch_restart_preserves_user_files() {
+    let (home, mut config) = crate::channels::tests::fixture();
+    let before_config = fs::read(home.path().join("config.toml")).unwrap();
+    let before_auth = fs::read(home.path().join("auth.json")).unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let marker = state.path().join("lease.json");
+    let backup_root = state.path().join("backups");
+    for (channel, provider, model) in [
+        ("provider:a", "a", "a-model"),
+        ("provider:b.dot", "b.dot", "b.model"),
+    ] {
+        crate::channels::set_default(home.path(), &mut config, channel, model).unwrap();
+        crate::channels::select(home.path(), &mut config, Some(channel)).unwrap();
+        let store = crate::config::ConfigStore::new(state.path().join("config.json"));
+        store.save(&config).unwrap();
+        config = store.load().unwrap();
+        let applied = apply_isolated_runtime_router_config_for_channels(
+            home.path(),
+            RouterApplyOptions {
+                model_catalog_path: None,
+                default_model: Some("legacy-model"),
+                fastctx_command: None,
+                subagent_optimization: false,
+                subagent_model: DEFAULT_SUBAGENT_MODEL,
+                subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
+                subagent_roles: None,
+                subagent_catalog: Default::default(),
+                marker: &marker,
+                backup_root: &backup_root,
+            },
+            &config,
+        )
+        .unwrap();
+        assert_eq!(
+            &applied.runtime_config_overrides[applied.runtime_config_overrides.len() - 2..],
+            &[
+                format!("model_provider=\"{provider}\""),
+                format!("model=\"{model}\"")
+            ]
+        );
+        assert_eq!(
+            fs::read(home.path().join("config.toml")).unwrap(),
+            before_config
+        );
+        assert_eq!(
+            fs::read(home.path().join("auth.json")).unwrap(),
+            before_auth
+        );
+        restore_runtime_config_at(home.path(), &marker, true).unwrap();
+        assert_eq!(
+            fs::read(home.path().join("config.toml")).unwrap(),
+            before_config
+        );
+        assert_eq!(
+            fs::read(home.path().join("auth.json")).unwrap(),
+            before_auth
+        );
+    }
+}
+
+#[test]
 fn legacy_applied_hooks_are_restored_once_before_inline_runtime_apply() {
     for original in [None, Some(b"{\"hooks\":{}}\n".as_slice())] {
         let (_temp, home, marker, backup_root) = isolated_runtime_fixture();

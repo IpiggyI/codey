@@ -4,7 +4,7 @@ use super::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChildProcessState {
     Running,
-    Exited,
+    Exited(Option<i32>),
     Untracked,
 }
 
@@ -13,16 +13,51 @@ async fn child_process_state(child: &Arc<Mutex<Option<Child>>>) -> ChildProcessS
     let mut slot = child.lock().await;
     let state = match slot.as_mut() {
         Some(process) => match process.try_wait() {
-            Ok(Some(_)) => ChildProcessState::Exited,
+            Ok(Some(status)) => ChildProcessState::Exited(status.code()),
             Ok(None) => ChildProcessState::Running,
             Err(_) => ChildProcessState::Running,
         },
         None => ChildProcessState::Untracked,
     };
-    if state == ChildProcessState::Exited {
+    if matches!(state, ChildProcessState::Exited(_)) {
         slot.take();
     }
     state
+}
+
+fn record_codex_exit_watch_started(process_id: Option<u32>, source: &str) -> Instant {
+    let watched_at = Instant::now();
+    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+        "launcher.codex_exit_watch_started",
+        serde_json::json!({
+            "codeyProcessId": std::process::id(),
+            "processId": process_id,
+            "source": source,
+        }),
+    );
+    watched_at
+}
+
+fn record_codex_exit(
+    process_id: Option<u32>,
+    source: &str,
+    watched_at: Instant,
+    exit_code: Option<i64>,
+    success: Option<bool>,
+) {
+    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+        "launcher.codex_exited",
+        serde_json::json!({
+            "codeyProcessId": std::process::id(),
+            "processId": process_id,
+            "source": source,
+            "watchedForMs": watched_at.elapsed().as_millis(),
+            "exitCode": exit_code,
+            "exitCodeHex": exit_code.map(|code| format!("0x{:08X}", code as u32)),
+            "success": success,
+        }),
+    );
+    let _ = codey_runtime_core::diagnostic_log::flush_diagnostic_log();
 }
 
 #[cfg(not(windows))]
@@ -40,19 +75,32 @@ pub(super) fn spawn_codex_exit_watcher(
         let Some(mut process) = child.lock().await.take() else {
             return;
         };
+        // macOS app bundles are held by `open -W`; this is the exact launched
+        // child, which can differ from the Electron main process PID.
+        let process_id = process.id();
+        let watched_at = record_codex_exit_watch_started(process_id, "direct_child");
         let wait_result = tokio::select! {
             _ = &mut shutdown_rx => None,
             result = process.wait() => Some(result),
         };
         let natural_exit = match wait_result {
-            Some(Ok(_)) => true,
+            Some(Ok(status)) => {
+                record_codex_exit(
+                    process_id,
+                    "direct_child",
+                    watched_at,
+                    status.code().map(i64::from),
+                    Some(status.success()),
+                );
+                true
+            }
             Some(Err(error)) => {
                 error_log::record_failure(
                     "process_watch_failed",
                     "wait_for_codex_exit",
                     error.to_string(),
                     serde_json::json!({
-                        "processId": process.id(),
+                        "processId": process_id,
                     }),
                 );
                 *child.lock().await = Some(process);
@@ -84,12 +132,26 @@ pub(super) fn spawn_codex_exit_watcher(
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
     let (exit_tx, exit_rx) = oneshot::channel();
     let task = tokio::spawn(async move {
+        let watched_process_id = match process_id {
+            Some(process_id) => Some(process_id),
+            None => child.lock().await.as_ref().and_then(Child::id),
+        };
+        let mut source = if process_id.is_some() {
+            "windows_process_wait"
+        } else {
+            "direct_child"
+        };
+        let watched_at = record_codex_exit_watch_started(watched_process_id, source);
+        let mut exit_code = None;
         let natural_exit = if let Some(process_id) = process_id {
             tokio::select! {
                 _ = &mut shutdown_rx => false,
-                result = codey_runtime_core::launcher::wait_for_windows_process_id(process_id) => {
+                result = codey_runtime_core::launcher::wait_for_windows_process_exit(process_id) => {
                     match result {
-                        Ok(()) => true,
+                        Ok(code) => {
+                            exit_code = code;
+                            true
+                        }
                         Err(error) => {
                             error_log::record_failure(
                                 "process_watch_failed",
@@ -100,6 +162,7 @@ pub(super) fn spawn_codex_exit_watcher(
                                 }),
                             );
                             eprintln!("等待 Windows Codex 进程退出失败：{error:#}");
+                            source = "windows_process_probe";
                             let mut interval = tokio::time::interval(Duration::from_secs(1));
                             loop {
                                 tokio::select! {
@@ -125,13 +188,23 @@ pub(super) fn spawn_codex_exit_watcher(
                     _ = &mut shutdown_rx => break false,
                     _ = interval.tick() => match child_process_state(&child).await {
                         ChildProcessState::Running => {}
-                        ChildProcessState::Exited => break true,
+                        ChildProcessState::Exited(code) => {
+                            exit_code = code.map(|code| code as u32);
+                            break true;
+                        }
                         ChildProcessState::Untracked => break false,
                     }
                 }
             }
         };
         if natural_exit {
+            record_codex_exit(
+                watched_process_id,
+                source,
+                watched_at,
+                exit_code.map(i64::from),
+                exit_code.map(|code| code == 0),
+            );
             codex_exited.store(true, Ordering::Release);
             let _ = exit_tx.send(());
         }
@@ -156,6 +229,21 @@ fn windows_app_dir_supports_packaged_activation(app_dir: &std::path::Path) -> bo
     codey_runtime_core::app_paths::packaged_app_user_model_id(app_dir).is_some()
 }
 
+pub(super) struct CodexLaunchOptions<'a> {
+    pub gpu_launch_mode: GpuLaunchMode,
+    pub launch_proxy: Option<&'a crate::launch_proxy::CodexLaunchProxy>,
+}
+
+fn apply_launch_proxy(
+    proxy: Option<&crate::launch_proxy::CodexLaunchProxy>,
+    arguments: &mut Vec<String>,
+    environment: &mut Vec<(String, String)>,
+) {
+    let Some(proxy) = proxy else { return };
+    arguments.push(proxy.chromium_argument());
+    environment.extend(proxy.environment());
+}
+
 #[cfg_attr(
     not(windows),
     allow(clippy::ptr_arg, reason = "Windows 启动重试需要替换调用方的应用目录")
@@ -164,13 +252,23 @@ pub(super) async fn spawn_codex(
     app_dir: &mut PathBuf,
     debug_port: u16,
     subagent_gate_active: bool,
-    gpu_launch_mode: GpuLaunchMode,
+    options: CodexLaunchOptions<'_>,
     runtime_config_overrides: &[String],
 ) -> Result<SpawnedCodex> {
     #[cfg(not(any(windows, target_os = "macos")))]
     let _ = (subagent_gate_active, runtime_config_overrides);
-    let runtime_arguments =
-        codex_runtime_arguments(gpu_launch_mode, !cfg!(target_os = "macos"), cfg!(windows));
+    let mut runtime_arguments = codex_runtime_arguments(
+        options.gpu_launch_mode,
+        !cfg!(target_os = "macos"),
+        cfg!(windows),
+    );
+    let mut proxy_environment = Vec::new();
+    apply_launch_proxy(
+        options.launch_proxy,
+        &mut runtime_arguments,
+        &mut proxy_environment,
+    );
+    let launch_proxy_environment = options.launch_proxy.map(|_| proxy_environment);
 
     #[cfg(windows)]
     {
@@ -209,11 +307,15 @@ pub(super) async fn spawn_codex(
                     &runtime_arguments,
                     runtime_config_overrides,
                     subagent_gate_active,
+                    launch_proxy_environment.as_deref(),
                     format!("启动尝试 {attempt}/2：Codex CLI 兼容入口不可用：{error:#}"),
                 )
                 .await;
             };
-            let launch_environment = wrapper.environment.clone();
+            let mut launch_environment = wrapper.environment.clone();
+            if let Some(environment) = &launch_proxy_environment {
+                launch_environment.extend(environment.iter().cloned());
+            }
             // 包装器是唯一入口：受限启动必须带着环境落进 Codex，否则宁可降级。
             let constrained = !runtime_config_overrides.is_empty() || subagent_gate_active;
             let wrapper_environment_required = constrained;
@@ -222,7 +324,7 @@ pub(super) async fn spawn_codex(
                 debug_port,
                 &runtime_arguments,
                 &launch_environment,
-                wrapper_environment_required,
+                wrapper_environment_required || options.launch_proxy.is_some(),
             )
             .await;
             let (mut spawned, wrapper_environment_applied) = match launch {
@@ -359,8 +461,14 @@ pub(super) async fn spawn_codex(
                             "Codex 启动兼容方案未能安装；Codey 集成未启用：{startup_error}"
                         )));
                     }
-                    match spawn_windows_codex(app_dir, debug_port, &runtime_arguments, &[], false)
-                        .await
+                    match spawn_windows_codex(
+                        app_dir,
+                        debug_port,
+                        &runtime_arguments,
+                        launch_proxy_environment.as_deref().unwrap_or(&[]),
+                        options.launch_proxy.is_some(),
+                    )
+                    .await
                     {
                         Ok((mut fallback, _)) => {
                             fallback.performance_status = "degraded".to_string();
@@ -403,10 +511,18 @@ pub(super) async fn spawn_codex(
         // 由 spawn 环境继承。
         let mut spawned_environment = Vec::new();
         if is_app_bundle {
-            add_macos_cli_wrapper(&mut command, &wrapper.environment)
+            add_macos_launch_environment(&mut command, &wrapper.environment)
                 .map_err(recovery::recoverable)?;
         } else {
             spawned_environment = wrapper.environment.clone();
+        }
+        if let Some(environment) = &launch_proxy_environment {
+            if is_app_bundle {
+                add_macos_launch_environment(&mut command, environment)
+                    .map_err(recovery::recoverable)?;
+            } else {
+                spawned_environment.extend(environment.iter().cloned());
+            }
         }
         let mut spawned = spawn_command(command, &spawned_environment)?;
         let startup_result = confirm_cli_wrapper_startup(
@@ -475,7 +591,8 @@ pub(super) async fn spawn_codex(
     #[cfg(not(any(windows, target_os = "macos")))]
     {
         let command = build_codex_command(app_dir, debug_port, &runtime_arguments);
-        let mut spawned = spawn_command(command, &[])?;
+        let mut spawned =
+            spawn_command(command, launch_proxy_environment.as_deref().unwrap_or(&[]))?;
         spawned.performance_status = "ready".to_string();
         spawned.performance_detail = "Codex 启动成功".to_string();
         Ok(spawned)
@@ -1158,7 +1275,7 @@ fn write_macos_cli_wrapper(
 }
 
 #[cfg(target_os = "macos")]
-fn add_macos_cli_wrapper(
+fn add_macos_launch_environment(
     command: &mut Vec<String>,
     environment: &[(String, String)],
 ) -> Result<()> {
@@ -1213,6 +1330,7 @@ async fn launch_windows_codex_without_compatibility(
     runtime_arguments: &[String],
     runtime_config_overrides: &[String],
     subagent_gate_active: bool,
+    launch_proxy_environment: Option<&[(String, String)]>,
     startup_error: String,
 ) -> Result<SpawnedCodex> {
     if !runtime_config_overrides.is_empty() {
@@ -1225,9 +1343,15 @@ async fn launch_windows_codex_without_compatibility(
             "Codex 启动兼容入口不可用；Codey 集成未启用：{startup_error}"
         )));
     }
-    let (mut spawned, _) = spawn_windows_codex(app_dir, debug_port, runtime_arguments, &[], false)
-        .await
-        .with_context(|| format!("Codex 启动设置未能应用，且启动失败：{startup_error}"))?;
+    let (mut spawned, _) = spawn_windows_codex(
+        app_dir,
+        debug_port,
+        runtime_arguments,
+        launch_proxy_environment.unwrap_or(&[]),
+        launch_proxy_environment.is_some(),
+    )
+    .await
+    .with_context(|| format!("Codex 启动设置未能应用，且启动失败：{startup_error}"))?;
     spawned.performance_status = "degraded".to_string();
     spawned.performance_detail =
         "Codex 已启动，但部分启动设置未能应用；页面功能以检测结果为准，下次启动将重试".to_string();
@@ -1581,8 +1705,8 @@ pub(super) async fn prepare_codex_for_launch(app_dir: &std::path::Path) -> Resul
     Ok(())
 }
 
-#[cfg(not(windows))]
-fn spawn_command(command: Vec<String>, environment: &[(String, String)]) -> Result<SpawnedCodex> {
+#[cfg(any(not(windows), test))]
+fn build_spawn_command(command: &[String], environment: &[(String, String)]) -> Result<Command> {
     let executable = command
         .first()
         .ok_or_else(|| anyhow::anyhow!("Codex 启动命令为空"))?;
@@ -1591,9 +1715,14 @@ fn spawn_command(command: Vec<String>, environment: &[(String, String)]) -> Resu
     child_command.envs(environment.iter().map(|(name, value)| (name, value)));
     #[cfg(unix)]
     child_command.process_group(0);
-    let child = child_command
+    Ok(child_command)
+}
+
+#[cfg(not(windows))]
+fn spawn_command(command: Vec<String>, environment: &[(String, String)]) -> Result<SpawnedCodex> {
+    let child = build_spawn_command(&command, environment)?
         .spawn()
-        .with_context(|| format!("启动 Codex 失败：{executable}"))?;
+        .with_context(|| format!("启动 Codex 失败：{}", command[0]))?;
     let process_id = child.id();
     Ok(SpawnedCodex {
         child: Some(child),
@@ -2281,5 +2410,86 @@ mod cli_wrapper_tests {
             stage_windows_cli_runtime(&target, &local_app_data).unwrap(),
             fallback
         );
+    }
+}
+
+#[cfg(test)]
+mod launch_proxy_tests {
+    use super::*;
+
+    #[test]
+    fn launch_proxy_environment_fixture() {
+        if std::env::var_os("CODEY_LAUNCH_PROXY_TEST_ENV").is_some() {
+            let environment = std::env::vars_os().collect::<std::collections::BTreeMap<_, _>>();
+            println!("CODEY_TEST_ENV={environment:?}");
+        }
+    }
+
+    async fn child_environment(mut command: Command) -> String {
+        let output = command.output().await.unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .find_map(|line| line.strip_prefix("CODEY_TEST_ENV="))
+            .expect("子进程应输出环境快照")
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn empty_launch_proxy_preserves_all_environment_and_arguments() {
+        for value in ["", "  "] {
+            for populated in [false, true] {
+                let mut environment = vec![
+                    ("CODEX_HOME".into(), "existing-home".into()),
+                    ("CODEY_LAUNCH_PROXY_TEST_ENV".into(), "1".into()),
+                ];
+                if populated {
+                    for key in [
+                        "HTTP_PROXY",
+                        "HTTPS_PROXY",
+                        "ALL_PROXY",
+                        "NO_PROXY",
+                        "http_proxy",
+                        "https_proxy",
+                        "all_proxy",
+                        "no_proxy",
+                    ] {
+                        environment.push((key.into(), format!("inherited-{key}")));
+                    }
+                }
+                let mut arguments = vec![
+                    "--exact".into(),
+                    "launcher::process::launch_proxy_tests::launch_proxy_environment_fixture"
+                        .into(),
+                    "--nocapture".into(),
+                ];
+                let original_environment = environment.clone();
+                let original_arguments = arguments.clone();
+                let proxy = match crate::launch_proxy::CodexLaunchProxy::resolve(value).unwrap() {
+                    Some(plan) => Some(plan.start().await.unwrap()),
+                    None => None,
+                };
+                apply_launch_proxy(proxy.as_ref(), &mut arguments, &mut environment);
+                let executable = std::env::current_exe().unwrap();
+                let mut command = vec![executable.to_str().unwrap().to_string()];
+                command.extend(arguments);
+                let actual = build_spawn_command(&command, &environment).unwrap();
+                let mut expected = Command::new(executable);
+                expected.args(original_arguments).envs(original_environment);
+                assert_eq!(
+                    actual.as_std().get_envs().collect::<Vec<_>>(),
+                    expected.as_std().get_envs().collect::<Vec<_>>(),
+                );
+                assert_eq!(
+                    actual.as_std().get_args().collect::<Vec<_>>(),
+                    expected.as_std().get_args().collect::<Vec<_>>(),
+                );
+                assert!(
+                    child_environment(actual).await == child_environment(expected).await,
+                    "空设置改变了子进程环境",
+                );
+            }
+        }
     }
 }

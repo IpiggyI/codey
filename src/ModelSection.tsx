@@ -8,10 +8,14 @@ import {
 } from "@tabler/icons-react";
 
 import type {
+  ChannelList,
   Config,
+  Confirmation,
   CurrentProviderSnapshot,
   ModelContextConfig,
   ModelState,
+  Notice,
+  OfficialAccountsResult,
   RouterSessionDiagnosis,
 } from "./App.types";
 import { Card } from "@heroui/react";
@@ -28,7 +32,9 @@ import {
   Input,
   Switch,
 } from "./components/ui";
+import { ChannelSection } from "./ChannelSection";
 import { ModelOrderEditor } from "./components/ModelOrderEditor";
+import { OfficialAccountsPanel } from "./OfficialAccountsPanel";
 import { modelIdsEqual, modelKey, uniqueModelIds } from "./modelIds";
 import { globalDefaultForProvider } from "./modelRoutes";
 import { SETTINGS_OVERLAY_Z_INDEX } from "./overlay.constants";
@@ -87,6 +93,20 @@ type ModelSectionProps = {
   onSaveModelOrder: (models: string[], mode: "official" | "manual") => Promise<boolean>;
   routerSessionDiagnosis: RouterSessionDiagnosis | null;
   onMigrateRouterSessions: (targetProvider: string) => void;
+  channelList: ChannelList | null;
+  channelLoadError: string | null;
+  channelActionError: string | null;
+  channelVersionConflict: boolean;
+  channelNotice: string | null;
+  onSelectChannel: (channelId: string | null, defaultModel?: string) => void;
+  onSetChannelDefaultModel: (channelId: string, model: string) => void;
+  onRefreshChannels: () => void;
+  active: boolean;
+  officialAccountsRefreshKey: number;
+  onSwitchOfficialAccount: (accountId: string) => Promise<OfficialAccountsResult | null>;
+  onOfficialAccountsChanged: () => void;
+  onNotice: (notice: Notice) => void;
+  onRequestConfirmation: (confirmation: Confirmation) => void;
 };
 
 type RouteModelGroup = {
@@ -115,6 +135,20 @@ function ModelSectionComponent({
   onSaveModelOrder,
   routerSessionDiagnosis,
   onMigrateRouterSessions,
+  channelList,
+  channelLoadError,
+  channelActionError,
+  channelVersionConflict,
+  channelNotice,
+  onSelectChannel,
+  onSetChannelDefaultModel,
+  onRefreshChannels,
+  active,
+  officialAccountsRefreshKey,
+  onSwitchOfficialAccount,
+  onOfficialAccountsChanged,
+  onNotice,
+  onRequestConfirmation,
 }: ModelSectionProps) {
   const [officialEditorOpen, setOfficialEditorOpen] = useState(false);
   const [officialModelDraft, setOfficialModelDraft] = useState<string[]>([]);
@@ -253,6 +287,31 @@ function ModelSectionComponent({
         </div>
       </div>
 
+      <ChannelSection
+        channelList={channelList}
+        loadError={channelLoadError}
+        actionError={channelActionError}
+        versionConflict={channelVersionConflict}
+        notice={channelNotice}
+        modelOptions={modelGroups[0]?.models ?? []}
+        popupContainer={popupContainer}
+        disabled={dirty || isBusy}
+        onSelect={onSelectChannel}
+        onSetDefaultModel={onSetChannelDefaultModel}
+        onRefresh={onRefreshChannels}
+      />
+
+      <OfficialAccountsPanel
+        active={active}
+        disabled={dirty || isBusy}
+        refreshKey={officialAccountsRefreshKey}
+        popupContainer={popupContainer}
+        onSwitch={onSwitchOfficialAccount}
+        onAccountsChanged={onOfficialAccountsChanged}
+        onNotice={onNotice}
+        onRequestConfirmation={onRequestConfirmation}
+      />
+
       {currentProviderSnapshot ? (
         <aside
           className="current-provider-snapshot"
@@ -310,7 +369,7 @@ function ModelSectionComponent({
           />
         </label>
         <p>
-          这是本机估计的对话缓存有效时间，不是服务商返回的到期时刻。还没过期时，输入栏用量芯片会显示剩余时间圈。
+          这是本机估计的对话缓存有效时间，不是服务商返回的到期时刻。对话用量统计条的 Token 用量卡片按它显示缓存剩余时间。
         </p>
       </div>
 

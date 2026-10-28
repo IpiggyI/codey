@@ -1,14 +1,16 @@
 import { useId, type ComponentType, type SVGProps } from "react";
-import { IconBrandWechat } from "@tabler/icons-react";
+import { IconBellRinging, IconBrandWechat } from "@tabler/icons-react";
 
 import { FeishuChannelEditor } from "./FeishuChannelEditor";
+import { NtfyChannelEditor } from "./NtfyChannelEditor";
 import { TelegramChannelEditor } from "./TelegramChannelEditor";
 import { WechatClawChannelEditor } from "./WechatClawChannelEditor";
 import { WecomChannelEditor } from "./WecomChannelEditor";
-import type {
-  NotificationChannel,
-  NotificationChannelEditorProps,
-  NotificationChannelKind,
+import {
+  validateNtfyChannel,
+  type NotificationChannel,
+  type NotificationChannelEditorProps,
+  type NotificationChannelKind,
 } from "./types";
 
 type NotificationChannelIconProps = SVGProps<SVGSVGElement> & {
@@ -89,6 +91,10 @@ function WecomIcon(props: NotificationChannelIconProps) {
   return <IconBrandWechat {...props} color="#07c160" />;
 }
 
+function NtfyIcon(props: NotificationChannelIconProps) {
+  return <IconBellRinging {...props} color="#52bca6" />;
+}
+
 function WechatClawIcon(props: NotificationChannelIconProps) {
   return <IconBrandWechat {...props} color="#07c160" />;
 }
@@ -153,6 +159,20 @@ const CHANNEL_DEFINITIONS: Record<
           (channel.url.trim() || channel.urlConfigured) &&
           channel.chatId.trim(),
       ),
+  },
+  ntfy: {
+    kind: "ntfy",
+    addLabel: "ntfy",
+    displayName: "ntfy",
+    title: "ntfy 推送",
+    description: "通过自建或公共 ntfy 服务器推送到手机与桌面",
+    iconClassName: "ntfy",
+    Icon: NtfyIcon,
+    Editor: NtfyChannelEditor,
+    isConfigured: (channel) => {
+      const issues = validateNtfyChannel(channel);
+      return !issues.url && !issues.topic;
+    },
   },
 };
 

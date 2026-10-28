@@ -160,9 +160,11 @@ test("renderer core loads session tools after idle time or sidebar use", async (
   assert.match(sessionObserverBody, /addPendingScanRoot\(threadRow\)/);
   assert.match(sessionObserverBody, /syncConversationRichTooltipOpen\(target\)/);
   assert.doesNotMatch(sessionObserverBody, /syncSidebarThreadTimeState\(threadRow\)/);
+  // getSessionId() reads layout; it must not run synchronously per mutation batch.
+  assert.doesNotMatch(sessionObserverBody, /getSessionId\(\)/);
   assert.match(
     sessionObserverBody,
-    /if \(!completionReconcileSessionId\) void reconcileStaleCompletedTask\(\);/,
+    /if \(!completionReconcileSessionId && !completionReconcileCheckTimer\) \{\s*completionReconcileCheckTimer = window\.setTimeout\(\(\) => \{[\s\S]*?void reconcileStaleCompletedTask\(\);[\s\S]*?\}, completionReconcileMutationDelayMs\)/,
   );
   assert.equal(sessionObserverBody.match(/reconcileStaleCompletedTask/g)?.length, 1);
   assert.match(sessionTools, /mutationDispatcher\.subscribe\(\s*handleSessionToolMutations/);
@@ -235,6 +237,43 @@ test("locale bootstrap patches navigator and Statsig independently from renderer
   vm.runInNewContext(localeSource, sandbox);
   assert.equal(window.__codeyDefaultChineseLocale, firstState);
   assert.equal(firstState.snapshot().statsigClientsPatched, 1);
+});
+
+test("locale bootstrap stops retrying when Codex no longer implements the setting handlers", async () => {
+  const localeSource = await readSource("public/default-chinese-locale.js");
+  const listeners = new Map();
+  const sent = [];
+  const window = {
+    __codeySharedRuntime: { statsigClients: () => [] },
+    addEventListener(type, listener) { listeners.set(type, listener); },
+    removeEventListener(type) { listeners.delete(type); },
+    // Retries need timers; a missing handler must stop without one.
+    setTimeout() { return 1; },
+    clearTimeout() {},
+    electronBridge: {
+      sendMessageFromView(message) {
+        sent.push(message.url);
+        queueMicrotask(() => listeners.get("message")?.({ data: {
+          type: "fetch-response",
+          requestId: message.requestId,
+          responseType: "error",
+          error: "get-setting not implemented in the current Electron process. Restart ChatGPT to load the latest Electron handlers.",
+        } }));
+      },
+    },
+    navigator: {},
+  };
+  window.window = window;
+  vm.runInNewContext(localeSource, { console: { warn() { assert.fail("must not warn for a missing handler"); } }, window });
+  for (let index = 0; index < 20; index += 1) await new Promise((resolve) => setImmediate(resolve));
+  const state = window.__codeyDefaultChineseLocale.snapshot();
+  assert.equal(state.settingSyncUnsupported, true);
+  assert.equal(state.settingSynced, false);
+  assert.equal(state.settingSyncAttempts, 1);
+  assert.deepEqual(sent, ["vscode://codex/get-setting"]);
+  listeners.get("focus")?.();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(sent.length, 1);
 });
 
 test("locale bootstrap patches Statsig instances added in place without a 50ms burst", async () => {
@@ -521,6 +560,60 @@ test("plugin bridge reports effective only after the runtime method is patched",
   assert.equal(events.length, 1);
   assert.equal(events[0].type, "codey-injection-status-changed");
   assert.equal(events[0].detail.status, "effective");
+});
+
+test("plugin bridge does not report a frozen native bridge as patched", async () => {
+  const source = await readSource("public/plugin-marketplace-fix.js");
+  const events = [];
+  let retries = 0;
+  const native = () => Promise.resolve({ status: "ok" });
+  const window = {
+    __codeyInjectionStatus: {
+      "plugin-marketplace-compatibility": { status: "pending", detail: null, error: null },
+    },
+    clearTimeout() {},
+    dispatchEvent(event) { events.push(event); },
+    electronBridge: Object.freeze({ sendMessageFromView: native }),
+    setTimeout() { retries += 1; return 1; },
+  };
+  window.window = window;
+  vm.runInNewContext(source, {
+    CustomEvent: class {
+      constructor(type, options = {}) {
+        this.type = type;
+        this.detail = options.detail;
+      }
+    },
+    console,
+    window,
+  });
+  const status = window.__codeyInjectionStatus["plugin-marketplace-compatibility"];
+  assert.equal(window.electronBridge.sendMessageFromView, native);
+  assert.equal(status.status, "inactive");
+  assert.equal(status.detail, "Codex 插件桥接不可替换，桥接兼容未生效");
+  assert.equal(events.at(-1).detail.status, "inactive");
+  assert.equal(retries, 0, "a frozen bridge is not retried");
+});
+
+test("local plugins are merged only into plugin lists, not other nested arrays", async () => {
+  const source = await readSource("public/plugin-marketplace-fix.js");
+  const window = { clearTimeout() {}, dispatchEvent() {}, setTimeout() { return 1; } };
+  window.window = window;
+  vm.runInNewContext(source, { CustomEvent: class {}, console, window });
+  window.__codeyLocalPlugins = [{ id: "local@codey", name: "local", marketplaceName: "codey" }];
+  const patched = window.__codeyPatchPluginResponse({
+    marketplaces: [{
+      name: "openai-curated",
+      plugins: [{ id: "a@openai-curated", name: "a", interface: { capabilities: ["Read"], screenshots: [] } }],
+    }],
+  });
+  assert.equal(patched.marketplaces.length, 1);
+  const [plugin, local] = patched.marketplaces[0].plugins;
+  assert.equal(JSON.stringify(plugin.interface.capabilities), "[\"Read\"]");
+  assert.equal(plugin.interface.screenshots.length, 0);
+  assert.equal(local.id, "local@codey");
+  const flat = window.__codeyPatchPluginResponse([{ id: "remote", name: "remote", hidden: true }]);
+  assert.equal(flat.some((entry) => entry.id === "local@codey"), true);
 });
 
 test("a stalled local plugin refresh cannot block the native marketplace list", async () => {

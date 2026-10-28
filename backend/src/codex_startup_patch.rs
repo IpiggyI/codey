@@ -449,14 +449,14 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
                 use std::os::windows::process::CommandExt;
                 relay.creation_flags(codey_runtime_core::windows_create_no_window());
             }
-            let mut relay = relay.spawn().context("启动 Codex 本地路由请求转发失败")?;
+            let relay =
+                input_router.insert(relay.spawn().context("启动 Codex 本地路由请求转发失败")?);
             command.stdin(
                 relay
                     .stdout
                     .take()
                     .context("Codex 本地路由请求管道不可用")?,
             );
-            input_router = Some(relay);
         }
         #[cfg(target_os = "macos")]
         {
@@ -493,9 +493,8 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
     let mut child = match launch {
         Ok(child) => child,
         Err(error) => {
-            if let Some(mut relay) = input_router {
-                let _ = relay.kill();
-                let _ = relay.wait();
+            if let Some(relay) = input_router.as_mut() {
+                terminate_cli_child(relay, "输入转发器");
             }
             if let Some(readiness) = readiness {
                 // 校验或创建进程失败必须显式回传，避免被误报成握手超时。
@@ -514,14 +513,54 @@ pub fn run_cli_wrapper_if_requested() -> Result<bool> {
         readiness.executed();
     }
     let status = child.wait();
-    if let Some(mut relay) = input_router {
-        let _ = relay.kill();
-        let _ = relay.wait();
+    if status.is_err() {
+        terminate_cli_child(&mut child, "Codex CLI");
+    }
+    // CLI 已结束，不再需要输入转发器。
+    if let Some(relay) = input_router.as_mut() {
+        terminate_cli_child(relay, "输入转发器");
     }
     let status =
         status.with_context(|| format!("等待 Codex CLI 退出失败：{}", target.display()))?;
     let _ = codey_runtime_core::diagnostic_log::flush_diagnostic_log();
     std::process::exit(status.code().unwrap_or(1));
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn wait_for_cli_child_exit(
+    child: &mut std::process::Child,
+    timeout: std::time::Duration,
+) -> std::io::Result<bool> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(true),
+            Ok(None) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return Ok(false);
+        }
+        std::thread::sleep(remaining.min(std::time::Duration::from_millis(20)));
+    }
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn terminate_cli_child(child: &mut std::process::Child, role: &str) {
+    if matches!(child.try_wait(), Ok(Some(_))) {
+        return;
+    }
+    let termination = child.kill();
+    // Windows 的终止请求是异步的；回收同样有时限，避免清理失败阻塞包装器退出。
+    match wait_for_cli_child_exit(child, std::time::Duration::from_secs(1)) {
+        Ok(true) => {}
+        result => eprintln!(
+            "Codey 回收 {role} 失败（PID {}）：终止结果 {termination:?}，等待结果 {result:?}",
+            child.id()
+        ),
+    }
 }
 
 #[cfg(any(windows, target_os = "macos", test))]
@@ -682,6 +721,7 @@ fn windows_package_resume_target(
 struct CliWrapperReadiness {
     stream: Option<std::net::TcpStream>,
     marker: Option<std::path::PathBuf>,
+    tcp_deferred: bool,
 }
 
 #[cfg(any(windows, target_os = "macos", test))]
@@ -696,6 +736,7 @@ impl CliWrapperReadiness {
             marker,
             handshake_required,
             started,
+            cfg!(windows),
             connect_cli_wrapper_handshake,
         )
     }
@@ -704,12 +745,14 @@ impl CliWrapperReadiness {
     fn begin_with(
         marker: Option<std::path::PathBuf>,
         handshake_required: bool,
+        prefer_marker: bool,
         connect: impl FnOnce() -> Result<std::net::TcpStream>,
     ) -> Self {
         Self::begin_with_diagnostics(
             marker,
             handshake_required,
             std::time::Instant::now(),
+            prefer_marker,
             connect,
         )
     }
@@ -718,6 +761,7 @@ impl CliWrapperReadiness {
         marker: Option<std::path::PathBuf>,
         handshake_required: bool,
         started: std::time::Instant,
+        prefer_marker: bool,
         connect: impl FnOnce() -> Result<std::net::TcpStream>,
     ) -> Self {
         let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
@@ -731,48 +775,64 @@ impl CliWrapperReadiness {
         let readiness = Self {
             stream: None,
             marker,
+            tcp_deferred: false,
         };
-        readiness.mark(CliWrapperMarkerStatus::Launching, None);
-        let tcp_available = handshake_tcp_channel_available();
-        let stream = if !handshake_required || !tcp_available {
-            None
+        let marker_written = readiness.mark(CliWrapperMarkerStatus::Launching, None);
+        // Windows 回环连接可能受网络隔离影响。只有本次记录写入成功才跳过 TCP，
+        // 启动器仍须等到 Executed 或 Failed；路径已配置不代表文件通道可用。
+        let tcp_required = handshake_required && (!prefer_marker || !marker_written);
+        let stream = if tcp_required {
+            readiness.connect_with_diagnostics(marker_written, connect)
         } else {
-            match connect() {
-                Ok(stream) => Some(stream),
-                Err(error) => {
-                    // 端口被拒绝说明启动器已不再监听（例如 app-server 重启），属正常情况。
-                    if error
-                        .downcast_ref::<std::io::Error>()
-                        .is_none_or(|error| error.kind() != std::io::ErrorKind::ConnectionRefused)
-                    {
-                        crate::error_log::record_failure(
-                            "compatibility_fallback",
-                            "connect_cli_wrapper_handshake",
-                            format!("{error:#}"),
-                            serde_json::json!({ "markerPresent": readiness.marker.is_some() }),
-                        );
-                    }
-                    None
-                }
-            }
+            None
         };
         let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
             "launcher.cli_wrapper_handshake_connect",
             serde_json::json!({
                 "connected": stream.is_some(),
-                "tcpChannelAvailable": tcp_available,
+                "tcpAttempted": tcp_required,
+                "markerWritten": marker_written,
                 "elapsedMs": started.elapsed().as_millis(),
             }),
         );
         Self {
             stream,
+            tcp_deferred: handshake_required && !tcp_required,
             ..readiness
         }
     }
 
-    fn mark(&self, status: CliWrapperMarkerStatus, failure: Option<&CliWrapperFailure>) {
+    fn connect_with_diagnostics(
+        &self,
+        marker_written: bool,
+        connect: impl FnOnce() -> Result<std::net::TcpStream>,
+    ) -> Option<std::net::TcpStream> {
+        match connect() {
+            Ok(stream) => Some(stream),
+            Err(error) => {
+                // 端口被拒绝说明启动器已不再监听（例如 app-server 重启），属正常情况。
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_none_or(|error| error.kind() != std::io::ErrorKind::ConnectionRefused)
+                {
+                    crate::error_log::record_failure(
+                        "compatibility_fallback",
+                        "connect_cli_wrapper_handshake",
+                        format!("{error:#}"),
+                        serde_json::json!({
+                            "markerPresent": self.marker.is_some(),
+                            "markerWritten": marker_written,
+                        }),
+                    );
+                }
+                None
+            }
+        }
+    }
+
+    fn mark(&self, status: CliWrapperMarkerStatus, failure: Option<&CliWrapperFailure>) -> bool {
         let Some(path) = self.marker.as_deref() else {
-            return;
+            return false;
         };
         let mut marker = CliWrapperMarker::new(status);
         if let Some(failure) = failure {
@@ -786,71 +846,58 @@ impl CliWrapperReadiness {
                 format!("{error:#}"),
                 serde_json::json!({ "marker": path, "status": status }),
             );
+            return false;
         }
+        true
     }
 
-    fn mark_executed(&self) {
-        self.mark(CliWrapperMarkerStatus::Executed, None);
+    fn mark_executed(&self) -> bool {
+        self.mark(CliWrapperMarkerStatus::Executed, None)
     }
 
-    fn fail(mut self, failure: &CliWrapperFailure) {
-        self.mark(CliWrapperMarkerStatus::Failed, Some(failure));
-        if let Some(mut stream) = self.stream.take() {
-            let _ = stream.write_all(b"!");
-            let _ = serde_json::to_writer(&mut stream, failure);
-        }
+    fn fail(self, failure: &CliWrapperFailure) {
+        self.finish_with(Some(failure), connect_cli_wrapper_handshake);
     }
 
     /// 记录已执行；随后 drop 关闭握手连接，启动器以 EOF 作为执行确认。
     fn executed(self) {
-        self.mark_executed();
+        self.finish_with(None, connect_cli_wrapper_handshake);
+    }
+
+    fn finish_with(
+        mut self,
+        failure: Option<&CliWrapperFailure>,
+        connect: impl FnOnce() -> Result<std::net::TcpStream>,
+    ) {
+        let marker_written = match failure {
+            Some(failure) => self.mark(CliWrapperMarkerStatus::Failed, Some(failure)),
+            None => self.mark_executed(),
+        };
+        // 初次写入成功后，文件仍可能被占用。仅在此前没有尝试 TCP 时补一次有界连接，
+        // 避免丢失最终状态，也不会叠加两次连接重试预算。
+        if !marker_written && self.tcp_deferred {
+            let started = std::time::Instant::now();
+            self.stream = self.connect_with_diagnostics(false, connect);
+            let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                "launcher.cli_wrapper_handshake_fallback",
+                serde_json::json!({
+                    "connected": self.stream.is_some(),
+                    "elapsedMs": started.elapsed().as_millis(),
+                }),
+            );
+        }
+        if let Some(failure) = failure
+            && let Some(mut stream) = self.stream.take()
+        {
+            let _ = stream.write_all(b"!");
+            let _ = serde_json::to_writer(&mut stream, failure);
+        }
     }
 }
 
 #[cfg(any(windows, target_os = "macos", test))]
 fn cli_wrapper_handshake_required(optional: Option<&OsStr>) -> bool {
     optional != Some(OsStr::new("1"))
-}
-
-#[cfg(any(windows, target_os = "macos", test))]
-fn handshake_tcp_channel_available() -> bool {
-    #[cfg(windows)]
-    {
-        // AppContainer 隔离可能阻止回环连接，此时仅通过标记文件确认执行。
-        !running_in_app_container()
-    }
-    #[cfg(not(windows))]
-    {
-        true
-    }
-}
-
-#[cfg(windows)]
-fn running_in_app_container() -> bool {
-    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-    use windows::Win32::Foundation::HANDLE;
-    use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TokenIsAppContainer};
-    use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-
-    let mut token = HANDLE::default();
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) }.is_err() {
-        return false;
-    }
-    // 让 OwnedHandle 负责关闭；查不到令牌信息时按非隔离进程处理，不影响握手。
-    let token = unsafe { OwnedHandle::from_raw_handle(token.0) };
-    let mut value = 0u32;
-    let mut returned = 0u32;
-    unsafe {
-        GetTokenInformation(
-            HANDLE(token.as_raw_handle()),
-            TokenIsAppContainer,
-            Some((&mut value as *mut u32).cast()),
-            std::mem::size_of::<u32>() as u32,
-            &mut returned,
-        )
-    }
-    .is_ok()
-        && value != 0
 }
 
 #[cfg(any(windows, target_os = "macos", test))]
@@ -1207,9 +1254,10 @@ mod tests {
     fn optional_cli_wrapper_handshake_writes_marker_without_connecting() {
         let temporary = tempfile::tempdir().unwrap();
         let marker_path = temporary.path().join("wrapper.json");
-        let readiness = CliWrapperReadiness::begin_with(Some(marker_path.clone()), false, || {
-            panic!("a marker-only wrapper must not connect")
-        });
+        let readiness =
+            CliWrapperReadiness::begin_with(Some(marker_path.clone()), false, false, || {
+                panic!("a marker-only wrapper must not connect")
+            });
         assert!(readiness.stream.is_none());
         assert_eq!(
             CliWrapperMarker::read(&marker_path)
@@ -1226,9 +1274,10 @@ mod tests {
                 .status,
             CliWrapperMarkerStatus::Executed
         );
-        let readiness = CliWrapperReadiness::begin_with(Some(marker_path.clone()), false, || {
-            panic!("a marker-only wrapper must not connect")
-        });
+        let readiness =
+            CliWrapperReadiness::begin_with(Some(marker_path.clone()), false, false, || {
+                panic!("a marker-only wrapper must not connect")
+            });
         readiness.fail(&CliWrapperFailure {
             message: "目标程序被占用".to_string(),
             retryable: true,
@@ -1237,6 +1286,219 @@ mod tests {
         assert_eq!(marker.status, CliWrapperMarkerStatus::Failed);
         assert_eq!(marker.message.as_deref(), Some("目标程序被占用"));
         assert_eq!(marker.retryable, Some(true));
+    }
+
+    #[test]
+    fn windows_cli_wrapper_confirms_execution_and_failure_through_written_marker() {
+        for failure in [None, Some(false), Some(true)] {
+            let temporary = tempfile::tempdir().unwrap();
+            let marker_path = temporary.path().join("wrapper.json");
+            assert!(!marker_path.exists());
+            let readiness =
+                CliWrapperReadiness::begin_with(Some(marker_path.clone()), true, true, || {
+                    panic!("a successfully written Windows marker must avoid the TCP connection")
+                });
+            assert!(readiness.stream.is_none());
+            assert_eq!(
+                CliWrapperMarker::read(&marker_path)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                CliWrapperMarkerStatus::Launching
+            );
+            if let Some(retryable) = failure {
+                readiness.fail(&CliWrapperFailure {
+                    message: "CLI process creation failed".into(),
+                    retryable,
+                });
+            } else {
+                readiness.executed();
+            }
+            let marker = CliWrapperMarker::read(&marker_path).unwrap().unwrap();
+            assert_eq!(marker.retryable, failure);
+            if failure.is_some() {
+                assert_eq!(marker.status, CliWrapperMarkerStatus::Failed);
+                assert_eq!(
+                    marker.message.as_deref(),
+                    Some("CLI process creation failed")
+                );
+            } else {
+                assert_eq!(marker.status, CliWrapperMarkerStatus::Executed);
+                assert_eq!(marker.message, None);
+            }
+        }
+    }
+
+    #[test]
+    fn windows_cli_wrapper_keeps_tcp_confirmation_when_marker_missing_or_unwritable() {
+        use std::io::Read;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let blocked_destination = temporary.path().join("directory.json");
+        std::fs::create_dir(&blocked_destination).unwrap();
+        let blocked_parent = temporary.path().join("file");
+        std::fs::write(&blocked_parent, b"not a directory").unwrap();
+        for marker in [
+            None,
+            Some(blocked_destination),
+            Some(blocked_parent.join("wrapper.json")),
+        ] {
+            for failure in [None, Some(false), Some(true)] {
+                let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+                let readiness = CliWrapperReadiness::begin_with(marker.clone(), true, true, || {
+                    Ok(std::net::TcpStream::connect(listener.local_addr()?)?)
+                });
+                assert!(readiness.stream.is_some());
+                let (mut receiver, _) = listener.accept().unwrap();
+                receiver
+                    .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                    .unwrap();
+                if let Some(retryable) = failure {
+                    readiness.fail(&CliWrapperFailure {
+                        message: "CLI process creation failed".into(),
+                        retryable,
+                    });
+                } else {
+                    readiness.executed();
+                }
+                let mut received = Vec::new();
+                receiver.read_to_end(&mut received).unwrap();
+                if let Some(retryable) = failure {
+                    assert_eq!(received.first(), Some(&b'!'));
+                    let failure: CliWrapperFailure =
+                        serde_json::from_slice(&received[1..]).unwrap();
+                    assert_eq!(failure.message, "CLI process creation failed");
+                    assert_eq!(failure.retryable, retryable);
+                } else {
+                    assert!(received.is_empty(), "execution is confirmed by EOF");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn windows_cli_wrapper_falls_back_to_tcp_if_final_marker_write_fails() {
+        use std::io::Read;
+
+        for retryable in [None, Some(false), Some(true)] {
+            let temporary = tempfile::tempdir().unwrap();
+            let marker_path = temporary.path().join("wrapper.json");
+            let readiness =
+                CliWrapperReadiness::begin_with(Some(marker_path.clone()), true, true, || {
+                    panic!("the initial marker write succeeded")
+                });
+            assert_eq!(
+                CliWrapperMarker::read(&marker_path)
+                    .unwrap()
+                    .unwrap()
+                    .status,
+                CliWrapperMarkerStatus::Launching
+            );
+            std::fs::remove_file(&marker_path).unwrap();
+            std::fs::create_dir(&marker_path).unwrap();
+            let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+            let failure = retryable.map(|retryable| CliWrapperFailure {
+                message: "CLI process creation failed".into(),
+                retryable,
+            });
+            let mut attempted = false;
+            readiness.finish_with(failure.as_ref(), || {
+                attempted = true;
+                Ok(std::net::TcpStream::connect(listener.local_addr()?)?)
+            });
+            assert!(
+                attempted,
+                "the failed final write must use the deferred TCP channel"
+            );
+            let (mut receiver, _) = listener.accept().unwrap();
+            receiver
+                .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+                .unwrap();
+            let mut received = Vec::new();
+            receiver.read_to_end(&mut received).unwrap();
+            if let Some(retryable) = retryable {
+                assert_eq!(received.first(), Some(&b'!'));
+                let failure: CliWrapperFailure = serde_json::from_slice(&received[1..]).unwrap();
+                assert_eq!(failure.message, "CLI process creation failed");
+                assert_eq!(failure.retryable, retryable);
+            } else {
+                assert!(received.is_empty(), "execution is confirmed by EOF");
+            }
+        }
+    }
+
+    #[test]
+    fn cli_wrapper_does_not_repeat_an_exhausted_tcp_connect_budget() {
+        for prefer_marker in [false, true] {
+            let readiness = CliWrapperReadiness::begin_with(None, true, prefer_marker, || {
+                Err(std::io::Error::from(std::io::ErrorKind::TimedOut).into())
+            });
+            readiness.finish_with(None, || {
+                panic!("the connection budget was already used before launching")
+            });
+        }
+    }
+
+    #[test]
+    fn cli_wrapper_readiness_writes_marker_even_when_handshake_is_refused() {
+        let temporary = tempfile::tempdir().unwrap();
+        let marker_path = temporary.path().join("wrapper.json");
+        let mut attempted = false;
+        let readiness =
+            CliWrapperReadiness::begin_with(Some(marker_path.clone()), true, false, || {
+                attempted = true;
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionRefused,
+                    "listener already gone",
+                )
+                .into())
+            });
+        assert!(
+            attempted,
+            "other platforms keep TCP even after the marker was written"
+        );
+        assert!(readiness.stream.is_none());
+        assert_eq!(
+            CliWrapperMarker::read(&marker_path)
+                .unwrap()
+                .unwrap()
+                .status,
+            CliWrapperMarkerStatus::Launching
+        );
+    }
+
+    #[test]
+    fn cli_helper_process_fixture() {
+        if std::env::var_os("CODEY_TEST_CLI_HELPER_RELAY").is_none() {
+            return;
+        }
+        // 父进程不关闭 stdin 时一直阻塞，模拟仍在等待输入的转发器。
+        std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink()).unwrap();
+        std::process::exit(0);
+    }
+
+    #[test]
+    fn cli_wrapper_reaps_an_input_relay_still_waiting_for_input() {
+        let mut relay = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "codex_startup_patch::tests::cli_helper_process_fixture",
+                "--nocapture",
+            ])
+            .env("CODEY_TEST_CLI_HELPER_RELAY", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(
+            !wait_for_cli_child_exit(&mut relay, std::time::Duration::from_millis(200)).unwrap()
+        );
+
+        let started = std::time::Instant::now();
+        terminate_cli_child(&mut relay, "输入转发器");
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+        assert!(relay.try_wait().unwrap().is_some());
     }
 
     #[test]
@@ -1515,6 +1777,34 @@ mod tests {
                 "features.hooks=true",
             ]
             .map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn channels_wrapper_discards_desktop_provider_and_model() {
+        let (home, config) = crate::channels::tests::selected_fixture();
+        let overrides = crate::channels::runtime_overrides(home.path(), &config).unwrap();
+        let args = [
+            "app-server",
+            "-c",
+            "model_provider=old",
+            "--config=model=old",
+            "--config",
+            "model_provider=also-old",
+        ]
+        .map(OsString::from);
+        let actual = rewrite_app_server_args(&args, &overrides).unwrap();
+        assert_eq!(
+            actual,
+            vec![
+                OsString::from("app-server"),
+                OsString::from("-c"),
+                OsString::from("analytics.enabled=false"),
+                OsString::from("-c"),
+                OsString::from(&overrides[0]),
+                OsString::from("-c"),
+                OsString::from(&overrides[1]),
+            ]
         );
     }
 

@@ -32,8 +32,9 @@ pub async fn fetch_route_models(
 
     let home = codex_home().to_path_buf();
     let sync_home = home.clone();
+    let channel_config = config.clone();
     let sync = tokio::task::spawn_blocking(move || {
-        codex_provider::current_provider_model_sync(&sync_home)
+        codex_provider::current_provider_model_sync_for_config(&sync_home, &channel_config)
     })
     .await
     .map_err(|error| format!("解析当前 provider 模型同步配置任务异常退出：{error}"))?
@@ -65,9 +66,9 @@ pub async fn fetch_route_models(
         return Err(rollback_model_catalog_after_config_save_async(catalog_refresh, error).await);
     }
     *state.config.write().await = latest.clone();
+    let hot_reload = ModelHotReloadOutcome::queued(state, true);
     drop(_config_write_guard);
-    let hot_reload = hot_reload_runtime_models(state).await;
-    let subagent_hot_reload = hot_reload_runtime_subagent_config(state, &latest).await;
+    let subagent_hot_reload = SubagentHotReloadOutcome::default();
     let restart_required = runtime_config_requires_restart(state, &latest).await;
     Ok(add_subagent_hot_reload_to_response(
         hot_reload.add_to_response(json!({

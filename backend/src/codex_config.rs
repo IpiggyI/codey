@@ -29,7 +29,10 @@ use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Val
 
 mod fastctx;
 mod fs_io;
+mod repair;
 mod runtime_role_transaction;
+
+pub(crate) use repair::{ConfigRepairFailure, check_codex_config, repair_codex_config};
 
 use fastctx::{
     apply_fastctx_guidance_to_table, arguments_have_codey_fastctx_marker,
@@ -306,6 +309,7 @@ struct RuntimeAgentPlan {
 pub(crate) fn apply_runtime_router_config(
     home: &Path,
     options: RuntimeRouterConfigOptions<'_>,
+    config: &crate::config::CodeyConfig,
 ) -> Result<AppliedRuntimeRouterConfig> {
     let marker = lease_marker_path();
     let _runtime_config_lock = RuntimeConfigLock::acquire(&marker)?;
@@ -320,7 +324,7 @@ pub(crate) fn apply_runtime_router_config(
     }
     // Runtime values stay command-local `-c` overlays. Codey never writes a
     // request-destination provider table into the user's config.toml.
-    let applied = apply_isolated_runtime_router_config(
+    let applied = apply_isolated_runtime_router_config_for_channels(
         home,
         RouterApplyOptions {
             model_catalog_path,
@@ -334,7 +338,19 @@ pub(crate) fn apply_runtime_router_config(
             marker: &marker,
             backup_root: &backup_root,
         },
+        config,
     )?;
+    Ok(applied)
+}
+
+fn apply_isolated_runtime_router_config_for_channels(
+    home: &Path,
+    options: RouterApplyOptions<'_>,
+    config: &crate::config::CodeyConfig,
+) -> Result<AppliedRuntimeRouterConfig> {
+    let channel_overrides = crate::channels::runtime_overrides(home, config)?;
+    let mut applied = apply_isolated_runtime_router_config(home, options)?;
+    applied.runtime_config_overrides.extend(channel_overrides);
     Ok(applied)
 }
 const FASTCTX_SERVER_BINARY: &str = if cfg!(windows) {
@@ -1079,6 +1095,35 @@ fn reconcile_runtime_subagent_roles_at(
     })
 }
 
+#[cfg(test)]
+pub(crate) fn prepare_subagent_apply_test(
+    home: &Path,
+    marker: &Path,
+    config: &CodeyConfig,
+) -> Result<()> {
+    apply_isolated_test_runtime_config(
+        home,
+        false,
+        None,
+        true,
+        &config.subagent_model,
+        &config.subagent_reasoning_effort,
+        Some(&config.subagent_roles),
+        marker,
+        &marker.with_file_name("codex-backups"),
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn reconcile_subagent_apply_test(
+    config: &CodeyConfig,
+    marker: &Path,
+) -> Result<RuntimeSubagentReconcileReport> {
+    let _runtime_config_lock = RuntimeConfigLock::acquire(marker)?;
+    reconcile_runtime_subagent_roles_at(config, marker)
+}
+
 fn runtime_agent_files_match(plans: &[RuntimeAgentPlan]) -> Result<bool> {
     for plan in plans {
         let contents = match fs::read(&plan.registration.config_file) {
@@ -1244,18 +1289,12 @@ fn ensure_child_table<'a>(parent: &'a mut Table, key: &str) -> Result<&'a mut Ta
         .ok_or_else(|| anyhow::anyhow!("{key} 必须是 TOML table"))
 }
 
-/// Reads the provider bucket selected by the current Codex configuration.
-/// Codex defaults to its built-in `openai` provider when the root key is absent.
-pub fn current_model_provider(home: &Path) -> Result<String> {
-    let config_path = home.join("config.toml");
-    let doc = read_codex_config_document(&config_path)?;
-    Ok(doc
-        .get("model_provider")
-        .and_then(Item::as_str)
-        .map(str::trim)
-        .filter(|provider| !provider.is_empty())
-        .unwrap_or(BUILTIN_OPENAI_PROVIDER_ID)
-        .to_string())
+#[cfg(test)]
+fn current_model_provider(home: &Path) -> Result<String> {
+    crate::codex_provider::current_provider_id_for_config(
+        home,
+        &crate::config::CodeyConfig::default(),
+    )
 }
 
 pub(crate) fn fast_context_tools_status(home: &Path) -> Result<FastContextToolsStatus> {

@@ -167,7 +167,7 @@ test("mounts weekly and five-hour usage before the sidebar footer's last child",
   assert.deepEqual(env.footer.children, [usage, env.anchor]);
   assert.equal(env.footer.getAttribute("data-codey-usage-host"), "true");
   assert.match(usage.innerHTML, /周额度[\s\S]*?60%[\s\S]*?5 小时[\s\S]*?85%/);
-  assert.match(usage.innerHTML, /class="codey-usage-plan-tag">Pro 20x</);
+  assert.match(usage.innerHTML, /class="codey-usage-plan-tag" data-pro-tier="200">Pro 200</);
   assert.match(usage.innerHTML, /已用 40%/);
   assert.match(usage.innerHTML, /剩余 60%/);
   assert.match(usage.innerHTML, /Credits 余额[\s\S]*?42/);
@@ -186,6 +186,63 @@ test("mounts weekly and five-hour usage before the sidebar footer's last child",
   env.setUsage({ status: "disabled" });
   await env.window.__codeyRefreshAccountUsage();
   assert.equal(env.document.getElementById("codey-account-usage"), null);
+});
+
+test("maps plan types to sidebar labels and Pro tier attributes", async () => {
+  const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+  const baseUsage = {
+    status: "ok",
+    planType: "prolite",
+    fetchedAt: Math.floor(Date.now() / 1000),
+    primary: { usedPercent: 15, windowMinutes: 300, resetsAt },
+    secondary: { usedPercent: 40, windowMinutes: 10080, resetsAt },
+  };
+  const env = mountSidebar({ usageResult: baseUsage });
+  const planTag = /<span class="codey-usage-plan-tag"((?: data-plan="plus")?(?: data-pro-tier="(?:100|200|500)")?)>([^<]*)<\/span>/;
+
+  for (const [planType, expectedLabel, expectedTier] of [
+    ["prolite", "Pro 100", "100"],
+    ["pro", "Pro 200", "200"],
+    ["promax", "Pro 500", "500"],
+    ["  ProLite  ", "Pro 100", "100"],
+    ["pro100", "Pro 100", "100"],
+    ["pro200", "Pro 200", "200"],
+    ["pro500", "Pro 500", "500"],
+    ["pro 100", "Pro 100", "100"],
+    ["pro_200", "Pro 200", "200"],
+    ["pro-500", "Pro 500", "500"],
+    ["Pro $100", "Pro 100", "100"],
+    ["5x", "Pro 5x"],
+    ["pro5x", "Pro 5x"],
+    ["pro20x", "Pro 20x"],
+    ["plus", "Plus"],
+    ["free", "Free"],
+    ["business_prolite", "business_prolite"],
+    ["business_pro100", "business_pro100"],
+    ["pro500_trial", "pro500_trial"],
+    ["pro_lite", "pro_lite"],
+    ["business_plus", "business_plus"],
+    ["  future_plan  ", "future_plan"],
+    ["__proto__", "__proto__"],
+    ['pro500" data-pro-tier="500', 'pro500&quot; data-pro-tier=&quot;500'],
+  ]) {
+    env.setUsage({ ...baseUsage, planType });
+    await env.window.__codeyRefreshAccountUsage();
+    const usage = env.document.getElementById("codey-account-usage");
+    assert.ok(usage, `usage mounted for ${planType}`);
+    const match = usage.innerHTML.match(planTag);
+    assert.equal(match?.[2], expectedLabel, `rendered plan label for ${planType}`);
+    assert.equal(
+      match?.[1].match(/data-pro-tier="(\d+)"/)?.[1],
+      expectedTier,
+      `rendered Pro tier for ${planType}`,
+    );
+    assert.equal(
+      match?.[1].includes('data-plan="plus"'),
+      expectedLabel === "Plus",
+      `applies Plus styling only to Plus for ${planType}`,
+    );
+  }
 });
 
 test("mounts into Codex's bottom-anchored footer when it has no controls yet", async () => {
@@ -273,7 +330,8 @@ test("app-server rateLimitsByLimitId keeps codex as the summary and lists other 
   // 摘要来自 rateLimitsByLimitId.codex，而不是 rateLimits 或其他额度组。
   assert.match(usage.innerHTML, /周额度[\s\S]*?70%[\s\S]*?5 小时[\s\S]*?90%/);
   assert.equal(usage.dataset.windowCount, "2");
-  assert.match(usage.innerHTML, /class="codey-usage-plan-tag">Plus</);
+  assert.match(usage.innerHTML, /class="codey-usage-plan-tag" data-plan="plus">Plus</);
+  assert.match(usage.innerHTML, /class="codey-usage-detail-row" data-tone="critical" style="--codey-usage-remaining:0"/);
   const summary = usage.innerHTML.slice(0, usage.innerHTML.indexOf("codey-account-usage-details"));
   assert.doesNotMatch(summary, /GPT-5\.3-Codex-Spark/);
   // 其他额度组只出现在详情里，带名称和独立的小标题。

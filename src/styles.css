@@ -197,63 +197,6 @@ input:focus-visible,
   width: 140px;
 }
 
-.config-header-feedback {
-  position: relative;
-}
-
-.feedback-qr-popover {
-  position: absolute;
-  z-index: 40;
-  top: calc(100% + 10px);
-  left: 50%;
-  display: grid;
-  width: 176px;
-  justify-items: center;
-  gap: 7px;
-  padding: 10px;
-  border: 1px solid rgba(0, 0, 0, 0.1);
-  border-radius: 12px;
-  background: #ffffff;
-  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.18);
-  color: #4b4b50;
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.4;
-  opacity: 0;
-  pointer-events: none;
-  transform: translate(-50%, -4px);
-  visibility: hidden;
-  transition: opacity 150ms ease, transform 150ms ease, visibility 150ms ease;
-}
-
-.feedback-qr-popover::before {
-  position: absolute;
-  top: -5px;
-  left: 50%;
-  width: 9px;
-  height: 9px;
-  border-top: 1px solid rgba(0, 0, 0, 0.1);
-  border-left: 1px solid rgba(0, 0, 0, 0.1);
-  background: #ffffff;
-  content: "";
-  transform: translateX(-50%) rotate(45deg);
-}
-
-.feedback-qr-popover img {
-  display: block;
-  width: 156px;
-  height: 156px;
-  border-radius: 7px;
-  object-fit: cover;
-}
-
-.config-header-feedback:hover .feedback-qr-popover,
-.config-header-feedback:focus-within .feedback-qr-popover {
-  opacity: 1;
-  transform: translate(-50%, 0);
-  visibility: visible;
-}
-
 /* ==========================================================================
    Main Scroll & Page Container
    ========================================================================== */
@@ -271,6 +214,142 @@ input:focus-visible,
   width: min(100%, 1360px);
   margin: 0 auto;
   padding: 18px 22px 36px;
+}
+
+/* ==========================================================================
+   Settings Sidebar Layout
+   ========================================================================== */
+
+.settings-layout {
+  display: grid;
+  grid-template-columns: 208px minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.settings-sidebar {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  overscroll-behavior: contain;
+  border-right: 1px solid rgba(0, 0, 0, 0.06);
+  background: rgba(255, 255, 255, 0.55);
+  padding: 16px 10px 12px;
+}
+
+.settings-sidebar-menu {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.settings-nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.settings-nav-group + .settings-nav-group {
+  margin-top: 22px;
+}
+
+.settings-nav-group-title {
+  padding: 0 10px 6px;
+  color: var(--mac-text-tertiary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  user-select: none;
+}
+
+.settings-nav-item {
+  position: relative;
+  display: flex;
+  min-height: 34px;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  padding: 7px 10px;
+  color: #3a3a3c;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.3;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.settings-nav-item span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-nav-item svg {
+  flex-shrink: 0;
+  color: var(--mac-text-tertiary);
+  transition: color 120ms ease;
+}
+
+.settings-nav-item:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--mac-text-primary);
+}
+
+.settings-nav-item:hover svg {
+  color: #3a3a3c;
+}
+
+.settings-nav-item[aria-current="page"] {
+  background: var(--mac-card-bg);
+  color: var(--mac-text-primary);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 0 0 1px rgba(0, 0, 0, 0.04);
+}
+
+.settings-nav-item[aria-current="page"] svg {
+  color: var(--mac-blue);
+}
+
+.settings-nav-item:focus-visible {
+  outline: 2px solid var(--mac-blue);
+  outline-offset: 1px;
+}
+
+.settings-content {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.settings-content:focus-visible,
+.settings-page-scroll:focus-visible {
+  outline: 2px solid var(--mac-blue);
+  outline-offset: -2px;
+}
+
+.settings-page {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  overflow: hidden;
+}
+
+.settings-layout[hidden],
+.settings-page[hidden] {
+  display: none;
 }
 
 .section-title {
@@ -331,3 +410,132 @@ input:focus-visible,
   margin-left: 0;
 }
 
+
+.system-settings-icon {
+  display: flex;
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: rgba(0, 122, 255, 0.1);
+  color: var(--mac-blue);
+}
+
+.system-settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 0;
+  font-size: 14px;
+}
+
+.system-settings-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 12px;
+  background: var(--mac-gray-bg);
+}
+
+.system-settings-versions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.system-settings-version-cell {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.system-settings-version-cell:first-child {
+  padding-right: 12px;
+  border-right: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.system-settings-version-cell:last-child {
+  padding-left: 12px;
+}
+
+.system-settings-label {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--mac-text-secondary);
+}
+
+.system-settings-value {
+  min-width: 0;
+  overflow: hidden;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--mac-text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.system-settings-error,
+.system-settings-copy-feedback {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.system-settings-path {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.system-settings-path-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.system-settings-path-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--mac-text-secondary);
+}
+
+.system-settings-copy {
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  flex-shrink: 0;
+  color: var(--mac-text-secondary);
+}
+
+.system-settings-path-box {
+  padding: 6px 10px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  background: var(--mac-card-bg);
+}
+
+.system-settings-path-box code {
+  display: block;
+  max-height: 80px;
+  overflow-y: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--mac-text-primary);
+  overflow-wrap: anywhere;
+  user-select: all;
+}

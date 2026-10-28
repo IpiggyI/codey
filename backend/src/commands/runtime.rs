@@ -36,8 +36,9 @@ pub(super) struct CodexAppVersionCache {
     runtime_app_path: Option<PathBuf>,
     configured_app_path: String,
     version: String,
-    lookup_started_at: Instant,
-    checked_at: Instant,
+    checked_at: Option<Instant>,
+    generation: u64,
+    refreshing: bool,
 }
 
 #[cfg(test)]
@@ -48,8 +49,9 @@ impl CodexAppVersionCache {
             runtime_app_path: None,
             configured_app_path,
             version: String::new(),
-            lookup_started_at: now,
-            checked_at: now,
+            checked_at: Some(now),
+            generation: 0,
+            refreshing: false,
         }
     }
 }
@@ -79,6 +81,14 @@ pub(super) async fn runtime_status_with_options(
     state: &Arc<AppState>,
     refresh_injection_status: bool,
 ) -> Result<Value, String> {
+    runtime_status_at(state, refresh_injection_status, codex_home()).await
+}
+
+async fn runtime_status_at(
+    state: &Arc<AppState>,
+    refresh_injection_status: bool,
+    home: &std::path::Path,
+) -> Result<Value, String> {
     let runtime = state.runtime.lock().await.clone();
     // 先在无锁状态取运行时模型基线，再持配置读锁做同步比较：读守卫跨
     // await 会让排队写者阻塞所有新的桥接请求。
@@ -95,6 +105,13 @@ pub(super) async fn runtime_status_with_options(
         None => false,
     };
     let config = state.config.read().await;
+    let channel_notice = if config.selected_channel_id.is_some() {
+        crate::channels::list(home, &config)
+            .map_err(|error| error.to_string())?
+            .notice
+    } else {
+        None
+    };
     let snapshot = config.current_provider_snapshot.as_ref();
     let active_provider_id = snapshot
         .map(|snapshot| snapshot.id.clone())
@@ -145,10 +162,12 @@ pub(super) async fn runtime_status_with_options(
         0
     };
     let mut status = json!({
+        "configApply": super::config_apply::status(state),
         "running": runtime.is_some(),
         "appVersion": env!("CARGO_PKG_VERSION"),
         "clientPlatform": current_update_platform(),
         "activeProviderId": active_provider_id,
+        "channelNotice": channel_notice,
         "officialAccountAvailable": official_account_available,
         "officialAccountStatus": official_account_status,
         "restartRequired": restart_required,
@@ -216,62 +235,115 @@ pub(super) async fn runtime_status_with_options(
     Ok(status)
 }
 
+#[tokio::test]
+async fn channels_runtime_status_surfaces_missing_selection_notice() {
+    let (home, mut config) = crate::channels::tests::fixture();
+    config.selected_channel_id = Some("provider:removed".into());
+    let state = Arc::new(AppState {
+        store: crate::config::ConfigStore::new(home.path().join("codey.json")),
+        config: tokio::sync::RwLock::new(config),
+        ..AppState::default()
+    });
+    state.request_shutdown();
+    let status = runtime_status_at(&state, false, home.path()).await.unwrap();
+    assert!(status["channelNotice"].as_str().unwrap().contains("回退"));
+    state.config.write().await.selected_channel_id = None;
+    assert!(
+        runtime_status_at(&state, false, home.path()).await.unwrap()["channelNotice"].is_null()
+    );
+}
+
 async fn codex_app_version_for_status(
-    state: &AppState,
+    state: &Arc<AppState>,
     runtime_app_path: Option<PathBuf>,
     configured_app_path: String,
 ) -> String {
-    let lookup_started_at = Instant::now();
+    cached_codex_app_version(
+        state,
+        runtime_app_path,
+        configured_app_path,
+        Arc::new(|runtime_path: Option<PathBuf>, configured_path: String| {
+            error_log::refresh_codex_app_version(runtime_path.as_deref(), Some(&configured_path))
+                .unwrap_or_default()
+        }),
+    )
+    .await
+}
+
+type VersionLookup = dyn Fn(Option<PathBuf>, String) -> String + Send + Sync;
+
+async fn cached_codex_app_version(
+    state: &Arc<AppState>,
+    runtime_app_path: Option<PathBuf>,
+    configured_app_path: String,
+    lookup: Arc<VersionLookup>,
+) -> String {
+    let mut cache = state.codex_app_version_cache.lock().await;
+    let cached = cache.get_or_insert_with(|| CodexAppVersionCache {
+        runtime_app_path: runtime_app_path.clone(),
+        configured_app_path: configured_app_path.clone(),
+        version: String::new(),
+        checked_at: None,
+        generation: 0,
+        refreshing: false,
+    });
+    if cached.runtime_app_path != runtime_app_path
+        || cached.configured_app_path != configured_app_path
     {
-        let cache = state.codex_app_version_cache.lock().await;
-        if let Some(cached) = cache.as_ref()
-            && cached.runtime_app_path == runtime_app_path
-            && cached.configured_app_path == configured_app_path
-            && lookup_started_at.saturating_duration_since(cached.checked_at)
-                < CODEX_APP_VERSION_CACHE_TTL
-        {
-            return cached.version.clone();
+        cached.runtime_app_path = runtime_app_path;
+        cached.configured_app_path = configured_app_path;
+        cached.version.clear();
+        cached.checked_at = None;
+        cached.generation = cached.generation.wrapping_add(1);
+    }
+    if !cached.refreshing
+        && cached
+            .checked_at
+            .is_none_or(|checked| checked.elapsed() >= CODEX_APP_VERSION_CACHE_TTL)
+        && !state.is_shutting_down()
+    {
+        cached.refreshing = true;
+        tokio::spawn(refresh_codex_app_version_cache(Arc::clone(state), lookup));
+    }
+    cached.version.clone()
+}
+
+async fn refresh_codex_app_version_cache(state: Arc<AppState>, lookup: Arc<VersionLookup>) {
+    // 一个后台任务串行探测；路径连续变化时只保留最新请求，避免慢卷扫描堆积。
+    loop {
+        let (runtime_path, configured_path, generation) = {
+            let mut cache = state.codex_app_version_cache.lock().await;
+            let Some(cached) = cache.as_mut() else { return };
+            if state.is_shutting_down() {
+                cached.refreshing = false;
+                return;
+            }
+            (
+                cached.runtime_app_path.clone(),
+                cached.configured_app_path.clone(),
+                cached.generation,
+            )
+        };
+        let lookup = Arc::clone(&lookup);
+        let shutdown_state = Arc::clone(&state);
+        let version = tokio::task::spawn_blocking(move || {
+            if shutdown_state.is_shutting_down() {
+                return String::new();
+            }
+            lookup(runtime_path, configured_path)
+        })
+        .await
+        .unwrap_or_default();
+        let mut cache = state.codex_app_version_cache.lock().await;
+        let Some(cached) = cache.as_mut() else { return };
+        if cached.generation == generation {
+            cached.version = version;
+            // 未找到版本或任务失败也缓存，避免状态轮询反复扫描磁盘。
+            cached.checked_at = Some(Instant::now());
+            cached.refreshing = false;
+            return;
         }
     }
-
-    // App bundle discovery performs blocking filesystem work. Do not keep the
-    // async cache mutex locked while it runs: concurrent status requests should
-    // remain independent even when the application lives on a slow volume.
-    let checked_runtime_app_path = runtime_app_path.clone();
-    let checked_configured_app_path = configured_app_path.clone();
-    let version = tokio::task::spawn_blocking(move || {
-        error_log::refresh_codex_app_version(
-            checked_runtime_app_path.as_deref(),
-            Some(&checked_configured_app_path),
-        )
-        .unwrap_or_default()
-    })
-    .await
-    .unwrap_or_default();
-
-    let mut cache = state.codex_app_version_cache.lock().await;
-    if let Some(cached) = cache.as_ref()
-        && cached.runtime_app_path == runtime_app_path
-        && cached.configured_app_path == configured_app_path
-        && cached.lookup_started_at >= lookup_started_at
-    {
-        // Another request completed the same lookup while this one was doing
-        // filesystem work. Reuse the newer result instead of replacing it.
-        return cached.version.clone();
-    }
-    if cache
-        .as_ref()
-        .is_none_or(|cached| cached.lookup_started_at < lookup_started_at)
-    {
-        *cache = Some(CodexAppVersionCache {
-            runtime_app_path,
-            configured_app_path,
-            version: version.clone(),
-            lookup_started_at,
-            checked_at: Instant::now(),
-        });
-    }
-    version
 }
 
 fn ensure_runtime_can_start(state: &AppState) -> Result<(), String> {
@@ -298,6 +370,14 @@ async fn forward_codex_exit_to_codey_shutdown(
     runtime_generation: u64,
 ) {
     if codex_exit.await.is_err() {
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "launcher.codex_exit_watch_closed",
+            json!({
+                "codeyProcessId": std::process::id(),
+                "runtimeGeneration": runtime_generation,
+                "shutdownRequested": false,
+            }),
+        );
         return;
     }
     while exit_state.restart_in_progress.load(Ordering::Acquire) {
@@ -311,7 +391,18 @@ async fn forward_codex_exit_to_codey_shutdown(
     }
     // 重启期间旧 Codex 的退出不能关闭新一代运行时；只有当前受控
     // Codex 的自然退出才联动关闭 Codey 主进程。
-    if exit_state.runtime_generation.load(Ordering::Acquire) == runtime_generation {
+    let current_generation = exit_state.runtime_generation.load(Ordering::Acquire);
+    let current_runtime = current_generation == runtime_generation;
+    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+        "launcher.codex_exit_observed",
+        json!({
+            "codeyProcessId": std::process::id(),
+            "runtimeGeneration": runtime_generation,
+            "currentRuntimeGeneration": current_generation,
+            "shutdownRequested": current_runtime,
+        }),
+    );
+    if current_runtime {
         exit_state.request_shutdown();
     }
 }
@@ -321,15 +412,31 @@ async fn launch_codey_inner_locked(state: &Arc<AppState>) -> Result<Value, Strin
     if state.runtime.lock().await.is_some() {
         return Ok(json!({"status":"already_running"}));
     }
+    let launch_started = std::time::Instant::now();
     #[cfg(windows)]
     ensure_windows_codex_app_path(state).await?;
+    let resolve_app_path_ms = launch_started.elapsed().as_millis() as u64;
     stop_waiting_webhook_watcher(state).await;
     restore_previous_runtime_state(codex_home())
         .await
         .map_err(|error| format!("恢复上次 Codey 临时 Codex 配置失败：{error}"))?;
+    let restore_preparation_ms = launch_started.elapsed().as_millis() as u64 - resolve_app_path_ms;
+    let routes_started = std::time::Instant::now();
     prepare_routes_for_current_launch(state).await?;
+    let routes_ms = routes_started.elapsed().as_millis() as u64;
     let imported_default_route = super::ensure_default_route_imported(state).await;
     let config = sync_provider_models_for_launch(state, imported_default_route).await;
+    let model_sync_ms = routes_started.elapsed().as_millis() as u64 - routes_ms;
+    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+        "launcher.prelaunch_timings",
+        json!({
+            "resolveAppPathMs": resolve_app_path_ms,
+            "restorePreparationMs": restore_preparation_ms,
+            "prepareRoutesMs": routes_ms,
+            "modelSyncMs": model_sync_ms,
+            "totalMs": launch_started.elapsed().as_millis() as u64,
+        }),
+    );
     let initial_scan_task = if webhook_watcher_should_run(&config) {
         let initial_event_cache = state
             .recent_session_event_cache
@@ -351,6 +458,7 @@ async fn launch_codey_inner_locked(state: &Arc<AppState>) -> Result<Value, Strin
         &config,
         handler.clone(),
         &state.trace_log_write_protection_active,
+        state.trace_log_guard_state.clone(),
         state.crashpad_pending_stats.clone(),
     )
     .await;
@@ -385,6 +493,7 @@ async fn launch_codey_inner_locked(state: &Arc<AppState>) -> Result<Value, Strin
                     &config,
                     handler,
                     &state.trace_log_write_protection_active,
+                    state.trace_log_guard_state.clone(),
                     state.crashpad_pending_stats.clone(),
                 )
                 .await;
@@ -420,6 +529,8 @@ async fn launch_codey_inner_locked(state: &Arc<AppState>) -> Result<Value, Strin
         codex_exit,
         runtime_generation,
     ));
+    *state.startup_error.write().await = None;
+    super::config_apply::confirm_launch(state, &config).await;
     Ok(json!({"status":"running"}))
 }
 
@@ -559,7 +670,7 @@ async fn run_scheduled_restart(restart_state: Arc<AppState>, mut cancel: oneshot
         runtime_start_failure_context(&restart_state, true, &error).await,
     );
     eprintln!("Codey 自动重启 Codex 失败：{error}");
-    restart_state.request_shutdown();
+    restart_state.request_shutdown_with_reason(super::AppShutdownReason::RuntimeRestartFailed);
 }
 
 async fn stop_codey_runtime_locked(state: &Arc<AppState>) -> Result<Value, String> {
@@ -877,4 +988,52 @@ mod tests {
                 .is_err()
         );
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn closed_codex_exit_watch_does_not_request_shutdown() {
+        let state = Arc::new(AppState::default());
+        state.runtime_generation.store(7, Ordering::Release);
+        let (exit_tx, exit_rx) = oneshot::channel();
+        drop(exit_tx);
+
+        forward_codex_exit_to_codey_shutdown(Arc::clone(&state), exit_rx, 7).await;
+
+        assert!(!state.is_shutting_down());
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), state.wait_for_shutdown())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_restart_failure_keeps_its_shutdown_reason() {
+        let state = Arc::new(AppState::default());
+        state.request_shutdown_with_reason(AppShutdownReason::RuntimeRestartFailed);
+        // A late natural-exit notification must not replace the failure cause.
+        state.request_shutdown();
+        assert_eq!(
+            state.wait_for_shutdown().await,
+            AppShutdownReason::RuntimeRestartFailed
+        );
+        assert!(state.is_shutting_down());
+    }
+}
+
+#[cfg(test)]
+mod version_cache_tests;
+
+#[tokio::test]
+async fn channels_runtime_status_ignores_malformed_official_login_for_provider() {
+    let (home, config) = crate::channels::tests::selected_fixture();
+    std::fs::write(home.path().join("auth.json"), "{half-written").unwrap();
+    let state = Arc::new(AppState {
+        store: crate::config::ConfigStore::new(home.path().join("codey.json")),
+        config: tokio::sync::RwLock::new(config),
+        ..AppState::default()
+    });
+    state.request_shutdown();
+    let status = runtime_status_at(&state, false, home.path()).await.unwrap();
+    assert_eq!(status["activeProviderId"], "b.dot");
+    assert!(status["channelNotice"].is_null());
 }

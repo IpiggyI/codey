@@ -35,4 +35,4 @@ single-context. See `docs/agents/domain.md`.
 
 ### Windows pack
 
-To build a Windows installer for local testing, run only `scripts/build-windows.sh` (same as `pnpm run build:windows`). Do not compile from `\\wsl.localhost`, do not push a tag or dispatch Actions to package uncommitted work, and do not install the package. See `docs/agents/windows-pack.md`.
+To build a test package for human install testing, run `scripts/ci-pack.sh` on a pushed feature branch; GitHub Actions builds it and the script downloads it. See `docs/agents/ci-pack.md`. When GitHub is unreachable or an offline build is needed, run only `scripts/build-windows.sh` (same as `pnpm run build:windows`) instead, and do not compile from `\\wsl.localhost`. See `docs/agents/windows-pack.md`. Release tags are for releases, not test packages, and the human installs the package.

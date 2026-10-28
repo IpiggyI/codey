@@ -197,9 +197,97 @@ pub(crate) fn read_bounded(path: &Path, max_bytes: u64) -> anyhow::Result<Vec<u8
     Ok(bytes)
 }
 
+// PowerShell 的错误输出只含路径和异常文本，截短后写入日志与错误信息。
+#[cfg(any(windows, test))]
+const POWERSHELL_STDERR_LIMIT: usize = 1000;
+
+#[cfg(any(windows, test))]
+fn powershell_failure_detail(stderr: &[u8], code: Option<i32>) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let text = text.trim();
+    if text.is_empty() {
+        return match code {
+            Some(code) => format!("PowerShell 退出码 {code}，没有错误输出"),
+            None => "PowerShell 被终止，没有错误输出".into(),
+        };
+    }
+    let mut chars = text.chars();
+    let bounded: String = chars.by_ref().take(POWERSHELL_STDERR_LIMIT).collect();
+    if chars.next().is_some() {
+        format!("{bounded}…")
+    } else {
+        bounded
+    }
+}
+
+/// 将目录 ACL 设为仅当前用户完全控制；失败时错误信息带 PowerShell 的错误输出。
+#[cfg(windows)]
+pub(crate) fn restrict_directory_to_current_user(path: &Path) -> anyhow::Result<()> {
+    use std::os::windows::process::CommandExt;
+    // 新文件继承受保护目录的当前用户 ACL；Set-Acl 重设已受保护目录会要求 SeSecurityPrivilege。
+    let script = "$ErrorActionPreference='Stop'; $sid=[System.Security.Principal.WindowsIdentity]::GetCurrent().User; $acl=New-Object System.Security.AccessControl.DirectorySecurity; $acl.SetOwner($sid); $acl.SetAccessRuleProtection($true,$false); $rule=New-Object System.Security.AccessControl.FileSystemAccessRule($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow'); $acl.AddAccessRule($rule); (Get-Item -LiteralPath $env:CODEY_PRIVATE_DIRECTORY).SetAccessControl($acl)";
+    let output = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env("CODEY_PRIVATE_DIRECTORY", path)
+        .creation_flags(0x08000000)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|error| {
+            eprintln!(
+                "启动 PowerShell 设置目录 ACL 失败：{}：{error}",
+                path.display()
+            );
+            anyhow::anyhow!("无法启动 PowerShell：{error}")
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = powershell_failure_detail(&output.stderr, output.status.code());
+    eprintln!("PowerShell 设置目录 ACL 失败：{}：{detail}", path.display());
+    anyhow::bail!("PowerShell 设置目录 ACL 失败：{detail}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn restricting_the_same_directory_again_still_allows_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let private = directory.path().join("private");
+        fs::create_dir(&private).unwrap();
+
+        restrict_directory_to_current_user(&private).unwrap();
+        restrict_directory_to_current_user(&private).unwrap();
+        let destination = private.join("secret.json");
+        atomic_write_private(&destination, b"secret").unwrap();
+        assert_eq!(fs::read(destination).unwrap(), b"secret");
+    }
+
+    #[test]
+    fn powershell_failure_detail_is_trimmed_bounded_and_never_empty() {
+        assert_eq!(
+            powershell_failure_detail(b"  Access denied: C:\\x\r\n", Some(1)),
+            "Access denied: C:\\x"
+        );
+        assert_eq!(
+            powershell_failure_detail(b" \n", Some(1)),
+            "PowerShell 退出码 1，没有错误输出"
+        );
+        assert_eq!(
+            powershell_failure_detail(b"", None),
+            "PowerShell 被终止，没有错误输出"
+        );
+        let long = "错".repeat(POWERSHELL_STDERR_LIMIT + 5);
+        let detail = powershell_failure_detail(long.as_bytes(), Some(1));
+        assert_eq!(detail.chars().count(), POWERSHELL_STDERR_LIMIT + 1);
+        assert!(detail.ends_with('…'));
+        let exact = "a".repeat(POWERSHELL_STDERR_LIMIT);
+        assert_eq!(powershell_failure_detail(exact.as_bytes(), Some(1)), exact);
+    }
 
     #[test]
     fn temp_paths_are_unique_for_the_same_destination() {

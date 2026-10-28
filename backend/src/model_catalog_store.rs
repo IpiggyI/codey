@@ -159,9 +159,43 @@ pub(crate) fn materialize_derived_catalog(
     generated_models: &[Value],
     user_catalog_path: Option<&Path>,
 ) -> Result<PathBuf> {
+    materialize_derived_catalog_with_required_models(
+        catalog_dir,
+        codex_home,
+        generated_models,
+        user_catalog_path,
+        &[],
+    )
+}
+
+pub(crate) fn materialize_derived_catalog_with_required_models(
+    catalog_dir: &Path,
+    codex_home: &Path,
+    generated_models: &[Value],
+    user_catalog_path: Option<&Path>,
+    required_models: &[String],
+) -> Result<PathBuf> {
     let catalog = if let Some(user_path) = user_catalog_path {
         let user = load_user_catalog(user_path)?;
-        merge_user_catalog(user, generated_models)
+        let mut merged = merge_user_catalog(user, generated_models);
+        let models = merged["models"].as_array_mut().expect("validated catalog");
+        for required in required_models {
+            if models.iter().any(|model| {
+                model["slug"]
+                    .as_str()
+                    .is_some_and(|slug| model_id::equal(slug, required))
+            }) {
+                continue;
+            }
+            if let Some(model) = generated_models.iter().find(|model| {
+                model["slug"]
+                    .as_str()
+                    .is_some_and(|slug| model_id::equal(slug, required))
+            }) {
+                models.push(model.clone());
+            }
+        }
+        merged
     } else {
         json!({ "models": generated_models })
     };

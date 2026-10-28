@@ -2,6 +2,47 @@ use super::*;
 use crate::config::ProviderProfile;
 
 #[tokio::test]
+async fn conversation_stats_bridge_returns_record_snapshot_envelope() {
+    let directory = tempfile::tempdir().unwrap();
+    let id = "00000000-0000-0000-0000-000000000034";
+    let sessions = directory.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::write(sessions.join(format!("rollout-2026-10-28T00-00-00-{id}.jsonl")), format!(
+        "{}\n{}\n{}\n",
+        json!({"type":"session_meta","payload":{"id":id}}),
+        json!({"type":"event_msg","timestamp":"2026-10-28T00:00:00Z","payload":{"type":"task_started","turn_id":"one"}}),
+        json!({"type":"event_msg","timestamp":"2026-10-28T00:00:01Z","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":123}}}})
+    )).unwrap();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        stats_codex_home: Some(directory.path().to_owned()),
+        ..AppState::default()
+    });
+    let result = state
+        .bridge_request(
+            "/session/stats".into(),
+            json!({"sessionId":format!("local:{id}")}),
+        )
+        .await;
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["stats"]["totalTokens"], 123);
+    assert_eq!(result["stats"]["turnCount"], 1);
+    assert_eq!(result["stats"]["lastTurn"]["id"], "one");
+    assert_eq!(result.as_object().unwrap().len(), 2);
+    let empty = state
+        .bridge_request(
+            "/session/stats".into(),
+            json!({"sessionId":"00000000-0000-0000-0000-000000000035"}),
+        )
+        .await;
+    assert_eq!(empty, json!({"status":"ok","stats":null}));
+    let invalid = state
+        .bridge_request("/session/stats".into(), json!({}))
+        .await;
+    assert_eq!(invalid["status"], "failed");
+}
+
+#[tokio::test]
 async fn model_save_routes_accept_missing_or_null_ids_without_weakening_required_routes() {
     let directory = tempfile::tempdir().unwrap();
     let state = Arc::new(AppState {
@@ -224,7 +265,7 @@ async fn session_metadata_cache_operations_are_serialized_in_blocking_workers() 
 }
 
 #[test]
-fn renderer_settings_keep_api_keys_and_clear_notification_secrets() {
+fn renderer_settings_keep_editable_credentials_and_clear_notification_secrets() {
     let mut config = CodeyConfig::default();
     config.prompt_optimization.api_key = "optimizer-secret".to_string();
     config.hide_full_access_warning = true;
@@ -257,6 +298,15 @@ fn renderer_settings_keep_api_keys_and_clear_notification_secrets() {
         ..NotificationChannelConfig::default()
     });
 
+    config.webhook.channels.push(NotificationChannelConfig {
+        id: "ntfy-1".to_string(),
+        kind: crate::notifications::NotificationChannelKind::Ntfy,
+        url: "https://ntfy.example.com".to_string(),
+        bot_token: "ntfy-access-secret".to_string(),
+        chat_id: "codey-topic".to_string(),
+        ..NotificationChannelConfig::default()
+    });
+
     let public = serde_json::to_value(redacted_config(&config)).unwrap();
 
     assert_eq!(public["promptOptimization"]["apiKey"], "");
@@ -276,6 +326,15 @@ fn renderer_settings_keep_api_keys_and_clear_notification_secrets() {
         public["webhook"]["channels"][3]["contextTokenConfigured"],
         true
     );
+    assert_eq!(
+        public["webhook"]["channels"][4]["url"],
+        "https://ntfy.example.com"
+    );
+    assert_eq!(public["webhook"]["channels"][4]["urlConfigured"], true);
+    assert_eq!(public["webhook"]["channels"][4]["botToken"], "");
+    assert_eq!(public["webhook"]["channels"][4]["botTokenConfigured"], true);
+    assert_eq!(public["webhook"]["channels"][4]["chatId"], "codey-topic");
+    assert!(!public.to_string().contains("ntfy-access-secret"));
     assert!(!public.to_string().contains("optimizer-secret"));
     assert!(!public.to_string().contains("feishu-secret"));
     assert!(!public.to_string().contains("telegram-secret"));
@@ -558,7 +617,7 @@ async fn request_log_hot_reload_reports_superseded_config() {
     let previous = state.config.read().await.clone();
     state.config.write().await.route_request_log.enabled = !previous.route_request_log.enabled;
 
-    let outcome = hot_reload_runtime_request_log(&state, &previous).await;
+    let outcome = hot_reload_runtime_request_log_locked(&state, &previous).await;
 
     assert_eq!(outcome.health(), "superseded");
     assert_eq!(
@@ -776,6 +835,37 @@ async fn legacy_subagent_scalars_update_only_the_default_role() {
     );
     assert_eq!(saved.subagent_model, "legacy-default");
     assert_eq!(saved.subagent_reasoning_effort, "high");
+}
+
+#[tokio::test]
+async fn codex_launch_proxy_saves_after_validation() {
+    let directory = tempfile::tempdir().unwrap();
+    let initial = CodeyConfig::default();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(initial.clone()),
+        ..AppState::default()
+    });
+    // 带凭据的地址交给本地认证中继，允许保存。
+    let mut payload = serde_json::to_value(&initial).unwrap();
+    payload["codexLaunchProxy"] = json!(" http://user:pass@127.0.0.1:7890 ");
+
+    let result = invoke_api(&state, "save_codey_config", json!({ "config": payload })).await;
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(
+        state.config.read().await.codex_launch_proxy,
+        "http://user:pass@127.0.0.1:7890"
+    );
+
+    // 第一次保存已推进 settings_revision，从当前配置重建请求。
+    let current = state.config.read().await.clone();
+    let mut payload = serde_json::to_value(&current).unwrap();
+    payload["codexLaunchProxy"] = json!(" socks5h://127.0.0.1 ");
+    let result = invoke_api(&state, "save_codey_config", json!({ "config": payload })).await;
+
+    assert_eq!(result["status"], "failed");
+    assert!(result["message"].as_str().unwrap().contains("启动代理"));
 }
 
 #[tokio::test]
@@ -1001,6 +1091,7 @@ fn selected_codex_app_path_requires_a_desktop_executable() {
 
     let executable = directory.path().join("Codex.exe");
     fs::write(&executable, []).unwrap();
+    write_codex_app_package(directory.path());
     assert_eq!(
         validate_codex_app_path(directory.path().to_str().unwrap()).unwrap(),
         directory.path()
@@ -1015,11 +1106,28 @@ fn selected_codex_app_path_accepts_a_custom_install_root() {
     let current = install_root.join("versions").join("current");
     fs::create_dir_all(&current).unwrap();
     fs::write(current.join("ChatGPT.exe"), []).unwrap();
+    write_codex_app_package(&current);
 
     assert_eq!(
         validate_codex_app_path(install_root.to_str().unwrap()).unwrap(),
         current
     );
+}
+
+#[cfg(windows)]
+fn write_codex_app_package(app_dir: &std::path::Path) {
+    let package_dir = app_dir.join("resources").join("app");
+    fs::create_dir_all(&package_dir).unwrap();
+    fs::write(
+        package_dir.join("package.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "name": "openai-codex-electron",
+            "productName": "Codex",
+            "version": "26.924.22138"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
 }
 
 #[tokio::test]

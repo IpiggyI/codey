@@ -478,6 +478,20 @@ fn renderer_catalog_uses_current_config_for_model_only_changes() {
 }
 
 #[test]
+fn codex_launch_proxy_change_requires_restart() {
+    let applied = CodeyConfig::default();
+    let mut current = applied.clone();
+    current.codex_launch_proxy = "http://127.0.0.1:7890".into();
+    assert!(config_requires_restart_with_route_status(
+        false,
+        &applied,
+        &RuntimeModelConfig::from_config(&applied),
+        &RuntimeSubagentConfig::from_config(&applied),
+        &current
+    ));
+}
+
+#[test]
 fn model_hot_reload_keeps_startup_capabilities_pending_without_blocking_other_routes() {
     for (websockets, web_search) in [(false, false), (true, false), (false, true)] {
         let mut route = crate::config::ProviderProfile::new("Models");

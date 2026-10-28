@@ -17,11 +17,11 @@ Codey 能找到并加载当前 Codex 的资源文件，但管理器发现逻辑�
 | 对象 | 本次核实结果 |
 | --- | --- |
 | Windows 仓库 | `D:/Development/GitHub/codey`。诊断基线为 `31fe3f2464c6d842002c2e2d252b852acc1ce4df`，`package.json` 为 `1.3.0`。 |
-| WSL 仓库 | Ubuntu 中的 `/home/hyy/develop/personal/GitHub/codey`。保存前提交同为 `31fe3f2464c6d842002c2e2d252b852acc1ce4df`，远端为 `git@github.com:IpiggyI/codey.git`。 |
+| WSL 仓库 | Ubuntu 中的本仓库。保存前提交同为 `31fe3f2464c6d842002c2e2d252b852acc1ce4df`，远端为 `git@github.com:IpiggyI/codey.git`。 |
 | 两侧源码比对 | `public/codey-inject.js` 和 `tests/session-delete-ui.test.mjs` 在统一换行后文本完全相同。Windows 为 CRLF，WSL 为 LF。不能用原始文件摘要不同推断功能差异。 |
 | WSL 原有改动 | 保存前 `git status --short` 只有未跟踪的 `.scratch/`。本次保留，不读取或清理其内容。 |
-| 运行中的 Codey | `D:/Software/Codey/Codey.exe`。未读取其产品版本，也未证明整个可执行文件与仓库产物一致；相关运行中发现函数的关键判定已逐项核对。 |
-| 运行中的 Codex | `C:/Program Files/WindowsApps/OpenAI.Codex_26.1013.4894.0_x64__2p2nqsd0c76g0/app/ChatGPT.exe`。本次读取时主进程 PID 为 `97804`，CDP 端口为 `9229`。商店包版本不等同于应用显示版本。 |
+| 运行中的 Codey | `<安装目录>/Codey.exe`。未读取其产品版本，也未证明整个可执行文件与仓库产物一致；相关运行中发现函数的关键判定已逐项核对。 |
+| 运行中的 Codex | `C:/Program Files/WindowsApps/OpenAI.Codex_26.1013.4894.0_x64__2p2nqsd0c76g0/app/ChatGPT.exe`。CDP 端口为 `9229`。商店包版本不等同于应用显示版本。 |
 | 实际页面资源 | `index-a092859c3d97.js`、`app-shared-bbfeca5e5737.js`、`app-initial-5851df3f6cb1.js`，均由实际页面的 `app://-/assets/` 地址读取。 |
 
 上述进程、端口、资源散列名及压缩符号只适用于本次运行。后续开始修复前重新探测，不能沿用为固定接口。

@@ -1,17 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   IconBrandGithub,
+  IconArrowBackUp as Undo,
   IconCheck,
   IconDeviceFloppy as Save,
   IconGitBranch as GitBranch,
   IconLoader2 as LoaderCircle,
-  IconMessageCircleQuestion,
   IconRefresh as RefreshCw,
+  IconSettings,
   IconX,
 } from "@tabler/icons-react";
 import { invoke } from "./api";
 import { TraceLogModule } from "./TraceLogModule";
 import { ModelPickerDialog } from "./AppDialogs";
+import { SystemSettingsDialog } from "./SystemSettingsDialog";
 import { FeaturePolicyCard, SubagentPolicyCard } from "./FeaturePolicyCard";
 import { ModelSection } from "./ModelSection";
 import { OperationsPanel } from "./OperationsPanel";
@@ -23,12 +25,31 @@ import {
 import type { NotificationChannel } from "./notifications";
 import { errorText, withTimeout } from "./appUtils";
 import { formatBytes } from "./formatters";
+import {
+  confirmThroughDialog,
+  createChannelController,
+  noticeAfterChannelChange,
+  type ChannelOutcome,
+  type SwitchTarget,
+} from "./channels";
 import { modelIdsEqual, uniqueModelIds } from "./modelIds";
 import { globalDefaultForProvider } from "./modelRoutes";
 import { CodeyBrandMark, SettingsModalShell } from "./SettingsModalShell";
+import { SettingsLayout } from "./SettingsLayout";
+import { CodexExtensionsPage, type ExtensionTransport } from "./features/codex-extensions";
 import { useModelSelection } from "./useModelSelection";
 import type { CrashpadPendingStats, TraceLogStats } from "./traceLogTypes";
 import { useRuntimeStatus } from "./useRuntimeStatus";
+import {
+  configApplyBannerVisible,
+  configApplyCompletionNotice,
+  configApplyNotice,
+} from "./configApply";
+import {
+  applyConfigCommandResult,
+  isStaleConfig,
+  type ConfigCommandResult,
+} from "./configCommandResult";
 import {
   NoticeLoadingText,
   NoticeToast,
@@ -41,36 +62,48 @@ import {
 import { useStableEvent } from "./useStableEvent";
 import type {
   AppProps,
+  ChannelList,
+  ConfigApplyStatus,
   CurrentProviderSnapshot,
   ProviderStatus,
   Config,
+  Confirmation,
   ModelContextConfig,
   CrashpadCleanup,
   FastContextToolsStatus,
   ModelState,
+  OfficialAccountsResult,
   PluginMarketplaceStatus,
   RouterSessionDiagnosis,
+  RuntimeStatus,
   TraceLogCleanup,
 } from "./App.types";
 import { Badge, Button } from "./components/ui";
 
 const Check = IconCheck;
 const X = IconX;
-const FEEDBACK_GROUP_QR_BASE_URL =
-  "https://pub-2d17a6a8bc22426a92e297a59f55ccc3.r2.dev/qr.png";
+const RESTART_INTERRUPTS_TASKS =
+  "当前 Codex 客户端将被关闭并由 Codey 自动重新拉起，正在执行的本地任务会被中断。";
+const SWITCH_CONFIRMATIONS: Record<SwitchTarget, Omit<Confirmation, "run">> = {
+  channel: {
+    action: "restart",
+    title: "切换渠道并重启 Codex？",
+    description: `确认后立即切换渠道，并重启 Codex 使新渠道生效。${RESTART_INTERRUPTS_TASKS}`,
+    confirmLabel: "切换并重启",
+  },
+  "official-account": {
+    action: "switch-official-account",
+    title: "切换官方账号并重启 Codex？",
+    description: `确认后 Codey 会先保存当前账号刷新过的登录，再把 Codex 的登录改写为该账号，并重启 Codex 使新账号生效。${RESTART_INTERRUPTS_TASKS}在之前账号下开始的对话可能无法在新账号下继续。`,
+    confirmLabel: "切换并重启",
+  },
+};
+const extensionRequest: ExtensionTransport = (request) => invoke("codex_extensions", { request });
 const UNKNOWN_FAST_CONTEXT_TOOLS_STATUS: FastContextToolsStatus = {
   userConfigured: false,
   detectionFailed: true,
 };
 const CONFIG_LOAD_TIMEOUT_MS = 30_000;
-
-function localDateCacheKey(date: Date) {
-  return [
-    date.getFullYear(),
-    String(date.getMonth() + 1).padStart(2, "0"),
-    String(date.getDate()).padStart(2, "0"),
-  ].join("");
-}
 
 function currentProviderModelState(
   config: Config,
@@ -105,17 +138,20 @@ export function App({
   onAfterClose,
   onClose,
 }: AppProps) {
-  const feedbackGroupQrUrl =
-    `${FEEDBACK_GROUP_QR_BASE_URL}?date=${localDateCacheKey(new Date())}`;
   const [config, setConfig] = useState<Config | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const persistedConfigRef = useRef<Config | null>(null);
   const loadGenerationRef = useRef(0);
+  // 渠道控制器在运行状态 hook 之后创建，经稳定事件转交。
+  const handleStatusResponse = useStableEvent(
+    (next: RuntimeStatus) => channelController.noteStatusNotice(next.channelNotice ?? null),
+  );
   const { status, setStatus, refreshStatus, refreshStatusForLoad,
-    restartStatusError, setRestartStatusError } =
+    restartStatusError, setRestartStatusError, acceptConfigApply, configApplyError, retryConfigApply } =
     useRuntimeStatus({
       active: !embedded || modalVisible,
       embedded,
+      onStatusResponse: handleStatusResponse,
     });
   const [pluginMarketplaceStatus, setPluginMarketplaceStatus] =
     useState<PluginMarketplaceStatus | null>(null);
@@ -125,6 +161,13 @@ export function App({
   );
   const [currentProviderSnapshot, setCurrentProviderSnapshot] =
     useState<CurrentProviderSnapshot | null>(null);
+  const [channelList, setChannelList] = useState<ChannelList | null>(null);
+  const [channelNotice, setChannelNotice] = useState<string | null>(null);
+  const [channelLoadError, setChannelLoadError] = useState<string | null>(null);
+  const [channelActionError, setChannelActionError] = useState<string | null>(null);
+  const [channelVersionConflict, setChannelVersionConflict] = useState(false);
+  const [restartAfterSwitchPending, setRestartAfterSwitchPending] = useState(false);
+  const [officialAccountsRefreshKey, setOfficialAccountsRefreshKey] = useState(0);
   const [routerSessionDiagnosis, setRouterSessionDiagnosis] =
     useState<RouterSessionDiagnosis | null>(null);
   const [fastContextToolsStatus, setFastContextToolsStatus] =
@@ -134,6 +177,8 @@ export function App({
   const [portalContainer, setPortalContainer] = useState<HTMLElement | null>(
     null,
   );
+  const [systemSettingsOpen, setSystemSettingsOpen] = useState(false);
+  const [configRepairNotice, setConfigRepairNotice] = useState<{ tone: "info" | "success" | "error"; text: string } | null>(null);
   const popupContainer = modalContainer ?? null;
   const noticeController = useAppNoticeController();
   const confirmationController = useConfirmationController();
@@ -142,6 +187,12 @@ export function App({
   useEffect(() => {
     if (restartStatusError) setNotice({ tone: "error", text: restartStatusError });
   }, [restartStatusError, setNotice]);
+  const previousConfigApplyRef = useRef(status.configApply);
+  useEffect(() => {
+    const notice = configApplyCompletionNotice(previousConfigApplyRef.current, status.configApply);
+    previousConfigApplyRef.current = status.configApply;
+    if (notice) setNotice(notice);
+  }, [status.configApply, setNotice]);
 
   const provider = providerStatus?.provider;
   const isBusy = busy !== null;
@@ -172,11 +223,9 @@ export function App({
   const operationsStatus = useMemo(
     () => ({
       running: status.running,
-      codexAppVersion: status.codexAppVersion,
       clientPlatform: status.clientPlatform,
       restartRequired: status.restartRequired,
       restartInProgress: status.restartInProgress,
-      codexAppPath: status.codexAppPath,
       maintenance: status.maintenance,
       injectionScripts: status.injectionScripts,
       fastContextToolsActive: status.fastContextToolsActive,
@@ -188,11 +237,9 @@ export function App({
     }),
     [
       status.running,
-      status.codexAppVersion,
       status.clientPlatform,
       status.restartRequired,
       status.restartInProgress,
-      status.codexAppPath,
       status.maintenance,
       status.injectionScripts,
       status.fastContextToolsActive,
@@ -202,6 +249,9 @@ export function App({
       status.traceLogWriteProtectionActive,
       status.crashpadDiskProtectionActive,
     ],
+  );
+  const handleConfigResult = useStableEvent(
+    (result: ConfigCommandResult) => applyCommandResult(result),
   );
   const {
     subagentModelOptions,
@@ -237,10 +287,27 @@ export function App({
     currentProviderSnapshot,
     officialAccountAvailable: status.officialAccountAvailable === true,
     runOperation,
-    setPersistedConfig,
-    setStatus,
+    applyConfigResult: handleConfigResult,
     setNotice,
   });
+
+  const adoptChannelConfig = useStableEvent(
+    (next: Config, restartRequired: boolean) => applyCommandResult({ config: next, restartRequired }),
+  );
+  const codexRunning = useStableEvent(() => status.running);
+  const channelController = useMemo(
+    () => createChannelController({
+      call: invoke,
+      readConfig: () => persistedConfigRef.current,
+      adopt: adoptChannelConfig,
+      setChannelList,
+      setChannelNotice,
+      codexRunning,
+      confirmSwitch: (target) => confirmThroughDialog(confirmationController, SWITCH_CONFIRMATIONS[target]),
+      restart: () => setRestartAfterSwitchPending(true),
+    }),
+    [adoptChannelConfig, codexRunning, confirmationController],
+  );
 
   useEffect(() => {
     void load();
@@ -248,6 +315,13 @@ export function App({
       loadGenerationRef.current += 1;
     };
   }, []);
+
+  // 切换前已确认重启：等切换操作结束、界面用上最新状态后，直接执行既有的重启操作。
+  useEffect(() => {
+    if (!restartAfterSwitchPending || isBusy) return;
+    setRestartAfterSwitchPending(false);
+    void restartCodex();
+  }, [restartAfterSwitchPending, isBusy]);
 
   async function load() {
     const generation = ++loadGenerationRef.current;
@@ -288,6 +362,7 @@ export function App({
         refreshStatusForLoad(),
         refreshPluginMarketplaceStatus(),
         refreshRouterSessionDiagnosis(),
+        refreshChannels(),
       ]);
       if (!current()) return;
       const lastMigration = diagnosis?.lastMigration;
@@ -310,6 +385,88 @@ export function App({
       setLoadFailed(true);
       setNotice({ tone: "error", text: errorText(error) });
     }
+  }
+
+  function reportChannelOutcome(outcome: ChannelOutcome) {
+    if (outcome.kind === "stale" || outcome.kind === "cancelled") return false;
+    if (outcome.kind === "failed") {
+      setChannelActionError(outcome.message);
+      setChannelVersionConflict(outcome.conflict);
+      setNotice({ tone: "error", text: outcome.message });
+      return false;
+    }
+    setChannelActionError(null);
+    setChannelVersionConflict(false);
+    return true;
+  }
+
+  async function refreshChannels() {
+    const outcome = await channelController.refresh();
+    if (outcome.kind === "failed") {
+      setChannelLoadError(outcome.message);
+    } else if (outcome.kind === "applied") {
+      setChannelLoadError(null);
+      setChannelActionError(null);
+      setChannelVersionConflict(false);
+    }
+  }
+
+  // 渠道变更后当前 provider 随之变化，重新读取一次以免页面显示旧 provider；失败由调用方提示。
+  async function refreshProviderAfterChannelChange() {
+    const result = await invoke<
+      ConfigCommandResult & { currentProviderSnapshot?: CurrentProviderSnapshot | null }
+    >("load_codey_config");
+    if (!applyRouteResult(result)) return;
+    if (result.currentProviderSnapshot === undefined) setCurrentProviderSnapshot(null);
+    await refreshStatus().catch(() => undefined);
+  }
+
+  async function switchChannel(channelId: string | null, defaultModel?: string) {
+    if (dirty || isBusy) return;
+    await runOperation("switch-channel", async () => {
+      const outcome = await channelController.select(channelId, defaultModel);
+      if (!reportChannelOutcome(outcome)) return;
+      setOfficialAccountsRefreshKey((key) => key + 1);
+      setNotice(await noticeAfterChannelChange(refreshProviderAfterChannelChange, {
+        tone: "info",
+        text: outcome.kind === "applied" && outcome.restart === "next-start"
+          ? "已切换渠道，下次启动 Codex 时生效"
+          : "已切换渠道",
+      }));
+    });
+  }
+
+  // 切换官方账号即切换渠道：在操作锁内执行，未保存的修改存在时不切换。
+  async function switchOfficialAccount(accountId: string): Promise<OfficialAccountsResult | null> {
+    if (dirty || isBusy) return null;
+    let accounts: OfficialAccountsResult | null = null;
+    await runOperation("switch-official-account", async () => {
+      const switched = await channelController.switchOfficialAccount(accountId);
+      accounts = switched.accounts;
+      if (switched.listError) setChannelLoadError(switched.listError);
+      if (!reportChannelOutcome(switched.outcome)) return;
+      setNotice(await noticeAfterChannelChange(refreshProviderAfterChannelChange, {
+        tone: "info",
+        text: switched.outcome.kind === "applied" && switched.outcome.restart === "next-start"
+          ? "已切换官方账号，下次启动 Codex 时生效"
+          : "已切换官方账号",
+      }));
+    });
+    return accounts;
+  }
+
+  async function saveChannelDefaultModel(channelId: string, model: string) {
+    if (dirty || isBusy) return;
+    await runOperation("save-channel-default-model", async () => {
+      const outcome = await channelController.setDefaultModel(channelId, model);
+      if (!reportChannelOutcome(outcome)) return;
+      setNotice(await noticeAfterChannelChange(
+        refreshProviderAfterChannelChange,
+        outcome.kind === "applied" && outcome.restartRequired
+          ? { tone: "info", text: "已保存渠道默认模型，重启 Codex 后生效" }
+          : { tone: "success", text: "已保存渠道默认模型" },
+      ));
+    });
   }
 
   async function refreshRouterSessionDiagnosis() {
@@ -362,6 +519,7 @@ export function App({
       providerStatus?: ProviderStatus;
       currentProviderSnapshot?: CurrentProviderSnapshot | null;
       modelState?: ModelState;
+      configApply?: ConfigApplyStatus | null;
       restartRequired?: boolean;
       modelHotReloaded?: boolean;
       modelHotReloadError?: string;
@@ -372,7 +530,7 @@ export function App({
       subagentConfigHotReloadError?: string;
       fastContextToolsStatus?: FastContextToolsStatus;
     }>("save_codey_config", { config: next });
-    setPersistedConfig(result.config);
+    if (!applyCommandResult(result)) return null;
     setFastContextToolsStatus(
       result.fastContextToolsStatus ?? UNKNOWN_FAST_CONTEXT_TOOLS_STATUS,
     );
@@ -384,19 +542,9 @@ export function App({
         },
       }),
     );
-    if (result.providerStatus) setProviderStatus(result.providerStatus);
-    if (result.currentProviderSnapshot !== undefined) {
-      setCurrentProviderSnapshot(result.currentProviderSnapshot);
-    }
-    if (result.modelState) setModelState(result.modelState);
-    if (typeof result.restartRequired === "boolean") {
-      setStatus((current) => ({
-        ...current,
-        restartRequired: result.restartRequired,
-      }));
-    }
-    setDirty(false);
     await refreshStatus().catch(() => undefined);
+    // 后台应用可能在刷新期间完成，提示以最新的应用状态为准。
+    if (result.configApply) result.configApply = acceptConfigApply(result.configApply);
     return result;
   }
 
@@ -408,14 +556,16 @@ export function App({
     if (isBusy) return false;
     setBusy("save-notification-channel");
     try {
-      await persist({
+      const result = await persist({
         ...current,
         webhook: {
           ...current.webhook,
           channels,
         },
       });
-      setNotice({ tone: "success", text: successText });
+      if (result) {
+        setNotice(result.configApply ? configApplyNotice(result.configApply) : { tone: "success", text: successText });
+      }
       return true;
     } catch (error) {
       setNotice({ tone: "error", text: errorText(error) });
@@ -474,16 +624,12 @@ export function App({
         providerStatus: ProviderStatus;
         currentProviderSnapshot?: CurrentProviderSnapshot | null;
         modelState: ModelState;
+        configApply?: ConfigApplyStatus | null;
         restartRequired?: boolean;
       }>("sync_current_provider");
-      setPersistedConfig(result.config);
-      setProviderStatus(result.providerStatus);
-      setCurrentProviderSnapshot(result.currentProviderSnapshot ?? null);
-      setModelState(result.modelState);
-      setStatus((current) => ({
-        ...current,
-        restartRequired: result.restartRequired ?? current.restartRequired,
-      }));
+      if (!applyCommandResult(result)) return;
+      if (result.currentProviderSnapshot === undefined) setCurrentProviderSnapshot(null);
+      void refreshChannels();
       setNotice({
         tone: result.restartRequired ? "info" : "success",
         text: result.restartRequired
@@ -501,26 +647,28 @@ export function App({
     });
   }
 
-  function applyRouteResult(result: {
-    config: Config;
-    providerStatus?: ProviderStatus;
-    currentProviderSnapshot?: CurrentProviderSnapshot | null;
-    modelState?: ModelState;
-    restartRequired?: boolean;
-  }) {
-    setPersistedConfig(result.config);
-    if (result.providerStatus) setProviderStatus(result.providerStatus);
+  function adoptCommandConfig(incoming: Config) {
+    if (isStaleConfig(persistedConfigRef.current, incoming)) return null;
+    setPersistedConfig(incoming);
+    return { dirty: false };
+  }
+
+  function applyCommandResult(
+    result: ConfigCommandResult & { currentProviderSnapshot?: CurrentProviderSnapshot | null },
+  ) {
+    if (!applyConfigCommandResult(result, {
+      adoptConfig: adoptCommandConfig, acceptConfigApply, setDirty, setProviderStatus, setModelState, setStatus,
+    })) return false;
     if (result.currentProviderSnapshot !== undefined) {
       setCurrentProviderSnapshot(result.currentProviderSnapshot);
     }
-    if (result.modelState) setModelState(result.modelState);
-    if (typeof result.restartRequired === "boolean") {
-      setStatus((current) => ({
-        ...current,
-        restartRequired: result.restartRequired,
-      }));
-    }
-    setDirty(false);
+    return true;
+  }
+
+  function applyRouteResult(
+    result: ConfigCommandResult & { currentProviderSnapshot?: CurrentProviderSnapshot | null },
+  ) {
+    if (!applyCommandResult(result)) return false;
     window.dispatchEvent(
       new CustomEvent("codey:config-changed", {
         detail: {
@@ -529,6 +677,7 @@ export function App({
         },
       }),
     );
+    return true;
   }
 
   async function fetchRouteModels() {
@@ -546,12 +695,13 @@ export function App({
           modelState: ModelState;
           routeModelState: ModelState;
           models: string[];
+          configApply?: ConfigApplyStatus | null;
           restartRequired?: boolean;
           modelHotReloaded?: boolean;
         }>("fetch_route_models", {
           expectedRevision: savedConfig.settingsRevision,
         });
-        applyRouteResult(result);
+        if (!applyRouteResult(result)) return;
         openModelPicker(
           { ...result.routeModelState, officialModels: [] },
           "",
@@ -600,6 +750,7 @@ export function App({
       const modelResult = await invoke<{
         config: Config;
         modelState: ModelState;
+        configApply?: ConfigApplyStatus | null;
         restartRequired?: boolean;
         modelHotReloaded?: boolean;
       }>("save_official_route_models", {
@@ -611,8 +762,12 @@ export function App({
         showAccountUsageInHeader,
         modelContexts,
       });
-      applyRouteResult(modelResult);
+      if (!applyRouteResult(modelResult)) return;
       saved = true;
+      if (modelResult.configApply) {
+        setNotice(configApplyNotice(modelResult.configApply));
+        return;
+      }
       setNotice({
         tone: modelResult.restartRequired ? "info" : "success",
         text: modelResult.restartRequired
@@ -647,9 +802,16 @@ export function App({
       const result = await invoke<{
         config: Config;
         modelState: ModelState;
+        configApply?: ConfigApplyStatus | null;
         restartRequired?: boolean;
       }>("save_default_model", { model });
-      applyRouteResult(result);
+      if (!applyRouteResult(result)) return;
+      // 已选渠道时该命令写入渠道默认模型，渠道列表随之刷新。
+      void refreshChannels();
+      if (result.configApply) {
+        setNotice(configApplyNotice(result.configApply));
+        return;
+      }
       setNotice({
         tone: result.restartRequired ? "info" : "success",
         text: `已将全局默认模型设为「${currentProviderSnapshot.id} / ${model}」`,
@@ -661,6 +823,11 @@ export function App({
     if (!config) return;
     await runOperation("save", async () => {
       const result = await persist(config);
+      if (!result) return;
+      if (result.configApply) {
+        setNotice(configApplyNotice(result.configApply));
+        return;
+      }
       const subagentHotReloaded = Boolean(result.subagentConfigHotReloaded);
       const subagentHotReloadFailed = Boolean(result.subagentConfigHotReloadError);
       const subagentConfigRepaired = Boolean(result.subagentConfigRepaired);
@@ -682,7 +849,8 @@ export function App({
     });
   }
 
-  function discardSettings() {
+  // 恢复上次保存的设置；close 为 false 时控制台保持打开。
+  function discardSettings(close = true) {
     if (isBusy) return;
     if (persistedConfigRef.current) {
       setConfig(persistedConfigRef.current);
@@ -690,7 +858,18 @@ export function App({
     setDirty(false);
     setModelPickerVisible(false);
     confirmationController.clear();
-    onClose?.();
+    if (close) onClose?.();
+  }
+
+  function askDiscardChanges() {
+    if (isBusy || !dirty) return;
+    setConfirmation({
+      action: "discard-settings",
+      title: "放弃未保存的更改？",
+      description: "将恢复上次保存的设置，控制台保持打开。",
+      confirmLabel: "放弃更改",
+      run: () => discardSettings(false),
+    });
   }
 
   function closeSettings() {
@@ -701,7 +880,7 @@ export function App({
       title: "放弃未保存的设置？",
       description: "关闭后将恢复上次保存的设置。",
       confirmLabel: "放弃更改并关闭",
-      run: discardSettings,
+      run: () => discardSettings(),
     });
   }
 
@@ -716,7 +895,9 @@ export function App({
     });
   }
 
-  function askRestartCodex() {
+  function askRestartCodex(
+    description = "当前 Codex 客户端将被关闭并由 Codey 自动重新拉起，正在执行的本地任务会被中断。",
+  ) {
     if (restartStatusError) {
       void runOperation("restart", async () => {
         const next = await refreshStatus();
@@ -732,10 +913,55 @@ export function App({
     setConfirmation({
       action: "restart",
       title: "重启 Codex？",
-      description:
-        "当前 Codex 客户端将被关闭并由 Codey 自动重新拉起，正在执行的本地任务会被中断。",
+      description,
       confirmLabel: "重启 Codex",
       run: () => void restartCodex(),
+    });
+  }
+
+  function askRepairCodexConfig() {
+    if (isBusy) return;
+    setConfirmation({
+      action: "repair-codex-config",
+      title: "修复 Codex 配置？",
+      description: "将检查配置文件及相关路径，修改已有配置前自动备份，并修复能够确认的问题。修复成功后，请从 Codey 重启 Codex 使修改生效。",
+      confirmLabel: "确认修复",
+      run: () => void repairCodexConfig(),
+    });
+  }
+
+  async function repairCodexConfig() {
+    await runOperation("repair-codex-config", async () => {
+      const report = (notice: { tone: "info" | "success" | "error"; text: string }) => {
+        setConfigRepairNotice(notice);
+        setNotice(notice);
+      };
+      report({ tone: "info", text: "正在检查并修复 Codex 配置…" });
+      try {
+        const result = await invoke<{
+          message: string;
+          configPath: string;
+          repaired: boolean;
+          backupPath?: string | null;
+        }>("repair_codex_config");
+        const summary = result.message || (result.repaired
+          ? "Codex 配置已修复"
+          : "Codex 配置检查通过，无需修改");
+        const restartHint = "修复成功，请从 Codey 重启 Codex 使修改生效。";
+        const backupPath = result.backupPath ? String(result.backupPath) : null;
+        // 后端消息已含重启提示或备份位置时不再重复追加
+        report({
+          tone: "success",
+          text: [
+            result.repaired && !summary.includes("重启 Codex") ? restartHint : null,
+            summary,
+            `配置文件：${result.configPath}`,
+            backupPath && !summary.includes(backupPath) ? `备份文件：${backupPath}` : null,
+          ].filter(Boolean).join("\n"),
+        });
+      } catch (error) {
+        report({ tone: "error", text: `Codex 配置修复未完成：${errorText(error)}。请查看 Codey 错误日志；连接中断时可重新检查执行结果。` });
+      }
     });
   }
 
@@ -920,6 +1146,7 @@ export function App({
   }
 
   const handleCloseSettings = useStableEvent(closeSettings);
+  const handleDiscardChanges = useStableEvent(askDiscardChanges);
   const handleSaveCurrent = useStableEvent(() => void saveCurrent());
   const handleRepairPluginMarketplace = useStableEvent(
     () => void repairPluginMarketplace(),
@@ -927,7 +1154,7 @@ export function App({
   const handlePrepareComputerUse = useStableEvent(
     () => void prepareComputerUse(),
   );
-  const handleRestartCodex = useStableEvent(askRestartCodex);
+  const handleRestartCodex = useStableEvent(() => askRestartCodex());
   const handleConfigChange = useStableEvent(editConfig);
   const handleAddNotificationChannel = useStableEvent(addNotificationChannel);
   const handleNotificationChannelChange = useStableEvent(
@@ -965,6 +1192,17 @@ export function App({
   const handleSetRouteDefaultModel = useStableEvent((model: string) => {
     void setRouteDefaultModel(model);
   });
+  const handleSelectChannel = useStableEvent(
+    (channelId: string | null, defaultModel?: string) => void switchChannel(channelId, defaultModel),
+  );
+  const handleSetChannelDefaultModel = useStableEvent(
+    (channelId: string, model: string) => void saveChannelDefaultModel(channelId, model),
+  );
+  const handleSwitchOfficialAccount = useStableEvent(switchOfficialAccount);
+  const handleOfficialAccountsChanged = useStableEvent(() => void refreshChannels());
+  const handleRefreshChannels = useStableEvent(
+    () => void runOperation("reload-config", load),
+  );
   const handleClearTraceLogs = useStableEvent(askClearTraceLogs);
   const handleRefreshTraceLogStats = useStableEvent(
     () => void refreshTraceLogStats(),
@@ -1020,6 +1258,10 @@ export function App({
     );
   }
 
+  // 已保存的配置需重启生效时，重启按钮提示等待重启。
+  const waitingForRestart = !restartStatusError && status.running
+    && !status.restartInProgress && busy !== "restart" && status.restartRequired === true;
+
   const configHeaderContent = (
     <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-5 max-[760px]:grid-cols-[minmax(0,1fr)_auto_auto] max-[760px]:gap-2.5">
       <div className="flex min-w-0 items-center gap-3 justify-self-start max-[760px]:gap-2">
@@ -1043,22 +1285,6 @@ export function App({
 
       {embedded && (
         <div className="flex items-center gap-3 justify-self-center max-[520px]:gap-2">
-          <div className="config-header-feedback">
-            <Button
-              aria-describedby="codey-feedback-qr-description"
-              aria-label="问题反馈群，悬浮或聚焦查看二维码"
-              className="whitespace-nowrap max-[520px]:w-8! max-[520px]:px-0!"
-              size="sm"
-              variant="brand-outline"
-            >
-              <IconMessageCircleQuestion aria-hidden="true" />
-              <span className="max-[520px]:hidden">问题反馈群</span>
-            </Button>
-            <div className="feedback-qr-popover" role="tooltip">
-              <img src={feedbackGroupQrUrl} alt="问题反馈群二维码" />
-              <span id="codey-feedback-qr-description">扫码加入问题反馈群</span>
-            </div>
-          </div>
           <Button
             aria-label="打开 Codey GitHub 仓库"
             className="w-8! min-w-8! px-0!"
@@ -1074,9 +1300,19 @@ export function App({
 
       <div className="flex min-w-0 items-center gap-4 justify-self-end">
         <div className="flex items-center gap-2">
+          <Button
+            aria-label="系统设置与偏好"
+            className="flex-none"
+            onPress={() => setSystemSettingsOpen(true)}
+            size="icon-sm"
+            title="系统设置与偏好"
+            variant="ghost"
+          >
+            <IconSettings aria-hidden="true" />
+          </Button>
           {embedded && (
             <Button
-              aria-label={restartStatusError ? "重新查询状态" : status.running ? "重启 Codex" : "Codex 未运行"}
+              aria-label={restartStatusError ? "重新查询状态" : waitingForRestart ? "等待重启 Codex，点击重启以应用配置" : status.running ? "重启 Codex" : "Codex 未运行"}
               className="max-[520px]:w-8! max-[520px]:px-0!"
               disabled={isBusy || (!restartStatusError && (status.restartInProgress || !status.running))}
               onPress={handleRestartCodex}
@@ -1089,8 +1325,21 @@ export function App({
                 <RefreshCw aria-hidden="true" />
               )}
               <span className="max-[520px]:hidden">
-                {restartStatusError ? "重新查询状态" : status.running ? "重启 Codex" : "未运行"}
+                {restartStatusError ? "重新查询状态" : waitingForRestart ? "等待重启" : status.running ? "重启 Codex" : "未运行"}
               </span>
+            </Button>
+          )}
+          {dirty && (
+            <Button
+              aria-label="放弃更改"
+              className="max-[520px]:w-8! max-[520px]:px-0!"
+              disabled={isBusy}
+              onPress={handleDiscardChanges}
+              size="sm"
+              variant="ghost"
+            >
+              <Undo aria-hidden="true" />
+              <span className="max-[520px]:hidden">放弃更改</span>
             </Button>
           )}
           <Button
@@ -1134,7 +1383,19 @@ export function App({
       className={`app-shell${embedded ? " embedded" : ""}`}
       ref={setPortalContainer}
     >
-      <a className="skip-link" href="#codey-settings-content">
+      <a
+        className="skip-link"
+        href="#codey-settings-content"
+        onClick={(event) => {
+          // 页内锚点无法跨越 ShadowRoot，直接在当前控制台内移动焦点。
+          const target = event.currentTarget
+            .closest(".app-shell")
+            ?.querySelector<HTMLElement>("#codey-settings-content");
+          if (!target) return;
+          event.preventDefault();
+          target.focus();
+        }}
+      >
         跳至设置内容
       </a>
 
@@ -1179,27 +1440,88 @@ export function App({
         </header>
       )}
 
-      <div className="page-scroll">
-        <div className="page" id="codey-settings-content">
-          {/* 最上方：运行状态 (Codex 运行与维护) */}
-          <OperationsPanel
-            codexAppPath={config.codexAppPath}
-            fastContextToolsStatus={fastContextToolsStatus}
-            status={operationsStatus}
-            busy={busy}
-            isBusy={isBusy}
-            pluginMarketplaceStatus={pluginMarketplaceStatus}
-            onRepairPluginMarketplace={handleRepairPluginMarketplace}
-            computerUseNotice={computerUseNotice}
-            onPrepareComputerUse={handlePrepareComputerUse}
-            onRestart={handleRestartCodex}
-            restartStatusUnknown={Boolean(restartStatusError)}
-            showRestartAction={!embedded}
-          />
+      {configApplyBannerVisible(status.configApply, configApplyError) && status.configApply && (
+        <div
+          role={status.configApply.state === "failed" || configApplyError ? "alert" : "status"}
+          className="flex flex-wrap items-center gap-2 border-b border-black/8 px-5 py-2 text-xs"
+        >
+          {status.configApply.state === "pending" && !configApplyError && (
+            <LoaderCircle size={14} className="animate-spin" aria-hidden="true" />
+          )}
+          <span>{configApplyError || configApplyNotice(status.configApply).text}</span>
+          {configApplyError && (
+            <Button size="sm" variant="outline" onPress={() => void retryConfigApply()}>
+              重新查询状态
+            </Button>
+          )}
+        </div>
+      )}
 
-          {/* 当前 provider 与模型：单独一行展示 */}
-          <div className="full-row-section">
+      <SettingsLayout
+        sections={{
+          overview: (
+            <>
+              <OperationsPanel
+                fastContextToolsStatus={fastContextToolsStatus}
+                status={operationsStatus}
+                busy={busy}
+                isBusy={isBusy}
+                pluginMarketplaceStatus={pluginMarketplaceStatus}
+                onRepairPluginMarketplace={handleRepairPluginMarketplace}
+                computerUseNotice={computerUseNotice}
+                onPrepareComputerUse={handlePrepareComputerUse}
+                onRestart={handleRestartCodex}
+                restartStatusUnknown={Boolean(restartStatusError)}
+                showRestartAction={!embedded}
+              />
+
+              {/* Codex 功能策略（含启动代理） */}
+              <div className="full-row-section">
+                <FeaturePolicyCard
+                  config={config}
+                  fastContextToolsStatus={fastContextToolsStatus}
+                  isMacClient={status.clientPlatform === "macos"}
+                  isWindowsClient={status.clientPlatform === "windows"}
+                  popupContainer={popupContainer}
+                  tooltipContainer={portalContainer}
+                  isBusy={isBusy}
+                  onConfigChange={handleConfigChange}
+                />
+              </div>
+
+              {/* 消息通知：每个渠道 item 占一半 */}
+              <div className="full-row-section">
+                <NotificationChannelsCard
+                  config={config}
+                  container={portalContainer}
+                  popupContainer={popupContainer}
+                  isBusy={isBusy}
+                  onAddChannel={handleAddNotificationChannel}
+                  onChannelChange={handleNotificationChannelChange}
+                  onRequestRemoveChannel={handleRequestRemoveNotificationChannel}
+                />
+              </div>
+
+              {/* 诊断存储保护 */}
+              <div className="full-row-section">
+                <TraceLogModule
+                  stats={status.traceLogStats}
+                  crashpadStats={status.crashpadPendingStats}
+                  crashpadSupported={status.clientPlatform === "macos"}
+                  traceProtectionEnabled={config.disableTraceLogWrites}
+                  crashpadProtectionEnabled={config.protectCrashpadPending}
+                  clearBusy={busy === "clear-trace-logs"}
+                  refreshing={busy === "refresh-trace-stats"}
+                  disabled={isBusy}
+                  onClear={handleClearTraceLogs}
+                  onRefresh={handleRefreshTraceLogStats}
+                />
+              </div>
+            </>
+          ),
+          models: (active) => (
             <ModelSection
+              active={active}
               config={config}
               currentProviderSnapshot={currentProviderSnapshot}
               officialAccountAvailable={status.officialAccountAvailable === true}
@@ -1218,82 +1540,51 @@ export function App({
               onSaveModelOrder={saveModelOrder}
               routerSessionDiagnosis={routerSessionDiagnosis}
               onMigrateRouterSessions={askMigrateRouterSessions}
+              channelList={channelList}
+              channelLoadError={channelLoadError}
+              channelActionError={channelActionError}
+              channelVersionConflict={channelVersionConflict}
+              channelNotice={channelNotice}
+              onSelectChannel={handleSelectChannel}
+              onSetChannelDefaultModel={handleSetChannelDefaultModel}
+              onRefreshChannels={handleRefreshChannels}
+              officialAccountsRefreshKey={officialAccountsRefreshKey}
+              onSwitchOfficialAccount={handleSwitchOfficialAccount}
+              onOfficialAccountsChanged={handleOfficialAccountsChanged}
+              onNotice={setNotice}
+              onRequestConfirmation={setConfirmation}
             />
-          </div>
-
-          {/* 提示词优化 与 Codey 子代理角色与调度增强：放在一行 */}
-          <div className="prompt-subagent-grid">
-            {/* 左侧：提示词优化 */}
-            <div className="prompt-column">
-              <PromptOptimizationCard
-                config={config}
-                currentProviderSnapshot={currentProviderSnapshot}
-                officialAccountAvailable={status.officialAccountAvailable === true}
-                isBusy={isBusy}
-                popupContainer={popupContainer}
-                onConfigChange={handleConfigChange}
-                onNotice={setNotice}
-              />
-            </div>
-
-            {/* 右侧：Codey 子代理角色与调度增强 */}
-            <div className="subagent-column">
-              <SubagentPolicyCard
-                config={config}
-                popupContainer={popupContainer}
-                tooltipContainer={portalContainer}
-                isBusy={isBusy}
-                subagentModelOptions={subagentModelOptions}
-                onConfigChange={handleConfigChange}
-                onSubagentOptimizationChange={handleSubagentOptimizationChange}
-              />
-            </div>
-          </div>
-
-          {/* Codex 功能策略：整行排列 */}
-          <div className="full-row-section">
-            <FeaturePolicyCard
+          ),
+          prompt: (
+            <PromptOptimizationCard
               config={config}
-              fastContextToolsStatus={fastContextToolsStatus}
-              isMacClient={status.clientPlatform === "macos"}
-              isWindowsClient={status.clientPlatform === "windows"}
+              currentProviderSnapshot={currentProviderSnapshot}
+              officialAccountAvailable={status.officialAccountAvailable === true}
+              isBusy={isBusy}
+              popupContainer={popupContainer}
+              onConfigChange={handleConfigChange}
+              onNotice={setNotice}
+            />
+          ),
+          subagents: (
+            <SubagentPolicyCard
+              config={config}
               popupContainer={popupContainer}
               tooltipContainer={portalContainer}
               isBusy={isBusy}
+              subagentModelOptions={subagentModelOptions}
               onConfigChange={handleConfigChange}
+              onSubagentOptimizationChange={handleSubagentOptimizationChange}
             />
-          </div>
-
-          {/* 消息通知：整行排列，每个渠道 item 占一半 */}
-          <div className="full-row-section">
-            <NotificationChannelsCard
-              config={config}
-              container={portalContainer}
-              popupContainer={popupContainer}
-              isBusy={isBusy}
-              onAddChannel={handleAddNotificationChannel}
-              onChannelChange={handleNotificationChannelChange}
-              onRequestRemoveChannel={handleRequestRemoveNotificationChannel}
-            />
-          </div>
-
-          {/* 诊断存储保护：整行独占排布 */}
-          <div className="full-row-section">
-            <TraceLogModule
-              stats={status.traceLogStats}
-              crashpadStats={status.crashpadPendingStats}
-              crashpadSupported={status.clientPlatform === "macos"}
-              traceProtectionEnabled={config.disableTraceLogWrites}
-              crashpadProtectionEnabled={config.protectCrashpadPending}
-              clearBusy={busy === "clear-trace-logs"}
-              refreshing={busy === "refresh-trace-stats"}
-              disabled={isBusy}
-              onClear={handleClearTraceLogs}
-              onRefresh={handleRefreshTraceLogStats}
-            />
-          </div>
-        </div>
-      </div>
+          ),
+          mcp: (active) => (
+            <CodexExtensionsPage kind="mcp" active={active} request={extensionRequest} container={popupContainer} />
+          ),
+          skills: (active) => (
+            <CodexExtensionsPage kind="skill" active={active} request={extensionRequest} container={popupContainer} />
+          ),
+        }}
+      />
 
       <NoticeToast
         autoDismissEnabled
@@ -1332,6 +1623,20 @@ export function App({
       <ConfirmationDialogHost
         container={portalContainer}
         controller={confirmationController}
+      />
+
+      <SystemSettingsDialog
+        open={systemSettingsOpen}
+        onOpenChange={setSystemSettingsOpen}
+        container={portalContainer}
+        appVersion={status.appVersion}
+        codexAppVersion={status.codexAppVersion}
+        codexAppPath={config.codexAppPath || status.codexAppPath}
+        onRefreshStatus={refreshStatus}
+        isBusy={isBusy}
+        busy={busy}
+        onRepairCodexConfig={askRepairCodexConfig}
+        configRepairNotice={configRepairNotice}
       />
     </main>
   );

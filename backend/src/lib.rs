@@ -1,7 +1,9 @@
 mod account_usage;
 mod cdp;
+mod channels;
 mod codex_config;
 mod codex_config_guidance;
+mod codex_extensions;
 mod codex_provider;
 mod codex_startup_patch;
 mod codey_router_session_migrate;
@@ -9,16 +11,18 @@ mod commands;
 mod computer_use;
 mod config;
 mod context_recovery;
+mod conversation_stats;
 mod crashpad_pending_guard;
 #[cfg(windows)]
 mod desktop_instance;
-mod early_attach;
 mod error_log;
 pub mod fastctx;
 mod fastctx_route_gate;
 mod fs_util;
 mod hook_io;
 mod http_response;
+mod launch_proxy;
+mod launch_proxy_relay;
 mod launcher;
 mod maintenance_lock;
 mod message_delete;
@@ -31,6 +35,7 @@ mod model_ownership;
 #[cfg(target_os = "macos")]
 mod native_update_ui;
 mod notifications;
+mod official_accounts;
 mod pending_approval;
 mod pet_slim_patch;
 mod plugin_marketplace;
@@ -50,8 +55,32 @@ mod subagent;
 mod subagent_gate;
 mod subagent_orchestrator;
 mod subagent_policy;
+mod target_prefetch;
 mod trace_log_guard;
 mod trace_log_stats;
+
+// 单元测试不能写入用户真实的 Codey 状态目录：诊断日志和错误日志都按该目录
+// 定位，否则测试记录会淹没真实故障并提前触发日志轮转。在 main 之前设置，
+// 保证任何测试线程读取路径时都已生效。`cargo run` 和 `cargo test` 重建的
+// 正式二进制都不包含这段代码。
+#[cfg(test)]
+mod test_state_isolation {
+    extern "C" fn isolate_app_state_dir() {
+        const KEY: &str = "CODEY_APP_STATE_DIR";
+        if std::env::var_os(KEY).is_some_and(|value| !value.is_empty()) {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("codey-test-state-{}", std::process::id()));
+        // SAFETY: runs as a pre-main initializer before any other thread exists.
+        unsafe { std::env::set_var(KEY, dir) };
+    }
+
+    #[used]
+    #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__mod_init_func"))]
+    #[cfg_attr(target_os = "linux", unsafe(link_section = ".init_array"))]
+    #[cfg_attr(windows, unsafe(link_section = ".CRT$XCU"))]
+    static ISOLATE_APP_STATE_DIR: extern "C" fn() = isolate_app_state_dir;
+}
 
 use std::path::Path;
 use std::sync::Arc;
@@ -66,6 +95,81 @@ use commands::{AppShutdownReason, AppState};
 enum ShutdownReason {
     CodexExited,
     Signal,
+    RuntimeRestartFailed,
+}
+
+impl ShutdownReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CodexExited => "codex_exited",
+            Self::Signal => "signal",
+            Self::RuntimeRestartFailed => "runtime_restart_failed",
+        }
+    }
+}
+
+struct DesktopLifecycle {
+    started_at: std::time::Instant,
+    reason: std::sync::Mutex<&'static str>,
+}
+
+impl DesktopLifecycle {
+    fn new() -> Self {
+        Self {
+            started_at: std::time::Instant::now(),
+            reason: std::sync::Mutex::new("startup_failed"),
+        }
+    }
+
+    fn set_reason(&self, reason: &'static str) {
+        *self
+            .reason
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = reason;
+    }
+
+    fn shutdown_requested(&self, reason: ShutdownReason) {
+        self.set_reason(reason.as_str());
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "desktop.shutdown_requested",
+            serde_json::json!({
+                "processId": std::process::id(),
+                "uptimeMs": self.started_at.elapsed().as_millis(),
+                "reason": reason.as_str(),
+            }),
+        );
+        let _ = codey_runtime_core::diagnostic_log::flush_diagnostic_log();
+    }
+
+    fn exit_details(&self, success: bool, panicking: bool) -> serde_json::Value {
+        let reason = *self
+            .reason
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        serde_json::json!({
+            "processId": std::process::id(),
+            "uptimeMs": self.started_at.elapsed().as_millis(),
+            "reason": if panicking { "panic" } else { reason },
+            "success": success && !panicking,
+            "exitCode": if panicking { None } else { Some(if success { 0 } else { 1 }) },
+        })
+    }
+}
+
+struct DesktopExitGuard {
+    lifecycle: Arc<DesktopLifecycle>,
+    success: bool,
+}
+
+impl Drop for DesktopExitGuard {
+    fn drop(&mut self) {
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "desktop.finished",
+            self.lifecycle
+                .exit_details(self.success, std::thread::panicking()),
+        );
+        let _ = codey_runtime_core::diagnostic_log::flush_diagnostic_log();
+    }
 }
 
 pub fn run_error_log_helper_if_requested() -> Result<bool> {
@@ -114,18 +218,40 @@ pub fn run_fastctx_route_hook_if_requested() -> Result<bool> {
 }
 
 pub fn run_desktop_application() -> Result<()> {
+    let lifecycle = Arc::new(DesktopLifecycle::new());
+    let mut exit_guard = DesktopExitGuard {
+        lifecycle: Arc::clone(&lifecycle),
+        success: false,
+    };
+    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+        "desktop.started",
+        serde_json::json!({ "processId": std::process::id() }),
+    );
+    let result = run_desktop_application_inner(lifecycle);
+    exit_guard.success = result.is_ok();
+    result
+}
+
+fn run_desktop_application_inner(lifecycle: Arc<DesktopLifecycle>) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        native_update_ui::run_macos_application(|| build_async_runtime()?.block_on(run()))
+        native_update_ui::run_macos_application(move || {
+            build_async_runtime()?.block_on(run(lifecycle))
+        })
     }
 
     #[cfg(not(target_os = "macos"))]
     {
         #[cfg(windows)]
         let Some(_desktop_instance) = desktop_instance::claim() else {
+            lifecycle.set_reason("instance_not_acquired");
+            let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                "desktop.instance_not_acquired",
+                serde_json::json!({}),
+            );
             return Ok(());
         };
-        build_async_runtime()?.block_on(run())
+        build_async_runtime()?.block_on(run(lifecycle))
     }
 }
 
@@ -138,9 +264,12 @@ fn build_async_runtime() -> Result<tokio::runtime::Runtime> {
     builder.enable_all().build().map_err(anyhow::Error::from)
 }
 
-async fn run() -> Result<()> {
+async fn run(lifecycle: Arc<DesktopLifecycle>) -> Result<()> {
     error_log::initialize();
     let state = Arc::new(AppState::default());
+    if let Err(error) = state.sync_official_accounts_at_startup(codex_config::codex_home()) {
+        eprintln!("启动时同步官方账号失败：{error:#}");
+    }
     let configured_codex_app_path = state.config.read().await.codex_app_path.clone();
     let _ = tokio::task::spawn_blocking(move || {
         error_log::refresh_codex_app_version(None, Some(&configured_codex_app_path));
@@ -177,12 +306,16 @@ async fn run() -> Result<()> {
     }
     let mut shutdown = Box::pin(shutdown_signal());
     let shutdown_reason = match commands::launch_codey_runtime(&state).await {
-        Ok(_) => tokio::select! {
-            reason = state.wait_for_shutdown() => match reason {
-                AppShutdownReason::CodexExited => ShutdownReason::CodexExited,
-            },
-            _ = &mut shutdown => ShutdownReason::Signal,
-        },
+        Ok(_) => {
+            lifecycle.set_reason("runtime_failed");
+            tokio::select! {
+                reason = state.wait_for_shutdown() => match reason {
+                    AppShutdownReason::CodexExited => ShutdownReason::CodexExited,
+                    AppShutdownReason::RuntimeRestartFailed => ShutdownReason::RuntimeRestartFailed,
+                },
+                _ = &mut shutdown => ShutdownReason::Signal,
+            }
+        }
         Err(error) => {
             eprintln!("Codey 自动启动 Codex 失败：{error:#}");
             let cleanup = stop_runtime_with_retry(&state).await;
@@ -203,6 +336,7 @@ async fn run() -> Result<()> {
     };
 
     let shutdown_started_at = std::time::SystemTime::now();
+    lifecycle.shutdown_requested(shutdown_reason);
     let cleanup = stop_runtime_with_retry(&state).await;
     if let Err(error) = &cleanup {
         error_log::record_failure(
@@ -215,6 +349,7 @@ async fn run() -> Result<()> {
     let shutdown_context = match shutdown_reason {
         ShutdownReason::CodexExited => "Codex 已退出",
         ShutdownReason::Signal => "Codey 收到退出信号",
+        ShutdownReason::RuntimeRestartFailed => "Codey 自动重启 Codex 失败",
     };
     // The public no-argument helper remains available for callers without a shutdown boundary:
     // terminate_other_codey_processes().await
@@ -233,7 +368,20 @@ async fn run() -> Result<()> {
             eprintln!("{shutdown_context}，但清理遗留 Codey 进程失败：{error:#}");
         }
     }
-    cleanup.map_err(anyhow::Error::msg)
+    runtime_shutdown_result(shutdown_reason, cleanup).map_err(anyhow::Error::msg)
+}
+
+fn runtime_shutdown_result(
+    reason: ShutdownReason,
+    cleanup: Result<(), String>,
+) -> Result<(), String> {
+    match (reason, cleanup) {
+        (ShutdownReason::RuntimeRestartFailed, Ok(())) => Err("自动重启 Codex 失败".to_string()),
+        (ShutdownReason::RuntimeRestartFailed, Err(error)) => {
+            Err(format!("自动重启 Codex 失败；退出清理失败：{error}"))
+        }
+        (_, result) => result,
+    }
 }
 
 async fn repair_legacy_model_catalog(home: &Path) -> Result<bool> {
@@ -300,26 +448,139 @@ async fn shutdown_signal() {
         match signal(SignalKind::terminate()).context("监听 SIGTERM 失败") {
             Ok(mut terminate) => {
                 tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    _ = terminate.recv() => {}
+                    _ = ctrl_c_signal() => {}
+                    _ = wait_for_termination_signal(terminate.recv()) => {}
                 }
             }
             Err(error) => {
+                error_log::record_failure(
+                    "shutdown_signal_listener_failed",
+                    "register_sigterm_listener",
+                    format!("{error:#}"),
+                    serde_json::json!({}),
+                );
                 eprintln!("{error:#}");
-                let _ = tokio::signal::ctrl_c().await;
+                ctrl_c_signal().await;
             }
         }
     }
 
     #[cfg(not(unix))]
     {
-        let _ = tokio::signal::ctrl_c().await;
+        ctrl_c_signal().await;
+    }
+}
+
+#[cfg(any(unix, test))]
+async fn wait_for_termination_signal(signal: impl std::future::Future<Output = Option<()>>) {
+    if signal.await.is_none() {
+        error_log::record_failure(
+            "shutdown_signal_listener_failed",
+            "wait_for_sigterm",
+            "SIGTERM 监听流已关闭，未收到退出信号",
+            serde_json::json!({}),
+        );
+        std::future::pending::<()>().await;
+    }
+}
+
+/// A listener that cannot be registered never fires, so Codex exit remains
+/// the shutdown trigger instead of Codey quitting right after launch.
+async fn ctrl_c_signal() {
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        error_log::record_failure(
+            "shutdown_signal_listener_failed",
+            "wait_for_ctrl_c",
+            error.to_string(),
+            serde_json::json!({}),
+        );
+        eprintln!("监听 Ctrl+C 失败：{error}");
+        std::future::pending::<()>().await;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::initial_startup_failure_error;
+    use std::time::Duration;
+
+    use super::{
+        DesktopLifecycle, ShutdownReason, initial_startup_failure_error, runtime_shutdown_result,
+        wait_for_termination_signal,
+    };
+
+    #[test]
+    fn desktop_exit_diagnostics_preserve_reason_and_cleanup_failure() {
+        let lifecycle = DesktopLifecycle::new();
+        for reason in [ShutdownReason::CodexExited, ShutdownReason::Signal] {
+            lifecycle.set_reason(reason.as_str());
+            for success in [true, false] {
+                let details = lifecycle.exit_details(success, false);
+                assert_eq!(details["processId"], std::process::id());
+                assert_eq!(details["reason"], reason.as_str());
+                assert_eq!(details["success"], success);
+                assert_eq!(details["exitCode"], if success { 0 } else { 1 });
+                assert!(details["uptimeMs"].is_u64());
+            }
+        }
+        lifecycle.set_reason("instance_not_acquired");
+        assert_eq!(
+            lifecycle.exit_details(true, false)["reason"],
+            "instance_not_acquired"
+        );
+        let panic = lifecycle.exit_details(false, true);
+        assert_eq!(panic["reason"], "panic");
+        assert_eq!(panic["success"], false);
+        assert!(panic["exitCode"].is_null());
+        assert_eq!(
+            DesktopLifecycle::new().exit_details(false, false)["reason"],
+            "startup_failed"
+        );
+    }
+
+    #[test]
+    fn runtime_restart_failure_remains_failure_after_shutdown_cleanup() {
+        let reason = ShutdownReason::RuntimeRestartFailed;
+        let lifecycle = DesktopLifecycle::new();
+        lifecycle.set_reason(reason.as_str());
+        for cleanup in [Ok(()), Err("配置恢复失败".to_string())] {
+            let result = runtime_shutdown_result(reason, cleanup.clone());
+            let details = lifecycle.exit_details(result.is_ok(), false);
+            assert_eq!(details["reason"], "runtime_restart_failed");
+            assert_eq!(details["success"], false);
+            assert_eq!(details["exitCode"], 1);
+            let error = result.unwrap_err();
+            assert!(error.contains("自动重启 Codex 失败"));
+            if let Err(cleanup_error) = cleanup {
+                assert!(error.contains(&cleanup_error));
+            }
+        }
+        assert_eq!(
+            runtime_shutdown_result(ShutdownReason::CodexExited, Ok(())),
+            Ok(())
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closed_sigterm_stream_does_not_trigger_shutdown() {
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                wait_for_termination_signal(async { None }),
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn received_sigterm_triggers_shutdown() {
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            wait_for_termination_signal(async { Some(()) }),
+        )
+        .await
+        .unwrap();
+    }
 
     #[test]
     fn startup_failure_keeps_the_cleanup_error() {

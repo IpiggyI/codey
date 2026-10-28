@@ -8,12 +8,12 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use codey_runtime_core::app_paths::resolve_codex_app_dir_with_saved;
+use codey_runtime_core::app_paths::resolve_codex_app_dir_with_saved_checked;
 use codey_runtime_core::launcher::build_codex_command;
 use serde::Serialize;
 use serde_json::Value;
 use tokio::process::Child;
-#[cfg(not(windows))]
+#[cfg(any(not(windows), test))]
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock, oneshot};
 
@@ -51,16 +51,19 @@ pub(crate) use platform::{activate_visible_windows_codex_window, windows_process
 #[cfg(windows)]
 pub(crate) use process::windows_cli_wrapper_target;
 use process::{
-    SpawnedCodex, prepare_codex_for_launch, reap_child_after_cleanup, spawn_codex,
-    spawn_codex_exit_watcher,
+    CodexLaunchOptions, SpawnedCodex, prepare_codex_for_launch, reap_child_after_cleanup,
+    spawn_codex, spawn_codex_exit_watcher,
 };
 #[cfg(test)]
 use process::{codex_runtime_arguments, gpu_launch_arguments};
 
 const CDP_WATCHDOG_INTERVAL: Duration = Duration::from_secs(30);
 const CDP_WATCHDOG_FAILURE_THRESHOLD: u8 = 2;
-// Each reinjection already spends a full discovery budget before failing.
+// 页面明确答复桥接失效后，确认这一判断不必再等一整轮巡检。
+const CDP_WATCHDOG_UNHEALTHY_CONFIRM_INTERVAL: Duration = Duration::from_secs(5);
+// 连续发现失败只能说明端点暂时不可达；降低重试频率，保留后续自动恢复。
 const CDP_WATCHDOG_ENDPOINT_LOSS_LIMIT: u8 = 3;
+const CDP_WATCHDOG_ENDPOINT_RETRY_INTERVAL: Duration = Duration::from_secs(120);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InjectionHealth {
@@ -121,7 +124,15 @@ impl RuntimeModelConfig {
                 .declared_official_models_by_provider
                 .clone(),
             upstream_models_by_provider: config.upstream_models_by_provider.clone(),
-            default_model: config.default_model.clone(),
+            default_model: if config
+                .current_provider_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.channel_id.is_some())
+            {
+                config.default_model().unwrap_or_default().to_string()
+            } else {
+                config.default_model.clone()
+            },
         }
     }
 }
@@ -223,13 +234,19 @@ async fn run_startup_session_maintenance(
                     summary.deleted, summary.cleared_sessions
                 );
             }
+            // 失败日志按错误文本去重，不看上下文；同一错误的会话必须合并成一条，
+            // 否则同一次启动里第二个及之后的会话会被静默吞掉。
+            let mut failures = std::collections::BTreeMap::<String, Vec<String>>::new();
             for (session_id, message) in summary.failures {
+                failures.entry(message).or_default().push(session_id);
+            }
+            for (message, session_ids) in failures {
                 error_log::record_failure(
                     "patch_failed",
                     "reapply_message_deletion",
                     message,
                     serde_json::json!({
-                        "sessionId": session_id,
+                        "sessionIds": session_ids,
                     }),
                 );
             }
@@ -280,7 +297,12 @@ pub(crate) fn find_configured_codex_app_dir_sync(
     let configured_app_path = configured_app_path
         .map(|path| refresh_windows_packaged_app_dir(&path))
         .transpose()?;
-    let app_dir = resolve_codex_app_dir_with_saved(configured_app_path.as_deref(), None);
+    if let Some(path) = &configured_app_path
+        && !path.try_exists()?
+    {
+        return Ok(None);
+    }
+    let app_dir = resolve_codex_app_dir_with_saved_checked(configured_app_path.as_deref(), None)?;
     if let Some(app_dir) = app_dir.as_deref() {
         error_log::refresh_codex_app_version(Some(app_dir), None);
     }
@@ -375,16 +397,12 @@ async fn prepare_startup_model_catalog(
         ConfiguredModelCatalog::Unset | ConfiguredModelCatalog::CodeyOwned => None,
     };
     let contexts = config.runtime_enabled_model_contexts();
-    let user_catalog = user_catalog
-        .map(|source| {
-            model_catalog::prepare_context_catalog_overlay(&catalog_dir, &source, &contexts)
-        })
-        .transpose()?;
     let user_catalog_configured = user_catalog.is_some();
     let available_official_models = model_catalog::available_official_models(
         &catalog_home,
         &catalog_dir,
         user_catalog.as_deref(),
+        &config.codex_app_path,
     )?
     .into_iter()
     .map(|model| model.slug)
@@ -433,11 +451,13 @@ async fn prepare_startup_model_catalog(
         .unwrap_or_default();
     let requested_default_model = config.default_model().map(str::to_string);
     let excluded_official_models = config.official_model_exclusions(&list_key);
+    let codex_app_path = config.codex_app_path.clone();
     let catalog_dir_for_refresh = catalog_dir.clone();
     let user_catalog_for_refresh = user_catalog.clone();
     let (refresh_result, catalog_available, selection_result) =
         tokio::task::spawn_blocking(move || {
             let refresh = model_catalog::refresh_catalog(model_catalog::CatalogRefreshArgs {
+                codex_app_path: &codex_app_path,
                 codex_home: &catalog_home,
                 catalog_dir: &catalog_dir_for_refresh,
                 official_provider: refresh_official_provider,
@@ -451,6 +471,14 @@ async fn prepare_startup_model_catalog(
                 user_catalog: user_catalog_for_refresh.as_deref(),
             })
             .and_then(|count| {
+                if let Some(source) = user_catalog_for_refresh.as_deref() {
+                    model_catalog::prepare_context_catalog_overlay(
+                        &catalog_dir_for_refresh,
+                        source,
+                        &contexts,
+                        &runtime_selected_models,
+                    )?;
+                }
                 model_catalog::apply_catalog_contexts(
                     &catalog_dir_for_refresh,
                     &contexts,
@@ -458,8 +486,13 @@ async fn prepare_startup_model_catalog(
                 )?;
                 Ok(count)
             });
-            let catalog_available =
-                refresh.is_err() && model_catalog::is_available(&catalog_dir_for_refresh);
+            let catalog_available = refresh.is_err()
+                && model_catalog::validate_catalog_source(
+                    &catalog_dir_for_refresh,
+                    &codex_app_path,
+                )
+                .is_ok()
+                && model_catalog::is_available(&catalog_dir_for_refresh);
             let selection = model_catalog::selection_state_with_catalog_options(
                 &catalog_home,
                 &catalog_dir_for_refresh,
@@ -470,6 +503,7 @@ async fn prepare_startup_model_catalog(
                 &excluded_official_models,
                 requested_default_model.as_deref(),
                 user_catalog_for_refresh.as_deref(),
+                &codex_app_path,
             );
             (refresh, catalog_available, selection)
         })
@@ -606,6 +640,7 @@ async fn prepare_codex_startup_state(
     for selection in subagent_roles.values_mut() {
         selection.model = runtime_subagent_model(&selection.model, &subagent_catalog);
     }
+    let channel_config = config.clone();
     let runtime_config = tokio::task::spawn_blocking(move || {
         apply_runtime_router_config(
             &runtime_config_home,
@@ -619,6 +654,7 @@ async fn prepare_codex_startup_state(
                 subagent_roles: Some(&subagent_roles),
                 subagent_catalog,
             },
+            &channel_config,
         )
     })
     .await
@@ -777,6 +813,7 @@ async fn stop_runtime_watcher(
 async fn stop_codex_processes(
     app_dir: &std::path::Path,
     process_id: Option<u32>,
+    #[cfg(windows)] renderer_websocket_url: Option<&str>,
     #[cfg(unix)] process_group_id: Option<u32>,
 ) -> Result<()> {
     #[cfg(target_os = "macos")]
@@ -793,7 +830,11 @@ async fn stop_codex_processes(
     }
     #[cfg(windows)]
     {
-        terminate_windows_codex_processes(app_dir, process_id).await
+        if let Some(websocket_url) = renderer_websocket_url {
+            stop_windows_codex_processes(app_dir, process_id, websocket_url).await
+        } else {
+            terminate_windows_codex_processes(app_dir, process_id).await
+        }
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -829,7 +870,7 @@ struct InitialRendererInputs<'a> {
     home: &'a std::path::Path,
     spawned: &'a SpawnedCodex,
     child: &'a Arc<Mutex<Option<Child>>>,
-    prefetched_target: tokio::task::JoinHandle<Option<crate::early_attach::PrefetchedPage>>,
+    prefetched_target: crate::target_prefetch::PrefetchTask,
 }
 
 async fn inject_initial_renderer(inputs: InitialRendererInputs<'_>) -> Result<cdp::InjectedTarget> {
@@ -877,6 +918,8 @@ async fn inject_initial_renderer(inputs: InitialRendererInputs<'_>) -> Result<cd
     if let Err(stop_error) = stop_codex_processes(
         app_dir,
         spawned.process_id,
+        #[cfg(windows)]
+        None,
         #[cfg(unix)]
         spawned.process_group_id,
     )
@@ -934,17 +977,24 @@ fn spawn_injection_watchdog(
     let watchdog_websocket_url = websocket_url.clone();
     let watchdog_scripts = injection_scripts;
     let task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(CDP_WATCHDOG_INTERVAL);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        interval.tick().await;
+        let mut retry_interval = CDP_WATCHDOG_INTERVAL;
         let mut target = injected_target;
         let mut consecutive_failures = 0u8;
         let mut endpoint_losses = 0u8;
+        let mut confirm_unhealthy = false;
         'watchdog: loop {
+            // 泵已结束而重建失败时不再监听，否则会跳过重试间隔空转。
+            let pump_running = !target.pump_finished();
+            let wait = if confirm_unhealthy {
+                CDP_WATCHDOG_UNHEALTHY_CONFIRM_INTERVAL
+            } else {
+                retry_interval
+            };
             tokio::select! {
                 biased;
                 _ = &mut shutdown_rx => break,
-                _ = interval.tick() => {}
+                _ = target.pump_closed(), if pump_running => {}
+                _ = tokio::time::sleep(wait) => {}
             }
             let health = tokio::select! {
                 biased;
@@ -992,9 +1042,15 @@ fn spawn_injection_watchdog(
                 }
             };
             if health == InjectionHealth::Healthy {
+                if endpoint_losses > 0 {
+                    *watchdog_statuses.write().await = target.injection_statuses();
+                }
                 watchdog_endpoint_loss_limit_reached(&mut endpoint_losses, false);
+                retry_interval = CDP_WATCHDOG_INTERVAL;
             }
-            if !watchdog_should_reinject(&mut consecutive_failures, health) {
+            let reinject = watchdog_should_reinject(&mut consecutive_failures, health);
+            confirm_unhealthy = !reinject && health == InjectionHealth::Unhealthy;
+            if !reinject {
                 continue;
             }
             let reinjection = tokio::select! {
@@ -1016,43 +1072,56 @@ fn spawn_injection_watchdog(
                     previous.close().await;
                     consecutive_failures = 0;
                     watchdog_endpoint_loss_limit_reached(&mut endpoint_losses, false);
+                    retry_interval = CDP_WATCHDOG_INTERVAL;
                 }
                 Err(error) => {
                     let endpoint_unreachable = error.debug_endpoint_unreachable();
                     let error_message = format!("{error:#}");
-                    error_log::record_failure_with_metadata_async(
-                        "injection_failed",
-                        "reinject_cdp_bridge",
-                        error_message.clone(),
-                        error_log::FailureMetadata {
-                            stage: Some("runtime.renderer_reinjection".to_string()),
-                            recoverable: Some(true),
-                        },
-                        serde_json::json!({
-                            "debugPort": debug_port,
-                            "lastError": error.detail(),
-                            "debugEndpointUnreachable": endpoint_unreachable,
-                        }),
-                    )
-                    .await;
-                    *watchdog_statuses.write().await = watchdog_scripts
-                        .statuses_with_error(format!("脚本重新注入失败：{error_message}"));
-                    eprintln!("Codey CDP bridge 恢复失败：{error_message}");
+                    // 低频恢复中的相同端点故障不重复写错误日志；阶段变化仍记录。
+                    if !endpoint_unreachable || endpoint_losses < CDP_WATCHDOG_ENDPOINT_LOSS_LIMIT {
+                        tokio::select! {
+                            biased;
+                            _ = &mut shutdown_rx => break 'watchdog,
+                            _ = error_log::record_failure_with_metadata_async(
+                                "injection_failed",
+                                "reinject_cdp_bridge",
+                                error_message.clone(),
+                                error_log::FailureMetadata {
+                                    stage: Some("runtime.renderer_reinjection".to_string()),
+                                    recoverable: Some(true),
+                                },
+                                serde_json::json!({
+                                    "debugPort": debug_port,
+                                    "lastError": error.detail(),
+                                    "debugEndpointUnreachable": endpoint_unreachable,
+                                }),
+                            ) => {}
+                        }
+                        eprintln!("Codey CDP bridge 恢复失败：{error_message}");
+                    }
                     consecutive_failures = CDP_WATCHDOG_FAILURE_THRESHOLD.saturating_sub(1);
                     if watchdog_endpoint_loss_limit_reached(
                         &mut endpoint_losses,
                         endpoint_unreachable,
                     ) {
                         *watchdog_statuses.write().await = watchdog_scripts
-                            .statuses_with_error("Codex 调试端点持续不可达，集成已停用；通过 Codey 重新启动 Codex 后恢复");
-                        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
-                            "bridge.injection_disabled",
-                            serde_json::json!({
-                                "debugPort": debug_port,
-                                "consecutiveEndpointLosses": endpoint_losses,
-                            }),
+                            .statuses_with_error("Codex 调试连接暂时不可用，Codey 将继续自动恢复");
+                        if retry_interval != CDP_WATCHDOG_ENDPOINT_RETRY_INTERVAL {
+                            let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                                "bridge.recovery_backoff",
+                                serde_json::json!({
+                                    "debugPort": debug_port,
+                                    "consecutiveEndpointLosses": endpoint_losses,
+                                    "retryIntervalMs": CDP_WATCHDOG_ENDPOINT_RETRY_INTERVAL.as_millis(),
+                                }),
+                            );
+                        }
+                        retry_interval = CDP_WATCHDOG_ENDPOINT_RETRY_INTERVAL;
+                    } else {
+                        *watchdog_statuses.write().await = watchdog_scripts.statuses_with_error(
+                            format!("脚本重新注入失败，将继续自动恢复：{error_message}"),
                         );
-                        break 'watchdog;
+                        retry_interval = CDP_WATCHDOG_INTERVAL;
                     }
                 }
             }
@@ -1118,14 +1187,63 @@ struct RuntimeWatcherInputs {
     crashpad_pending_stats: CrashpadPendingStatsHandle,
 }
 
+/// Accumulates per-stage durations for `CodeyRuntime::start` and writes one
+/// `launcher.startup_timings` diagnostic record with the total.
+struct StartupStageTimings {
+    started: Instant,
+    previous: Instant,
+    stages: Vec<(&'static str, u64)>,
+}
+
+impl Default for StartupStageTimings {
+    fn default() -> Self {
+        let started = Instant::now();
+        Self {
+            started,
+            previous: started,
+            stages: Vec::new(),
+        }
+    }
+}
+
+impl StartupStageTimings {
+    fn mark(&mut self, stage: &'static str) {
+        let now = Instant::now();
+        self.stages
+            .push((stage, now.duration_since(self.previous).as_millis() as u64));
+        self.previous = now;
+    }
+
+    /// Records a branch that ran concurrently inside the current stage.
+    fn branch(&mut self, stage: &'static str, elapsed: std::time::Duration) {
+        self.stages.push((stage, elapsed.as_millis() as u64));
+    }
+
+    fn report(&self) {
+        let mut detail = serde_json::Map::new();
+        for (stage, millis) in &self.stages {
+            detail.insert((*stage).to_string(), serde_json::json!(millis));
+        }
+        detail.insert(
+            "totalMs".to_string(),
+            serde_json::json!(self.started.elapsed().as_millis() as u64),
+        );
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "launcher.startup_timings",
+            serde_json::Value::Object(detail),
+        );
+    }
+}
+
 fn spawn_initial_storage_guards(
     home: &std::path::Path,
     config: &CodeyConfig,
+    trace_guard_state: Arc<trace_log_guard::TraceLogGuardState>,
 ) -> InitialStorageGuards {
     let trace_guard_home = home.to_path_buf();
     let disable_trace_log_writes = config.disable_trace_log_writes;
     let trace = tokio::task::spawn_blocking(move || {
-        trace_log_guard::configure(&trace_guard_home, disable_trace_log_writes)
+        trace_guard_state.configure(&trace_guard_home, disable_trace_log_writes)
     });
     let protect_crashpad_pending = config.protect_crashpad_pending;
     let crashpad = tokio::task::spawn_blocking(move || {
@@ -1160,21 +1278,36 @@ async fn prepare_startup_storage(
     guards: InitialStorageGuards,
     trace_log_write_protection_active: &AtomicBool,
     crashpad_pending_stats: &CrashpadPendingStatsHandle,
+    stage_timings: &mut StartupStageTimings,
 ) -> Result<(StartupStorageState, Option<StartupModelCatalog>)> {
+    let started = Instant::now();
+    let mut stop_codex_done = None;
+    let mut session_maintenance_done = None;
+    let mut model_catalog_done = None;
+    let mut storage_guards_done = None;
     let preparation = async {
         let app_dir = resolve_configured_codex_app_dir(config).await?;
         // Session repair must never race a live Codex writer. Stopping the old
         // runtime first also gives SQLite and rollout buffers a chance to flush
         // before any permanent maintenance is applied.
         prepare_codex_for_launch(&app_dir).await?;
+        stop_codex_done = Some(started.elapsed());
 
         // Keep each task's saved provider. Historical session ownership is left
         // unchanged. The catalog touches separate files, so prepare it alongside
         // session maintenance after Codex has stopped.
-        let (session_maintenance, startup_catalog) =
-            tokio::join!(run_startup_session_maintenance(home), async {
-                prepare_startup_model_catalog(config, home).await.map(Some)
-            });
+        let (session_maintenance, startup_catalog) = tokio::join!(
+            async {
+                let result = run_startup_session_maintenance(home).await;
+                session_maintenance_done = Some(started.elapsed());
+                result
+            },
+            async {
+                let result = prepare_startup_model_catalog(config, home).await.map(Some);
+                model_catalog_done = Some(started.elapsed());
+                result
+            }
+        );
         Ok::<_, anyhow::Error>((
             StartupStorageState {
                 app_dir,
@@ -1183,17 +1316,33 @@ async fn prepare_startup_storage(
             startup_catalog?,
         ))
     };
-    let storage_guards = await_initial_storage_guards(
-        guards.trace,
-        config.disable_trace_log_writes,
-        trace_log_write_protection_active,
-        guards.crashpad,
-        config.protect_crashpad_pending,
-        crashpad_pending_stats,
-    );
+    let storage_guards = async {
+        let result = await_initial_storage_guards(
+            guards.trace,
+            config.disable_trace_log_writes,
+            trace_log_write_protection_active,
+            guards.crashpad,
+            config.protect_crashpad_pending,
+            crashpad_pending_stats,
+        )
+        .await;
+        storage_guards_done = Some(started.elapsed());
+        result
+    };
     // A failed preparation must still finish the already-started blocking
     // guards and publish their status before the caller can retry or exit.
     let (preparation, storage_guards) = tokio::join!(preparation, storage_guards);
+    // Offsets from the stage start: the branches overlap.
+    for (stage, done) in [
+        ("storage.stopCodexDoneMs", stop_codex_done),
+        ("storage.sessionMaintenanceDoneMs", session_maintenance_done),
+        ("storage.modelCatalogDoneMs", model_catalog_done),
+        ("storage.guardsDoneMs", storage_guards_done),
+    ] {
+        if let Some(done) = done {
+            stage_timings.branch(stage, done);
+        }
+    }
     let prepared = preparation?;
     storage_guards?;
     Ok(prepared)
@@ -1329,6 +1478,7 @@ async fn prepare_native_runtime_state(
                     &native_subagent_config,
                 ),
             },
+            &native_subagent_config,
         )
     })
     .await
@@ -1407,6 +1557,20 @@ async fn prepare_startup_patches_with_port_selector(
     Ok(StartupPatchState { debug_port })
 }
 
+async fn with_launch_proxy<T, F>(
+    value: &str,
+    launch: impl FnOnce(Option<crate::launch_proxy::CodexLaunchProxy>) -> F,
+) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    let launch_proxy = match crate::launch_proxy::CodexLaunchProxy::resolve(value)? {
+        Some(plan) => Some(plan.start().await?),
+        None => None,
+    };
+    launch(launch_proxy).await
+}
+
 async fn spawn_and_inject_runtime(
     home: &std::path::Path,
     config: &CodeyConfig,
@@ -1417,60 +1581,67 @@ async fn spawn_and_inject_runtime(
     runtime_config_overrides: &[String],
 ) -> Result<SpawnedRenderer> {
     let spawn_inject_started = Instant::now();
-    // 在启动与 CLI 包装器握手期间预取，首导航前暂停时先装 Fetch 再放行。
-    let target_prefetch = cdp::spawn_injectable_target_prefetch(patch.debug_port);
-    let mut spawned = match spawn_codex(
-        &mut storage.app_dir,
-        patch.debug_port,
-        config.subagent_optimization,
-        config.gpu_launch_mode,
-        runtime_config_overrides,
-    )
+    with_launch_proxy(&config.codex_launch_proxy, |launch_proxy| async move {
+        // 浏览器级补丁服务先于 Codex 启动；目标枚举与 CLI 包装器握手并行。
+        crate::renderer_asset_patch::start_service(patch.debug_port, config.slim_codex_pet);
+        let target_prefetch = cdp::spawn_injectable_target_prefetch(patch.debug_port);
+        let mut spawned = match spawn_codex(
+            &mut storage.app_dir,
+            patch.debug_port,
+            config.subagent_optimization,
+            CodexLaunchOptions {
+                gpu_launch_mode: config.gpu_launch_mode,
+                launch_proxy: launch_proxy.as_ref(),
+            },
+            runtime_config_overrides,
+        )
+        .await
+        {
+            Ok(spawned) => spawned,
+            Err(error) => {
+                target_prefetch.abort();
+                return Err(restore_runtime_config_after_error(home, error).await);
+            }
+        };
+        let codex_spawn_ms = spawn_inject_started.elapsed().as_millis() as u64;
+        let maintenance = MaintenanceStatus {
+            session_status: storage.session_maintenance.status,
+            session_files_fixed: storage.session_maintenance.files_fixed,
+            sqlite_rows_updated: storage.session_maintenance.sqlite_rows_updated,
+            ghost_tasks_pruned: storage.session_maintenance.ghost_tasks_pruned,
+            performance_status: spawned.performance_status.clone(),
+            performance_detail: spawned.performance_detail.clone(),
+        };
+        let child = Arc::new(Mutex::new(spawned.child.take()));
+        let injected_target = inject_initial_renderer(InitialRendererInputs {
+            debug_port: patch.debug_port,
+            handler: handler.clone(),
+            injection_scripts,
+            app_dir: &storage.app_dir,
+            home,
+            spawned: &spawned,
+            child: &child,
+            prefetched_target: target_prefetch,
+        })
+        .await?;
+        let inject_renderer_ms = spawn_inject_started.elapsed().as_millis() as u64 - codex_spawn_ms;
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "launcher.spawn_inject_timings",
+            serde_json::json!({
+                "codexSpawnAndCompatibilityMs": codex_spawn_ms,
+                "rendererInjectionMs": inject_renderer_ms,
+                "totalMs": spawn_inject_started.elapsed().as_millis() as u64,
+            }),
+        );
+        Ok(SpawnedRenderer {
+            app_dir: storage.app_dir,
+            spawned,
+            child,
+            maintenance,
+            injected_target,
+        })
+    })
     .await
-    {
-        Ok(spawned) => spawned,
-        Err(error) => {
-            target_prefetch.abort();
-            return Err(restore_runtime_config_after_error(home, error).await);
-        }
-    };
-    let codex_spawn_ms = spawn_inject_started.elapsed().as_millis() as u64;
-    let maintenance = MaintenanceStatus {
-        session_status: storage.session_maintenance.status,
-        session_files_fixed: storage.session_maintenance.files_fixed,
-        sqlite_rows_updated: storage.session_maintenance.sqlite_rows_updated,
-        ghost_tasks_pruned: storage.session_maintenance.ghost_tasks_pruned,
-        performance_status: spawned.performance_status.clone(),
-        performance_detail: spawned.performance_detail.clone(),
-    };
-    let child = Arc::new(Mutex::new(spawned.child.take()));
-    let injected_target = inject_initial_renderer(InitialRendererInputs {
-        debug_port: patch.debug_port,
-        handler: handler.clone(),
-        injection_scripts,
-        app_dir: &storage.app_dir,
-        home,
-        spawned: &spawned,
-        child: &child,
-        prefetched_target: target_prefetch,
-    })
-    .await?;
-    let inject_renderer_ms = spawn_inject_started.elapsed().as_millis() as u64 - codex_spawn_ms;
-    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
-        "launcher.spawn_inject_timings",
-        serde_json::json!({
-            "codexSpawnAndCompatibilityMs": codex_spawn_ms,
-            "rendererInjectionMs": inject_renderer_ms,
-            "totalMs": spawn_inject_started.elapsed().as_millis() as u64,
-        }),
-    );
-    Ok(SpawnedRenderer {
-        app_dir: storage.app_dir,
-        spawned,
-        child,
-        maintenance,
-        injected_target,
-    })
 }
 
 fn spawn_runtime_watchers(inputs: RuntimeWatcherInputs) -> RuntimeWatchers {
@@ -1597,8 +1768,10 @@ impl CodeyRuntime {
         config: &CodeyConfig,
         handler: codey_runtime_core::bridge::BridgeHandler,
         trace_log_write_protection_active: &AtomicBool,
+        trace_log_guard_state: Arc<trace_log_guard::TraceLogGuardState>,
         crashpad_pending_stats: CrashpadPendingStatsHandle,
     ) -> Result<(Self, oneshot::Receiver<()>)> {
+        let mut stage_timings = StartupStageTimings::default();
         let home = codex_home();
         trace_log_write_protection_active.store(false, Ordering::Release);
         let injection_scripts = cdp::prepare_injection_scripts(
@@ -1609,7 +1782,9 @@ impl CodeyRuntime {
             &config.user_scripts,
         );
         resolve_startup_provider(config)?;
-        let initial_storage_guards = spawn_initial_storage_guards(home, config);
+        stage_timings.mark("startupPreparationMs");
+        let initial_storage_guards =
+            spawn_initial_storage_guards(home, config, trace_log_guard_state);
         let (storage, startup_catalog) = prepare_startup_storage(
             home,
             config,
@@ -1617,8 +1792,10 @@ impl CodeyRuntime {
             initial_storage_guards,
             trace_log_write_protection_active,
             &crashpad_pending_stats,
+            &mut stage_timings,
         )
         .await?;
+        stage_timings.mark("storageAndCatalogMs");
         let PreparedProviderState {
             runtime_config,
             runtime_config_overrides,
@@ -1628,6 +1805,7 @@ impl CodeyRuntime {
                 return Err(restore_runtime_config_after_error(home, error).await);
             }
         };
+        stage_timings.mark("providerStateMs");
         let delivered_catalog = startup_catalog.as_ref().map(|catalog| {
             crate::commands::renderer_model_catalog_value(&runtime_config, &catalog.model_state)
         });
@@ -1642,6 +1820,7 @@ impl CodeyRuntime {
                 .await);
             }
         };
+        stage_timings.mark("startupPatchesMs");
         let recovery_app_dir = storage.app_dir.clone();
         let SpawnedRenderer {
             app_dir,
@@ -1667,6 +1846,8 @@ impl CodeyRuntime {
                 );
             }
         };
+        stage_timings.mark("spawnAndInjectMs");
+        stage_timings.report();
         let process_id = spawned.process_id;
         let RuntimeWatchers {
             injection_statuses,
@@ -1721,10 +1902,14 @@ impl CodeyRuntime {
     }
 
     pub async fn stop(&self) -> Result<()> {
+        #[cfg(windows)]
+        let renderer_websocket_url = self.injection_websocket_url.read().await.clone();
         self.stop_with_cleanup(
             stop_codex_processes(
                 &self.codex_app_path,
                 self.process_id,
+                #[cfg(windows)]
+                Some(&renderer_websocket_url),
                 #[cfg(unix)]
                 self.process_group_id,
             ),
@@ -1859,7 +2044,7 @@ mod endpoint_loss_tests {
     use super::*;
 
     #[test]
-    fn cdp_watchdog_stops_after_three_consecutive_endpoint_losses() {
+    fn cdp_watchdog_backs_off_after_three_consecutive_endpoint_losses() {
         let mut losses = 0;
         assert!(!watchdog_endpoint_loss_limit_reached(&mut losses, true));
         assert!(!watchdog_endpoint_loss_limit_reached(&mut losses, true));
@@ -1970,6 +2155,10 @@ mod gpu_launch_argument_tests;
 #[path = "launcher/watchdog_tests.rs"]
 mod watchdog_tests;
 
+#[cfg(test)]
+#[path = "launcher/watchdog_recovery_tests.rs"]
+mod watchdog_recovery_tests;
+
 #[cfg(all(test, unix))]
 mod tests;
 
@@ -1978,3 +2167,38 @@ mod app_path_tests;
 
 #[cfg(test)]
 mod model_delivery_test_support;
+
+#[cfg(test)]
+mod launch_proxy_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn launch_proxy_relay_failure_stops_before_spawn_and_environment_injection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            stream.read_exact(&mut [0; 4]).await.unwrap();
+            stream.write_all(&[0x05, 0xff]).await.unwrap();
+        });
+        let mut spawned = false;
+        let mut environment = vec![("HTTP_PROXY".to_string(), "inherited-proxy".to_string())];
+        let original_environment = environment.clone();
+        let value = format!("socks5://user:secret@{address}");
+        let result = with_launch_proxy(&value, |proxy| {
+            spawned = true;
+            if let Some(proxy) = proxy {
+                environment.extend(proxy.environment());
+            }
+            std::future::ready(Ok(()))
+        })
+        .await;
+        let message = format!("{:#}", result.unwrap_err());
+        assert!(message.contains("不接受可用的认证方式"), "{message}");
+        assert!(!message.contains("secret"), "{message}");
+        assert!(!spawned);
+        assert_eq!(environment, original_environment);
+        server.await.unwrap();
+    }
+}

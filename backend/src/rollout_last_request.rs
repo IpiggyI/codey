@@ -176,7 +176,7 @@ fn last_model_request_in(bytes: &[u8], starts_mid_line: bool) -> Option<LastMode
 }
 
 #[derive(Default)]
-struct RequestWindow {
+pub(crate) struct RequestWindow {
     previous_token_at: Option<i64>,
     input_at: Option<i64>,
     started_at: Option<i64>,
@@ -184,11 +184,18 @@ struct RequestWindow {
     usage_at: Option<i64>,
     has_output: bool,
     has_usage: bool,
-    turn_reasoning: Option<u64>,
+    pub(crate) turn_reasoning: Option<u64>,
 }
 
 impl RequestWindow {
-    fn observe(&mut self, record: &Value) {
+    pub(crate) fn after_usage(previous_token_at: Option<i64>) -> Self {
+        Self {
+            previous_token_at,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn observe(&mut self, record: &Value) {
         let time = timestamp(record.get("timestamp"));
         if is_input_event(record) {
             self.input_at = time;
@@ -211,6 +218,11 @@ impl RequestWindow {
     }
 
     fn response_window(&self) -> Option<ResponseWindow> {
+        self.recorded_window()
+            .filter(|window| window.ended_at > window.started_at)
+    }
+
+    pub(crate) fn recorded_window(&self) -> Option<ResponseWindow> {
         if !self.has_output {
             return None;
         }
@@ -220,14 +232,14 @@ impl RequestWindow {
         } else {
             self.output_at?
         };
-        (ended_at > started_at).then_some(ResponseWindow {
+        (ended_at >= started_at).then_some(ResponseWindow {
             started_at,
             ended_at,
         })
     }
 }
 
-fn is_input_event(record: &Value) -> bool {
+pub(crate) fn is_input_event(record: &Value) -> bool {
     let payload = &record["payload"];
     match record["type"].as_str() {
         Some("turn_context") => true,
@@ -249,7 +261,7 @@ fn is_input_event(record: &Value) -> bool {
     }
 }
 
-fn timestamp(value: Option<&Value>) -> Option<i64> {
+pub(crate) fn timestamp(value: Option<&Value>) -> Option<i64> {
     DateTime::parse_from_rfc3339(value?.as_str()?)
         .ok()
         .map(|time| time.timestamp_millis())

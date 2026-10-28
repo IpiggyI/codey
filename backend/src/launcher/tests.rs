@@ -271,6 +271,7 @@ async fn startup_storage_waits_for_guards_when_app_resolution_fails() {
     });
     let trace_active = AtomicBool::new(false);
     let stats = CrashpadPendingStatsHandle::idle(true);
+    let mut timings = StartupStageTimings::default();
     let preparation = prepare_startup_storage(
         home.path(),
         &config,
@@ -278,6 +279,7 @@ async fn startup_storage_waits_for_guards_when_app_resolution_fails() {
         InitialStorageGuards { trace, crashpad },
         &trace_active,
         &stats,
+        &mut timings,
     );
     tokio::pin!(preparation);
 

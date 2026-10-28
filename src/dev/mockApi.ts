@@ -1,7 +1,16 @@
 // Development-only preview data and a mock Codey bridge API. Loaded from
 // main.tsx via a dynamic import that only exists in Vite dev builds, so this
 // module never ships in the production overlay.
-import type { ProviderStatus, Config, ModelState } from "../App.types";
+import type {
+  ChannelEntry,
+  ChannelList,
+  ProviderStatus,
+  Config,
+  ConfigApplyStatus,
+  ModelState,
+  OfficialAccount,
+  OfficialUsageSnapshot,
+} from "../App.types";
 import {
   AUTO_REVIEW_MODEL,
   includesModelId,
@@ -9,11 +18,27 @@ import {
   modelKey,
   uniqueModelIds,
 } from "../modelIds";
+import { validateNtfyTopic } from "../notifications/types";
+import { createCodexExtensionsPreview } from "./codexExtensionsMock";
 import { previewOfficialModels, previewUpstreamModels } from "../previewModels";
 import {
   previewCrashpadPendingStats,
   previewTraceLogStats,
 } from "../previewTraceLogStats";
+
+const OFFICIAL_ACCOUNT_COMMANDS = new Set<string>([
+  "list_official_accounts",
+  "import_current_codex_login",
+  "import_official_account_credential",
+  "start_official_account_login",
+  "poll_official_account_login",
+  "submit_official_account_login_callback",
+  "cancel_official_account_login",
+  "set_default_official_account",
+  "remove_official_account",
+  "query_official_account_usage",
+  "store_official_account_usage",
+]);
 
 // 在 Vite 开发模式下，若未通过 Codey Bridge/Token 访问，自动注入 Mock 接口方便 UI 调试
 if (import.meta.env.DEV) {
@@ -23,11 +48,22 @@ if (import.meta.env.DEV) {
       new URLSearchParams(window.location.search).get("platform") === "windows"
         ? "windows"
         : "macos";
+    const configRepairPreview = new URLSearchParams(window.location.search).get("configRepair");
+    const channelFallbackPreview = new URLSearchParams(window.location.search).get("channelFallback") === "1";
+    // ?officialSwitchDisabled=1 预览 Codex 凭据存储不是 file 模式时禁用导入当前登录与切换。
+    const officialSwitchDisabledPreview = new URLSearchParams(window.location.search).get("officialSwitchDisabled") === "1";
+    // ?codexConfigModel=gpt-5.5 预览 Codex 配置里有顶层 model 时的切换模型来源；默认没有。
+    const previewCodexConfigModel = new URLSearchParams(window.location.search).get("codexConfigModel")?.trim() || null;
+    // ?officialBrowser=0 预览未能自动打开浏览器时显示授权地址。
+    const officialBrowserPreview = new URLSearchParams(window.location.search).get("officialBrowser") !== "0";
+    // ?officialCallback=0 预览登录回调端口被占用：开始登录后只能粘贴回调地址完成。
+    const officialCallbackPreview = new URLSearchParams(window.location.search).get("officialCallback") !== "0";
     const previewEndpoints = {
       primary: "https://primary.example.invalid/v1",
       backup: "https://backup.example.invalid/v1",
       feishu: "https://webhook.example.invalid/feishu/preview-only",
       wecom: "https://webhook.example.invalid/wecom/preview-only?key=preview",
+      ntfy: "https://ntfy.example.invalid",
     } as const;
     type PreviewProfile = {
       id: string;
@@ -47,6 +83,8 @@ if (import.meta.env.DEV) {
     };
     let previewActiveProfileId = "primary";
     let previewComputerUseReady = false;
+    // 预览中保存后先返回应用中，下一次运行状态查询时完成应用。
+    let previewConfigApply: ConfigApplyStatus | null = null;
     let previewRoutes: PreviewProfile[] = [
         {
           id: "primary",
@@ -130,6 +168,21 @@ if (import.meta.env.DEV) {
             clearContextToken: false,
             chatId: "preview-chat-id",
           },
+          {
+            id: "preview-ntfy",
+            kind: "ntfy" as const,
+            enabled: true,
+            url: previewEndpoints.ntfy,
+            urlConfigured: true,
+            clearUrl: false,
+            botToken: "",
+            botTokenConfigured: false,
+            clearBotToken: false,
+            contextToken: "",
+            contextTokenConfigured: false,
+            clearContextToken: false,
+            chatId: "preview-ntfy-topic",
+          },
         ],
       },
       promptOptimization: {
@@ -164,6 +217,7 @@ if (import.meta.env.DEV) {
       protectCrashpadPending: true,
       slimCodexPet: true,
       gpuLaunchMode: "off" as const,
+      codexLaunchProxy: "",
       fastContextTools: false,
       subagentOptimization: false,
       subagentModel: "gpt-5.6-terra",
@@ -184,6 +238,9 @@ if (import.meta.env.DEV) {
       showAccountUsageInHeader: true,
       quotaUnlockEnabled: true,
       cacheValidMinutes: 30,
+      // ?channelFallback=1 预览所选渠道已从用户配置中删除时的回退提示。
+      selectedChannelId: channelFallbackPreview ? "provider:removed" : null,
+      defaultModelsByChannel: {},
     };
     let previewModelState: ModelState = {
       officialModels: previewOfficialModels.map((model) => ({
@@ -217,14 +274,114 @@ if (import.meta.env.DEV) {
     const previewCurrentProviderSnapshot = () => {
       const profile = activePreviewProfile();
       const id = profile ? routeProviderId(profile) : "openai";
+      // 没有有效所选渠道时省略 channelId，不发 null。
+      const selected = previewConfig.selectedChannelId;
+      const channelId = previewChannelCatalog().some((entry) => entry.id === selected && entry.available)
+        ? selected
+        : null;
       return {
         id,
         baseUrl: (profile?.baseUrl || "").replace(/\/+$/, ""),
         wireApi: "responses",
         usesOfficialAccountAuth: profile?.authMode === "officialAccount",
         ownershipKey: id,
+        ...(channelId ? { channelId } : {}),
       };
     };
+    const CHANNEL_FALLBACK_NOTICE = "所选渠道已不可用，已回退到用户配置的默认 provider。";
+    const channelVersionConflictMessage = "Codey 设置已被其他操作更新，请刷新后重试";
+    // 预览用的渠道目录：两个 provider、一个缺少密钥的 provider、官方账号和一个无法选择的官方占位。
+    // 预览账号库：账号摘要不含任何凭据，每个账号对应一个官方渠道。
+    let previewAccounts: OfficialAccount[] = [
+      { id: "preview-account", accountId: "acct-preview-plus", addedAt: 1_760_000_000, invalid: false, isDefault: false, email: "plus@example.invalid", planType: "plus", lastRefresh: "2026-10-27T08:00:00Z" },
+      { id: "preview-pro", accountId: "acct-preview-pro", addedAt: 1_760_100_000, invalid: false, isDefault: false, email: "pro@example.invalid", planType: "prolite" },
+    ];
+    let previewCurrentAccountId: string | null = "preview-account";
+    // Codex 当前登录的账号；从账号库移除后仍可再次导入。
+    let previewCodexLogin: OfficialAccount = previewAccounts[0];
+    let previewUsageGeneration = 0;
+    const previewUsageGenerations = new Map<string, number>();
+    const previewLogins = new Map<string, number>();
+    const previewLoginState = (loginId: string) => `preview-state-${loginId}`;
+    const addPreviewBrowserAccount = () => {
+      const n = previewAccounts.length + 1;
+      return upsertPreviewAccount({ id: `preview-browser-${n}`, accountId: `acct-browser-${n}`, addedAt: Math.floor(Date.now() / 1000), invalid: false, isDefault: false, email: `browser${n}@example.invalid`, planType: "pro" });
+    };
+    const previewSwitchDisabledReason = officialSwitchDisabledPreview
+      ? "Codex 凭据存储不是 file 模式，不能导入当前登录或切换官方账号"
+      : null;
+    const previewAccountsPayload = (extra: Record<string, unknown> = {}) => ({
+      status: "ok",
+      accounts: previewAccounts.map((account) => ({ ...account, isDefault: account.id === previewCurrentAccountId })),
+      defaultAccountId: previewAccounts.some((account) => account.id === previewCurrentAccountId) ? previewCurrentAccountId : null,
+      officialAccountAvailable: previewCurrentAccountId !== null,
+      officialAccountStatus: previewCurrentAccountId !== null ? "authenticated" : "unauthenticated",
+      switchDisabledReason: previewSwitchDisabledReason,
+      ...extra,
+    });
+    const upsertPreviewAccount = (account: OfficialAccount) => {
+      previewAccounts = [...previewAccounts.filter((item) => item.id !== account.id), account];
+      return previewAccountsPayload({ accountId: account.id });
+    };
+    const previewChannelCatalog = () => [
+      { id: "provider:primary", kind: "provider", providerId: "primary", displayName: "主中转", available: true, unavailableReason: null, modelOptions: previewConfig.upstreamModelsByProvider.primary },
+      { id: "provider:backup", kind: "provider", providerId: "backup", displayName: "备用中转 (Claude)", available: true, unavailableReason: null, modelOptions: previewConfig.upstreamModelsByProvider.backup },
+      { id: "provider:offline", kind: "provider", providerId: "offline", displayName: "离线中转", available: false, unavailableReason: "环境变量 OFFLINE_API_KEY 未设置", modelOptions: [] as string[] },
+      ...previewAccounts.map((account) => ({
+        // 与后端一致：凭据存储不是 file 模式时官方渠道不可用。
+        id: `official:${account.id}`, kind: "official" as const, providerId: "openai", displayName: account.email ?? account.accountId,
+        available: previewSwitchDisabledReason === null, unavailableReason: previewSwitchDisabledReason,
+        modelOptions: previewOfficialModels.map((model) => model.slug),
+      })),
+      { id: "official:unavailable", kind: "official", providerId: "openai", displayName: "官方账号（未登录）", available: false, unavailableReason: "没有可用的官方账号登录", modelOptions: [] as string[] },
+    ] as const;
+    // 与后端一致：切换使用的模型依次取渠道默认模型、全局默认模型、Codex 配置的顶层 model。
+    const previewSwitchModel = (channelId: string) => {
+      const sources = [
+        ["channel", previewConfig.defaultModelsByChannel[channelId]],
+        ["global", previewConfig.defaultModel],
+        ["codex-config", previewCodexConfigModel],
+      ] as const;
+      for (const [source, candidate] of sources) {
+        const model = candidate?.trim();
+        if (model) return { switchModel: model, switchModelSource: source };
+      }
+      return { switchModel: null, switchModelSource: null };
+    };
+    // 预览里“正在运行的 Codex”所用的渠道与模型，重启后与当前渠道对齐。
+    const previewChannelRunKey = () => {
+      const list = previewChannelList();
+      const current = list.channels.find((entry) => entry.current);
+      return `${current?.id ?? ""}|${current?.switchModel ?? ""}`;
+    };
+    let previewChannelRunning = "";
+    const previewChannelList = (): ChannelList => {
+      const selected = previewConfig.selectedChannelId;
+      const catalog = previewChannelCatalog();
+      const found = catalog.find((entry) => entry.id === selected);
+      const effective = found ?? catalog[0];
+      const channels: ChannelEntry[] = catalog.map((entry) => ({
+        ...entry,
+        modelOptions: [...entry.modelOptions],
+        defaultModel: previewConfig.defaultModelsByChannel[entry.id] ?? null,
+        ...previewSwitchModel(entry.id),
+        current: entry.id === effective.id,
+      }));
+      return {
+        channels,
+        selectedChannelId: selected,
+        effectiveProviderId: effective.providerId,
+        notice: selected !== null && !found ? CHANNEL_FALLBACK_NOTICE : null,
+      };
+    };
+    previewChannelRunning = previewChannelRunKey();
+    const channelRestartRequired = () => previewChannelRunKey() !== previewChannelRunning;
+    const previewChannelMutationResult = () => ({
+      status: "ok",
+      channelList: previewChannelList(),
+      settingsRevision: previewConfig.settingsRevision,
+      restartRequired: channelRestartRequired(),
+    });
     const previewModelStateForProfile = (profile: PreviewProfile): ModelState => {
       const providerId = routeProviderId(profile);
       const official = profile.authMode === "officialAccount";
@@ -329,10 +486,15 @@ if (import.meta.env.DEV) {
       };
     });
 
+    const extensionsPreview = createCodexExtensionsPreview(previewClientPlatform);
+
     window.__codeyInvokeApi = async (command, args) => {
-      console.log(`[Mock API Call] ${command}`, args);
+      // 粘贴的凭据不进日志。
+      console.log(`[Mock API Call] ${command}`, args && "credential" in args ? { ...args, credential: "[已隐藏]" } : args);
       // Wait a tiny bit to simulate network delay
       await new Promise((resolve) => setTimeout(resolve, 300));
+
+      if (command === "codex_extensions") return extensionsPreview(args?.request as Record<string, unknown>);
 
       if (command === "load_codey_config") {
         return {
@@ -375,15 +537,23 @@ if (import.meta.env.DEV) {
                     (channel.sessionStatus !== "expired" &&
                       channel.urlConfigured &&
                       channel.contextTokenConfigured))
-                : channel.urlConfigured),
+                : channel.kind === "ntfy"
+                  ? channel.urlConfigured && !validateNtfyTopic(channel.chatId)
+                  : channel.urlConfigured),
           ).length;
+        const configApply = previewConfigApply;
+        if (previewConfigApply?.state === "pending") {
+          previewConfigApply = { revision: previewConfigApply.revision, state: "applied" };
+        }
         return {
+          configApply,
           running: true,
           appVersion: "0.2.0",
           codexAppVersion: "26.601.21317",
           clientPlatform: previewClientPlatform,
-          restartRequired: false,
+          restartRequired: channelRestartRequired(),
           restartInProgress: false,
+          channelNotice: previewChannelList().notice,
           activeProfileId: previewActiveProfileId,
           activeProfileName:
             previewRoutes.find(
@@ -550,10 +720,18 @@ if (import.meta.env.DEV) {
             clearApiKey: false,
           },
           settingsRevision: previewConfig.settingsRevision + 1,
+          // 普通保存不改渠道字段，渠道变更走专用命令。
+          selectedChannelId: previewConfig.selectedChannelId,
+          defaultModelsByChannel: previewConfig.defaultModelsByChannel,
         };
         refreshPreviewModelState();
+        previewConfigApply = {
+          revision: (previewConfigApply?.revision ?? 0) + 1,
+          state: "pending",
+        };
         return {
           config: previewConfig,
+          configApply: previewConfigApply,
           modelState: previewModelState,
           providerStatus: previewProviderStatus(),
           currentProviderSnapshot: previewCurrentProviderSnapshot(),
@@ -563,6 +741,206 @@ if (import.meta.env.DEV) {
           },
           restartRequired: false,
         };
+      }
+      if (OFFICIAL_ACCOUNT_COMMANDS.has(command)) {
+        const failed = (message: string) => ({ status: "failed", message });
+        const stringArgument = (name: string) =>
+          typeof args[name] === "string" && args[name].trim() ? args[name] : null;
+        if (command === "list_official_accounts") return previewAccountsPayload();
+        if (command === "import_current_codex_login") {
+          if (previewSwitchDisabledReason) return failed(previewSwitchDisabledReason);
+          if (previewCurrentAccountId === null) return failed("当前 Codex 没有官方登录");
+          return upsertPreviewAccount({ ...previewCodexLogin, lastRefresh: new Date().toISOString() });
+        }
+        if (command === "import_official_account_credential") {
+          if (typeof args.credential !== "string") return failed("缺少参数：credential");
+          const input = args.credential.trim();
+          if (!input) return failed("请粘贴刷新令牌或 OAuth JSON");
+          let accountId = `acct-pasted-${previewAccounts.length + 1}`;
+          if (/^[{["]/.test(input)) {
+            let value: unknown;
+            try { value = JSON.parse(input); } catch { return failed("OAuth JSON 格式无效"); }
+            if (!value || typeof value !== "object" || Array.isArray(value)) return failed("OAuth JSON 必须是对象");
+            const tokens = ((value as { tokens?: Record<string, unknown> }).tokens ?? value) as Record<string, unknown>;
+            if (typeof tokens.access_token !== "string" && typeof tokens.refresh_token !== "string") {
+              return failed("OAuth JSON 缺少访问令牌或刷新令牌");
+            }
+            if (typeof tokens.access_token === "string") {
+              if (typeof tokens.account_id !== "string") return failed("官方账号缺少 tokens.account_id");
+              accountId = tokens.account_id;
+            }
+          } else if (input.length < 20 || /\s/.test(input) || input.startsWith("sk-") || input.split(".").length === 3) {
+            return failed("刷新令牌格式无效");
+          }
+          return upsertPreviewAccount({ id: `preview-${accountId}`, accountId, addedAt: Math.floor(Date.now() / 1000), invalid: false, isDefault: false, email: `${accountId}@example.invalid`, planType: "free" });
+        }
+        if (command === "start_official_account_login") {
+          // 与后端一致：开始新的登录会取消之前的登录会话。
+          previewLogins.clear();
+          const loginId = `preview-login-${Date.now()}`;
+          previewLogins.set(loginId, 0);
+          return {
+            status: "wait",
+            loginId,
+            authUrl: `https://auth.example.invalid/oauth/authorize?preview=1&state=${previewLoginState(loginId)}`,
+            browserOpened: officialBrowserPreview,
+            callbackListening: officialCallbackPreview,
+            callbackError: officialCallbackPreview ? null : "登录回调端口 127.0.0.1:1455 已被其他程序占用，无法自动完成登录",
+          };
+        }
+        if (command === "poll_official_account_login") {
+          const loginId = stringArgument("loginId");
+          if (!loginId) return failed("缺少参数：loginId");
+          const polls = previewLogins.get(loginId);
+          if (polls === undefined) return { status: "expired", message: "登录已过期或已取消，请重新添加账号" };
+          if (polls < 2) {
+            previewLogins.set(loginId, polls + 1);
+            return { status: "wait" };
+          }
+          previewLogins.delete(loginId);
+          return addPreviewBrowserAccount();
+        }
+        if (command === "submit_official_account_login_callback") {
+          const loginId = stringArgument("loginId");
+          if (!loginId) return failed("缺少参数：loginId");
+          const callbackUrl = stringArgument("callbackUrl");
+          if (!callbackUrl) return failed("请粘贴浏览器地址栏里的完整回调地址");
+          if (!previewLogins.has(loginId)) return failed("登录已过期或已结束，请重新添加账号");
+          // 回调地址可以是完整地址，也可以只有问号后面的参数。
+          const query = callbackUrl.includes("?") ? callbackUrl.slice(callbackUrl.indexOf("?") + 1) : callbackUrl;
+          const params = new URLSearchParams(query.split("#")[0]);
+          if (params.get("state") !== previewLoginState(loginId)) return failed("回调地址与本次登录不匹配，请复制本次登录后浏览器打开的完整地址");
+          if (params.get("error")) return failed("授权被拒绝，请重新开始登录");
+          if (!params.get("code")) return failed("回调地址里没有授权码，请复制浏览器地址栏里的完整地址");
+          previewLogins.delete(loginId);
+          return addPreviewBrowserAccount();
+        }
+        if (command === "cancel_official_account_login") {
+          const loginId = stringArgument("loginId");
+          if (!loginId) return failed("缺少参数：loginId");
+          previewLogins.delete(loginId);
+          return { status: "ok" };
+        }
+        if (command === "set_default_official_account") {
+          const accountId = stringArgument("accountId");
+          if (!accountId) return failed("缺少参数：accountId");
+          if (previewSwitchDisabledReason) return failed(previewSwitchDisabledReason);
+          const target = previewAccounts.find((account) => account.id === accountId);
+          if (!target) return failed("找不到官方账号");
+          const channelId = `official:${accountId}`;
+          // 与后端一致：先用渠道默认模型，再用全局默认模型，再用 Codex 配置的顶层 model；都没有时拒绝切换。
+          const model = previewSwitchModel(channelId).switchModel;
+          if (!model) return failed("请先为该官方账号设置默认模型：在渠道列表中为它的渠道设置默认模型后再切换");
+          const defaultsByChannel = { ...previewConfig.defaultModelsByChannel, [channelId]: model };
+          previewConfig = {
+            ...previewConfig,
+            settingsRevision: previewConfig.settingsRevision + 1,
+            selectedChannelId: channelId,
+            defaultModelsByChannel: defaultsByChannel,
+          };
+          previewCurrentAccountId = accountId;
+          previewCodexLogin = target;
+          return previewAccountsPayload({ accountId, restartRequired: true, settingsRevision: previewConfig.settingsRevision });
+        }
+        if (command === "remove_official_account") {
+          const accountId = stringArgument("accountId");
+          if (!accountId) return failed("缺少参数：accountId");
+          // 与后端一致：只删除账号库记录，不退出 Codex 登录，也不自动切换其他账号。
+          previewAccounts = previewAccounts.filter((account) => account.id !== accountId);
+          return previewAccountsPayload();
+        }
+        if (command === "query_official_account_usage") {
+          const accountId = typeof args.accountId === "string" ? args.accountId : previewCurrentAccountId;
+          if (!accountId) return { status: "error", message: "当前没有可用的官方账号" };
+          const account = previewAccounts.find((item) => item.id === accountId);
+          if (!account) return { status: "error", message: "找不到官方账号" };
+          previewUsageGeneration += 1;
+          previewUsageGenerations.set(accountId, previewUsageGeneration);
+          const now = Math.floor(Date.now() / 1000);
+          const used = account.planType === "plus" ? 72 : 18;
+          const snapshot: OfficialUsageSnapshot = {
+            fetchedAt: now,
+            planType: account.planType,
+            primary: { usedPercent: used, windowMinutes: 300, resetsAt: now + 2 * 3600 },
+            secondary: { usedPercent: used / 2, windowMinutes: 10080, resetsAt: now + 3 * 86400 },
+          };
+          return { ...snapshot, status: "ok", authGeneration: previewUsageGeneration };
+        }
+        if (command === "store_official_account_usage") {
+          if (!("authGeneration" in args)) return failed("缺少参数：authGeneration");
+          if (!("snapshot" in args)) return failed("缺少参数：snapshot");
+          const accountId = typeof args.accountId === "string" ? args.accountId : previewCurrentAccountId;
+          if (!accountId || !previewAccounts.some((account) => account.id === accountId)) return failed("找不到官方账号");
+          if (previewUsageGenerations.get(accountId) !== args.authGeneration) {
+            return failed(previewUsageGenerations.has(accountId) ? "官方账号状态已变化，忽略旧的额度结果" : "账号额度请求已失效");
+          }
+          return { status: "ok" };
+        }
+      }
+      if (command === "list_channels") return previewChannelList();
+      if (command === "set_channel_default_model" || command === "select_channel") {
+        const failed = (message: string) => ({ status: "failed", message });
+        // 参数校验与错误文案对齐后端 argument()，包括 serde 的类型错误描述。
+        const describe = (value: unknown) =>
+          value === null ? "null"
+            : typeof value === "string" ? `string "${value}"`
+            : typeof value === "boolean" ? `boolean \`${value}\``
+            : typeof value === "number" ? (Number.isInteger(value) ? `integer \`${value}\`` : `floating point \`${value}\``)
+            : Array.isArray(value) ? "sequence" : "map";
+        const argumentError = (name: string, detail: string) => failed(`参数 ${name} 无效：${detail}`);
+        if (!("expectedRevision" in args)) return failed("缺少参数：expectedRevision");
+        const revision = args.expectedRevision;
+        if (typeof revision !== "number" || !Number.isInteger(revision)) {
+          return argumentError("expectedRevision", `invalid type: ${describe(revision)}, expected u64`);
+        }
+        if (revision < 0) {
+          return argumentError("expectedRevision", `invalid value: integer \`${revision}\`, expected u64`);
+        }
+        if (revision !== previewConfig.settingsRevision) {
+          return failed(channelVersionConflictMessage);
+        }
+        if (!("channelId" in args)) return failed("缺少参数：channelId");
+        const rawId = args.channelId;
+        const setDefault = command === "set_channel_default_model";
+        if (typeof rawId !== "string" && !(rawId === null && !setDefault)) {
+          return argumentError("channelId", `invalid type: ${describe(rawId)}, expected a string`);
+        }
+        const channelId = rawId as string | null;
+        const entry = previewChannelCatalog().find((candidate) => candidate.id === channelId && candidate.available);
+        if (setDefault) {
+          if (!("model" in args)) return failed("缺少参数：model");
+          if (typeof args.model !== "string") {
+            return argumentError("model", `invalid type: ${describe(args.model)}, expected a string`);
+          }
+          const model = args.model.trim();
+          if (!model) return failed("渠道默认模型不能为空");
+          if (!entry) return failed("所选渠道不可用");
+          previewConfig = {
+            ...previewConfig,
+            settingsRevision: previewConfig.settingsRevision + 1,
+            defaultModelsByChannel: { ...previewConfig.defaultModelsByChannel, [entry.id]: model },
+          };
+          return previewChannelMutationResult();
+        }
+        if (channelId !== null) {
+          if (!entry) return failed("所选渠道不可用");
+          if (!previewSwitchModel(entry.id).switchModel) return failed("请先为渠道设置默认模型");
+        }
+        previewConfig = {
+          ...previewConfig,
+          settingsRevision: previewConfig.settingsRevision + 1,
+          selectedChannelId: channelId,
+        };
+        // 与后端一致：选择库内官方账号的渠道会把 Codex 登录切换到该账号。
+        const selectedAccount = previewAccounts.find((account) => `official:${account.id}` === channelId);
+        if (selectedAccount) {
+          previewCurrentAccountId = selectedAccount.id;
+          previewCodexLogin = selectedAccount;
+        }
+        const effectiveProviderId = previewChannelList().effectiveProviderId;
+        previewActiveProfileId = previewRoutes.find((profile) => routeProviderId(profile) === effectiveProviderId)?.id
+          ?? "primary";
+        return previewChannelMutationResult();
       }
       if (command === "sync_current_provider") {
         return {
@@ -820,7 +1198,18 @@ if (import.meta.env.DEV) {
           modelHotReloaded: true,
         };
       }
+      if (command === "repair_codex_config") {
+        await new Promise((resolve) => setTimeout(resolve, 1800));
+        if (configRepairPreview === "failure") throw new Error("预览：无法写入配置目录，已记录错误日志");
+        return {
+          message: configRepairPreview === "unchanged" ? "Codex 配置检查通过，无需修改" : "Codex 配置已修复",
+          configPath: "/preview/.codex/config.toml",
+          repaired: configRepairPreview !== "unchanged",
+          backupPath: null,
+        };
+      }
       if (command === "restart_codey") {
+        previewChannelRunning = previewChannelRunKey();
         return { status: "restarting" };
       }
       if (command === "codey_router_session_diagnosis") {
@@ -848,7 +1237,9 @@ if (import.meta.env.DEV) {
               (channel.kind !== "wechatClaw" ||
                 (channel.url?.trim() && channel.contextToken?.trim())),
           )
-          : Boolean(channel?.url?.trim());
+          : channel?.kind === "ntfy"
+            ? Boolean(channel.url?.trim()) && !validateNtfyTopic(channel.chatId ?? "")
+            : Boolean(channel?.url?.trim());
         return configured
           ? { status: "ok", eventId: "preview-notification-test" }
           : { status: "failed", message: "请先完成渠道配置" };

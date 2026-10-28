@@ -8,7 +8,7 @@ use base64::{
     engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
 };
 use reqwest::{Client, StatusCode, header::ACCEPT};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 static LAST_GOOD_USAGE_ENDPOINT: std::sync::atomic::AtomicUsize =
@@ -90,7 +90,7 @@ impl OfficialAuthCache {
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountUsageSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,14 +101,14 @@ pub struct AccountUsageSnapshot {
     pub secondary: Option<AccountUsageWindow>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credits: Option<AccountCredits>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_limits: Vec<AccountUsageLimitGroup>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_label: Option<String>,
     pub fetched_at: u64,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountUsageWindow {
     pub used_percent: f64,
@@ -117,7 +117,7 @@ pub struct AccountUsageWindow {
     pub resets_at: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountUsageLimitGroup {
     pub limit_name: String,
@@ -130,7 +130,7 @@ pub struct AccountUsageLimitGroup {
     pub blocked: bool,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountCredits {
     pub has_credits: bool,
@@ -320,6 +320,13 @@ pub async fn fetch_official_account_usage(
     let auth = tokio::task::spawn_blocking(move || read_official_auth(&auth_path))
         .await
         .context("读取 Codex 官方登录信息任务异常退出")??;
+    fetch_usage_for_auth(client, auth).await
+}
+
+pub(crate) async fn fetch_usage_for_auth(
+    client: &Client,
+    auth: OfficialAuth,
+) -> Result<AccountUsageSnapshot> {
     let mut last_error = None;
 
     // 从上次成功的端点开始轮询，失败仍会回退到完整列表，结果不变但稳定
@@ -403,25 +410,52 @@ pub(crate) fn read_official_auth(path: &Path) -> Result<OfficialAuth> {
     official_auth_from_value(&value)
 }
 
+pub(crate) fn account_identity_for_home(home: &Path) -> Result<Value> {
+    let mut identity = account_identity(&home.join("auth.json"))?;
+    match crate::codex_provider::current_provider(home) {
+        Ok(provider) => {
+            identity["providerName"] = Value::String(provider.name);
+            identity["usesOfficialAccountAuth"] = Value::Bool(provider.official);
+        }
+        Err(_) => {
+            eprintln!("读取账号显示所需的服务商配置失败，保留官方登录身份，服务商信息标为未知");
+            identity["providerName"] = Value::Null;
+            identity["usesOfficialAccountAuth"] = Value::Null;
+        }
+    }
+    Ok(identity)
+}
+
 pub(crate) fn account_identity(path: &Path) -> Result<Value> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(serde_json::json!({"status":"ok", "loggedIn":false, "accountLabel":null}));
+            return Ok(
+                serde_json::json!({"status":"ok", "loggedIn":false, "accountLabel":null, "accountEmail":null}),
+            );
         }
         Err(error) => return Err(error).context("读取 Codex 官方登录信息失败"),
     };
     let value: Value = serde_json::from_slice(&bytes).context("Codex 登录信息格式无效")?;
     // A local login is usable only when it has the same credentials as account usage.
     let auth = official_auth_from_value(&value).ok();
+    let email = auth.as_ref().and_then(|_| {
+        ["id_token", "access_token"].iter().find_map(|key| {
+            let claims = jwt_claims(value["tokens"][*key].as_str()?)?;
+            string_field(&claims, &["email"])
+                .or_else(|| string_field(&claims["https://api.openai.com/profile"], &["email"]))
+                .filter(|email| !email.is_empty() && email.len() <= 256)
+        })
+    });
     Ok(serde_json::json!({
         "status": "ok",
         "loggedIn": auth.is_some(),
         "accountLabel": auth.and_then(|auth| auth.account_label),
+        "accountEmail": email,
     }))
 }
 
-fn official_auth_from_value(value: &Value) -> Result<OfficialAuth> {
+pub(crate) fn official_auth_from_value(value: &Value) -> Result<OfficialAuth> {
     let is_chatgpt = value
         .get("auth_mode")
         .and_then(Value::as_str)
@@ -468,7 +502,7 @@ fn official_auth_from_value(value: &Value) -> Result<OfficialAuth> {
     })
 }
 
-fn jwt_claims(token: &str) -> Option<Value> {
+pub(crate) fn jwt_claims(token: &str) -> Option<Value> {
     let mut parts = token.split('.');
     let _header = parts.next()?;
     let payload = parts.next()?;
@@ -486,7 +520,7 @@ fn jwt_claims(token: &str) -> Option<Value> {
     serde_json::from_slice::<Value>(&decoded).ok()
 }
 
-fn account_id_from_jwt(token: &str) -> Option<String> {
+pub(crate) fn account_id_from_jwt(token: &str) -> Option<String> {
     account_id_from_claims(&jwt_claims(token)?)
 }
 
@@ -764,6 +798,11 @@ mod tests {
             ),
         ];
         for (claims, label) in claims {
+            let email = if label.contains('@') {
+                Some(label)
+            } else {
+                None
+            };
             let auth = serde_json::json!({"auth_mode":"chatgpt", "tokens":{
                 "access_token":"token-value", "id_token":unsigned_jwt(claims)
             }});
@@ -771,7 +810,7 @@ mod tests {
             assert_eq!(
                 account_identity(&path).unwrap(),
                 serde_json::json!({
-                    "status":"ok", "loggedIn":true, "accountLabel":label
+                    "status":"ok", "loggedIn":true, "accountLabel":label, "accountEmail":email
                 })
             );
         }
@@ -781,7 +820,7 @@ mod tests {
     fn account_identity_reports_not_logged_in_without_official_credentials() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("auth.json");
-        let expected = serde_json::json!({"status":"ok", "loggedIn":false, "accountLabel":null});
+        let expected = serde_json::json!({"status":"ok", "loggedIn":false, "accountLabel":null, "accountEmail":null});
         assert_eq!(account_identity(&path).unwrap(), expected);
         for auth in [
             serde_json::json!({"auth_mode":"apikey", "OPENAI_API_KEY":"key"}),
@@ -800,7 +839,7 @@ mod tests {
         assert_eq!(
             account_identity(&path).unwrap(),
             serde_json::json!({
-                "status":"ok", "loggedIn":true, "accountLabel":null
+                "status":"ok", "loggedIn":true, "accountLabel":null, "accountEmail":null
             })
         );
     }
@@ -814,6 +853,75 @@ mod tests {
             account_identity(&path).unwrap_err().to_string(),
             "Codex 登录信息格式无效"
         );
+    }
+
+    #[test]
+    fn account_identity_exposes_provider_display_name_and_auth_choice() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path();
+        fs::write(home.join("config.toml"), "model_provider = 'relay'\ncli_auth_credentials_store = 'file'\n[model_providers.relay]\nname = 'Configured display name'\nbase_url = 'https://example.invalid/v1'\nwire_api = 'responses'\nrequires_openai_auth = false\n").unwrap();
+        let third_party = account_identity_for_home(home).unwrap();
+        assert_eq!(third_party["providerName"], "Configured display name");
+        assert_eq!(third_party["usesOfficialAccountAuth"], false);
+        assert_eq!(third_party["loggedIn"], false);
+        assert!(third_party["accountEmail"].is_null());
+        let auth = serde_json::json!({"auth_mode":"chatgpt","tokens":{
+            "access_token":"secret-access-token", "id_token":unsigned_jwt(serde_json::json!({"email":"official@example.com"}))
+        }});
+        fs::write(home.join("auth.json"), serde_json::to_vec(&auth).unwrap()).unwrap();
+        fs::write(
+            home.join("config.toml"),
+            "cli_auth_credentials_store = 'file'\n",
+        )
+        .unwrap();
+        let official = account_identity_for_home(home).unwrap();
+        assert_eq!(official["usesOfficialAccountAuth"], true);
+        assert_eq!(official["loggedIn"], true);
+        assert_eq!(official["accountEmail"], "official@example.com");
+        assert_eq!(official.as_object().unwrap().len(), 6);
+        assert!(!official.to_string().contains("secret-access-token"));
+    }
+
+    #[test]
+    fn account_identity_keeps_auth_fields_when_provider_config_is_invalid() {
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path();
+        fs::write(home.join("config.toml"), "model_provider = [").unwrap();
+        for logged_in in [false, true] {
+            if logged_in {
+                let auth = serde_json::json!({"auth_mode":"chatgpt","tokens":{
+                    "access_token":"secret-access-token", "id_token":unsigned_jwt(serde_json::json!({"email":"official@example.com"}))
+                }});
+                fs::write(home.join("auth.json"), serde_json::to_vec(&auth).unwrap()).unwrap();
+            }
+            let original = account_identity(&home.join("auth.json")).unwrap();
+            let actual = account_identity_for_home(home).unwrap();
+            for (key, value) in original.as_object().unwrap() {
+                assert_eq!(&actual[key], value);
+            }
+            assert_eq!(actual["loggedIn"], logged_in);
+            assert!(actual["providerName"].is_null());
+            assert!(actual["usesOfficialAccountAuth"].is_null());
+            assert_eq!(actual.as_object().unwrap().len(), 6);
+        }
+    }
+
+    #[test]
+    fn account_identity_email_does_not_fall_back_to_username_or_expose_credentials() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("auth.json");
+        let auth = serde_json::json!({"auth_mode":"chatgpt","tokens":{
+            "access_token":"secret-access-token", "id_token":unsigned_jwt(serde_json::json!({
+                "preferred_username":"nickname", "https://api.openai.com/profile":{"email":"official@example.com"}
+            }))
+        }});
+        fs::write(&path, serde_json::to_vec(&auth).unwrap()).unwrap();
+        let identity = account_identity(&path).unwrap();
+        assert_eq!(identity["accountLabel"], "nickname");
+        assert_eq!(identity["accountEmail"], "official@example.com");
+        assert_eq!(identity["loggedIn"], true);
+        assert_eq!(identity.as_object().unwrap().len(), 4);
+        assert!(!identity.to_string().contains("secret-access-token"));
     }
 
     #[test]

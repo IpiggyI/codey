@@ -3,7 +3,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -449,6 +448,59 @@ fn normalize_prompt_optimization_upstream_protocol(value: &str) -> String {
     }
 }
 
+pub(crate) fn validate_outbound_proxy_url(value: &str, label: &str) -> Result<(), String> {
+    let url = reqwest::Url::parse(value)
+        .map_err(|_| format!("{label}不是有效的代理地址（http/https/socks5/socks5h）"))?;
+    if url.host_str().is_none() || !matches!(url.scheme(), "http" | "https" | "socks5" | "socks5h")
+    {
+        return Err(format!("{label}必须是 http、https、socks5 或 socks5h 地址"));
+    }
+    reqwest::Proxy::all(url.clone()).map_err(|_| format!("{label}无法用作代理"))?;
+    let unusable_host = url
+        .host_str()
+        .and_then(|host| {
+            host.trim_start_matches('[')
+                .trim_end_matches(']')
+                .parse::<std::net::IpAddr>()
+                .ok()
+        })
+        .is_some_and(|ip| match ip {
+            std::net::IpAddr::V4(ip) => {
+                ip.is_unspecified() || ip.is_link_local() || ip.is_broadcast()
+            }
+            std::net::IpAddr::V6(ip) => ip.is_unspecified() || ip.is_unicast_link_local(),
+        });
+    if unusable_host {
+        return Err(format!("{label}不能指向未指定地址或链路本地地址"));
+    }
+    Ok(())
+}
+
+/// Codex 启动代理在通用代理地址校验之外叠加启动约束：
+/// 只允许协议、地址、端口和认证信息；SOCKS 地址必须显式端口，其
+/// RFC 1929 凭据限长 255 字节。凭据不会交给 Chromium 命令行，启动时由
+/// 本地认证中继注入上游。
+pub(crate) fn validate_codex_launch_proxy(value: &str) -> Result<(), String> {
+    validate_outbound_proxy_url(value, "Codex 启动代理")?;
+    let url = reqwest::Url::parse(value).expect("启动代理地址已通过校验");
+    // 非特殊协议（socks5/socks5h）解析出的 path 是空串而非 "/"。
+    if !matches!(url.path(), "" | "/") || url.query().is_some() || url.fragment().is_some() {
+        return Err("Codex 启动代理只能包含协议、地址、端口和认证信息".into());
+    }
+    if matches!(url.scheme(), "socks5" | "socks5h") {
+        if url.port().is_none() {
+            return Err("Codex 启动代理的 SOCKS 地址必须带端口".into());
+        }
+        let username = percent_encoding::percent_decode_str(url.username()).collect::<Vec<u8>>();
+        let password = percent_encoding::percent_decode_str(url.password().unwrap_or_default())
+            .collect::<Vec<u8>>();
+        if crate::launch_proxy_relay::socks_credentials_too_long(&username, &password) {
+            return Err("Codex 启动代理的 SOCKS 用户名或密码不能超过 255 字节".into());
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_outbound_api_url(value: &str, label: &str) -> Result<reqwest::Url, String> {
     let url = reqwest::Url::parse(value).map_err(|_| format!("{label}不是有效的 HTTP(S) 地址"))?;
     if url.host_str().is_none() || !matches!(url.scheme(), "http" | "https") {
@@ -583,6 +635,10 @@ impl RouteRequestLogConfig {
 #[serde(rename_all = "camelCase")]
 pub struct CodeyConfig {
     #[serde(default)]
+    pub selected_channel_id: Option<String>,
+    #[serde(default)]
+    pub default_models_by_channel: BTreeMap<String, String>,
+    #[serde(default)]
     pub settings_revision: u64,
     /// Retained from upstream as a catalog/API branch flag. This fork deleted
     /// the in-process gateway; missing values and loaded configs stay disabled.
@@ -654,6 +710,9 @@ pub struct CodeyConfig {
     /// Codey-managed Codex launch. Disabled by default and ignored on macOS.
     #[serde(default)]
     pub gpu_launch_mode: GpuLaunchMode,
+    /// 下次启动 Codex 时使用的代理；留空保留原有环境。
+    #[serde(default)]
+    pub codex_launch_proxy: String,
     /// Publishes Codey's embedded FastCtx file tools to Codex for the next
     /// runtime. Disabled by default so existing tool behavior is unchanged.
     #[serde(default)]
@@ -755,6 +814,8 @@ impl Default for CodeyConfig {
         let profile = ProviderProfile::new("默认配置");
         Self {
             settings_revision: 0,
+            selected_channel_id: None,
+            default_models_by_channel: BTreeMap::new(),
             local_router_enabled: false,
             route_request_log: RouteRequestLogConfig::default(),
             active_profile_id: profile.id.clone(),
@@ -777,6 +838,7 @@ impl Default for CodeyConfig {
             protect_crashpad_pending: true,
             slim_codex_pet: true,
             gpu_launch_mode: GpuLaunchMode::Off,
+            codex_launch_proxy: String::new(),
             fast_context_tools: false,
             subagent_optimization: false,
             subagent_model: default_subagent_model(),
@@ -859,6 +921,7 @@ impl CodeyConfig {
         if !self.initial_route_import_completed && !self.looks_like_empty_default_route() {
             self.initial_route_import_completed = true;
         }
+        self.codex_launch_proxy = self.codex_launch_proxy.trim().to_string();
         self.webhook.normalize();
         self.prompt_optimization.normalize();
         self.cache_valid_minutes = self
@@ -1557,6 +1620,15 @@ impl CodeyConfig {
     }
 
     pub fn default_model(&self) -> Option<&str> {
+        if let Some(id) = &self.selected_channel_id
+            && self
+                .current_provider_snapshot
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.channel_id.as_ref() == Some(id))
+            && let Some(model) = self.default_models_by_channel.get(id)
+        {
+            return Some(model.as_str());
+        }
         let model = self.default_model.trim();
         (!model.is_empty()).then_some(model)
     }
@@ -1832,6 +1904,11 @@ impl CodeyConfig {
     }
 
     fn normalize_subagent_model_references(&mut self) {
+        // Native model selection resolves saved selectors at the runtime
+        // boundary. Preserve raw ids here, including provider-looking names.
+        if !self.local_router_enabled {
+            return;
+        }
         let targets = self.configured_model_targets();
         if targets.is_empty() {
             return;
@@ -1844,9 +1921,6 @@ impl CodeyConfig {
                 .find(|target| model_id::equal(&target.alias, requested))
                 .map(|target| target.alias.clone())
                 .or_else(|| {
-                    if !self.local_router_enabled {
-                        return None;
-                    }
                     // Preserve the model's route identity for subagents. The
                     // router selects their isolated HTTP/SSE transport per
                     // request, so catalog identity does not grant upstream WS.
@@ -2213,10 +2287,27 @@ fn default_subagent_reasoning_effort() -> String {
     DEFAULT_SUBAGENT_REASONING_EFFORT.to_string()
 }
 
+#[cfg(not(test))]
 pub fn default_config_path() -> PathBuf {
-    ProjectDirs::from("com", "Codey", "Codey")
+    directories::ProjectDirs::from("com", "Codey", "Codey")
         .map(|dirs| dirs.config_dir().join("config.json"))
         .unwrap_or_else(|| PathBuf::from(".codey").join("config.json"))
+}
+
+// 测试进程只使用自己的临时 Codey 配置目录，不读写真实用户目录。
+// shortcut: 静态 TempDir 不会析构; ceiling: 每个测试进程在系统临时目录留下一个 codey-test-config-* 目录; replace when: 测试改为显式注入 Codey 配置目录，或临时目录残留影响开发机与 CI
+#[cfg(test)]
+pub fn default_config_path() -> PathBuf {
+    static DIRECTORY: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    DIRECTORY
+        .get_or_init(|| {
+            tempfile::Builder::new()
+                .prefix("codey-test-config-")
+                .tempdir()
+                .expect("创建测试 Codey 配置目录失败")
+        })
+        .path()
+        .join("config.json")
 }
 
 #[derive(Debug, Clone)]
@@ -2352,7 +2443,8 @@ impl ConfigStore {
                 crate::error_log::record_failure(
                     "config_backup_rotate_failed",
                     "rotate_codey_config_backups",
-                    format!("{error:#}"),
+                    // 去重只看错误文本，带上路径才不会吞掉其他备份的同类错误。
+                    format!("{}: {error:#}", from.display()),
                     serde_json::json!({ "from": from.display().to_string() }),
                 );
             }
@@ -2388,10 +2480,108 @@ fn parse_config_contents(contents: &str, path: &Path) -> Result<CodeyConfig> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn codex_launch_proxy_rejects_paths_and_portless_socks_but_allows_credentials() {
+        for accepted in [
+            "http://127.0.0.1:7890",
+            "https://proxy.example.com:8443",
+            "https://proxy.example.com",
+            "socks5://127.0.0.1:1080",
+            "socks5h://proxy.example.com:1080",
+            "http://[::1]:7890",
+            &format!("socks5://{}@127.0.0.1:1080", "%ff".repeat(255)),
+            // 凭据交给本地认证中继，不交给 Chromium 命令行。
+            "http://user:pass@proxy.example.com:8080",
+            "socks5://user@127.0.0.1:1080",
+        ] {
+            assert!(validate_codex_launch_proxy(accepted).is_ok(), "{accepted}");
+        }
+        for rejected in [
+            // 只允许协议、地址、端口和认证信息；非特殊协议的 path 解析为空串。
+            "http://127.0.0.1:7890/v1",
+            "socks5://127.0.0.1:1080/v1",
+            "http://127.0.0.1:7890?x=1",
+            "http://127.0.0.1:7890#frag",
+            "http://proxy.example:7890?",
+            "http://proxy.example:7890#",
+            "http://169.254.1.1:7890",
+            "http://255.255.255.255:7890",
+            "http://[::]:7890",
+            "http://[fe80::1]:7890",
+            &format!("socks5://{}@127.0.0.1:1080", "%FF".repeat(256)),
+            &format!("socks5h://user:{}@127.0.0.1:1080", "%41".repeat(256)),
+            // Chromium 需要 host:port，SOCKS 不能省略端口。
+            "socks5://127.0.0.1",
+            "socks5h://proxy.example.com",
+            // RFC 1929 的用户名和密码各限 255 字节。
+            &format!("socks5://{}@127.0.0.1:1080", "u".repeat(256)),
+            // 拒绝不支持的协议和不可用的主机。
+            "ftp://proxy.example.com:21",
+            "127.0.0.1:7890",
+            "http://0.0.0.0:7890",
+        ] {
+            assert!(validate_codex_launch_proxy(rejected).is_err(), "{rejected}");
+        }
+    }
+
+    #[test]
+    fn codex_launch_proxy_defaults_and_normalizes_on_config_roundtrip() {
+        let config = CodeyConfig::default();
+        assert!(config.codex_launch_proxy.is_empty());
+        let mut value = serde_json::to_value(config).unwrap();
+        value.as_object_mut().unwrap().remove("codexLaunchProxy");
+        let mut config: CodeyConfig = serde_json::from_value(value).unwrap();
+        assert!(config.codex_launch_proxy.is_empty());
+        config.codex_launch_proxy = " http://127.0.0.1:7890 ".into();
+        let value = serde_json::to_value(config.normalize()).unwrap();
+        assert_eq!(value["codexLaunchProxy"], "http://127.0.0.1:7890");
+    }
+
     fn named_config(name: &str) -> CodeyConfig {
         let mut config = CodeyConfig::default();
         config.profiles[0].name = name.to_string();
         config
+    }
+
+    #[test]
+    fn native_subagent_models_survive_normalization_and_persistence_with_route_like_prefixes() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path().join("config.json"));
+        let mut route = ProviderProfile::new("Vendor");
+        route.id = "vendor".into();
+        route.base_url = "https://vendor.example/v1".into();
+        let config = CodeyConfig {
+            local_router_enabled: false,
+            active_profile_id: route.id.clone(),
+            profiles: vec![route],
+            selected_models_by_provider: BTreeMap::from([("vendor".into(), vec!["Model".into()])]),
+            model_alias_history: BTreeMap::from([(
+                "deleted/vendor/model".into(),
+                "Vendor/Model".into(),
+            )]),
+            ..CodeyConfig::default()
+        };
+        for model in [
+            "Vendor/Model",
+            "Vendor/Other",
+            "deleted/Vendor/Model",
+            "unknown/model",
+        ] {
+            let mut native = config.clone();
+            native.subagent_model = model.into();
+            native.subagent_roles = uniform_subagent_roles(model, "high");
+            let normalized = native.normalize();
+            assert_eq!(normalized.subagent_model, model);
+            store.save(&normalized).unwrap();
+            let restored = store.load().unwrap();
+            assert_eq!(restored.subagent_model, model);
+            assert!(
+                restored
+                    .subagent_roles
+                    .values()
+                    .all(|role| role.model == model)
+            );
+        }
     }
 
     #[test]

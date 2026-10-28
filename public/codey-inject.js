@@ -75,6 +75,7 @@
   let completionReconcileInFlight = false;
   let completionNextReconcileAt = 0;
   let completionReconcileSessionId = "";
+  let completionReconcileCheckTimer = 0;
   let sidebarActionTooltipTimer = 0;
   let sidebarActionTooltipAnchor = null;
   let threadUpdatedAtFetchTimer = 0;
@@ -138,6 +139,9 @@
   // A lost bridge reply must release the in-flight batch before the next refresh.
   const threadTimestampFetchTimeoutMs = 10_000;
   const completedTaskReconcileIntervalMs = 15_000;
+  // getSessionId() reads layout (getClientRects); calling it inside every
+  // mutation batch forced a synchronous reflow per streamed chunk.
+  const completionReconcileMutationDelayMs = 250;
   const threadTimestampBridgePath = "/session/timestamps";
   const maxPendingThreadTimestampRefs = 200;
   const fallbackSessionExportMaxBytes = 64 * 1024 * 1024;
@@ -2263,6 +2267,32 @@
   };
   window.__codeyAppServerManagerRegistryResolverFromModule = appServerManagerRegistryResolverFromModule;
 
+  const cachedAppServerManagerFromScope = (scope, hostId) => {
+    if (hostId !== "local") return null;
+    const managers = new Set();
+    const seenFamilies = new Set();
+    const nodes = new Set([scope.node, ...scope.chain?.values?.() || []]);
+    for (const node of nodes) {
+      for (const [family, bindings] of node?.familyBindings?.entries?.() || []) {
+        // New builds keep the concrete manager in a signal without exporting
+        // its registry. Read existing local bindings only; probing unused
+        // families can initialize managers or create deferred RPC connections.
+        if (family?.kind !== "signal-family" || !bindings?.has?.(hostId) || seenFamilies.has(family)) continue;
+        seenFamilies.add(family);
+        try {
+          const manager = scope.get(family, hostId);
+          const client = manager && Object.getOwnPropertyDescriptor(manager, "requestClient")?.value;
+          if (client?.hostId !== hostId || !declaredMethod(manager, "sendRequest")
+            || !["enqueueRequest", "createRequest", "onResult"].every((method) => declaredMethod(client, method))) continue;
+          managers.add(manager);
+        } catch {
+          continue;
+        }
+      }
+    }
+    return managers.size === 1 ? managers.values().next().value : null;
+  };
+
   const importCodexAsset = (url) => (typeof window.__codeyImportCodexAsset === "function"
     ? window.__codeyImportCodexAsset(url) : import(url));
 
@@ -2386,6 +2416,7 @@
       return { kind, conversationState, revertedTurns: revertedEntries.map(({ turn }) => turn) };
     },
     async prepare(conversationId) {
+      if (!isLocalMessageDeletionManager(this)) throw unavailableCapability("deleteMessages");
       messageDeletionMethods.validate.call(this, conversationId);
       messageDeletionMethods.validateWindow.call(this);
     },
@@ -2443,6 +2474,7 @@
       await this.applyRollbackResponseToConversation({ conversationId, conversationState, rollbackResponse });
     },
     finish(conversationId, messageIds) {
+      if (!isLocalMessageDeletionManager(this)) throw unavailableCapability("deleteMessages");
       const selected = new Set(messageIds);
       this.updateConversationState(conversationId, (conversation) => {
         if (selected.size) {
@@ -2474,11 +2506,16 @@
     },
   };
   const isLocalMessageDeletionManager = (manager) => {
-    if (!["getHostId", "getConversation", "getStreamRole", "sendRequest", "updateConversationState"]
-      .every((name) => declaredMethod(manager, name))) return false;
-    const unsubscriber = Object.getOwnPropertyDescriptor(manager, "inactiveThreadUnsubscriber")?.value;
-    return Boolean(declaredMethod(unsubscriber, "clearConversationStreamOwnership"))
-      && manager.getHostId() === "local";
+    try {
+      if (!manager || manager.disposed === true
+        || !["getHostId", "getConversation", "getStreamRole", "sendRequest", "updateConversationState"]
+          .every((name) => declaredMethod(manager, name))) return false;
+      const unsubscriber = Object.getOwnPropertyDescriptor(manager, "inactiveThreadUnsubscriber")?.value;
+      return Boolean(declaredMethod(unsubscriber, "clearConversationStreamOwnership"))
+        && declaredMethod(manager, "getHostId").call(manager) === "local";
+    } catch {
+      return false;
+    }
   };
 
   const managerSessionController = (manager) => {
@@ -2500,6 +2537,17 @@
         ? (payload) => manager.codeyReconcileCompletedConversation(payload)
         : null,
     };
+  };
+
+  const registeredMessageDeletionController = (feature) => {
+    if (feature !== "deleteMessages") return null;
+    try {
+      const registry = globalThis.__codeyAppServerManagers;
+      const manager = registry instanceof Map ? registry.get("local") : null;
+      return isLocalMessageDeletionManager(manager) ? managerSessionController(manager) : null;
+    } catch {
+      return null;
+    }
   };
 
   const sessionControllerLooksUsable = (controller, feature = "session") => {
@@ -2541,6 +2589,11 @@
 
   const discoverCodexSessionController = async (feature) => {
     if (disposed) throw unavailableCapability(feature);
+    const registered = registeredMessageDeletionController(feature);
+    if (registered) {
+      window.__codeyCodexSessionController = registered;
+      return registered;
+    }
     const requireCompletionReconcile = feature === "reconcile";
     // Rebuild wrappers so methods added by a late renderer patch become usable.
     if (window.__codeyCodexSessionController?.manager) {
@@ -2548,6 +2601,12 @@
     }
     if (sessionControllerLooksUsable(window.__codeyCodexSessionController, feature)) {
       return window.__codeyCodexSessionController;
+    }
+    const cachedManager = appServerManagerFromReact(cachedAppServerManagerFromScope);
+    const cachedController = cachedManager && managerSessionController(cachedManager);
+    if (sessionControllerLooksUsable(cachedController, feature)) {
+      window.__codeyCodexSessionController = cachedController;
+      return cachedController;
     }
     let fallbackDispatcher = typeof window.__codeyCodexSignalDispatcher === "function"
       ? window.__codeyCodexSignalDispatcher
@@ -2571,6 +2630,11 @@
         const module = await importCodexAsset(url);
         // Late discovery from a disposed installation cannot replace the current interface.
         if (disposed) throw unavailableCapability(feature);
+        const registered = registeredMessageDeletionController(feature);
+        if (registered) {
+          window.__codeyCodexSessionController = registered;
+          return registered;
+        }
         const resolvers = [
           appServerManagerRegistryResolverFromModule(module),
           appServerManagerResolverFromModule(module),
@@ -2609,7 +2673,9 @@
     if (requireCompletionReconcile) feature = "reconcile";
     if (disposed) throw unavailableCapability(feature);
     const cached = window.__codeyCodexSessionController;
-    const current = cached?.manager ? managerSessionController(cached.manager) : cached;
+    // A manager registered after an earlier failed probe must win over the cache and the retry backoff.
+    const current = registeredMessageDeletionController(feature)
+      || (cached?.manager ? managerSessionController(cached.manager) : cached);
     if (sessionControllerLooksUsable(current, feature)) {
       window.__codeyCodexSessionController = current;
       capabilityProbes.delete(feature);
@@ -2627,11 +2693,21 @@
       ? Promise.resolve().then(discover)
       : waitForNativeSessionOperation(discover)).then((controller) => {
       if (disposed) throw unavailableCapability(feature);
+      controller = registeredMessageDeletionController(feature) || controller;
+      window.__codeyCodexSessionController = controller;
       state.failures = 0;
       state.retryAt = 0;
       publishCapability(feature, true);
       return controller;
     }, (error) => {
+      const registered = !disposed && registeredMessageDeletionController(feature);
+      if (registered) {
+        window.__codeyCodexSessionController = registered;
+        state.failures = 0;
+        state.retryAt = 0;
+        publishCapability(feature, true);
+        return registered;
+      }
       state.failures += 1;
       state.retryAt = Date.now() + Math.min(30_000, 1_000 * 2 ** Math.min(state.failures - 1, 5));
       const capabilityError = unavailableCapability(feature);
@@ -3133,9 +3209,14 @@
 
   const archivePlacementTarget = (thread, archiveControl) => {
     const wrapper = archiveControl.parentElement;
-    return wrapper instanceof HTMLElement && wrapper !== thread
-      ? wrapper
-      : archiveControl;
+    if (!(wrapper instanceof HTMLElement) || wrapper === thread) return archiveControl;
+    // 新版按钮直接位于浮动操作栏内；仅跳过旧版的单按钮提示包装层，
+    // 避免把整个操作栏当成按钮包装层，将图标插到聊天行下方。
+    const style = window.getComputedStyle?.(wrapper);
+    const isActionRow = /^(?:inline-)?(?:flex|grid)$/.test(style?.display || "")
+      || /^(?:absolute|fixed)$/.test(style?.position || "")
+      || wrapper.querySelectorAll("button, [role=button]").length !== 1;
+    return isActionRow ? archiveControl : wrapper;
   };
 
   const positionSessionDeletePopover = (popover, anchor) => {
@@ -4292,7 +4373,12 @@
     codeyTimed("codey-inject.sessionToolMutations", mutations?.length ?? 0, () => handleSessionToolMutationsImpl(mutations));
   const handleSessionToolMutationsImpl = (mutations) => {
     if (disposed) return;
-    if (!completionReconcileSessionId) void reconcileStaleCompletedTask();
+    if (!completionReconcileSessionId && !completionReconcileCheckTimer) {
+      completionReconcileCheckTimer = window.setTimeout(() => {
+        completionReconcileCheckTimer = 0;
+        void reconcileStaleCompletedTask();
+      }, completionReconcileMutationDelayMs);
+    }
     for (const mutation of mutations) {
       const target = mutation.target instanceof HTMLElement
         ? mutation.target
@@ -4466,6 +4552,7 @@
     window.clearTimeout(watcherWakeTimer);
     window.clearTimeout(conversationRichTooltipHandoffTimer);
     window.clearTimeout(threadUpdatedAtFetchTimer);
+    window.clearTimeout(completionReconcileCheckTimer);
     window.clearTimeout(sidebarActionTooltipTimer);
     threadRunningRecheckTimers.forEach((id) => window.clearTimeout(id));
     threadRunningRecheckTimers.clear();

@@ -74,6 +74,7 @@ export type Config = {
   protectCrashpadPending: boolean;
   slimCodexPet: boolean;
   gpuLaunchMode: "off" | "disableGpu" | "disableGpuRasterization";
+  codexLaunchProxy: string;
   fastContextTools: boolean;
   subagentOptimization: boolean;
   subagentModel: string;
@@ -83,6 +84,8 @@ export type Config = {
   showAccountUsageInHeader: boolean;
   quotaUnlockEnabled: boolean;
   cacheValidMinutes: number;
+  selectedChannelId: string | null;
+  defaultModelsByChannel: Record<string, string>;
 };
 
 export type OfficialModelState = {
@@ -135,7 +138,14 @@ export type InjectionScriptStatus = {
   error?: string;
 };
 
+export type ConfigApplyStatus = {
+  revision: number;
+  state: "pending" | "applied" | "restart_required" | "failed" | "saved";
+  error?: string | null;
+};
+
 export type RuntimeStatus = {
+  configApply?: ConfigApplyStatus | null;
   running: boolean;
   appVersion?: string;
   codexAppVersion?: string;
@@ -155,6 +165,7 @@ export type RuntimeStatus = {
   crashpadDiskProtectionActive?: boolean;
   traceLogStats?: TraceLogStats;
   crashpadPendingStats?: CrashpadPendingStats;
+  channelNotice?: string | null;
 };
 
 export type PluginMarketplaceStatus = {
@@ -181,6 +192,86 @@ export type CurrentProviderSnapshot = {
   wireApi: string;
   usesOfficialAccountAuth: boolean;
   ownershipKey: string;
+  channelId?: string;
+};
+
+export type ChannelSwitchModelSource = "channel" | "global" | "codex-config";
+
+export type ChannelEntry = {
+  id: string;
+  kind: "provider" | "official";
+  providerId: string;
+  displayName: string;
+  defaultModel: string | null;
+  // 该渠道可选的模型名称，可能为空。
+  modelOptions: string[];
+  // 此刻切换会使用的模型；渠道默认模型、全局默认模型、Codex 配置的 model 都没有时为 null。
+  switchModel: string | null;
+  // switchModel 的来源，与 switchModel 同为 null。
+  switchModelSource: ChannelSwitchModelSource | null;
+  current: boolean;
+  available: boolean;
+  unavailableReason: string | null;
+};
+
+export type ChannelList = {
+  channels: ChannelEntry[];
+  selectedChannelId: string | null;
+  effectiveProviderId: string;
+  notice: string | null;
+};
+
+export type ChannelMutationResult = {
+  status: "ok";
+  channelList: ChannelList;
+  settingsRevision: number;
+  restartRequired: boolean;
+};
+
+// 官方账号摘要：后端不返回令牌，前端类型也不声明任何凭据字段。
+export type OfficialAccount = {
+  id: string;
+  accountId: string;
+  addedAt: number;
+  invalid: boolean;
+  isDefault: boolean;
+  email?: string;
+  planType?: string;
+  lastRefresh?: string;
+};
+
+export type OfficialAccountsResult = {
+  status: "ok";
+  accounts: OfficialAccount[];
+  defaultAccountId: string | null;
+  officialAccountAvailable: boolean;
+  officialAccountStatus: string;
+  switchDisabledReason: string | null;
+  accountId?: string;
+};
+
+export type OfficialAccountSwitchResult = OfficialAccountsResult & {
+  accountId: string;
+  restartRequired: boolean;
+  settingsRevision: number;
+};
+
+export type OfficialUsageWindow = { usedPercent: number; windowMinutes: number; resetsAt?: number };
+
+export type OfficialUsageSnapshot = {
+  fetchedAt: number;
+  planType?: string;
+  primary?: OfficialUsageWindow;
+  secondary?: OfficialUsageWindow;
+  credits?: { hasCredits: boolean; unlimited: boolean; balance?: string };
+  additionalLimits?: Array<{
+    limitName: string;
+    limitId?: string;
+    primary?: OfficialUsageWindow;
+    secondary?: OfficialUsageWindow;
+    blocked: boolean;
+  }>;
+  accountLabel?: string;
 };
 
 export type ProviderStatus = {
@@ -215,8 +306,11 @@ export type Confirmation = {
     | "discard-settings"
     | "clear"
     | "restart"
+    | "repair-codex-config"
     | "delete-notification-channel"
-    | "migrate-codey-router-sessions";
+    | "migrate-codey-router-sessions"
+    | "switch-official-account"
+    | "delete-official-account";
   title: string;
   description: string;
   confirmLabel: string;

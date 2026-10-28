@@ -17,8 +17,9 @@ pub(super) async fn clear_diagnostic_storage(state: &Arc<AppState>) -> Result<Va
     drop(config);
 
     let trace_home = codex_home();
+    let guard_state = state.trace_log_guard_state.clone();
     let trace_task = tokio::task::spawn_blocking(move || {
-        let guard = trace_log_guard::configure(trace_home, disable_trace_writes);
+        let guard = guard_state.configure(trace_home, disable_trace_writes);
         let trace_log_write_protection_active = guard
             .as_ref()
             .is_ok_and(|report| report.protection_active(disable_trace_writes));

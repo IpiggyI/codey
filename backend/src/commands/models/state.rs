@@ -1,6 +1,10 @@
 use super::*;
 
 #[cfg(test)]
+#[path = "context_budget_tests.rs"]
+mod context_budget_tests;
+
+#[cfg(test)]
 pub(crate) fn provider_route_requires_restart(
     applied: &CodeyConfig,
     current: &CodeyConfig,
@@ -40,7 +44,11 @@ pub(crate) fn runtime_supports_current_routes_for_hot_reload(
     applied: &CodeyConfig,
     current: &CodeyConfig,
 ) -> bool {
-    if applied.local_router_enabled != current.local_router_enabled {
+    if applied.local_router_enabled != current.local_router_enabled
+        || applied.selected_channel_id != current.selected_channel_id
+        || (current.selected_channel_id.is_some()
+            && applied.current_provider_snapshot != current.current_provider_snapshot)
+    {
         return false;
     }
     // Renderer refresh cannot change the app-server's resolved context budget.
@@ -149,10 +157,31 @@ pub(crate) fn renderer_model_catalog_value_at(
     model_state: &model_catalog::ModelSelectionState,
     home: &std::path::Path,
 ) -> Value {
+    renderer_model_catalog_value_with_catalog_dir(
+        config,
+        model_state,
+        home,
+        &crate::codex_config::codey_model_catalog_dir(),
+    )
+}
+
+fn renderer_model_catalog_value_with_catalog_dir(
+    config: &CodeyConfig,
+    model_state: &model_catalog::ModelSelectionState,
+    home: &std::path::Path,
+    catalog_dir: &std::path::Path,
+) -> Value {
+    let context_metadata = if !config.uses_builtin_official_model_catalog()
+        || !config.runtime_enabled_model_contexts().is_empty()
+    {
+        model_catalog::context_metadata_for_config(catalog_dir, config)
+    } else {
+        BTreeMap::new()
+    };
     if !config.local_router_enabled {
         let mut catalog = renderer_native_model_catalog_value(model_state);
         catalog["legacy_model_aliases"] = json!(config.model_alias_history);
-        let provider = codex_provider::current_provider(home).ok();
+        let provider = codex_provider::current_provider_for_config(home, config).ok();
         let provider_id = provider
             .as_ref()
             .map(|provider| provider.id.clone())
@@ -175,6 +204,18 @@ pub(crate) fn renderer_model_catalog_value_at(
         if let Some(metadata) = catalog["model_metadata"].as_array_mut() {
             let contexts = config.runtime_enabled_model_contexts();
             for entry in metadata {
+                if let Some(context) = context_metadata
+                    .iter()
+                    .find(|(model, _)| {
+                        model_id::equal(model, entry["model"].as_str().unwrap_or_default())
+                    })
+                    .map(|(_, context)| context)
+                {
+                    for (key, value) in context {
+                        entry[key] = value.clone();
+                    }
+                    continue;
+                }
                 let policy = contexts
                     .iter()
                     .find(|(model, _)| {
@@ -212,13 +253,6 @@ pub(crate) fn renderer_model_catalog_value_at(
         return catalog;
     }
     let route_catalog = renderer_route_model_catalog(config, model_state);
-    let context_metadata = if !config.uses_builtin_official_model_catalog()
-        || !config.runtime_model_contexts().is_empty()
-    {
-        model_catalog::runtime_context_metadata(&crate::codex_config::codey_model_catalog_dir())
-    } else {
-        BTreeMap::new()
-    };
     let models = route_catalog
         .iter()
         .map(|entry| entry.alias.clone())
@@ -419,14 +453,17 @@ pub(crate) fn renderer_route_model_catalog(
         let state = if provider_id == config.current_provider_id().unwrap_or_default() {
             active_model_state.clone()
         } else {
-            model_catalog::selection_state_with_manual_models(
+            model_catalog::selection_state_with_catalog_options(
                 codex_home(),
                 &crate::codex_config::codey_model_catalog_dir(),
                 profile.official_account,
                 upstream_models,
                 &selected_models,
                 manual_models,
+                &[],
                 default_model.as_deref(),
+                None,
+                &config.codex_app_path,
             )
             .unwrap_or_default()
         };

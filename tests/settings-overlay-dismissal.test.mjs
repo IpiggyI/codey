@@ -17,8 +17,17 @@ test("settings modal keeps dismissal and stacking inside the overlay", async () 
 
   assert.match(
     appSource,
-    /function discardSettings\(\) \{[\s\S]*setConfig\(persistedConfigRef\.current\)[\s\S]*setDirty\(false\)[\s\S]*onClose\?\.\(\)/,
+    /function discardSettings\(close = true\) \{[\s\S]*setConfig\(persistedConfigRef\.current\)[\s\S]*setDirty\(false\)[\s\S]*if \(close\) onClose\?\.\(\)/,
   );
+  // 「放弃更改」：只在有未保存更改时出现，确认后沿用同一套恢复逻辑，控制台保持打开。
+  assert.match(
+    appSource,
+    /function askDiscardChanges\(\) \{\s*if \(isBusy \|\| !dirty\) return;\s*setConfirmation\(\{[\s\S]*?title: "放弃未保存的更改？"[\s\S]*?confirmLabel: "放弃更改",\s*run: \(\) => discardSettings\(false\),/,
+  );
+  assert.match(appSource, /\{dirty && \(\s*<Button\s+aria-label="放弃更改"[\s\S]*?disabled=\{isBusy\}\s+onPress=\{handleDiscardChanges\}/);
+  assert.match(appSource, /confirmLabel: "放弃更改并关闭",\s*run: \(\) => discardSettings\(\),/, "关闭时的放弃仍会关闭控制台");
+  assert.doesNotMatch(appSource, /问题反馈群|feedback-qr|FEEDBACK_GROUP_QR/);
+  assert.doesNotMatch(stylesSource, /feedback-qr|config-header-feedback/);
   assert.match(appSource, /function closeSettings\(\) \{\s*if \(isBusy\) return;/);
   assert.match(
     appSource,

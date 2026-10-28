@@ -43,7 +43,7 @@ pub(crate) fn add_subagent_hot_reload_to_response(
 
 pub async fn sync_current_provider_command(state: &Arc<AppState>) -> Result<Value, String> {
     crate::commands::prepare_routes_for_current_launch(state).await?;
-    let current_provider = current_codex_provider().await?;
+    let current_provider = current_codex_provider(&state.config.read().await.clone()).await?;
     let provider_status = if current_provider.official {
         let config = state.config.read().await;
         codex_provider::status_from_config(&config)
@@ -69,9 +69,12 @@ pub async fn sync_current_provider_command(state: &Arc<AppState>) -> Result<Valu
     })))
 }
 
-pub(crate) async fn current_codex_provider() -> Result<codex_provider::CurrentProvider, String> {
+pub(crate) async fn current_codex_provider(
+    config: &CodeyConfig,
+) -> Result<codex_provider::CurrentProvider, String> {
     let home = codex_home().to_path_buf();
-    tokio::task::spawn_blocking(move || codex_provider::current_provider(&home))
+    let config = config.clone();
+    tokio::task::spawn_blocking(move || codex_provider::current_provider_for_config(&home, &config))
         .await
         .map_err(|error| format!("读取当前 Codex 线路任务异常退出：{error}"))?
         .map_err(|error| format!("读取当前 Codex 线路失败：{error:#}"))
@@ -240,6 +243,7 @@ pub(crate) fn config_with_current_provider_model_sync(
     let order = model_catalog::official_model_order(
         codex_home,
         &crate::codex_config::codey_model_catalog_dir(),
+        &next.codex_app_path,
     );
     crate::model_order::apply_provider_order(&mut next, &provider_id, &order);
     subagent_policy::reconcile_for_current_provider(&mut next, codex_home, false);
@@ -321,8 +325,9 @@ pub(crate) async fn sync_provider_models_for_launch(
 ) -> CodeyConfig {
     let config = state.config.read().await.clone();
     let home = codex_home().to_path_buf();
+    let channel_config = config.clone();
     let sync = match tokio::task::spawn_blocking(move || {
-        codex_provider::current_provider_model_sync(&home)
+        codex_provider::current_provider_model_sync_for_config(&home, &channel_config)
     })
     .await
     {

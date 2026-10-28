@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "backend",
+  "crates/codey-codex-extensions",
   "vendor/CodeyRuntime/crates/codey-runtime-core",
   "vendor/CodeyRuntime/crates/codey-runtime-data",
 ]

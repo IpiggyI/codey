@@ -34,10 +34,20 @@ fn optimizer_client() -> Result<&'static Client, String> {
 
 async fn resolve_request_config(
     optimization: &PromptOptimizationConfig,
+    config: &crate::config::CodeyConfig,
 ) -> Result<prompt_optimization::ResolvedPromptOptimizationConfig, String> {
-    resolve_request_config_async_at(optimization.clone(), codex_home().to_path_buf()).await
+    let optimization = optimization.clone();
+    let config = config.clone();
+    tokio::task::spawn_blocking(move || {
+        resolve_request_config_for_channel(&optimization, codex_home(), &config, &|name| {
+            std::env::var(name).ok()
+        })
+    })
+    .await
+    .map_err(|_| "解析提示词优化配置任务失败".to_string())?
 }
 
+#[cfg(all(test, unix))]
 async fn resolve_request_config_async_at(
     optimization: PromptOptimizationConfig,
     home: std::path::PathBuf,
@@ -49,16 +59,31 @@ async fn resolve_request_config_async_at(
     .map_err(|_| "解析提示词优化配置任务失败".to_string())?
 }
 
+#[cfg(test)]
 fn resolve_request_config_at(
     optimization: &PromptOptimizationConfig,
     codex_home: &Path,
+    env: &impl Fn(&str) -> Option<String>,
+) -> Result<prompt_optimization::ResolvedPromptOptimizationConfig, String> {
+    resolve_request_config_for_channel(
+        optimization,
+        codex_home,
+        &crate::config::CodeyConfig::default(),
+        env,
+    )
+}
+
+fn resolve_request_config_for_channel(
+    optimization: &PromptOptimizationConfig,
+    codex_home: &Path,
+    config: &crate::config::CodeyConfig,
     env: &impl Fn(&str) -> Option<String>,
 ) -> Result<prompt_optimization::ResolvedPromptOptimizationConfig, String> {
     if optimization.uses_official_account() {
         return resolve_official_account_request(optimization, codex_home);
     }
     if optimization.uses_current_provider() {
-        return resolve_current_provider_request(optimization, codex_home, env);
+        return resolve_current_provider_request(optimization, codex_home, config, env);
     }
     resolve_manual_request_config_at(optimization, codex_home)
 }
@@ -80,10 +105,12 @@ fn resolve_official_account_request(
 fn resolve_current_provider_request(
     optimization: &PromptOptimizationConfig,
     codex_home: &Path,
+    config: &crate::config::CodeyConfig,
     env: &impl Fn(&str) -> Option<String>,
 ) -> Result<prompt_optimization::ResolvedPromptOptimizationConfig, String> {
-    let sync = codex_provider::current_provider_model_sync_with_env(codex_home, env)
-        .map_err(|error| format!("读取当前 provider 失败：{error:#}"))?;
+    let sync =
+        codex_provider::current_provider_model_sync_for_config_with_env(codex_home, config, env)
+            .map_err(|error| format!("读取当前 provider 失败：{error:#}"))?;
     if sync.snapshot.uses_official_account_auth {
         let request_headers = read_official_auth_headers(codex_home).map_err(|error| {
             format!("官方账号登录不可用：{error}。当前 provider 使用官方账号鉴权，提示词优化不会改用环境变量或其他已保存密钥。")
@@ -179,7 +206,7 @@ pub async fn optimize_prompt_command(state: &Arc<AppState>, text: String) -> Res
     if !optimization.enabled {
         return Err("提示词优化尚未启用，请先在 Codey 控制台开启".to_string());
     }
-    let request_config = resolve_request_config(&optimization).await?;
+    let request_config = resolve_request_config(&optimization, &config).await?;
     let client = optimizer_client()?;
     match prompt_optimization::optimize_prompt_resolved(client, &request_config, &text).await {
         Ok(optimized) => Ok(json!({"optimized": optimized})),
@@ -207,7 +234,7 @@ pub async fn fetch_prompt_optimization_models_command(
     let mut optimization = draft.unwrap_or_else(|| config.prompt_optimization.clone());
     optimization.merge_redacted_secrets(&config.prompt_optimization);
     optimization.validate()?;
-    let request_config = resolve_request_config(&optimization).await?;
+    let request_config = resolve_request_config(&optimization, &config).await?;
     let client = optimizer_client()?;
     let models = prompt_optimization::fetch_models_resolved(client, &request_config).await;
     match models {
@@ -237,7 +264,7 @@ pub async fn test_prompt_optimization_command(
     let mut optimization = draft.unwrap_or_else(|| config.prompt_optimization.clone());
     optimization.merge_redacted_secrets(&config.prompt_optimization);
     optimization.validate()?;
-    let request_config = resolve_request_config(&optimization).await?;
+    let request_config = resolve_request_config(&optimization, &config).await?;
     let client = optimizer_client()?;
     match prompt_optimization::test_configuration_resolved(client, &request_config).await {
         Ok(result) => Ok(json!({"status": "ok", "result": result})),
@@ -300,9 +327,10 @@ pub(super) fn official_login_available(codex_home: &Path) -> bool {
 
 pub(super) fn current_prompt_optimization_overlay(
     codex_home: &Path,
+    config: &crate::config::CodeyConfig,
     env: &impl Fn(&str) -> Option<String>,
 ) -> Option<PromptOptimizationProviderOverlay> {
-    codex_provider::prompt_optimization_provider_overlay_with_env(codex_home, env).ok()
+    codex_provider::prompt_optimization_provider_overlay_for_config(codex_home, config, env).ok()
 }
 
 fn prompt_optimization_credentials_ready(
@@ -644,6 +672,20 @@ mod tests {
             api_key: "leftover-manual-secret".to_string(),
             ..PromptOptimizationConfig::default()
         }
+    }
+
+    #[test]
+    fn channels_prompt_optimization_uses_selected_provider() {
+        let (home, config) = crate::channels::tests::selected_fixture();
+        let resolved = resolve_request_config_for_channel(
+            &current_provider_optimization(),
+            home.path(),
+            &config,
+            &|_| None,
+        )
+        .unwrap();
+        assert_eq!(resolved.base_url, "https://b.example/v1");
+        assert_eq!(resolved.api_key, "fixture-b");
     }
 
     #[test]

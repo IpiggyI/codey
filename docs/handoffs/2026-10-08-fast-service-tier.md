@@ -12,12 +12,12 @@
 
 | 对象 | 已核实的值 | 证据范围 |
 | --- | --- | --- |
-| WSL 源码仓库 | `/home/hyy/develop/personal/GitHub/codey` | 本次写入交接的仓库。 |
+| WSL 源码仓库 | 本仓库 | 本次写入交接的仓库。 |
 | WSL 分支与基线 | `master`，`047fa22f039922c3e24708aacdb3e72ea5030233` | 写入前工作区干净，最新提交为 `release: v1.2.1`。 |
 | WSL 源码版本 | `1.2.1` | 已读取 `package.json`，并核对下文三个源码入口。 |
 | Windows 已安装 Codey | `1.2.0` | 已读取正在运行的 `D:\Software\Codey\Codey.exe` 文件版本。 |
 | Windows Codex 桌面包 | `OpenAI.Codex_26.1002.7124.0_x64__2p2nqsd0c76g0` | 已核对正在运行的 `ChatGPT.exe` 路径。 |
-| Windows 应用服务器 | `C:\Users\Shy\AppData\Local\Codey\codex-runtime\cd8c322c12d11389\codex.exe` | 进程父子关系确认经过 Codey 包装器。 |
+| Windows 应用服务器 | `%USERPROFILE%\AppData\Local\Codey\codex-runtime\cd8c322c12d11389\codex.exe` | 进程父子关系确认经过 Codey 包装器。 |
 
 不得把 WSL 源码版本当成正在运行的 Codey 版本。更换桌面包、Codey 可执行文件、provider 或重新启动后，必须重新核对运行证据。下文的压缩函数名和资源哈希仅适用于上述 Codex 桌面包。
 
@@ -25,11 +25,11 @@
 
 ### 磁盘配置与进程配置不同
 
-Windows 的 `C:\Users\Shy\.codex\config.toml` 设置了 `model_provider="official"`、`service_tier="priority"` 和 `features.fast_mode=true`。
+Windows 的 `%USERPROFILE%\.codex\config.toml` 设置了 `model_provider="official"`、`service_tier="priority"` 和 `features.fast_mode=true`。
 
 这个名为 `official` 的 provider 实际指向自建网关，使用 `env_key`，没有启用 `requires_openai_auth`。它的名称不代表官方账号认证。
 
-Codey 的 `C:\Users\Shy\AppData\Roaming\Codey\Codey\config\codex-cli-launch.json` 含有 `service_tier="default"`。磁盘配置的修改时间晚于启动载体及进程启动时间。
+Codey 的 `%USERPROFILE%\AppData\Roaming\Codey\Codey\config\codex-cli-launch.json` 含有 `service_tier="default"`。磁盘配置的修改时间晚于启动载体及进程启动时间。
 
 通过当前窗口的应用服务器管理器执行只读请求，得到以下结果：
 
@@ -213,11 +213,11 @@ Codey 源码没有按 Codex 或 Work 模式主动隐藏导出、删除按钮的�
 
 浏览器夹具的应用状态目录已改为其自动清理的临时目录。早先检查产生的四条 Linux 服务档位失败日志已逐条核对归属并清理，原有应用目录及旧锁文件保持原样。
 
-本机未找到可复用的 Windows Go。通过 [Go 官方下载清单](https://go.dev/dl/?mode=json) 取得 `go1.26.8.windows-amd64.zip`，SHA-256 核对为 `b92c3b2adae85a11ba71fe7216daf0d84e82af4c8ab6c5625807f28622043a59`，解压后的 `go version` 返回 `go1.26.8 windows/amd64`。经唯一脚本传入 `-ComputerUseGo C:\Users\Shy\AppData\Local\Temp\codey-fast-tools-20261008-JOR9GE\go\bin\go.exe` 重试打包，没有改系统路径。该临时工具目录已确认无占用、无重解析点后清理，下载归档也已清理。历史 `codey-windows-pack\app-20261003-020823783` 不属于本任务，保持原样。
+本机未找到可复用的 Windows Go。通过 [Go 官方下载清单](https://go.dev/dl/?mode=json) 取得 `go1.26.8.windows-amd64.zip`，SHA-256 核对为 `b92c3b2adae85a11ba71fe7216daf0d84e82af4c8ab6c5625807f28622043a59`，解压后的 `go version` 返回 `go1.26.8 windows/amd64`。经唯一脚本传入 `-ComputerUseGo %USERPROFILE%\AppData\Local\Temp\codey-fast-tools-20261008-JOR9GE\go\bin\go.exe` 重试打包，没有改系统路径。该临时工具目录已确认无占用、无重解析点后清理，下载归档也已清理。历史 `codey-windows-pack\app-20261003-020823783` 不属于本任务，保持原样。
 
 ### 本地验证包
 
-- 安装包：`C:\Users\Shy\Downloads\Codey-1.2.1-local-20261008-182345832-windows-x64-setup.exe`。
+- 安装包：`%USERPROFILE%\Downloads\Codey-1.2.1-local-20261008-182345832-windows-x64-setup.exe`。
 - 大小：28,355,329 字节。
 - SHA-256：`829498f32435f410f2e27b941ce4161d18f993c23109d7d2bf5a5f5137b04a64`。
 - 构建期间已逐字节核对副本中五个生产文件与最终工作区一致：主进程补丁、`cdp.rs`、服务档位 JavaScript 与 Rust 模块、运行库桥接。构建后没有修改产品源码。
@@ -245,12 +245,12 @@ Codey 源码没有按 Codex 或 Work 模式主动隐藏导出、删除按钮的�
 
 ### Work 本地验证包
 
-- 路径：`C:\Users\Shy\Downloads\Codey-1.2.1-local-20261008-185544947-windows-x64-setup.exe`。
+- 路径：`%USERPROFILE%\Downloads\Codey-1.2.1-local-20261008-185544947-windows-x64-setup.exe`。
 - 大小：28,421,258 字节。
 - SHA-256：`1316e9f2758cb9211a68956d268c17be3a2f753f2727290e144dd9d95d2cf95c`。
 - 保留前述 Fast 修复，并包含 Work 按钮源码改动。没有安装、提交或推送。
 - 过程咨询要求核对打包成功、源码一致性、交付记录和清理，并保留实机验收边界；上述交付核对已完成。
-- 打包脚本已清理 `C:\Users\Shy\AppData\Local\Temp\codey-windows-pack\app-20261008-185544947-4112f1d6fe1e4fd6bf33d86504021354`，主会话确认该路径不存在。确认相关进程结束后，临时 Go 目录 `C:\Users\Shy\AppData\Local\Temp\codey-work-tools-D49aUq`、验证目录 `/tmp/codey-work-actions-D49aUq` 和本轮 `dist-overlay` 均已清理并核对不存在。安装包、共享缓存和其他任务目录保留；必要证据已汇总于本文。
+- 打包脚本已清理 `%USERPROFILE%\AppData\Local\Temp\codey-windows-pack\app-20261008-185544947-4112f1d6fe1e4fd6bf33d86504021354`，主会话确认该路径不存在。确认相关进程结束后，临时 Go 目录 `%USERPROFILE%\AppData\Local\Temp\codey-work-tools-D49aUq`、验证目录 `/tmp/codey-work-actions-D49aUq` 和本轮 `dist-overlay` 均已清理并核对不存在。安装包、共享缓存和其他任务目录保留；必要证据已汇总于本文。
 
 ### Work 实机复验与修正
 
@@ -262,9 +262,9 @@ Codey 源码没有按 Codex 或 Work 模式主动隐藏导出、删除按钮的�
 
 复验完整 JavaScript 检查为 532 项，其中 514 项通过、18 项 Windows 专属测试按环境跳过；`pnpm run check`、源码及构建后脚本语法检查、`git diff --check` 通过。312 层浏览器夹具对源码和构建后的注入脚本均通过。Windows 打包中的七个相关文件与最终工作区逐字节一致；源码 SHA-256 为 `38a702e755cc970c777c80ca3e1cbc512f6a668266b2d7611d25b97a49d2399c`，构建后注入脚本为 `4641988acc1bd3eb3ce2215c739bf86a75be8cf6a60ec30130f0c6c6b813eb74`。
 
-修正版安装包为 `C:\Users\Shy\Downloads\Codey-1.2.1-local-20261008-191522493-windows-x64-setup.exe`，大小 28,366,137 字节，SHA-256 为 `c751b4330324184e69ab6072b027209695ce5ef3cb8223cc376060bf34c988fb`。使用唯一脚本与临时 Windows Go 1.26.8 构建，官方归档哈希及原生工具版本均已核对；两个既有 CSS 警告仍存在。产物生成后，七个相关文件的工作区哈希仍与打包时相同。
+修正版安装包为 `%USERPROFILE%\Downloads\Codey-1.2.1-local-20261008-191522493-windows-x64-setup.exe`，大小 28,366,137 字节，SHA-256 为 `c751b4330324184e69ab6072b027209695ce5ef3cb8223cc376060bf34c988fb`。使用唯一脚本与临时 Windows Go 1.26.8 构建，官方归档哈希及原生工具版本均已核对；两个既有 CSS 警告仍存在。产物生成后，七个相关文件的工作区哈希仍与打包时相同。
 
-打包脚本输出 `NSIS_OK` 并以零退出。确认进程结束后，已核对本次 `app-20261008-191522493-fe64ba64772a48d8a7ebac1bc313932b` 编译副本不存在；临时 Go 目录 `C:\Users\Shy\AppData\Local\Temp\codey-work-tools-Kcl4jU`、验证目录 `/tmp/codey-work-live-Kcl4jU` 和 `dist-overlay` 也已清理并核对。保留安装包、共享缓存及其他任务目录。过程咨询的交付与清理建议已执行；没有安装、提交或推送。新包的实机可见效果等待用户验收。
+打包脚本输出 `NSIS_OK` 并以零退出。确认进程结束后，已核对本次 `app-20261008-191522493-fe64ba64772a48d8a7ebac1bc313932b` 编译副本不存在；临时 Go 目录 `%USERPROFILE%\AppData\Local\Temp\codey-work-tools-Kcl4jU`、验证目录 `/tmp/codey-work-live-Kcl4jU` 和 `dist-overlay` 也已清理并核对。保留安装包、共享缓存及其他任务目录。过程咨询的交付与清理建议已执行；没有安装、提交或推送。新包的实机可见效果等待用户验收。
 
 ## 侧栏整会话删除接口修复（2026-10-08）
 
@@ -286,12 +286,12 @@ Windows 构建副本的七个相关源码及资源与工作区逐字节一致。
 
 ### 删除接口修复验证包
 
-- 安装包：`C:\Users\Shy\Downloads\Codey-1.2.1-local-20261008-194506266-windows-x64-setup.exe`。
+- 安装包：`%USERPROFILE%\Downloads\Codey-1.2.1-local-20261008-194506266-windows-x64-setup.exe`。
 - 大小：28,376,273 字节。
 - SHA-256：`6f7f81af80853de645331f746d8814f1a171bd30ae6dc0952258cd64a1dc0660`。
 - 唯一打包脚本输出 `NSIS_OK`、退出码零；构建过程中仍有两个既有 CSS 警告。原生 Go 1.26.8 的版本和官方归档哈希均已核对。安装包生成后，七个相关源码和资源的哈希仍与构建副本一致。
 - 过程咨询确认可以交付已授权的本地验证包，并保留真实历史删除及独立验收未完成的边界。没有代安装、提交或推送。
-- 打包脚本已清理 `C:\Users\Shy\AppData\Local\Temp\codey-windows-pack\app-20261008-194506266-374612dc4d734df3b3b24493b4409922`，主会话核对路径不存在。临时 Go 目录 `C:\Users\Shy\AppData\Local\Temp\codey-delete-tools-fnsk15` 已通过路径和占用检查后清理。确认相关进程结束后，验证目录 `/tmp/codey-session-delete-fnsk15` 与本轮 `dist-overlay` 均已清理，四处路径已核对无残留。清理前再次核对七个源码和资源哈希一致，安装包大小及 SHA-256 与上述记录一致。保留安装包、共享缓存及其他任务目录；必要验证证据已汇总于本文。
+- 打包脚本已清理 `%USERPROFILE%\AppData\Local\Temp\codey-windows-pack\app-20261008-194506266-374612dc4d734df3b3b24493b4409922`，主会话核对路径不存在。临时 Go 目录 `%USERPROFILE%\AppData\Local\Temp\codey-delete-tools-fnsk15` 已通过路径和占用检查后清理。确认相关进程结束后，验证目录 `/tmp/codey-session-delete-fnsk15` 与本轮 `dist-overlay` 均已清理，四处路径已核对无残留。清理前再次核对七个源码和资源哈希一致，安装包大小及 SHA-256 与上述记录一致。保留安装包、共享缓存及其他任务目录；必要验证证据已汇总于本文。
 
 ## 用户验收与 1.2.2 发布收尾
 

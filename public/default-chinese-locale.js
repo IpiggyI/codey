@@ -7,13 +7,13 @@
 
   const installDefaultChineseLocale = () => {
     const existing = window.__codeyDefaultChineseLocale;
-    if (existing?.version === 5 && existing.locale === defaultChineseLocale) {
+    if (existing?.version === 6 && existing.locale === defaultChineseLocale) {
       existing.ensureSynced?.();
       return;
     }
 
     const state = {
-      version: 5,
+      version: 6,
       locale: defaultChineseLocale,
       navigatorPatched: false,
       statsigClientsPatched: 0,
@@ -23,6 +23,7 @@
       settingSyncInFlight: false,
       settingSyncAttempts: 0,
       settingSyncError: null,
+      settingSyncUnsupported: false,
       ensureSynced: null,
       snapshot() {
         return {
@@ -38,6 +39,7 @@
           settingSyncInFlight: this.settingSyncInFlight,
           settingSyncAttempts: this.settingSyncAttempts,
           settingSyncError: this.settingSyncError,
+          settingSyncUnsupported: this.settingSyncUnsupported,
         };
       },
     };
@@ -352,8 +354,15 @@
       reloadAfterLocaleChange();
     };
 
+    // Codex 26.1021 removed the get-setting and set-setting handlers. The
+    // first-render asset patch still selects Chinese, so stop retrying a
+    // missing handler instead of reporting a recurring sync failure.
+    const isMissingSettingHandler = (error) => (
+      /\b(?:get|set)-setting not implemented\b/.test(String(error?.message || error || ""))
+    );
+
     const ensureCodexLocaleSetting = () => {
-      if (state.settingSynced || state.settingSyncInFlight) return;
+      if (state.settingSynced || state.settingSyncUnsupported || state.settingSyncInFlight) return;
       state.settingSyncInFlight = true;
       void (async () => {
         const retryDelays = [0, 250, 750, 1500, 3000, 5000];
@@ -373,6 +382,10 @@
             return;
           } catch (error) {
             state.settingSyncError = error instanceof Error ? error.message : String(error);
+            if (isMissingSettingHandler(error)) {
+              state.settingSyncUnsupported = true;
+              return;
+            }
           }
         }
         console.warn(

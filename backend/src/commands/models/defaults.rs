@@ -56,14 +56,25 @@ pub async fn save_default_model(
     } else {
         target.upstream_model.clone()
     };
-    config.default_model = stored_default.clone();
+    let channel_id = config
+        .current_provider_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.channel_id.clone());
+    let channel_default = channel_id.is_some();
+    if let Some(id) = channel_id {
+        config
+            .default_models_by_channel
+            .insert(id, stored_default.clone());
+    } else {
+        config.default_model = stored_default.clone();
+    }
     // `active_profile_id` remains a compatibility projection for older features.
     // The model default is authoritative and therefore owns that projection.
     if let Some(profile) = target_profile {
         config.active_profile_id = profile.id;
     }
     config = config.normalize();
-    if !config.local_router_enabled {
+    if !config.local_router_enabled && !channel_default {
         config.default_model = stored_default;
     }
     config.settings_revision = config.settings_revision.saturating_add(1);
@@ -71,8 +82,8 @@ pub async fn save_default_model(
     save_config_to_store(state, &config).await?;
     *state.config.write().await = config.clone();
     let public_config = redacted_config(&config);
+    let hot_reload = ModelHotReloadOutcome::queued(state, true);
     drop(_config_write_guard);
-    let hot_reload = hot_reload_runtime_models(state).await;
     let restart_required = runtime_config_requires_restart(state, &config).await;
     Ok(hot_reload.add_to_response(json!({
         "status":"ok",
@@ -125,6 +136,7 @@ pub async fn save_official_route_models(
         codex_home(),
         &catalog_dir,
         user_catalog.as_deref(),
+        &config.codex_app_path,
     )
     .map_err(|error| error.to_string())?
     .into_iter()
@@ -159,9 +171,9 @@ pub async fn save_official_route_models(
     }
     *state.config.write().await = config.clone();
     let public_config = redacted_config(&config);
+    let hot_reload = ModelHotReloadOutcome::queued(state, true);
     drop(_config_write_guard);
-    let hot_reload = hot_reload_runtime_models(state).await;
-    let subagent_hot_reload = hot_reload_runtime_subagent_config(state, &config).await;
+    let subagent_hot_reload = SubagentHotReloadOutcome::default();
     let restart_required = runtime_config_requires_restart(state, &config).await;
     Ok(add_subagent_hot_reload_to_response(
         hot_reload.add_to_response(json!({
@@ -249,7 +261,7 @@ pub(crate) fn current_model_state(
     config: &CodeyConfig,
 ) -> Result<model_catalog::ModelSelectionState, String> {
     if !config.local_router_enabled {
-        let provider = codex_provider::current_provider(codex_home())
+        let provider = codex_provider::current_provider_for_config(codex_home(), config)
             .map_err(|error| format!("读取当前 Codex 线路失败：{error:#}"))?;
         return native_model_state_for_provider(config, &provider, codex_home());
     }
@@ -266,14 +278,17 @@ pub(crate) fn current_model_state(
         .current_model_list_key()
         .map(|provider_id| config.enabled_route_models(provider_id))
         .unwrap_or_default();
-    model_catalog::selection_state_with_manual_models(
+    model_catalog::selection_state_with_catalog_options(
         codex_home(),
         &crate::codex_config::codey_model_catalog_dir(),
         official,
         config.upstream_models_snapshot(),
         &selected_models,
         config.manual_third_party_models(),
+        &[],
         None,
+        None,
+        &config.codex_app_path,
     )
     .map_err(|error| error.to_string())
 }
@@ -313,6 +328,7 @@ pub(crate) fn model_state_for_profile(
         &excluded_official_models,
         config.default_model_for_profile(profile).as_deref(),
         user_catalog.as_deref(),
+        &config.codex_app_path,
     )
     .map_err(|error| error.to_string())
 }

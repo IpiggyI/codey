@@ -1,6 +1,6 @@
 // Codex 渲染进程资产源补丁。原本是主进程 protocol.handle 里对 app:// 响应
-// 做改写的纯函数部分；Electron fuse 关闭后主进程注入不可用，改由 CDP Fetch 会话
-// 在响应暂停时逐资产调用 globalThis.__codeyRendererPatchEntry 完成同样的改写。
+// 做改写的纯函数部分；Electron fuse 关闭后主进程注入不可用，改由浏览器级补丁
+// 服务在 Fetch 响应暂停时调用纯函数入口，结果按资产文件名缓存在 Codey 侧。
 // 本文件只依赖页面 JS 环境，不使用任何 Node/Electron API。
 (() => {
   const rendererPatchOptions =
@@ -10,8 +10,7 @@
       : {};
   const disablePet = rendererPatchOptions.disablePet === true;
   const threadOwnerDiscoveryTimeoutMs = 150;
-  // 渲染进程没有 --codey-record-error 子进程可写：补丁失败经 CDP
-  // Runtime.addBinding 暴露的 __codeyPatchLog 回传给 Rust 记录。
+  // 补丁失败由求值表达式收集，经返回值交给 Rust 记录。
   const recordCodeyPatchFailure = (operation, error, context = {}) => {
     try {
       const message = error instanceof Error
@@ -30,15 +29,17 @@
   const rendererPatchFailuresByFingerprint = new Map();
   let activeRendererPatchFailures = null;
   // 指纹只作补丁结果缓存键，不需要加密强度；原主进程版用 sha256，
-  // 页面里用同步 FNV-1a 变体即可，省掉 async crypto.subtle。
+  // 页面里用双路 32 位 FNV-1a，避免逐字符 BigInt 运算。
   const rendererPatchFingerprint = (source) => {
     try {
-      let hash = 0xcbf29ce484222325n;
+      let first = 0x811c9dc5;
+      let second = 0x050c5d1f;
       for (let index = 0; index < source.length; index += 1) {
-        hash ^= BigInt(source.charCodeAt(index));
-        hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+        const code = source.charCodeAt(index);
+        first = Math.imul(first ^ code, 0x01000193);
+        second = Math.imul(second ^ code, 0x5bd1e995);
       }
-      return `${source.length}:${hash.toString(36)}`;
+      return `${source.length}:${(first >>> 0).toString(36)}:${(second >>> 0).toString(36)}`;
     } catch {
       // 指纹仅用于减少重复计算；无法生成时保留兼容行为，避免错误命中缓存。
       return null;
@@ -65,6 +66,26 @@
   // 各渲染器门控相互独立。压缩代码的锚点可能随版本或平台变化；
   // 单个门控失配时记录错误并跳过，继续应用其余门控。
   // 日志附带相邻锚点的可打印源码片段，便于适配现场资源。
+  // 只截取传入的静态资产源码，不读取输入框、会话状态或凭据。
+  // 模型补丁优先记录过滤函数，避免被同一资产里更早的 Fast 控件占满。
+  const rendererModelFilterDiagnosticAnchor =
+    /function\s+[$A-Z_a-z][$\w]*\(\{[^}]{0,1024}\bisCustomModelProvider\s*:[^}]{0,256}\bmodel\s*:[^}]{0,256}\buseHiddenModels\s*:[^}]{0,256}\}\)\s*\{/;
+  const rendererModelGateDiagnosticAnchors = {
+    "model allowlist": [
+      rendererModelFilterDiagnosticAnchor,
+      /[$A-Z_a-z][$\w]*\.has\(\s*[$A-Z_a-z][$\w]*\.model\s*\)/,
+      "useHiddenModels:",
+      "availableModels:",
+      "isCustomModelProvider:",
+    ],
+    "model visibility": [
+      rendererModelFilterDiagnosticAnchor,
+      "amazonBedrock",
+      /[$A-Z_a-z][$\w]*\.hidden\b/,
+      "useHiddenModels:",
+      "isCustomModelProvider:",
+    ],
+  };
   const rendererGateDiagnosticAnchors = [
     "`composer.toggleFastMode`",
     "composer.speedSlashCommand.disableDescription",
@@ -74,17 +95,30 @@
     "useHiddenModels",
     "availableOptions.length",
     "includeUltraReasoningEffort",
+    "serviceTierAccess:",
+    "supportsIndependentSpeedModes",
+    "getHasInProgressLocalConversation",
+    "electron-app-state-snapshot-request",
     "isCustomModelProvider",
   ];
-  const rendererGateFailureExcerpts = (source) => {
+  const rendererGateFailureExcerpts = (source, name) => {
     const excerpts = [];
-    for (const anchor of rendererGateDiagnosticAnchors) {
+    const ranges = [];
+    const anchors = rendererModelGateDiagnosticAnchors[name] ??
+      rendererGateDiagnosticAnchors;
+    for (const anchor of anchors) {
       if (excerpts.length >= 2) break;
-      const index = source.indexOf(anchor);
+      const index = typeof anchor === "string"
+        ? source.indexOf(anchor)
+        : source.search(anchor);
       if (index < 0) continue;
+      if (ranges.some(([start, end]) => index >= start && index < end)) continue;
+      const start = Math.max(0, index - 120);
+      const end = Math.min(source.length, start + 640);
+      ranges.push([start, end]);
       excerpts.push(
         source
-          .slice(Math.max(0, index - 150), index + anchor.length + 190)
+          .slice(start, end)
           .replace(/[^\x20-\x7E]/g, "?"),
       );
     }
@@ -95,7 +129,7 @@
     const message =
       `Codey skipped an incompatible Codex renderer patch: ${name} gate matched ${matchCount} times`;
     const context = { matchCount };
-    const excerpts = rendererGateFailureExcerpts(source);
+    const excerpts = rendererGateFailureExcerpts(source, name);
     if (excerpts.length) context.excerpts = excerpts;
     recordCodeyPatchFailure(`renderer_patch:${name}`, message, context);
     try {
@@ -286,6 +320,19 @@
   const patchCodexRendererAsset = (source) => {
     let patched = source;
     let nativeCustomProviderModelAccess = false;
+    if (!source.includes("/*codey-app-server-manager-registry*/")
+      && source.includes("inactiveThreadUnsubscriber.clearConversationStreamOwnership")
+      && source.includes("getStreamRole(")
+      && source.includes("updateConversationState(")) {
+      // 在原生管理器被读取时登记真实实例，避免依赖模块导出名和 React 结构。
+      // 登记失败不得影响原生读取，也不允许已销毁实例覆盖新管理器。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /getConversation\(([$A-Z_a-z][$\w]*)\)\{return this\.threadStore\.getConversation\(\1\)\}/g,
+        (_match, id) => `getConversation(${id}){/*codey-app-server-manager-registry*/try{if(this.disposed!==true&&this.getHostId()===\`local\`){let __codeyManagers=globalThis.__codeyAppServerManagers;if(__codeyManagers==null)globalThis.__codeyAppServerManagers=__codeyManagers=new Map;if(__codeyManagers instanceof Map)__codeyManagers.set(\`local\`,this)}}catch{}return this.threadStore.getConversation(${id})}`,
+        "app server manager registry",
+      );
+    }
     if (
       source.includes("codex-message-from-view")
       && source.includes("sendMessageFromView")
@@ -391,18 +438,18 @@
     }
     if (
       !source.includes("codeyReconcileCompletedConversation")
-      && source.includes("isLocalConversationInProgress")
+      && source.includes("getHasInProgressLocalConversation(")
       && source.includes("inactiveThreadUnsubscriber.clearConversationStreamOwnership")
-      && source.includes("getConversationStreamRevision")
-      && source.includes("async resumeConversation(")
+      && source.includes("getConversationStreamRevision(")
     ) {
       // 渲染器可能漏掉完成通知，仍保留进行中的轮次和消息流角色。
-      // 两次核对服务端状态，排除并发修订和跟随窗口，再沿重连路径恢复分页历史。
+      // 两次核对服务端状态，排除并发修订、未确认的提交和跟随窗口，再沿重连路径恢复分页历史。
+      // 进行中判定复用 getHasInProgressLocalConversation 已使用的原生函数。
       patched = replaceUniqueRendererGate(
         patched,
-        /async resumeConversation\(([$A-Z_a-z][$\w]*)\)\{await this\.maybeResumeConversation\(\1\);/g,
-        (_match, paramsName) =>
-          `async codeyReconcileCompletedConversation(${paramsName}){let __codeyConversationId=${paramsName}?.conversationId,__codeyConversation=__codeyConversationId==null?null:this.getConversation(__codeyConversationId);if(__codeyConversationId==null||__codeyConversation==null||!this.productPolicy.runtimePolicy.isLocalConversationInProgress(__codeyConversation)||this.getStreamRole(__codeyConversationId)?.role===\`follower\`)return!1;let __codeyRevision=this.getConversationStreamRevision(__codeyConversationId),__codeyReadStatus=async()=>{let __codeyResponse=await this.sendRequest(\`thread/read\`,{threadId:__codeyConversationId,includeTurns:!1}),__codeyStatus=__codeyResponse?.thread?.status;return typeof __codeyStatus===\`string\`?__codeyStatus:__codeyStatus?.type},__codeyStatus=await __codeyReadStatus();if(__codeyStatus!==\`idle\`&&__codeyStatus!==\`error\`)return!1;await new Promise(__codeyResolve=>setTimeout(__codeyResolve,250));if(await __codeyReadStatus()!==__codeyStatus||this.getConversationStreamRevision(__codeyConversationId)!==__codeyRevision)return!1;__codeyConversation=this.getConversation(__codeyConversationId);if(__codeyConversation==null||!this.productPolicy.runtimePolicy.isLocalConversationInProgress(__codeyConversation)||this.getStreamRole(__codeyConversationId)?.role===\`follower\`)return!1;this.inactiveThreadUnsubscriber.clearConversationStreamOwnership(__codeyConversationId);this.updateConversationState(__codeyConversationId,__codeyState=>{__codeyState.resumeState=\`needs_resume\`},!1);await this.maybeResumeConversation(${paramsName});__codeyConversation=this.getConversation(__codeyConversationId);return __codeyConversation!=null&&!this.productPolicy.runtimePolicy.isLocalConversationInProgress(__codeyConversation)}async resumeConversation(${paramsName}){await this.maybeResumeConversation(${paramsName});`,
+        /getHasInProgressLocalConversation\(\{exceptConversationId:([$A-Z_a-z][$\w]*)\}=\{\}\)\{for\(let ([$A-Z_a-z][$\w]*) of this\.threadStore\.getRecentConversationIds\(\)\)\{if\(\2===\1\)continue;let ([$A-Z_a-z][$\w]*)=this\.conversations\.get\(\2\);if\(\3!=null&&([$A-Z_a-z][$\w]*)\(\3\)\)return!0\}return!1\}/g,
+        (match, _exceptName, _idName, _conversationName, inProgressName) =>
+          `async codeyReconcileCompletedConversation(__codeyParams){let __codeyId=__codeyParams?.conversationId,__codeyRunning=()=>{let __codeyConversation=__codeyId==null?null:this.getConversation(__codeyId);return __codeyConversation!=null&&__codeyConversation.unconfirmedTurnSubmissions?.some(e=>e.terminal!==!0)!==!0&&${inProgressName}(__codeyConversation)&&this.getStreamRole(__codeyId)?.role!==\`follower\`};if(!__codeyRunning())return!1;let __codeyRevision=this.getConversationStreamRevision(__codeyId),__codeyReadStatus=async()=>{let __codeyResponse=await this.sendRequest(\`thread/read\`,{threadId:__codeyId,includeTurns:!1}),__codeyStatus=__codeyResponse?.thread?.status;return typeof __codeyStatus===\`string\`?__codeyStatus:__codeyStatus?.type},__codeyStatus=await __codeyReadStatus();if(__codeyStatus!==\`idle\`&&__codeyStatus!==\`systemError\`&&__codeyStatus!==\`error\`)return!1;await new Promise(__codeyResolve=>setTimeout(__codeyResolve,250));if(await __codeyReadStatus()!==__codeyStatus||this.getConversationStreamRevision(__codeyId)!==__codeyRevision||!__codeyRunning())return!1;let __codeyCwd=this.getConversation(__codeyId)?.cwd;this.inactiveThreadUnsubscriber.clearConversationStreamOwnership(__codeyId);this.updateConversationState(__codeyId,__codeyState=>{__codeyState.resumeState=\`needs_resume\`},!1);await this.resumeConversation({...__codeyParams,workspaceRoots:__codeyParams.workspaceRoots?.length?__codeyParams.workspaceRoots:__codeyCwd?[__codeyCwd]:[\`/\`]});let __codeyConversation=this.getConversation(__codeyId);return __codeyConversation!=null&&!${inProgressName}(__codeyConversation)}${match}`,
         "completed thread reconciliation",
       );
     }
@@ -438,6 +485,22 @@
         (_match, visibilityPrefix, authMethodExpression) =>
           `${visibilityPrefix}${authMethodExpression}=== \`chatgpt\``,
         "model visibility",
+      );
+    }
+    if (
+      source.includes("includeUltraReasoningEffort:") &&
+      source.includes("isCustomModelProvider:") &&
+      source.includes("modelCatalogPath:") &&
+      source.includes("1186680773")
+    ) {
+      // 第三方 provider 按模型目录显示 Ultra，保留调用方和用户的思考强度设置。
+      // 宿主服务资源模块只把同一开关作为参数传入，没有模型目录查询，不在此改写。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(\(\{[^{}]*\bincludeUltraReasoningEffort\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\bisCustomModelProvider\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\s*,\s*\{[^{}]*\bget\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\)\s*=>\s*\{[^{}]*\b[$A-Z_a-z][$\w]*\s*=\s*\2\s*&&\s*)(\4\(\s*[$A-Z_a-z][$\w]*\s*,\s*(["'`])1186680773\6\s*\))/g,
+        (_match, prefix, _includeUltra, customProvider, _get, gate) =>
+          `${prefix}(${customProvider}||${gate})`,
+        "third-party Ultra reasoning",
       );
     }
     if (
@@ -676,13 +739,22 @@
         "fast model trigger fallback",
       );
     }
+    if (source.includes("case`electron-app-state-snapshot-request`:")) {
+      // 跳过周期心跳快照，保留卡顿等诊断触发的响应。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(case`electron-app-state-snapshot-request`:\{)(?=[^{}]{0,400}?break ([$A-Z_a-z][$\w]*);[\s\S]{0,400}?collectAppStateSnapshot\(([$A-Z_a-z][$\w]*)\.hostId,\3\.reason\))/g,
+        (_match, prefix, label, messageName) =>
+          `${prefix}if(${messageName}.reason===\`heartbeat\`)break ${label};`,
+        "app state heartbeat snapshot",
+      );
+    }
     if (
       source.includes("activeInteractions=new Map") &&
       source.includes("beginCpuSampling") &&
       source.includes(
         "ensureHeartbeat(){this.heartbeatTimer??=setInterval",
-      ) &&
-      source.includes("rendererProcessCpuPercentAvg")
+      )
     ) {
       // Codey 启动时已关闭分析；保留交互生命周期，
       // 去掉会被丢弃的处理器采样和每秒心跳。
@@ -701,41 +773,6 @@
     }
     return patched;
   };
-  const discoveredCodexRendererAssets = new Set();
-  const maximumDiscoveredCodexRendererAssets = 128;
-  const rememberCodexRendererAsset = (baseUrl, specifier) => {
-    try {
-      const url = new URL(specifier, baseUrl);
-      if (
-        url.protocol !== "app:" ||
-        !url.pathname.includes("/assets/") ||
-        !/\.(?:c|m)?js$/i.test(url.pathname)
-      ) return;
-      discoveredCodexRendererAssets.delete(url.pathname);
-      discoveredCodexRendererAssets.add(url.pathname);
-      while (
-        discoveredCodexRendererAssets.size >
-        maximumDiscoveredCodexRendererAssets
-      ) {
-        const oldest = discoveredCodexRendererAssets.keys().next().value;
-        if (oldest === undefined) break;
-        discoveredCodexRendererAssets.delete(oldest);
-      }
-    } catch {}
-  };
-  const discoverCodexRendererAssets = (baseUrl, source) => {
-    for (const match of source.matchAll(
-      /\b(?:src|href)\s*=\s*(["'])([^"']+\.(?:c|m)?js(?:[?#][^"']*)?)\1/gi,
-    )) rememberCodexRendererAsset(baseUrl, match[2]);
-  };
-  const isCodexRendererBootstrapUrl = (requestUrl) => {
-    try {
-      const url = new URL(requestUrl);
-      return url.protocol === "app:" && /\/index\.html$/i.test(url.pathname);
-    } catch {
-      return false;
-    }
-  };
   const isCodexRendererAssetUrl = (requestUrl) => {
     try {
       const url = new URL(requestUrl);
@@ -743,7 +780,7 @@
         url.protocol === "app:" &&
         url.pathname.includes("/assets/") &&
         (
-          /\/(?:(?:app-initial|app-shared|codex-composer-adapter|general-settings|model-list-filter|windows-model-controls|use-service-tier-settings|read-service-tier-for-request|subagent-activity-chip-group)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
+          /\/(?:(?:app-initial|app-primary|app-shared|codex-composer-adapter|initialize-app-host-services|general-settings|model-list-filter|windows-model-controls|use-service-tier-settings|read-service-tier-for-request|subagent-activity-chip-group)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
             url.pathname,
           ) ||
           (
@@ -751,8 +788,7 @@
             /\/(?:(?:appearance-settings|pet-settings|pets-settings)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
               url.pathname,
             )
-          ) ||
-          discoveredCodexRendererAssets.has(url.pathname)
+          )
         )
       );
     } catch {
@@ -760,20 +796,9 @@
     }
   };
   // CDP Fetch 拦截入口：输入响应体文本，返回改写后的文本；null 表示放行原响应。
-  // index.html 只用于发现资产清单，不写回。
   globalThis.__codeyRendererPatchEntry = (requestUrl, source) => {
     try {
       if (typeof requestUrl !== "string" || typeof source !== "string") {
-        return null;
-      }
-      if (isCodexRendererBootstrapUrl(requestUrl)) {
-        try {
-          discoverCodexRendererAssets(requestUrl, source);
-        } catch (error) {
-          recordCodeyPatchFailure("renderer_patch:asset discovery", error, {
-            requestUrl,
-          });
-        }
         return null;
       }
       if (!isCodexRendererAssetUrl(requestUrl)) return null;

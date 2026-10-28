@@ -11,11 +11,16 @@ test("Windows startup compatibility failure cleans the process before compatible
     "stop_windows_spawned_codex(&mut spawned, app_dir).await",
   );
   const compatibleRestart = windowsSpawn.indexOf(
-    "match spawn_windows_codex(app_dir, debug_port, &runtime_arguments, &[], false)",
+    "match spawn_windows_codex(",
+    cleanupCall,
   );
 
   assert.ok(cleanupCall >= 0);
   assert.ok(compatibleRestart > cleanupCall);
+  assert.match(
+    windowsSpawn.slice(compatibleRestart, compatibleRestart + 500),
+    /&runtime_arguments,\s*launch_proxy_environment\.as_deref\(\)\.unwrap_or\(&\[\]\),\s*options\.launch_proxy\.is_some\(\)/,
+  );
   const singleInstanceCleanup = windowsSpawn.indexOf("if single_instance_exit {", cleanupCall);
   assert.ok(singleInstanceCleanup > cleanupCall && singleInstanceCleanup < compatibleRestart);
   assert.match(
@@ -128,13 +133,28 @@ test("Windows and macOS confirm the CLI wrapper before reporting startup success
     assert.doesNotMatch(spawn, /--inspect|NODE_OPTIONS|prepare_startup_require/);
   }
   assert.match(windowsSpawn, /let wrapper_environment_required = constrained/);
+  assert.match(windowsSpawn, /wrapper_environment_required \|\| options\.launch_proxy\.is_some\(\)/);
+  const noEntryLaunch = launcher.slice(launcher.indexOf("async fn launch_windows_codex_without_compatibility("));
+  const overrideGuard = noEntryLaunch.indexOf("if !runtime_config_overrides.is_empty() {");
+  const subagentGuard = noEntryLaunch.indexOf("if subagent_gate_active {");
+  const degradedLaunch = noEntryLaunch.indexOf("spawn_windows_codex(");
+  assert.ok(overrideGuard >= 0 && overrideGuard < subagentGuard && subagentGuard < degradedLaunch);
+  assert.match(
+    noEntryLaunch.slice(degradedLaunch, degradedLaunch + 400),
+    /runtime_arguments,\s*launch_proxy_environment\.unwrap_or\(&\[\]\),\s*launch_proxy_environment\.is_some\(\)/,
+  );
   assert.match(windowsSpawn, /wrapper_environment_applied\.then\(\|\| wrapper\.into_handshake\(\)\)/);
-  assert.match(macosSpawn, /add_macos_cli_wrapper\(&mut command, &wrapper\.environment\)/);
+  assert.match(macosSpawn, /add_macos_launch_environment\(&mut command, &wrapper\.environment\)/);
   assert.match(macosSpawn, /spawned_environment = wrapper\.environment\.clone\(\)/);
   assert.match(launcher, /exited = startup_process_exited\(spawned\) => Err\(exited\.into\(\)\)/);
   assert.match(launcher, /result = wait_for_cli_wrapper\(handshake, deadline\) => result/);
   assert.match(launcher, /result = accept_handshake => result,[\s\S]*?result = marker => result/);
-  assert.match(startupPatch, /!running_in_app_container\(\)/);
+  // Windows 只在本次运行记录写入成功后才跳过回环握手。
+  assert.match(startupPatch, /started,\s*cfg!\(windows\),\s*connect_cli_wrapper_handshake,/);
+  assert.match(
+    startupPatch,
+    /let tcp_required = handshake_required && \(!prefer_marker \|\| !marker_written\);/,
+  );
 });
 
 test("Codex CLI wrapper environment does not leak into the real CLI", async () => {

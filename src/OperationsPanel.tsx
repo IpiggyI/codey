@@ -6,7 +6,6 @@ import {
   IconCpu,
   IconDatabase,
   IconFileCheck,
-  IconFolderOpen,
   IconHistory,
   IconLoader2 as LoaderCircle,
   IconPlugConnected as PlugZap,
@@ -31,7 +30,6 @@ import {
 } from "./runtimeStatusPresentation";
 
 const Cpu = IconCpu;
-const FolderOpen = IconFolderOpen;
 const History = IconHistory;
 const EMPTY_INJECTION_SCRIPTS: NonNullable<
   RuntimeStatus["injectionScripts"]
@@ -56,11 +54,9 @@ const OPTIMIZATION_FEATURE_ICONS: Record<
 type OperationsRuntimeStatus = Pick<
   RuntimeStatus,
   | "running"
-  | "codexAppVersion"
   | "clientPlatform"
   | "restartRequired"
   | "restartInProgress"
-  | "codexAppPath"
   | "maintenance"
   | "injectionScripts"
   | "fastContextToolsActive"
@@ -72,7 +68,6 @@ type OperationsRuntimeStatus = Pick<
 >;
 
 type OperationsPanelProps = {
-  codexAppPath: string;
   fastContextToolsStatus: FastContextToolsStatus;
   status: OperationsRuntimeStatus;
   busy: string | null;
@@ -87,7 +82,6 @@ type OperationsPanelProps = {
 };
 
 function OperationsPanelComponent({
-  codexAppPath,
   fastContextToolsStatus,
   status,
   busy,
@@ -169,12 +163,7 @@ function OperationsPanelComponent({
   const injectionStatusPending = injectionScripts.length === 0;
   const injectionError =
     internalInjectionError || failedInjectionScriptCount > 0;
-  const resolvedCodexPath = status.codexAppPath || "/Applications/ChatGPT.app";
   const restartPending = Boolean(status.restartRequired);
-  const codexVersion = status.codexAppVersion?.trim();
-  const codexVersionLabel = codexVersion
-    ? `Codex v${codexVersion}`
-    : "Codex 版本未知";
 
   type MetricItem = {
     id: string;
@@ -395,14 +384,6 @@ function OperationsPanelComponent({
             <div className="operations-heading-copy">
               <div className="operations-title-row">
                 <h2 id="operations-title">Codex 运行状态</h2>
-                <span className="codex-version-tag">{codexVersionLabel}</span>
-              </div>
-              <div
-                className="path-display header-path-display"
-                aria-label="Codex 应用路径"
-              >
-                <FolderOpen size={14} aria-hidden="true" />
-                <code>{codexAppPath || resolvedCodexPath}</code>
               </div>
             </div>
           </div>
