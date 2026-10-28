@@ -153,10 +153,8 @@ fn restrict_backup_directory(_path: &Path) -> Result<()> {
 
 #[cfg(windows)]
 fn restrict_backup_directory(path: &Path) -> Result<()> {
-    let restricted = crate::fs_util::restrict_directory_to_current_user(path)
-        .context("无法设置备份目录访问权限")?;
-    anyhow::ensure!(restricted, "无法将备份目录限制为当前用户访问，未写入配置");
-    Ok(())
+    crate::fs_util::restrict_directory_to_current_user(path)
+        .map_err(|error| anyhow::anyhow!("无法将备份目录限制为当前用户访问，未写入配置：{error}"))
 }
 
 fn write_and_verify(home: &Path, inspected: &Inspection) -> RepairResult<()> {

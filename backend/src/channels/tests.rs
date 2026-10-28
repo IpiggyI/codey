@@ -75,6 +75,20 @@ fn channels_list_selection_and_quoted_runtime_values() {
 }
 
 #[test]
+fn channels_official_selection_without_default_model_fails_like_other_channels() {
+    let (home, mut config) = fixture();
+    let official = list(home.path(), &config).unwrap().channels[2].id.clone();
+    assert!(official.starts_with("official:"));
+    config.selected_channel_id = Some(official);
+    assert!(config.default_model.is_empty());
+    let error = runtime_overrides(home.path(), &config).unwrap_err();
+    assert!(
+        error.to_string().contains("所选渠道缺少默认模型"),
+        "{error}"
+    );
+}
+
+#[test]
 fn channels_missing_selection_falls_back_to_profile_with_notice() {
     let (home, mut config) = selected_fixture();
     std::fs::write(home.path().join("config.toml"), "model_provider='root'\nprofile='work'\n[profiles.work]\nmodel_provider='profile-provider'\n[model_providers.profile-provider]\nbase_url='https://fallback.example/v1'\n").unwrap();

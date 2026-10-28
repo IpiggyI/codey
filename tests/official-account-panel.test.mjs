@@ -116,17 +116,12 @@ test("只有有效的非当前账号可以切换，切换按钮带说明重启�
   assert.match(exports.SWITCH_TIP, /重启 Codex/);
 });
 
-test("切换先确认；确认后经 App 切换并接纳返回的账号列表", async () => {
+test("切换交给 App：面板不自带确认，只有 App 的重启确认一处询问；接纳返回的账号列表", async () => {
   const { render, buttons, card, calls } = panel();
   elementProps(buttons(card(render(), "other@"), "切换到此账号")[0]).onPress();
-  assert.equal(calls.switch.length, 0, "确认前不切换");
-  const [confirmation] = calls.confirmations;
-  assert.equal(confirmation.action, "switch-official-account");
-  assert.match(confirmation.description, /重启 Codex/);
-  assert.doesNotMatch(textContent(render()), /新开对话/);
-  confirmation.run();
-  await flush();
+  assert.deepEqual(calls.confirmations, [], "面板不再弹出第二个确认");
   assert.deepEqual(calls.switch, ["other"]);
+  await flush();
   assert.equal(calls.apply.length, 1, "切换返回的账号列表被接纳");
 });
 
@@ -139,11 +134,10 @@ test("当前账号换成另一个账号后显示新开对话的提示", () => {
   assert.equal(collectElements(after, (node) => node.props.role === "status").length, 1);
 });
 
-test("切换没有成功时重新读取账号列表，不显示新开对话的提示", async () => {
+test("切换取消或没有成功时重新读取账号列表，不显示新开对话的提示", async () => {
   const { render, buttons, card, calls, setSwitchResult } = panel();
   setSwitchResult(null);
   elementProps(buttons(card(render(), "other@"), "切换到此账号")[0]).onPress();
-  calls.confirmations[0].run();
   await flush();
   assert.equal(calls.refresh, 1);
   assert.equal(calls.apply.length, 0);

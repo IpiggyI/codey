@@ -40,8 +40,6 @@ fn private_directory(path: &Path) -> Result<()> {
 #[cfg(windows)]
 fn restrict_windows_directory(path: &Path) -> Result<()> {
     // 凭据写入前完成权限设置。
-    let restricted = crate::fs_util::restrict_directory_to_current_user(path)
-        .context("无法设置官方账号库的当前用户 ACL")?;
-    ensure!(restricted, "设置官方账号库的当前用户 ACL 失败，未写入凭据");
-    Ok(())
+    crate::fs_util::restrict_directory_to_current_user(path)
+        .map_err(|error| anyhow::anyhow!("设置官方账号库的当前用户 ACL 失败，未写入凭据：{error}"))
 }

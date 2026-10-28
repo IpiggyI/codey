@@ -111,7 +111,8 @@ export type OfficialAccountsPanelProps = {
   disabled: boolean;
   refreshKey: number;
   popupContainer: HTMLElement | null;
-  // 由 App 在操作锁内执行切换并接纳配置；后端切换成功时返回账号列表，否则返回 null。
+  // 由 App 在 Codex 运行时先确认重启，再在操作锁内执行切换并接纳配置；
+  // 后端切换成功时返回账号列表，取消或失败时返回 null。
   onSwitch: (accountId: string) => Promise<OfficialAccountsResult | null>;
   // 添加、导入或移除账号后调用，用于刷新渠道列表。
   onAccountsChanged: () => void;
@@ -269,7 +270,7 @@ function OfficialAccountsPanelComponent({
       if (result) {
         apply(result);
       } else {
-        // 切换失败的原因可能是账号状态已变化，重新读取列表。
+        // 使用者取消或切换失败；失败的原因可能是账号状态已变化，重新读取列表。
         await refresh();
       }
     } catch (error) {
@@ -277,17 +278,6 @@ function OfficialAccountsPanelComponent({
     } finally {
       setPending(null);
     }
-  }
-
-  function askSwitch(account: OfficialAccount) {
-    onRequestConfirmation({
-      action: "switch-official-account",
-      title: `切换官方账号为「${accountLabel(account)}」？`,
-      description:
-        "Codey 会先保存当前账号刷新过的登录，再把 Codex 的登录改写为该账号，然后请你确认重启 Codex。在之前账号下开始的对话可能无法在新账号下继续。",
-      confirmLabel: "切换账号",
-      run: () => void switchTo(account),
-    });
   }
 
   const accounts = view?.accounts ?? null;
@@ -382,7 +372,7 @@ function OfficialAccountsPanelComponent({
                     title={SWITCH_TIP}
                     disabled={disabled || !switchable}
                     loading={pending === `switch:${account.id}`}
-                    onPress={() => askSwitch(account)}
+                    onPress={() => void switchTo(account)}
                   >
                     切换到此账号
                   </Button>

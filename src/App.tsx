@@ -25,7 +25,13 @@ import {
 import type { NotificationChannel } from "./notifications";
 import { errorText, withTimeout } from "./appUtils";
 import { formatBytes } from "./formatters";
-import { createChannelController, noticeAfterChannelChange, type ChannelOutcome } from "./channels";
+import {
+  confirmThroughDialog,
+  createChannelController,
+  noticeAfterChannelChange,
+  type ChannelOutcome,
+  type SwitchTarget,
+} from "./channels";
 import { modelIdsEqual, uniqueModelIds } from "./modelIds";
 import { globalDefaultForProvider } from "./modelRoutes";
 import { CodeyBrandMark, SettingsModalShell } from "./SettingsModalShell";
@@ -61,6 +67,7 @@ import type {
   CurrentProviderSnapshot,
   ProviderStatus,
   Config,
+  Confirmation,
   ModelContextConfig,
   CrashpadCleanup,
   FastContextToolsStatus,
@@ -75,8 +82,22 @@ import { Badge, Button } from "./components/ui";
 
 const Check = IconCheck;
 const X = IconX;
-const CHANNEL_RESTART_DESCRIPTION =
-  "渠道已切换，重启 Codex 后新渠道才会生效。当前 Codex 客户端将被关闭并由 Codey 自动重新拉起，正在执行的本地任务会被中断。";
+const RESTART_INTERRUPTS_TASKS =
+  "当前 Codex 客户端将被关闭并由 Codey 自动重新拉起，正在执行的本地任务会被中断。";
+const SWITCH_CONFIRMATIONS: Record<SwitchTarget, Omit<Confirmation, "run">> = {
+  channel: {
+    action: "restart",
+    title: "切换渠道并重启 Codex？",
+    description: `确认后立即切换渠道，并重启 Codex 使新渠道生效。${RESTART_INTERRUPTS_TASKS}`,
+    confirmLabel: "切换并重启",
+  },
+  "official-account": {
+    action: "switch-official-account",
+    title: "切换官方账号并重启 Codex？",
+    description: `确认后 Codey 会先保存当前账号刷新过的登录，再把 Codex 的登录改写为该账号，并重启 Codex 使新账号生效。${RESTART_INTERRUPTS_TASKS}在之前账号下开始的对话可能无法在新账号下继续。`,
+    confirmLabel: "切换并重启",
+  },
+};
 const extensionRequest: ExtensionTransport = (request) => invoke("codex_extensions", { request });
 const FEEDBACK_GROUP_QR_BASE_URL =
   "https://pub-2d17a6a8bc22426a92e297a59f55ccc3.r2.dev/qr.png";
@@ -157,7 +178,7 @@ export function App({
   const [channelLoadError, setChannelLoadError] = useState<string | null>(null);
   const [channelActionError, setChannelActionError] = useState<string | null>(null);
   const [channelVersionConflict, setChannelVersionConflict] = useState(false);
-  const [restartPromptPending, setRestartPromptPending] = useState(false);
+  const [restartAfterSwitchPending, setRestartAfterSwitchPending] = useState(false);
   const [officialAccountsRefreshKey, setOfficialAccountsRefreshKey] = useState(0);
   const [routerSessionDiagnosis, setRouterSessionDiagnosis] =
     useState<RouterSessionDiagnosis | null>(null);
@@ -285,6 +306,7 @@ export function App({
   const adoptChannelConfig = useStableEvent(
     (next: Config, restartRequired: boolean) => applyCommandResult({ config: next, restartRequired }),
   );
+  const codexRunning = useStableEvent(() => status.running);
   const channelController = useMemo(
     () => createChannelController({
       call: invoke,
@@ -292,9 +314,11 @@ export function App({
       adopt: adoptChannelConfig,
       setChannelList,
       setChannelNotice,
-      askRestart: () => setRestartPromptPending(true),
+      codexRunning,
+      confirmSwitch: (target) => confirmThroughDialog(confirmationController, SWITCH_CONFIRMATIONS[target]),
+      restart: () => setRestartAfterSwitchPending(true),
     }),
-    [adoptChannelConfig],
+    [adoptChannelConfig, codexRunning, confirmationController],
   );
 
   useEffect(() => {
@@ -304,12 +328,12 @@ export function App({
     };
   }, []);
 
-  // 渠道切换要求重启时，等操作结束、界面用上最新状态后再走既有的重启确认。
+  // 切换前已确认重启：等切换操作结束、界面用上最新状态后，直接执行既有的重启操作。
   useEffect(() => {
-    if (!restartPromptPending || isBusy) return;
-    setRestartPromptPending(false);
-    askRestartCodex(CHANNEL_RESTART_DESCRIPTION);
-  }, [restartPromptPending, isBusy]);
+    if (!restartAfterSwitchPending || isBusy) return;
+    setRestartAfterSwitchPending(false);
+    void restartCodex();
+  }, [restartAfterSwitchPending, isBusy]);
 
   async function load() {
     const generation = ++loadGenerationRef.current;
@@ -376,7 +400,7 @@ export function App({
   }
 
   function reportChannelOutcome(outcome: ChannelOutcome) {
-    if (outcome.kind === "stale") return false;
+    if (outcome.kind === "stale" || outcome.kind === "cancelled") return false;
     if (outcome.kind === "failed") {
       setChannelActionError(outcome.message);
       setChannelVersionConflict(outcome.conflict);
@@ -417,8 +441,8 @@ export function App({
       setOfficialAccountsRefreshKey((key) => key + 1);
       setNotice(await noticeAfterChannelChange(refreshProviderAfterChannelChange, {
         tone: "info",
-        text: outcome.kind === "applied" && outcome.restartRequired
-          ? "已切换渠道，重启 Codex 后生效"
+        text: outcome.kind === "applied" && outcome.restart === "next-start"
+          ? "已切换渠道，下次启动 Codex 时生效"
           : "已切换渠道",
       }));
     });
@@ -435,8 +459,8 @@ export function App({
       if (!reportChannelOutcome(switched.outcome)) return;
       setNotice(await noticeAfterChannelChange(refreshProviderAfterChannelChange, {
         tone: "info",
-        text: switched.outcome.kind === "applied" && switched.outcome.restartRequired
-          ? "已切换官方账号，重启 Codex 后生效"
+        text: switched.outcome.kind === "applied" && switched.outcome.restart === "next-start"
+          ? "已切换官方账号，下次启动 Codex 时生效"
           : "已切换官方账号",
       }));
     });

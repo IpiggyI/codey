@@ -254,14 +254,6 @@ pub(crate) fn runtime_overrides(home: &Path, config: &CodeyConfig) -> Result<Vec
     if resolved.channel_id.is_none() {
         return Ok(Vec::new());
     }
-    if resolved
-        .channel_id
-        .as_deref()
-        .is_some_and(|id| id.starts_with("official:"))
-        && resolved.default_model.is_none()
-    {
-        return Ok(vec!["model_provider=\"openai\"".into()]);
-    }
     let model = resolved
         .default_model
         .filter(|model| !model.trim().is_empty())

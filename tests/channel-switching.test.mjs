@@ -29,11 +29,13 @@ const listOf = (channelsList, selectedChannelId = null, notice = null) => ({
 });
 const initialList = listOf([entry("provider:a", { current: true, defaultModel: "ma" }), entry("provider:b")]);
 
-function harness({ revision = 5, handler }) {
+// 默认 Codex 在运行且使用者确认重启；confirm 为 false 模拟取消。
+function harness({ revision = 5, handler, running = true, confirm = true }) {
   const state = {
     config: { settingsRevision: revision, selectedChannelId: null, defaultModelsByChannel: {} },
     list: initialList,
     calls: [],
+    confirmations: [],
     restarts: 0,
     notice: undefined,
   };
@@ -51,7 +53,13 @@ function harness({ revision = 5, handler }) {
     },
     setChannelList: (list) => { state.list = list; },
     setChannelNotice: (notice) => { state.notice = notice; },
-    askRestart: () => { state.restarts += 1; },
+    codexRunning: () => running,
+    confirmSwitch: async (target) => {
+      // 记录确认发生时已发送的命令数，用来证明确认先于切换命令。
+      state.confirmations.push({ target, callsBefore: state.calls.length });
+      return confirm;
+    },
+    restart: () => { state.restarts += 1; },
   });
   return { state, controller };
 }
@@ -62,7 +70,7 @@ test("选择已有默认模型的渠道：只调用选择命令并带当前修�
   const { state, controller } = harness({ handler: () => mutation(selectedB, 6, true) });
   const outcome = await controller.select("provider:b");
   assert.deepEqual(state.calls, [{ command: "select_channel", args: { channelId: "provider:b", expectedRevision: 5 } }]);
-  assert.deepEqual(outcome, { kind: "applied", restartRequired: true });
+  assert.deepEqual(outcome, { kind: "applied", restartRequired: true, restart: "started" });
   assert.equal(state.list, selectedB);
   assert.equal(state.config.settingsRevision, 6);
   assert.equal(state.config.selectedChannelId, "provider:b");
@@ -91,14 +99,100 @@ test("跟随用户配置：channelId 为 null 且不保存默认模型", async (
   assert.equal(state.config.selectedChannelId, null);
 });
 
-test("需要重启时复用既有重启确认，不需要时不触发", async () => {
+test("Codex 运行时切换前先确认；确认后只发一次切换命令，再直接重启一次", async () => {
   const needs = harness({ handler: () => mutation(selectedB, 6, true) });
   await needs.controller.select("provider:b");
+  assert.deepEqual(needs.state.confirmations, [{ target: "channel", callsBefore: 0 }], "确认先于任何命令");
+  assert.deepEqual(needs.state.calls.map((call) => call.command), ["select_channel"]);
   assert.equal(needs.state.restarts, 1);
 
   const none = harness({ handler: () => mutation(selectedB, 6, false) });
-  await none.controller.select("provider:b");
-  assert.equal(none.state.restarts, 0);
+  const outcome = await none.controller.select("provider:b");
+  assert.deepEqual(outcome, { kind: "applied", restartRequired: false, restart: "none" });
+  assert.equal(none.state.restarts, 0, "后端不要求重启时不重启");
+});
+
+test("取消切换确认：不发送任何命令，也不重启", async () => {
+  for (const [label, run] of [
+    ["选择渠道", (controller) => controller.select("provider:b")],
+    ["保存并切换", (controller) => controller.select("provider:b", "mb")],
+    ["跟随用户配置", (controller) => controller.select(null)],
+  ]) {
+    const { state, controller } = harness({ confirm: false, handler: () => mutation(selectedB, 6, true) });
+    const outcome = await run(controller);
+    assert.deepEqual(outcome, { kind: "cancelled" }, label);
+    assert.deepEqual(state.calls, [], label);
+    assert.equal(state.confirmations.length, 1, label);
+    assert.equal(state.restarts, 0, label);
+    assert.equal(state.config.settingsRevision, 5, label);
+  }
+  const account = harness({ confirm: false, handler: () => accountSwitch("acct", 6) });
+  const switched = await account.controller.switchOfficialAccount("acct");
+  assert.deepEqual(switched, { outcome: { kind: "cancelled" }, accounts: null, listError: null });
+  assert.deepEqual(account.state.calls, []);
+  assert.deepEqual(account.state.confirmations, [{ target: "official-account", callsBefore: 0 }]);
+  assert.equal(account.state.restarts, 0);
+});
+
+test("Codex 未运行时不确认、直接切换，也不重启，结果标为下次启动生效", async () => {
+  // 后端在 Codex 未运行时对 provider 渠道返回 restartRequired: false，提示不能依赖它。
+  const channel = harness({ running: false, handler: () => mutation(selectedB, 6, false) });
+  const outcome = await channel.controller.select("provider:b");
+  assert.deepEqual(outcome, { kind: "applied", restartRequired: false, restart: "next-start" });
+  assert.deepEqual(channel.state.confirmations, []);
+  assert.deepEqual(channel.state.calls.map((call) => call.command), ["select_channel"]);
+  assert.equal(channel.state.restarts, 0);
+
+  const account = harness({ running: false, handler: (command) => command === "set_default_official_account" ? accountSwitch("acct", 6) : officialSelected });
+  const switched = await account.controller.switchOfficialAccount("acct");
+  assert.deepEqual(switched.outcome, { kind: "applied", restartRequired: true, restart: "next-start" });
+  assert.deepEqual(account.state.confirmations, []);
+  assert.equal(account.state.calls.filter((call) => call.command === "set_default_official_account").length, 1);
+  assert.equal(account.state.restarts, 0);
+});
+
+test("单独保存默认模型不确认、不重启", async () => {
+  const { state, controller } = harness({ handler: () => mutation(selectedB, 6, true) });
+  const outcome = await controller.setDefaultModel("provider:a", "ma-2");
+  assert.deepEqual(outcome, { kind: "applied", restartRequired: true, restart: "none" });
+  assert.deepEqual(state.confirmations, []);
+  assert.equal(state.restarts, 0);
+});
+
+// 与 ConfirmationDialogHost 一致：确认时先清除对话框再执行 run，关闭时只清除。
+function dialogHost() {
+  let current = null;
+  const listeners = new Set();
+  const set = (next) => { current = next; listeners.forEach((listener) => listener()); };
+  return {
+    subscribe: (listener) => { listeners.add(listener); return () => listeners.delete(listener); },
+    getSnapshot: () => current,
+    setConfirmation: set,
+    confirm: () => { const pending = current; set(null); pending.run(); },
+    close: () => set(null),
+    listeners,
+  };
+}
+const SWITCH_DIALOG = { action: "restart", title: "切换渠道并重启 Codex？", description: "d", confirmLabel: "切换并重启" };
+
+test("确认对话框包装：确认得到 true，关闭或被替换得到 false，结束后取消订阅", async () => {
+  const confirmed = dialogHost();
+  const yes = channels.confirmThroughDialog(confirmed, SWITCH_DIALOG);
+  assert.equal(confirmed.getSnapshot().title, SWITCH_DIALOG.title);
+  confirmed.confirm();
+  assert.equal(await yes, true);
+  assert.equal(confirmed.listeners.size, 0);
+
+  const closed = dialogHost();
+  const no = channels.confirmThroughDialog(closed, SWITCH_DIALOG);
+  closed.close();
+  assert.equal(await no, false);
+  assert.equal(closed.listeners.size, 0);
+
+  const replaced = dialogHost();
+  const other = channels.confirmThroughDialog(replaced, SWITCH_DIALOG);
+  replaced.setConfirmation({ ...SWITCH_DIALOG, title: "其他确认", run: () => {} });
+  assert.equal(await other, false);
 });
 
 test("切换失败：保留原渠道与修订，显示后端消息，不触发重启", async () => {
@@ -230,7 +324,7 @@ const officialSelected = listOf([
   entry("official:acct", { current: true, defaultModel: "global-default" }),
 ], "official:acct");
 
-test("切换官方账号：只带账号标识，接纳新修订与所选渠道，并走既有重启确认", async () => {
+test("切换官方账号：只带账号标识，接纳新修订与所选渠道，确认后直接重启", async () => {
   const { state, controller } = harness({
     handler: (command) => command === "set_default_official_account" ? accountSwitch("acct", 6) : officialSelected,
   });
@@ -239,9 +333,9 @@ test("切换官方账号：只带账号标识，接纳新修订与所选渠道�
     { command: "set_default_official_account", args: { accountId: "acct" } },
     { command: "list_channels", args: {} },
   ]);
-  assert.deepEqual(switched.outcome, { kind: "applied", restartRequired: true });
+  assert.deepEqual(switched.outcome, { kind: "applied", restartRequired: true, restart: "started" });
   assert.equal(switched.accounts.accountId, "acct");
-  assert.equal(state.restarts, 1, "切换成功后进入既有重启确认，不直接重启");
+  assert.equal(state.restarts, 1, "切换前已确认，切换成功后直接重启一次");
   assert.equal(state.config.settingsRevision, 6);
   assert.equal(state.config.selectedChannelId, "official:acct");
   assert.equal(state.config.defaultModelsByChannel["official:acct"], "global-default", "后端补上的默认模型进入配置");
@@ -824,8 +918,17 @@ test("控制台接线：重启走既有确认流程，渠道随页面加载读�
   ]);
   assert.equal(app.match(/"restart_codey"/g)?.length, 1, "只保留一条重启路径");
   assert.doesNotMatch(channelsSource + sectionSource, /restart_codey|invoke\(/);
-  assert.match(app, /askRestart: \(\) => setRestartPromptPending\(true\)/);
-  assert.match(app, /askRestartCodex\(CHANNEL_RESTART_DESCRIPTION\)/);
+  assert.match(app, /codexRunning,\s*confirmSwitch: \(target\) => confirmThroughDialog\(confirmationController, SWITCH_CONFIRMATIONS\[target\]\),\s*restart: \(\) => setRestartAfterSwitchPending\(true\),/);
+  assert.match(app, /const codexRunning = useStableEvent\(\(\) => status\.running\);/, "运行状态随渲染更新");
+  assert.match(app, /setRestartAfterSwitchPending\(false\);\s*void restartCodex\(\);/, "确认过的切换直接重启，不再二次询问");
+  assert.doesNotMatch(app, /渠道已切换，重启 Codex 后/);
+  assert.match(app, /outcome\.restart === "next-start"\s*\? "已切换渠道，下次启动 Codex 时生效"/, "未运行时提示下次启动生效");
+  assert.match(app, /switched\.outcome\.restart === "next-start"\s*\? "已切换官方账号，下次启动 Codex 时生效"/);
+  for (const target of ["channel", "\"official-account\""]) {
+    const block = app.slice(app.indexOf(`  ${target}: {`), app.indexOf("},", app.indexOf(`  ${target}: {`)));
+    assert.match(block, /\$\{RESTART_INTERRUPTS_TASKS\}/, `${target} 确认保留中断提示`);
+  }
+  assert.match(app, /const RESTART_INTERRUPTS_TASKS =\s*"[^"]*正在执行的本地任务会被中断/);
   assert.match(app, /refreshRouterSessionDiagnosis\(\),\s*refreshChannels\(\),/);
   assert.match(app, /onSelectChannel=\{handleSelectChannel\}/);
   assert.match(modelSection, /<ChannelSection\b/);

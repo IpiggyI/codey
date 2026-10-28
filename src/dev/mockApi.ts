@@ -780,9 +780,12 @@ if (import.meta.env.DEV) {
           const target = previewAccounts.find((account) => account.id === accountId);
           if (!target) return failed("找不到官方账号");
           const channelId = `official:${accountId}`;
-          // 与后端一致：官方渠道缺少默认模型时沿用全局默认模型。
-          const defaultsByChannel = { ...previewConfig.defaultModelsByChannel };
-          if (previewConfig.defaultModel && !defaultsByChannel[channelId]) defaultsByChannel[channelId] = previewConfig.defaultModel;
+          // 与后端一致：先用渠道默认模型，再用全局默认模型；都没有时拒绝切换。
+          const model = [previewConfig.defaultModelsByChannel[channelId], previewConfig.defaultModel]
+            .map((candidate) => candidate?.trim())
+            .find(Boolean);
+          if (!model) return failed("请先为该官方账号设置默认模型：在渠道列表中为它的渠道设置默认模型后再切换");
+          const defaultsByChannel = { ...previewConfig.defaultModelsByChannel, [channelId]: model };
           previewConfig = {
             ...previewConfig,
             settingsRevision: previewConfig.settingsRevision + 1,

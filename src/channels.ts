@@ -3,6 +3,7 @@ import type {
   ChannelList,
   ChannelMutationResult,
   Config,
+  Confirmation,
   Notice,
   OfficialAccountSwitchResult,
 } from "./App.types";
@@ -17,8 +18,12 @@ export type ChannelCommand =
 // 后端版本冲突提示中的固定片段，用它判断是否提示使用者刷新。
 const VERSION_CONFLICT_MARKER = "已被其他操作更新";
 
+// restart：started 表示使用者已确认，切换后直接重启 Codex；next-start 表示 Codex 未运行，下次启动生效。
+export type SwitchRestart = "started" | "next-start" | "none";
+
 export type ChannelOutcome =
-  | { kind: "applied"; restartRequired: boolean }
+  | { kind: "applied"; restartRequired: boolean; restart: SwitchRestart }
+  | { kind: "cancelled" }
   | { kind: "stale" }
   | { kind: "failed"; message: string; conflict: boolean };
 
@@ -37,9 +42,43 @@ export type ChannelControllerDeps = {
   setChannelList: (list: ChannelList) => void;
   // 回退提示以最近一次到达的响应为准：渠道列表与运行状态都经此更新。
   setChannelNotice: (notice: string | null) => void;
-  // 交给既有的重启确认流程，这里不自带重启路径。
-  askRestart: () => void;
+  codexRunning: () => boolean;
+  // Codex 运行时，切换前先走重启确认；取消时返回 false。
+  confirmSwitch: (target: SwitchTarget) => Promise<boolean>;
+  // 使用者已确认重启，交给既有的重启操作直接执行，这里不自带重启路径。
+  restart: () => void;
 };
+
+export type SwitchTarget = "channel" | "official-account";
+
+export type ConfirmationHost = {
+  subscribe: (listener: () => void) => () => void;
+  getSnapshot: () => Confirmation | null;
+  setConfirmation: (confirmation: Confirmation) => void;
+};
+
+// 把确认对话框包装成 Promise：确认时 resolve(true)，对话框被关闭或被其他确认替换时 resolve(false)。
+// 对话框确认时先清除再执行 run，所以清除后留到微任务再判定是否取消。
+export function confirmThroughDialog(
+  host: ConfirmationHost,
+  confirmation: Omit<Confirmation, "run">,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (confirmed: boolean) => {
+      if (settled) return;
+      settled = true;
+      unsubscribe();
+      resolve(confirmed);
+    };
+    const pending: Confirmation = { ...confirmation, run: () => settle(true) };
+    const unsubscribe = host.subscribe(() => {
+      if (host.getSnapshot() === pending) return;
+      queueMicrotask(() => settle(false));
+    });
+    host.setConfirmation(pending);
+  });
+}
 
 export const needsDefaultModel = (entry: ChannelEntry) => !entry.defaultModel?.trim();
 
@@ -101,7 +140,7 @@ export function createChannelController(deps: ChannelControllerDeps) {
       const list = await deps.call<ChannelList>("list_channels", {});
       if (generation !== listGeneration) return { kind: "stale" };
       adoptList(list);
-      return { kind: "applied", restartRequired: false };
+      return { kind: "applied", restartRequired: false, restart: "none" };
     } catch (error) {
       if (generation !== listGeneration) return { kind: "stale" };
       return failed(error);
@@ -129,26 +168,42 @@ export function createChannelController(deps: ChannelControllerDeps) {
     }
     listGeneration += 1;
     adoptList(result.channelList);
-    return { kind: "applied", restartRequired: result.restartRequired };
+    return { kind: "applied", restartRequired: result.restartRequired, restart: "none" };
+  }
+
+  // Codex 运行时先确认再发送切换命令；返回 null 表示使用者取消，否则返回切换后是否直接重启。
+  async function confirmBeforeSwitch(target: SwitchTarget): Promise<boolean | null> {
+    if (!deps.codexRunning()) return false;
+    return (await deps.confirmSwitch(target)) ? true : null;
+  }
+
+  function finishSwitch(outcome: ChannelOutcome, restartAfter: boolean): ChannelOutcome {
+    if (outcome.kind !== "applied") return outcome;
+    if (!restartAfter) return { ...outcome, restart: "next-start" };
+    if (!outcome.restartRequired) return outcome;
+    deps.restart();
+    return { ...outcome, restart: "started" };
   }
 
   const setDefaultModel = (channelId: string, model: string) =>
     mutate("set_channel_default_model", { channelId, model });
 
-  // 渠道没有默认模型时，先保存使用者给出的模型，再选择渠道。
+  // 渠道没有默认模型时，先保存使用者给出的模型，再选择渠道；确认在两条命令之前。
   async function select(channelId: string | null, defaultModel?: string): Promise<ChannelOutcome> {
+    const restartAfter = await confirmBeforeSwitch("channel");
+    if (restartAfter === null) return { kind: "cancelled" };
     if (channelId !== null && defaultModel !== undefined) {
       const saved = await setDefaultModel(channelId, defaultModel);
       if (saved.kind !== "applied") return saved;
     }
-    const outcome = await mutate("select_channel", { channelId });
-    if (outcome.kind === "applied" && outcome.restartRequired) deps.askRestart();
-    return outcome;
+    return finishSwitch(await mutate("select_channel", { channelId }), restartAfter);
   }
 
   // 切换官方账号即切换到它的渠道。后端已保存修订号，这里沿用渠道的配置接纳流程，
   // 保证下一次渠道请求带上新修订；列表读取失败时仍接纳修订与所选渠道。
   async function switchOfficialAccount(accountId: string): Promise<OfficialAccountSwitchOutcome> {
+    const restartAfter = await confirmBeforeSwitch("official-account");
+    if (restartAfter === null) return { outcome: { kind: "cancelled" }, accounts: null, listError: null };
     let result: OfficialAccountSwitchResult;
     try {
       result = await deps.call<OfficialAccountSwitchResult>("set_default_official_account", { accountId });
@@ -176,8 +231,11 @@ export function createChannelController(deps: ChannelControllerDeps) {
       return { outcome: { kind: "stale" }, accounts: result, listError };
     }
     if (list && generation === listGeneration) adoptList(list);
-    if (result.restartRequired) deps.askRestart();
-    return { outcome: { kind: "applied", restartRequired: result.restartRequired }, accounts: result, listError };
+    const outcome = finishSwitch(
+      { kind: "applied", restartRequired: result.restartRequired, restart: "none" },
+      restartAfter,
+    );
+    return { outcome, accounts: result, listError };
   }
 
   // 运行状态响应到达时调用；较晚到达的 null 同样清除提示。
