@@ -576,7 +576,7 @@ async fn request_log_hot_reload_reports_superseded_config() {
     let previous = state.config.read().await.clone();
     state.config.write().await.route_request_log.enabled = !previous.route_request_log.enabled;
 
-    let outcome = hot_reload_runtime_request_log(&state, &previous).await;
+    let outcome = hot_reload_runtime_request_log_locked(&state, &previous).await;
 
     assert_eq!(outcome.health(), "superseded");
     assert_eq!(

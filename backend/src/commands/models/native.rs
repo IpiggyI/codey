@@ -130,6 +130,7 @@ pub(crate) fn native_model_state_for_provider(
         &excluded_official_models,
         config.default_model(),
         user_catalog.as_deref(),
+        &config.codex_app_path,
     )
     .map_err(|error| error.to_string())
 }

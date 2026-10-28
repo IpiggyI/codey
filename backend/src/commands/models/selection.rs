@@ -118,6 +118,7 @@ pub async fn save_selected_models(
             let order = model_catalog::official_model_order(
                 codex_home(),
                 &crate::codex_config::codey_model_catalog_dir(),
+                &config.codex_app_path,
             );
             if !order.is_empty() {
                 crate::model_order::sort_models(&mut selected, &upstream_models, false);
@@ -203,9 +204,9 @@ pub async fn save_selected_models(
         .is_some_and(|refresh| refresh.fallback);
     *state.config.write().await = config.clone();
     let public_config = redacted_config(&config);
+    let hot_reload = ModelHotReloadOutcome::queued(state, true);
     drop(_config_write_guard);
-    let hot_reload = hot_reload_runtime_models(state).await;
-    let subagent_hot_reload = hot_reload_runtime_subagent_config(state, &config).await;
+    let subagent_hot_reload = SubagentHotReloadOutcome::default();
     let restart_required = runtime_config_requires_restart(state, &config).await;
     Ok(add_subagent_hot_reload_to_response(
         hot_reload.add_to_response(json!({

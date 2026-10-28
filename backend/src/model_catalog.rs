@@ -140,7 +140,12 @@ impl ModelSelectionState {
     }
 }
 
+#[path = "model_catalog/runtime_source.rs"]
+mod runtime_source;
+pub(crate) use runtime_source::validate_catalog_source;
+
 pub(crate) struct CatalogRefreshArgs<'a> {
+    pub codex_app_path: &'a str,
     pub codex_home: &'a Path,
     pub catalog_dir: &'a Path,
     pub official_provider: bool,
@@ -184,6 +189,7 @@ pub fn refresh_for_provider(
     selected_models: &[String],
 ) -> Result<usize> {
     refresh_catalog(CatalogRefreshArgs {
+        codex_app_path: "",
         codex_home: home,
         catalog_dir: home,
         official_provider,
@@ -204,6 +210,7 @@ pub(crate) fn refresh_catalog(args: CatalogRefreshArgs<'_>) -> Result<usize> {
 
 fn refresh_for_provider_with_transport_preferences(args: CatalogRefreshArgs<'_>) -> Result<usize> {
     let CatalogRefreshArgs {
+        codex_app_path,
         codex_home,
         catalog_dir,
         official_provider,
@@ -220,7 +227,12 @@ fn refresh_for_provider_with_transport_preferences(args: CatalogRefreshArgs<'_>)
     if let Some(user_path) = user_catalog {
         load_user_catalog(user_path)?;
     }
-    let official_catalog = match read_official_entries(codex_home, catalog_dir, user_catalog) {
+    let official_catalog = match read_official_entries_for_app(
+        codex_home,
+        catalog_dir,
+        user_catalog,
+        codex_app_path,
+    ) {
         Ok(catalog) => catalog,
         Err(_error) if user_catalog.is_some() => {
             return materialize_user_catalog_without_generated(
@@ -231,6 +243,36 @@ fn refresh_for_provider_with_transport_preferences(args: CatalogRefreshArgs<'_>)
         }
         Err(error) => return Err(error),
     };
+    let mut official_catalog = official_catalog;
+    if user_catalog.is_some() {
+        let missing = selected_models
+            .iter()
+            .filter(|required| {
+                !official_catalog.candidates.iter().any(|model| {
+                    model["slug"]
+                        .as_str()
+                        .is_some_and(|slug| model_id::equal(slug, required))
+                })
+            })
+            .collect::<Vec<_>>();
+        if !missing.is_empty()
+            && let Ok(native) =
+                read_official_entries_for_app(codex_home, catalog_dir, None, codex_app_path)
+        {
+            let mut combined = (*official_catalog).clone();
+            for model in &native.candidates {
+                if model["slug"].as_str().is_some_and(|slug| {
+                    missing
+                        .iter()
+                        .any(|required| model_id::equal(slug, required))
+                }) {
+                    combined.candidates.push(model.clone());
+                }
+            }
+            combined.templates.extend(native.templates.iter().cloned());
+            official_catalog = Arc::new(combined);
+        }
+    }
     let official_models = &official_catalog.candidates;
     if user_catalog.is_some() && ensure_runtime_compatible_models(official_models).is_err() {
         return materialize_user_catalog_without_generated(catalog_dir, codex_home, user_catalog);
@@ -356,13 +398,27 @@ fn refresh_for_provider_with_transport_preferences(args: CatalogRefreshArgs<'_>)
         .collect::<HashSet<_>>();
     for model in &mut catalog_models {
         configure_1m_context_window(model, &context_1m_model_keys);
+        if !official_provider
+            && (!include_official_models
+                || model.get("codey_source").and_then(Value::as_str) == Some("third_party"))
+        {
+            model["codey_source"] = json!("third_party");
+            clear_compaction_identity(model);
+        }
     }
     // Validate the selected models so a newly bundled model without a local
     // runtime template cannot block routes that still use older models.
     if !catalog_models.is_empty() {
         ensure_runtime_compatible_models(&catalog_models)?;
     }
-    materialize_derived_catalog(catalog_dir, codex_home, &catalog_models, user_catalog)?;
+    crate::model_catalog_store::materialize_derived_catalog_with_required_models(
+        catalog_dir,
+        codex_home,
+        &catalog_models,
+        user_catalog,
+        selected_models,
+    )?;
+    runtime_source::stamp_catalog(catalog_dir, codex_app_path)?;
     let written_models = read_runtime_catalog_models(catalog_dir)?;
     let expected_model_keys = catalog_models
         .iter()
@@ -379,7 +435,7 @@ fn refresh_for_provider_with_transport_preferences(args: CatalogRefreshArgs<'_>)
     }
     if let Some(user_path) = user_catalog {
         let user_models = load_user_catalog(user_path)?;
-        let expected_user_keys = user_models
+        let mut expected_user_keys = user_models
             .get("models")
             .and_then(Value::as_array)
             .into_iter()
@@ -387,6 +443,12 @@ fn refresh_for_provider_with_transport_preferences(args: CatalogRefreshArgs<'_>)
             .filter_map(|model| model.get("slug").and_then(Value::as_str))
             .map(model_id::key)
             .collect::<Vec<_>>();
+        for required in selected_models {
+            let key = model_id::key(required);
+            if expected_model_keys.contains(&key) && !expected_user_keys.contains(&key) {
+                expected_user_keys.push(key);
+            }
+        }
         if written_model_keys != expected_user_keys {
             bail!("写入后的 Codey 模型目录与用户模型目录不一致");
         }
@@ -422,6 +484,7 @@ pub fn selection_state(
     )
 }
 
+#[cfg(test)]
 pub fn selection_state_with_manual_models(
     home: &Path,
     catalog_dir: &Path,
@@ -444,6 +507,7 @@ pub fn selection_state_with_manual_models(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub fn selection_state_with_manual_models_and_exclusions(
     home: &Path,
     catalog_dir: &Path,
@@ -464,6 +528,7 @@ pub fn selection_state_with_manual_models_and_exclusions(
         excluded_official_models,
         requested_default_model,
         None,
+        "",
     )
 }
 
@@ -478,12 +543,18 @@ pub(crate) fn selection_state_with_catalog_options(
     excluded_official_models: &[String],
     requested_default_model: Option<&str>,
     user_catalog: Option<&Path>,
+    codex_app_path: &str,
 ) -> Result<ModelSelectionState> {
     // Model provenance comes from the current provider snapshot, not from a
     // slug prefix. An API-key provider may legitimately expose a model whose
     // id also appears in the official catalog; it must stay a third-party
     // catalog entry instead of acquiring official-account semantics.
-    let official_catalog = match read_official_entries(home, catalog_dir, user_catalog) {
+    let official_catalog = match read_official_entries_for_app(
+        home,
+        catalog_dir,
+        user_catalog,
+        codex_app_path,
+    ) {
         Ok(catalog) => catalog,
         Err(error) if official_provider => return Err(error),
         Err(_) => Arc::new(OfficialCatalogEntries::default()),
@@ -576,7 +647,11 @@ pub(crate) fn selection_state_with_catalog_options(
     Ok(ModelSelectionState {
         official_models,
         official_model_ids,
-        official_model_order: official_model_order(home, catalog_dir),
+        official_model_order: if user_catalog.is_none() {
+            official_catalog.official_order.clone()
+        } else {
+            official_model_order(home, catalog_dir, codex_app_path)
+        },
         third_party_models,
         third_party_model_metadata,
         manual_third_party_models,
@@ -645,11 +720,26 @@ pub fn is_available(catalog_dir: &Path) -> bool {
 
 /// 用户目录只覆盖明确配置的预算，保留模型指令和其余元数据，也不执行
 /// Codey 缓存迁移。每次从原目录生成，恢复默认不会继承旧副本的预算。
+#[cfg(test)]
 pub(crate) fn render_context_catalog_overlay(
     source: &Path,
     contexts: &BTreeMap<String, crate::config::ModelContextConfig>,
 ) -> Result<Option<Vec<u8>>> {
-    if contexts.is_empty() {
+    render_context_catalog_overlay_with_required_models(
+        source.parent().unwrap(),
+        source,
+        contexts,
+        &[],
+    )
+}
+
+pub(crate) fn render_context_catalog_overlay_with_required_models(
+    home: &Path,
+    source: &Path,
+    contexts: &BTreeMap<String, crate::config::ModelContextConfig>,
+    required_models: &[String],
+) -> Result<Option<Vec<u8>>> {
+    if contexts.is_empty() && required_models.is_empty() {
         return Ok(None);
     }
     let bytes = fs::read(source)
@@ -669,37 +759,130 @@ pub(crate) fn render_context_catalog_overlay(
                 .or_insert(Some(index));
         }
     }
-    for (model, policy) in contexts {
-        let index = match indices.get(&model_id::key(model)) {
-            Some(Some(index)) => *index,
-            Some(None) => {
-                return Err(ContextBudgetCatalogError(anyhow::anyhow!(
-                    "自定义模型目录中的预算模型重复：{model}（{}）",
-                    source.display()
-                ))
-                .into());
-            }
-            None => {
-                return Err(ContextBudgetCatalogError(anyhow::anyhow!(
-                    "自定义模型目录缺少已启用的预算模型：{model}（{}）",
-                    source.display()
-                ))
-                .into());
+    let mut targets = contexts
+        .iter()
+        .map(|(model, policy)| (model_id::key(model), (model.as_str(), Some(policy))))
+        .collect::<BTreeMap<_, _>>();
+    for model in required_models {
+        targets
+            .entry(model_id::key(model))
+            .or_insert((model.as_str(), None));
+    }
+    let mut runtime_models = None;
+    let mut supplemented = false;
+    for (key, (model, policy)) in targets {
+        let kind = if policy.is_some() {
+            "预算模型"
+        } else {
+            "必需模型"
+        };
+        let target_error = |error: anyhow::Error| -> anyhow::Error {
+            if policy.is_some() {
+                ContextBudgetCatalogError(error).into()
+            } else {
+                error
             }
         };
-        apply_model_context(&mut models[index], Some(policy)).map_err(ContextBudgetCatalogError)?;
+        let missing_model = || {
+            anyhow::anyhow!(
+                "自定义模型目录缺少已启用的{kind}：{model}（{}）",
+                source.display()
+            )
+        };
+        let index = match indices.get(&key) {
+            Some(Some(index)) => *index,
+            Some(None) => {
+                return Err(target_error(anyhow::anyhow!(
+                    "自定义模型目录中的{kind}重复：{model}（{}）",
+                    source.display()
+                )));
+            }
+            None => {
+                let runtime_path = derived_catalog_path(home);
+                // 普通运行时读取会去重；补齐前必须保留原数组以检查歧义。
+                let fallback = match &runtime_models {
+                    Some(models) => models,
+                    None => {
+                        let models = read_context_fallback_models(&runtime_path)
+                            .with_context(missing_model)
+                            .map_err(target_error)?;
+                        runtime_models.insert(models)
+                    }
+                };
+                let mut matches = fallback.iter().filter(|candidate| {
+                    candidate
+                        .get("slug")
+                        .and_then(Value::as_str)
+                        .is_some_and(|slug| model_id::key(slug) == key)
+                });
+                let candidate = matches
+                    .next()
+                    .ok_or_else(|| target_error(missing_model()))?;
+                if matches.next().is_some() {
+                    return Err(target_error(anyhow::anyhow!(
+                        "Codey 运行时模型目录中的{kind}重复：{model}（{}）",
+                        runtime_path.display()
+                    )));
+                }
+                if !runtime_compatible_models(std::slice::from_ref(candidate)) {
+                    return Err(target_error(anyhow::anyhow!(
+                        "Codey 运行时模型目录中的{kind}缺少 Codex 必需字段：{model}（{}）",
+                        runtime_path.display()
+                    )));
+                }
+                let mut candidate = candidate.clone();
+                if policy.is_none()
+                    && candidate
+                        .get("codey_context_source")
+                        .and_then(Value::as_str)
+                        == Some("user_declared")
+                    && candidate.get("codey_context_base").is_some()
+                {
+                    // 仅恢复已取消的用户预算，不迁移后备元数据或移除插件预算。
+                    configure_1m_context_window(&mut candidate, &HashSet::new());
+                }
+                let index = models.len();
+                models.push(candidate);
+                indices.insert(key, Some(index));
+                supplemented = true;
+                index
+            }
+        };
+        apply_model_context(&mut models[index], policy).map_err(ContextBudgetCatalogError)?;
+    }
+    if contexts.is_empty() && !supplemented {
+        return Ok(None);
     }
     let mut bytes = serde_json::to_vec_pretty(&catalog).context("序列化模型预算副本失败")?;
     bytes.push(b'\n');
     Ok(Some(bytes))
 }
 
+fn read_context_fallback_models(path: &Path) -> Result<Vec<Value>> {
+    let bytes = fs::read(path)
+        .with_context(|| format!("读取 Codey 运行时模型目录失败：{}", path.display()))?;
+    let catalog: Value = serde_json::from_slice(&bytes)
+        .with_context(|| format!("解析 Codey 运行时模型目录失败：{}", path.display()))?;
+    catalog
+        .get("models")
+        .and_then(Value::as_array)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("Codey 运行时模型目录缺少 models 数组：{}", path.display()))
+}
+
 pub(crate) fn prepare_context_catalog_overlay(
     catalog_dir: &Path,
     source: &Path,
     contexts: &BTreeMap<String, crate::config::ModelContextConfig>,
+    required_models: &[String],
 ) -> Result<PathBuf> {
-    let Some(bytes) = render_context_catalog_overlay(source, contexts)? else {
+    let Some(bytes) = render_context_catalog_overlay_with_required_models(
+        catalog_dir,
+        source,
+        contexts,
+        required_models,
+    )?
+    else {
         return Ok(source.to_path_buf());
     };
     // 内容变化使用新路径，保存设置或另一个进程启动不会改写运行中的目录。
@@ -820,11 +1003,32 @@ fn configure_1m_context_window(model: &mut Value, allowed_model_keys: &HashSet<S
     }
 }
 
-pub(crate) fn runtime_context_metadata(
+pub(crate) fn context_metadata_for_config(
     catalog_dir: &Path,
+    config: &crate::config::CodeyConfig,
 ) -> std::collections::BTreeMap<String, serde_json::Map<String, Value>> {
-    read_runtime_catalog_models(catalog_dir)
-        .unwrap_or_default()
+    let mut models = read_runtime_catalog_models(catalog_dir).unwrap_or_default();
+    let allowed = config
+        .runtime_1m_context_model_aliases()
+        .iter()
+        .map(|id| model_id::key(id))
+        .collect();
+    let contexts = config.runtime_enabled_model_contexts();
+    // 共享目录可能已写入下次启动的预算，显示值按已生效配置重新计算。
+    for model in &mut models {
+        configure_1m_context_window(model, &allowed);
+        let policy = model["slug"].as_str().and_then(|slug| {
+            contexts
+                .iter()
+                .find(|(key, _)| model_id::equal(key, slug))
+                .map(|(_, policy)| policy)
+        });
+        if let Err(error) = apply_model_context(model, policy) {
+            eprintln!("计算已生效模型预算失败：{error:#}");
+            return BTreeMap::new();
+        }
+    }
+    models
         .into_iter()
         .filter_map(|model| {
             let slug = model["slug"].as_str()?.to_string();
@@ -960,12 +1164,17 @@ pub(crate) fn prepare_cached_catalog_for_native_web_search(
     let mut changed = false;
     for model in &mut models {
         let previous = model.clone();
+        if model["codey_source"] == "third_party" {
+            clear_compaction_identity(model);
+        }
         gate_cached_native_web_search(model, &allowed_model_keys);
         configure_1m_context_window(model, &context_1m_model_keys);
         changed |= *model != previous;
     }
     if changed {
-        write_derived_catalog(catalog_dir, &json!({ "models": models }))?;
+        let mut catalog = read_derived_catalog(catalog_dir).unwrap_or_else(|| json!({}));
+        catalog["models"] = json!(models);
+        write_derived_catalog(catalog_dir, &catalog)?;
     }
 
     let written_models = read_runtime_catalog_models(catalog_dir)?;
@@ -989,15 +1198,20 @@ pub fn is_runtime_model_cache_unavailable(error: &anyhow::Error) -> bool {
 /// launch and across repeated config-page lookups. The paths are part of the
 /// key so entries can never leak between Codex homes.
 type CatalogSignature = Vec<(PathBuf, u64, Option<std::time::SystemTime>)>;
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct OfficialCatalogEntries {
     candidates: Vec<Value>,
     templates: Vec<Value>,
     official_order: Vec<String>,
 }
 
-type OfficialEntriesCache =
-    std::sync::Mutex<Option<(CatalogSignature, std::sync::Arc<OfficialCatalogEntries>)>>;
+type OfficialEntriesCache = std::sync::Mutex<
+    Option<(
+        CatalogSignature,
+        Option<runtime_source::RuntimeCatalogSource>,
+        std::sync::Arc<OfficialCatalogEntries>,
+    )>,
+>;
 
 static OFFICIAL_ENTRIES_CACHE: std::sync::OnceLock<OfficialEntriesCache> =
     std::sync::OnceLock::new();
@@ -1012,43 +1226,57 @@ fn catalog_signature(paths: &[PathBuf]) -> CatalogSignature {
         .collect()
 }
 
-fn read_official_entries(
+fn read_official_entries_for_app(
     codex_home: &Path,
     catalog_dir: &Path,
     user_catalog: Option<&Path>,
+    codex_app_path: &str,
 ) -> Result<std::sync::Arc<OfficialCatalogEntries>> {
+    let source = runtime_source::catalog_source_for_app(codex_app_path);
     let mut paths = user_catalog
         .into_iter()
         .map(Path::to_path_buf)
         .collect::<Vec<_>>();
-    paths.extend([
-        codex_home.join("models_cache.json"),
-        derived_catalog_path(catalog_dir),
-    ]);
+    paths.push(codex_home.join("models_cache.json"));
+    paths.push(derived_catalog_path(catalog_dir));
     let signature = catalog_signature(&paths);
     let cache = OFFICIAL_ENTRIES_CACHE.get_or_init(|| std::sync::Mutex::new(None));
     if let Ok(guard) = cache.lock()
-        && let Some((cached_signature, entries)) = guard.as_ref()
+        && let Some((cached_signature, cached_source, entries)) = guard.as_ref()
         && *cached_signature == signature
+        && cached_source.as_ref() == source.as_ref().ok()
     {
         // 缓存命中只递增引用计数；下游要么只读、要么本来就会拷贝出自己的
         // 工作副本，无需整目录深拷贝。
         return Ok(std::sync::Arc::clone(entries));
     }
-    let entries = std::sync::Arc::new(read_official_entries_uncached(
-        &paths,
-        user_catalog.is_some(),
-    )?);
+    let rejection = runtime_source::validate_catalog_source_with(catalog_dir, &source).err();
+    if let Some(error) = &rejection {
+        eprintln!("拒绝模型目录：{error:#}");
+        paths.pop();
+    }
+    let entries = read_official_entries_uncached(&paths, user_catalog.is_some());
+    let entries = std::sync::Arc::new(match rejection {
+        Some(error) => entries.with_context(|| format!("拒绝模型目录：{error:#}"))?,
+        None => entries?,
+    });
     if let Ok(mut guard) = cache.lock() {
-        *guard = Some((signature, std::sync::Arc::clone(&entries)));
+        *guard = Some((signature, source.ok(), std::sync::Arc::clone(&entries)));
     }
     Ok(entries)
 }
 
-pub(crate) fn official_model_order(home: &Path, catalog_dir: &Path) -> Vec<String> {
-    read_official_entries(home, catalog_dir, None)
+pub(crate) fn official_model_order(
+    home: &Path,
+    catalog_dir: &Path,
+    codex_app_path: &str,
+) -> Vec<String> {
+    read_official_entries_for_app(home, catalog_dir, None, codex_app_path)
         .map(|catalog| catalog.official_order.clone())
-        .unwrap_or_default()
+        .unwrap_or_else(|error| {
+            eprintln!("读取官方模型排序失败：{error:#}");
+            Vec::new()
+        })
 }
 
 fn read_official_entries_uncached(
@@ -1221,14 +1449,17 @@ pub(crate) fn available_official_models(
     codex_home: &Path,
     catalog_dir: &Path,
     user_catalog: Option<&Path>,
+    codex_app_path: &str,
 ) -> Result<Vec<OfficialModel>> {
-    read_official_entries(codex_home, catalog_dir, user_catalog).map(|catalog| {
-        catalog
-            .candidates
-            .iter()
-            .filter_map(official_model_from_value)
-            .collect()
-    })
+    read_official_entries_for_app(codex_home, catalog_dir, user_catalog, codex_app_path).map(
+        |catalog| {
+            catalog
+                .candidates
+                .iter()
+                .filter_map(official_model_from_value)
+                .collect()
+        },
+    )
 }
 
 fn complete_reasoning_metadata(model: &mut Value, fallbacks: &[&Value]) {
@@ -1789,6 +2020,7 @@ fn synthetic_model(
     model["priority"] = json!(1000 + index);
     model["supported_in_api"] = json!(true);
     model["codey_source"] = json!("third_party");
+    clear_compaction_identity(&mut model);
     model["default_reasoning_level"] = json!(THIRD_PARTY_DEFAULT_REASONING_EFFORT);
     model["supported_reasoning_levels"] =
         third_party_reasoning_levels(model_id, template, preserve_source_runtime_metadata);
@@ -1812,6 +2044,12 @@ fn synthetic_model(
     clamp_reasoning_efforts(&mut model);
     add_fast_speed_controls(&mut model);
     model
+}
+
+fn clear_compaction_identity(model: &mut Value) {
+    if let Some(object) = model.as_object_mut() {
+        object.remove("comp_hash");
+    }
 }
 
 fn gate_synthetic_native_web_search(model: &mut Value, allowed_model_keys: &HashSet<String>) {
@@ -2354,6 +2592,7 @@ mod tests {
         let excluded = vec!["gpt-5.3-codex-spark".to_string()];
 
         refresh_catalog(CatalogRefreshArgs {
+            codex_app_path: "",
             codex_home: home.path(),
             catalog_dir: home.path(),
             official_provider: true,
@@ -2452,6 +2691,7 @@ mod tests {
         let context_1m_models = selected.clone();
 
         refresh_catalog(CatalogRefreshArgs {
+            codex_app_path: "",
             codex_home: home.path(),
             catalog_dir: home.path(),
             official_provider: false,
@@ -2542,6 +2782,7 @@ mod tests {
             &[],
             None,
             Some(&user_catalog),
+            "",
         )
         .unwrap();
 
@@ -2765,12 +3006,14 @@ mod tests {
         .unwrap();
         fs::write(&user_path, &original).unwrap();
 
-        let models = available_official_models(home.path(), home.path(), Some(&user_path)).unwrap();
+        let models =
+            available_official_models(home.path(), home.path(), Some(&user_path), "").unwrap();
 
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].slug, "user-only-model");
         assert_eq!(models[0].display_name, "User Model");
         refresh_catalog(CatalogRefreshArgs {
+            codex_app_path: "",
             codex_home: home.path(),
             catalog_dir: home.path(),
             official_provider: true,
@@ -3056,6 +3299,7 @@ mod tests {
         )
         .unwrap();
 
+        runtime_source::stamp_catalog(home.path(), "").unwrap();
         refresh_for_provider(home.path(), true, None, &[]).unwrap();
 
         let generated: Value =
@@ -3407,7 +3651,7 @@ mod tests {
             .unwrap();
         assert_eq!(gpt_56["use_responses_lite"], true);
         assert_eq!(gpt_56["tool_mode"], "code_mode_only");
-        assert_eq!(gpt_56["comp_hash"], "3000");
+        assert!(gpt_56.get("comp_hash").is_none());
         assert_eq!(gpt_56["default_service_tier"], "priority");
         assert_eq!(gpt_56["prefer_websockets"], true);
         assert_eq!(gpt_56["include_skills_usage_instructions"], false);
@@ -3431,7 +3675,7 @@ mod tests {
             .unwrap();
         assert_eq!(gpt_55["use_responses_lite"], false);
         assert!(gpt_55.get("tool_mode").is_none());
-        assert_eq!(gpt_55["comp_hash"], "2911");
+        assert!(gpt_55.get("comp_hash").is_none());
         assert_eq!(gpt_55["include_skills_usage_instructions"], true);
         assert_eq!(gpt_55["experimental_supported_tools"], json!([]));
         assert_eq!(
@@ -3488,6 +3732,7 @@ mod tests {
         let websocket_models = vec!["route-ws/gpt-5.6-sol".to_string()];
 
         refresh_catalog(CatalogRefreshArgs {
+            codex_app_path: "",
             codex_home: home.path(),
             catalog_dir: home.path(),
             official_provider: false,
@@ -3533,6 +3778,7 @@ mod tests {
         ];
 
         refresh_catalog(CatalogRefreshArgs {
+            codex_app_path: "",
             codex_home: home.path(),
             catalog_dir: home.path(),
             official_provider: false,
@@ -3578,6 +3824,7 @@ mod tests {
         let selected = vec!["route-search/gpt-5.6-sol".to_string()];
 
         refresh_catalog(CatalogRefreshArgs {
+            codex_app_path: "",
             codex_home: home.path(),
             catalog_dir: home.path(),
             official_provider: false,
@@ -3814,6 +4061,7 @@ mod tests {
         let catalog_path = home.path().join(DERIVED_CATALOG_FILE_NAME);
         fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
         fs::write(&catalog_path, serde_json::to_vec(&stale_catalog).unwrap()).unwrap();
+        runtime_source::stamp_catalog(home.path(), "").unwrap();
 
         refresh_for_provider(home.path(), true, None, &[]).unwrap();
 
@@ -4085,7 +4333,7 @@ mod tests {
     fn official_exclusions_mark_only_the_remaining_model_as_supported() {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
-        let excluded = available_official_models(home.path(), home.path(), None)
+        let excluded = available_official_models(home.path(), home.path(), None, "")
             .unwrap()
             .into_iter()
             .map(|model| model.slug)
@@ -4134,7 +4382,7 @@ mod tests {
     fn leftover_alias_does_not_revive_an_excluded_official_model() {
         let home = tempfile::tempdir().unwrap();
         write_cache(home.path());
-        let excluded = available_official_models(home.path(), home.path(), None)
+        let excluded = available_official_models(home.path(), home.path(), None, "")
             .unwrap()
             .into_iter()
             .map(|model| model.slug)
@@ -4274,6 +4522,7 @@ mod tests {
         )
         .unwrap();
 
+        runtime_source::stamp_catalog(&catalog_dir, "").unwrap();
         let missed = selection_state_with_manual_models(
             &codex_home,
             &codex_home,
@@ -4346,6 +4595,7 @@ mod tests {
         write_cache(&codex_home);
 
         refresh_catalog(CatalogRefreshArgs {
+            codex_app_path: "",
             codex_home: &codex_home,
             catalog_dir: &catalog_dir,
             official_provider: true,
@@ -4382,6 +4632,7 @@ mod tests {
         fs::write(&user_path, &user_bytes).unwrap();
 
         refresh_catalog(CatalogRefreshArgs {
+            codex_app_path: "",
             codex_home: &codex_home,
             catalog_dir: &catalog_dir,
             official_provider: true,
@@ -4430,11 +4681,11 @@ fn custom_context_overlay_preserves_source_and_uses_immutable_versions() {
             reserve_output_tokens: Some(16_000),
         },
     )]);
-    let first = prepare_context_catalog_overlay(home.path(), &source, &policies).unwrap();
+    let first = prepare_context_catalog_overlay(home.path(), &source, &policies, &[]).unwrap();
     assert_ne!(first, source);
     assert_eq!(
         first,
-        prepare_context_catalog_overlay(home.path(), &source, &policies).unwrap()
+        prepare_context_catalog_overlay(home.path(), &source, &policies, &[]).unwrap()
     );
     let first_bytes = fs::read(&first).unwrap();
     let first_value: Value = serde_json::from_slice(&first_bytes).unwrap();
@@ -4446,18 +4697,18 @@ fn custom_context_overlay_preserves_source_and_uses_immutable_versions() {
         .get_mut("gpt-5.6-sol")
         .unwrap()
         .context_window_tokens = 400_000;
-    let second = prepare_context_catalog_overlay(home.path(), &source, &policies).unwrap();
+    let second = prepare_context_catalog_overlay(home.path(), &source, &policies, &[]).unwrap();
     assert_ne!(first, second);
     assert_eq!(fs::read(&first).unwrap(), first_bytes);
     assert_eq!(
-        prepare_context_catalog_overlay(home.path(), &source, &BTreeMap::new()).unwrap(),
+        prepare_context_catalog_overlay(home.path(), &source, &BTreeMap::new(), &[]).unwrap(),
         source
     );
     assert_eq!(fs::read(&source).unwrap(), source_bytes);
     let mut updated = original;
     updated["models"][0]["base_instructions"] = json!("Updated by user");
     fs::write(&source, serde_json::to_vec(&updated).unwrap()).unwrap();
-    let third = prepare_context_catalog_overlay(home.path(), &source, &policies).unwrap();
+    let third = prepare_context_catalog_overlay(home.path(), &source, &policies, &[]).unwrap();
     assert_ne!(second, third);
     let latest: Value = serde_json::from_slice(&fs::read(third).unwrap()).unwrap();
     assert_eq!(latest["models"][0]["base_instructions"], "Updated by user");
@@ -4498,7 +4749,8 @@ fn custom_context_overlay_rejects_missing_ambiguous_or_invalid_models() {
     ] {
         let bytes = serde_json::to_vec(&catalog).unwrap();
         fs::write(&source, &bytes).unwrap();
-        let error = prepare_context_catalog_overlay(home.path(), &source, &policies).unwrap_err();
+        let error =
+            prepare_context_catalog_overlay(home.path(), &source, &policies, &[]).unwrap_err();
         assert!(error.to_string().contains(message), "{error}");
         assert_eq!(
             error.is::<ContextBudgetCatalogError>(),
@@ -4523,7 +4775,7 @@ fn custom_context_overlay_rejects_missing_ambiguous_or_invalid_models() {
         .get_mut("route/model")
         .unwrap()
         .auto_compact_token_limit = Some(128_000);
-    let error = prepare_context_catalog_overlay(home.path(), &source, &invalid).unwrap_err();
+    let error = prepare_context_catalog_overlay(home.path(), &source, &invalid, &[]).unwrap_err();
     assert!(error.is::<ContextBudgetCatalogError>());
     assert_eq!(fs::read(&source).unwrap(), original);
     assert!(!home.path().join("context-overrides").exists());
@@ -4563,3 +4815,11 @@ fn removed_context_budget_restores_declaration_or_enabled_legacy_1m() {
         1000000
     );
 }
+
+#[cfg(test)]
+#[path = "model_catalog/overlay_tests.rs"]
+mod overlay_tests;
+
+#[cfg(test)]
+#[path = "model_catalog/compaction_tests.rs"]
+mod compaction_tests;

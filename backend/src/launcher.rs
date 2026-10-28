@@ -8,7 +8,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use codey_runtime_core::app_paths::resolve_codex_app_dir_with_saved;
+use codey_runtime_core::app_paths::resolve_codex_app_dir_with_saved_checked;
 use codey_runtime_core::launcher::build_codex_command;
 use serde::Serialize;
 use serde_json::Value;
@@ -289,7 +289,12 @@ pub(crate) fn find_configured_codex_app_dir_sync(
     let configured_app_path = configured_app_path
         .map(|path| refresh_windows_packaged_app_dir(&path))
         .transpose()?;
-    let app_dir = resolve_codex_app_dir_with_saved(configured_app_path.as_deref(), None);
+    if let Some(path) = &configured_app_path
+        && !path.try_exists()?
+    {
+        return Ok(None);
+    }
+    let app_dir = resolve_codex_app_dir_with_saved_checked(configured_app_path.as_deref(), None)?;
     if let Some(app_dir) = app_dir.as_deref() {
         error_log::refresh_codex_app_version(Some(app_dir), None);
     }
@@ -384,16 +389,12 @@ async fn prepare_startup_model_catalog(
         ConfiguredModelCatalog::Unset | ConfiguredModelCatalog::CodeyOwned => None,
     };
     let contexts = config.runtime_enabled_model_contexts();
-    let user_catalog = user_catalog
-        .map(|source| {
-            model_catalog::prepare_context_catalog_overlay(&catalog_dir, &source, &contexts)
-        })
-        .transpose()?;
     let user_catalog_configured = user_catalog.is_some();
     let available_official_models = model_catalog::available_official_models(
         &catalog_home,
         &catalog_dir,
         user_catalog.as_deref(),
+        &config.codex_app_path,
     )?
     .into_iter()
     .map(|model| model.slug)
@@ -442,11 +443,13 @@ async fn prepare_startup_model_catalog(
         .unwrap_or_default();
     let requested_default_model = config.default_model().map(str::to_string);
     let excluded_official_models = config.official_model_exclusions(&list_key);
+    let codex_app_path = config.codex_app_path.clone();
     let catalog_dir_for_refresh = catalog_dir.clone();
     let user_catalog_for_refresh = user_catalog.clone();
     let (refresh_result, catalog_available, selection_result) =
         tokio::task::spawn_blocking(move || {
             let refresh = model_catalog::refresh_catalog(model_catalog::CatalogRefreshArgs {
+                codex_app_path: &codex_app_path,
                 codex_home: &catalog_home,
                 catalog_dir: &catalog_dir_for_refresh,
                 official_provider: refresh_official_provider,
@@ -460,6 +463,14 @@ async fn prepare_startup_model_catalog(
                 user_catalog: user_catalog_for_refresh.as_deref(),
             })
             .and_then(|count| {
+                if let Some(source) = user_catalog_for_refresh.as_deref() {
+                    model_catalog::prepare_context_catalog_overlay(
+                        &catalog_dir_for_refresh,
+                        source,
+                        &contexts,
+                        &runtime_selected_models,
+                    )?;
+                }
                 model_catalog::apply_catalog_contexts(
                     &catalog_dir_for_refresh,
                     &contexts,
@@ -467,8 +478,13 @@ async fn prepare_startup_model_catalog(
                 )?;
                 Ok(count)
             });
-            let catalog_available =
-                refresh.is_err() && model_catalog::is_available(&catalog_dir_for_refresh);
+            let catalog_available = refresh.is_err()
+                && model_catalog::validate_catalog_source(
+                    &catalog_dir_for_refresh,
+                    &codex_app_path,
+                )
+                .is_ok()
+                && model_catalog::is_available(&catalog_dir_for_refresh);
             let selection = model_catalog::selection_state_with_catalog_options(
                 &catalog_home,
                 &catalog_dir_for_refresh,
@@ -479,6 +495,7 @@ async fn prepare_startup_model_catalog(
                 &excluded_official_models,
                 requested_default_model.as_deref(),
                 user_catalog_for_refresh.as_deref(),
+                &codex_app_path,
             );
             (refresh, catalog_available, selection)
         })
@@ -1211,11 +1228,12 @@ impl StartupStageTimings {
 fn spawn_initial_storage_guards(
     home: &std::path::Path,
     config: &CodeyConfig,
+    trace_guard_state: Arc<trace_log_guard::TraceLogGuardState>,
 ) -> InitialStorageGuards {
     let trace_guard_home = home.to_path_buf();
     let disable_trace_log_writes = config.disable_trace_log_writes;
     let trace = tokio::task::spawn_blocking(move || {
-        trace_log_guard::configure(&trace_guard_home, disable_trace_log_writes)
+        trace_guard_state.configure(&trace_guard_home, disable_trace_log_writes)
     });
     let protect_crashpad_pending = config.protect_crashpad_pending;
     let crashpad = tokio::task::spawn_blocking(move || {
@@ -1739,6 +1757,7 @@ impl CodeyRuntime {
         config: &CodeyConfig,
         handler: codey_runtime_core::bridge::BridgeHandler,
         trace_log_write_protection_active: &AtomicBool,
+        trace_log_guard_state: Arc<trace_log_guard::TraceLogGuardState>,
         crashpad_pending_stats: CrashpadPendingStatsHandle,
     ) -> Result<(Self, oneshot::Receiver<()>)> {
         let mut stage_timings = StartupStageTimings::default();
@@ -1753,7 +1772,8 @@ impl CodeyRuntime {
         );
         resolve_startup_provider(config)?;
         stage_timings.mark("startupPreparationMs");
-        let initial_storage_guards = spawn_initial_storage_guards(home, config);
+        let initial_storage_guards =
+            spawn_initial_storage_guards(home, config, trace_log_guard_state);
         let (storage, startup_catalog) = prepare_startup_storage(
             home,
             config,

@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use super::{
     AppState, STARTUP_PROVIDER_MODEL_SYNC_TIMEOUT, SubagentHotReloadOutcome,
-    hot_reload_runtime_subagent_config, redacted_config, runtime_config_requires_restart,
+    redacted_config, runtime_config_requires_restart,
     save_config_to_store,
 };
 use crate::cdp;

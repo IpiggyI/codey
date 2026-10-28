@@ -240,6 +240,7 @@ pub(crate) fn config_with_current_provider_model_sync(
     let order = model_catalog::official_model_order(
         codex_home,
         &crate::codex_config::codey_model_catalog_dir(),
+        &next.codex_app_path,
     );
     crate::model_order::apply_provider_order(&mut next, &provider_id, &order);
     subagent_policy::reconcile_for_current_provider(&mut next, codex_home, false);

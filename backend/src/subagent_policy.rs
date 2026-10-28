@@ -114,14 +114,17 @@ pub(crate) fn reconcile_for_current_provider(
         .and_then(|key| config.manual_third_party_models_by_provider.get(key))
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let state = model_catalog::selection_state_with_manual_models(
+    let state = model_catalog::selection_state_with_catalog_options(
         codex_home,
         &crate::codex_config::codey_model_catalog_dir(),
         official_provider,
         upstream_models,
         &selected_models,
         manual_models,
+        &[],
         Some(&config.subagent_model),
+        None,
+        &config.codex_app_path,
     )
     .ok();
     reconcile_with_model_state(config, state.as_ref());

@@ -1,5 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    Mutex,
+    atomic::{AtomicU8, Ordering},
+};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -10,6 +14,50 @@ use serde::Serialize;
 /// lets Codey adopt an existing manual workaround and makes the off switch
 /// restore writes predictably.
 const BLOCK_INSERTS_TRIGGER: &str = "block_log_inserts";
+
+/// 启动、清理和后台配置应用共用；目标已应用不代表找到了可保护的数据库。
+#[derive(Default)]
+pub struct TraceLogGuardState {
+    operation: Mutex<()>,
+    applied: AtomicU8,
+}
+
+impl TraceLogGuardState {
+    pub fn applied_target(&self) -> Option<bool> {
+        match self.applied.load(Ordering::Acquire) {
+            1 => Some(false),
+            2 => Some(true),
+            _ => None,
+        }
+    }
+
+    pub fn configure(&self, home: &Path, disabled: bool) -> Result<TraceLogGuardReport> {
+        let _operation = self.operation.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = self.applied_target();
+        match configure(home, disabled) {
+            Ok(report) => {
+                self.applied
+                    .store(if disabled { 2 } else { 1 }, Ordering::Release);
+                Ok(report)
+            }
+            Err(error) => {
+                // 已知旧目标时，再核实所有数据库均已恢复。
+                self.applied.store(0, Ordering::Release);
+                if let Some(previous) = previous {
+                    match configure(home, previous) {
+                        Ok(_) => self
+                            .applied
+                            .store(if previous { 2 } else { 1 }, Ordering::Release),
+                        Err(rollback) => {
+                            anyhow::bail!("{error:#}；恢复 Trace 日志防护失败：{rollback:#}")
+                        }
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+}
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct TraceLogGuardReport {
@@ -259,6 +307,53 @@ mod tests {
                 );",
             )
             .unwrap();
+    }
+
+    #[test]
+    fn successful_target_without_database_does_not_claim_active_protection() {
+        let temp = tempfile::tempdir().unwrap();
+        let guard = TraceLogGuardState::default();
+        let report = guard.configure(temp.path(), true).unwrap();
+        assert_eq!(guard.applied_target(), Some(true));
+        assert!(!report.protection_active(true));
+        // 显式应用仍需扫描新建数据库。
+        create_log_database(&temp.path().join("logs_2.sqlite"));
+        assert!(
+            guard
+                .configure(temp.path(), true)
+                .unwrap()
+                .protection_active(true)
+        );
+    }
+
+    #[test]
+    fn failure_restores_previous_actual_target_and_recovery_can_apply_new_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("logs_1.sqlite");
+        create_log_database(&path);
+        let guard = TraceLogGuardState::default();
+        guard.configure(temp.path(), true).unwrap();
+        let corrupt = temp.path().join("logs_2.sqlite");
+        fs::write(&corrupt, "invalid sqlite database").unwrap();
+        assert!(guard.configure(temp.path(), false).is_err());
+        let connection = Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .execute("INSERT INTO logs(level) VALUES ('TRACE')", [])
+                .unwrap(),
+            0
+        );
+        // 无法核实全部数据库时，应用目标保持未知。
+        assert_eq!(guard.applied_target(), None);
+        fs::remove_file(corrupt).unwrap();
+        guard.configure(temp.path(), false).unwrap();
+        assert_eq!(guard.applied_target(), Some(false));
+        assert_eq!(
+            connection
+                .execute("INSERT INTO logs(level) VALUES ('TRACE')", [])
+                .unwrap(),
+            1
+        );
     }
 
     #[test]

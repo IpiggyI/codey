@@ -1082,6 +1082,35 @@ fn reconcile_runtime_subagent_roles_at(
     })
 }
 
+#[cfg(test)]
+pub(crate) fn prepare_subagent_apply_test(
+    home: &Path,
+    marker: &Path,
+    config: &CodeyConfig,
+) -> Result<()> {
+    apply_isolated_test_runtime_config(
+        home,
+        false,
+        None,
+        true,
+        &config.subagent_model,
+        &config.subagent_reasoning_effort,
+        Some(&config.subagent_roles),
+        marker,
+        &marker.with_file_name("codex-backups"),
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn reconcile_subagent_apply_test(
+    config: &CodeyConfig,
+    marker: &Path,
+) -> Result<RuntimeSubagentReconcileReport> {
+    let _runtime_config_lock = RuntimeConfigLock::acquire(marker)?;
+    reconcile_runtime_subagent_roles_at(config, marker)
+}
+
 fn runtime_agent_files_match(plans: &[RuntimeAgentPlan]) -> Result<bool> {
     for plan in plans {
         let contents = match fs::read(&plan.registration.config_file) {

@@ -5,11 +5,22 @@ pub(crate) struct ModelHotReloadOutcome {
     pub(crate) reloaded: bool,
     pub(crate) deferred: bool,
     pub(crate) error: Option<String>,
+    pub(crate) config_apply: Option<Value>,
 }
 
 impl ModelHotReloadOutcome {
+    pub(crate) fn queued(state: &Arc<AppState>, reconcile: bool) -> Self {
+        Self {
+            config_apply: Some(super::super::config_apply::enqueue(state, reconcile)),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn add_to_response(self, mut response: Value) -> Value {
         if let Some(object) = response.as_object_mut() {
+            if let Some(status) = self.config_apply {
+                object.insert("configApply".into(), status);
+            }
             object.insert("modelHotReloaded".into(), Value::Bool(self.reloaded));
             if self.deferred {
                 object.insert("modelHotReloadDeferred".into(), Value::Bool(true));
@@ -51,6 +62,10 @@ async fn refresh_current_renderer(
 
 pub(crate) async fn hot_reload_runtime_models(state: &Arc<AppState>) -> ModelHotReloadOutcome {
     let _operation = state.runtime_operation.lock().await;
+    hot_reload_runtime_models_locked(state).await
+}
+
+pub(crate) async fn hot_reload_runtime_models_locked(state: &Arc<AppState>) -> ModelHotReloadOutcome {
     let _delivery = state.model_delivery_lock.lock().await;
     if state.is_shutting_down() {
         return ModelHotReloadOutcome::default();
@@ -82,6 +97,7 @@ pub(crate) async fn hot_reload_runtime_models(state: &Arc<AppState>) -> ModelHot
                 reloaded: true,
                 deferred: refresh.deferred,
                 error: None,
+                config_apply: None,
             }
         }
         Err(error) => {

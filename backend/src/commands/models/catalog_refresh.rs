@@ -20,14 +20,29 @@ pub(crate) fn refresh_model_catalog_or_fallback(
         crate::codex_config::configured_user_model_catalog_path(codex_home(), &catalog_dir)
             .map_err(|error| error.to_string())?
     {
-        model_catalog::render_context_catalog_overlay(&source, &contexts)
-            .map_err(|error| format!("{error:#}"))?;
+        model_catalog::render_context_catalog_overlay_with_required_models(
+            &crate::codex_config::codey_model_catalog_dir(),
+            &source,
+            &contexts,
+            &config.runtime_catalog_models().1,
+        )
+        .map_err(|error| format!("{error:#}"))?;
     }
     let snapshot = model_catalog::snapshot(&catalog_dir).map_err(|error| error.to_string())?;
     let native_web_search_models = config.runtime_native_web_search_model_aliases();
     let context_1m_models = config.runtime_1m_context_model_aliases();
+    let refresh_result = try_refresh_model_catalog(config);
+    if refresh_result.is_err()
+        && let Err(error) =
+            model_catalog::validate_catalog_source(&catalog_dir, &config.codex_app_path)
+    {
+        return Err(rollback_model_catalog_snapshot(
+            snapshot,
+            format!("{error:#}"),
+        ));
+    }
     let result = model_catalog_fallback(
-        try_refresh_model_catalog(config),
+        refresh_result,
         &catalog_dir,
         &native_web_search_models,
         &context_1m_models,
@@ -71,9 +86,13 @@ pub(crate) async fn refreshed_model_state_async(
         &crate::codex_config::codey_model_catalog_dir(),
     )
     .and_then(|source| match source {
-        Some(source) => {
-            model_catalog::render_context_catalog_overlay(&source, &contexts).map(|_| ())
-        }
+        Some(source) => model_catalog::render_context_catalog_overlay_with_required_models(
+            &crate::codex_config::codey_model_catalog_dir(),
+            &source,
+            &contexts,
+            &config.runtime_catalog_models().1,
+        )
+        .map(|_| ()),
         None => Ok(()),
     });
     if let Err(error) = validation {
@@ -240,11 +259,15 @@ pub(crate) fn try_refresh_model_catalog(config: &CodeyConfig) -> anyhow::Result<
     let home = codex_home();
     let catalog_dir = crate::codex_config::codey_model_catalog_dir();
     let user_catalog = crate::codex_config::configured_user_model_catalog_path(home, &catalog_dir)?;
-    let available_official_models =
-        model_catalog::available_official_models(home, &catalog_dir, user_catalog.as_deref())?
-            .into_iter()
-            .map(|model| model.slug)
-            .collect::<Vec<_>>();
+    let available_official_models = model_catalog::available_official_models(
+        home,
+        &catalog_dir,
+        user_catalog.as_deref(),
+        &config.codex_app_path,
+    )?
+    .into_iter()
+    .map(|model| model.slug)
+    .collect::<Vec<_>>();
     let mut config = config.clone();
     config.synchronize_runtime_official_model_selections(&available_official_models);
     let has_third_party_route = config.has_third_party_route();
@@ -258,7 +281,9 @@ pub(crate) fn try_refresh_model_catalog(config: &CodeyConfig) -> anyhow::Result<
             .iter()
             .any(|profile| profile.official_account);
     let excluded_official_models = config.runtime_official_model_exclusions();
+    let codex_app_path = config.codex_app_path.clone();
     model_catalog::refresh_catalog(model_catalog::CatalogRefreshArgs {
+        codex_app_path: &codex_app_path,
         codex_home: home,
         catalog_dir: &catalog_dir,
         official_provider: config.official_account_available_this_launch && !has_third_party_route,

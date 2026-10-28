@@ -65,9 +65,9 @@ pub async fn fetch_route_models(
         return Err(rollback_model_catalog_after_config_save_async(catalog_refresh, error).await);
     }
     *state.config.write().await = latest.clone();
+    let hot_reload = ModelHotReloadOutcome::queued(state, true);
     drop(_config_write_guard);
-    let hot_reload = hot_reload_runtime_models(state).await;
-    let subagent_hot_reload = hot_reload_runtime_subagent_config(state, &latest).await;
+    let subagent_hot_reload = SubagentHotReloadOutcome::default();
     let restart_required = runtime_config_requires_restart(state, &latest).await;
     Ok(add_subagent_hot_reload_to_response(
         hot_reload.add_to_response(json!({

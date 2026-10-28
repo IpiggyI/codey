@@ -8,6 +8,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
+mod config_apply;
 mod config_repair;
 mod diagnostics;
 mod models;
@@ -19,7 +20,7 @@ mod webhooks;
 mod wechat_claw;
 
 #[cfg(windows)]
-use codey_runtime_core::app_paths::{build_codex_executable, normalize_codex_app_path};
+use codey_runtime_core::app_paths::{build_codex_executable, normalize_codex_app_path_checked};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify, RwLock, oneshot, watch};
@@ -35,7 +36,7 @@ use models::{
     validate_deleted_third_party_models, validate_manual_model_selection,
 };
 use models::{
-    current_model_state_async, hot_reload_runtime_models,
+    current_model_state_async,
     native_web_search_capability_requires_restart, official_route_snapshots,
     remote_compaction_transport_requires_restart, runtime_supports_current_routes_for_hot_reload,
     sync_current_third_party_provider_state, sync_provider_models_for_launch,
@@ -109,6 +110,11 @@ pub struct AppState {
     pub store: ConfigStore,
     pub config: RwLock<CodeyConfig>,
     config_write_lock: Mutex<()>,
+    config_apply: BlockingMutex<config_apply::ApplyQueue>,
+    runtime_handle: Option<tokio::runtime::Handle>,
+    trace_log_guard_state: Arc<trace_log_guard::TraceLogGuardState>,
+    #[cfg(test)]
+    slow_apply_test: slow_apply_tests::TestHooks,
     provider_model_sync_lock: Mutex<()>,
     pub http_client: reqwest::Client,
     #[cfg(test)]
@@ -233,6 +239,11 @@ impl AppState {
             store,
             config: RwLock::new(config),
             config_write_lock: Mutex::new(()),
+            config_apply: BlockingMutex::new(config_apply::ApplyQueue::default()),
+            runtime_handle: tokio::runtime::Handle::try_current().ok(),
+            trace_log_guard_state: Arc::new(trace_log_guard::TraceLogGuardState::default()),
+            #[cfg(test)]
+            slow_apply_test: slow_apply_tests::TestHooks::default(),
             provider_model_sync_lock: Mutex::new(()),
             http_client: reqwest::Client::builder()
                 .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
@@ -698,6 +709,8 @@ pub(super) async fn prepare_routes_for_current_launch(state: &Arc<AppState>) -> 
     .map_err(|error| format!("{USER_CONFIG_PARSE_ERROR_PREFIX}：{error:#}"))?;
 
     let configured_codex_app_path = state.config.read().await.codex_app_path.clone();
+    let catalog_app_path = configured_codex_app_path.clone();
+    let order_app_path = configured_codex_app_path.clone();
     let official_status = tokio::task::spawn_blocking(move || {
         crate::codex_provider::current_official_account_profile_status_for_launch(
             &home,
@@ -716,6 +729,7 @@ pub(super) async fn prepare_routes_for_current_launch(state: &Arc<AppState>) -> 
                 &model_home,
                 &catalog_dir,
                 user_catalog.as_deref(),
+                &catalog_app_path,
             )
             .map(|models| {
                 models
@@ -738,6 +752,7 @@ pub(super) async fn prepare_routes_for_current_launch(state: &Arc<AppState>) -> 
             model_catalog::official_model_order(
                 codex_home(),
                 &crate::codex_config::codey_model_catalog_dir(),
+                &order_app_path,
             )
         })
         .await
@@ -1305,9 +1320,12 @@ fn validate_codex_app_path(path: &str) -> Result<PathBuf, String> {
         return Err("请先选择 Codex 桌面应用所在目录".to_string());
     }
 
-    let app_dir = normalize_codex_app_path(Path::new(selected)).ok_or_else(|| {
-        "所选目录不是可启动的 Codex 桌面应用。请选择包含 ChatGPT.exe 或 Codex.exe 的目录，不要选择 codex.exe 命令行程序".to_string()
-    })?;
+    let app_dir = normalize_codex_app_path_checked(Path::new(selected))
+        .and_then(|app_dir| {
+            codey_runtime_core::app_paths::validate_codex_app_dir(&app_dir)?;
+            Ok(app_dir)
+        })
+        .map_err(|error| format!("{error:#}"))?;
     let executable = build_codex_executable(&app_dir);
     if !executable.is_file() {
         return Err(format!(
@@ -1430,12 +1448,15 @@ async fn save_codey_config_input(
 ) -> Result<Value, String> {
     let saved = {
         let _config_write_guard = state.config_write_lock.lock().await;
-        save_codey_config_locked(state, config_input).await
+        let mut saved = save_codey_config_locked(state, config_input).await?;
+        saved.config_apply = config_apply::enqueue(state, saved.reconcile_subagent_config);
+        Ok::<_, String>(saved)
     }?;
     finish_codey_config_save(state, saved).await
 }
 
 struct SavedCodeyConfig {
+    config_apply: Value,
     config: CodeyConfig,
     reconcile_subagent_config: bool,
     fast_context_tools_status: FastContextToolsStatus,
@@ -1554,60 +1575,13 @@ async fn save_codey_config_locked(
     let reconcile_subagent_config = should_reconcile_runtime_subagent_config(&previous, &config);
     config.settings_revision = previous.settings_revision.saturating_add(1);
     let trace_guard_changed = config.disable_trace_log_writes != previous.disable_trace_log_writes;
-    let _diagnostic_operation = if trace_guard_changed {
-        Some(state.diagnostic_storage_operation.lock().await)
-    } else {
-        None
-    };
-    let trace_guard_report = if trace_guard_changed {
-        let home = codex_home().to_path_buf();
-        let disable_writes = config.disable_trace_log_writes;
-        match configure_trace_log_guard(home.clone(), disable_writes).await {
-            Ok(report) => Some(report),
-            Err(error) => {
-                let error =
-                    rollback_trace_log_guard(home, previous.disable_trace_log_writes, error).await;
-                state
-                    .trace_log_write_protection_active
-                    .store(false, Ordering::Release);
-                error_log::record_failure(
-                    "patch_failed",
-                    "configure_trace_log_guard",
-                    error.clone(),
-                    json!({
-                        "disabled": disable_writes,
-                        "source": "save_codey_config",
-                    }),
-                );
-                return Err(error);
-            }
-        }
-    } else {
-        None
-    };
-    if let Err(error) = save_config_to_store(state, &config).await {
-        if trace_guard_changed {
-            let error = rollback_trace_log_guard(
-                codex_home().to_path_buf(),
-                previous.disable_trace_log_writes,
-                error,
-            )
-            .await;
-            state
-                .trace_log_write_protection_active
-                .store(false, Ordering::Release);
-            return Err(error);
-        }
-        return Err(error);
-    }
+    save_config_to_store(state, &config).await?;
     *state.config.write().await = config.clone();
-    if let Some(report) = trace_guard_report {
-        state.trace_log_write_protection_active.store(
-            report.protection_active(config.disable_trace_log_writes),
-            Ordering::Release,
-        );
+    if trace_guard_changed {
+        config_apply::request_trace_apply(state);
     }
     Ok(SavedCodeyConfig {
+        config_apply: Value::Null,
         config,
         reconcile_subagent_config,
         fast_context_tools_status,
@@ -1635,57 +1609,28 @@ fn embedded_fast_context_tools_enabled(requested: bool, status: &FastContextTool
 async fn configure_trace_log_guard(
     home: PathBuf,
     disable_writes: bool,
+    guard: Arc<trace_log_guard::TraceLogGuardState>,
 ) -> Result<trace_log_guard::TraceLogGuardReport, String> {
-    tokio::task::spawn_blocking(move || trace_log_guard::configure(&home, disable_writes))
+    tokio::task::spawn_blocking(move || guard.configure(&home, disable_writes))
         .await
         .map_err(|error| format!("Trace 日志保护切换任务异常退出：{error}"))?
         .map_err(|error| error.to_string())
-}
-
-async fn rollback_trace_log_guard(
-    home: PathBuf,
-    previous_disable_writes: bool,
-    primary_error: String,
-) -> String {
-    match configure_trace_log_guard(home, previous_disable_writes).await {
-        Ok(_) => primary_error,
-        Err(rollback_error) => {
-            error_log::record_failure(
-                "restore_failed",
-                "rollback_trace_log_guard",
-                rollback_error.clone(),
-                json!({
-                    "disabled": previous_disable_writes,
-                    "source": "save_codey_config",
-                }),
-            );
-            format!("{primary_error}；回滚 Trace 日志保护也失败：{rollback_error}")
-        }
-    }
 }
 
 async fn finish_codey_config_save(
     state: &Arc<AppState>,
     saved: SavedCodeyConfig,
 ) -> Result<Value, String> {
-    sync_waiting_webhook_watcher(state).await;
-    sync_wechat_claw_service(state).await;
-    if let Some(runtime) = state.runtime.lock().await.clone() {
-        runtime.set_crashpad_pending_protection(saved.config.protect_crashpad_pending);
-    }
-    schedule_crashpad_pending_refresh(state, saved.config.protect_crashpad_pending);
     let model_state = current_model_state_async(&saved.config).await?;
-    let model_hot_reload = hot_reload_runtime_models(state).await;
-    let subagent_hot_reload = if saved.reconcile_subagent_config {
-        hot_reload_runtime_subagent_config(state, &saved.config).await
-    } else {
-        SubagentHotReloadOutcome::default()
+    let model_hot_reload = models::ModelHotReloadOutcome {
+        config_apply: Some(saved.config_apply),
+        ..Default::default()
     };
-    let route_request_log_hot_reload = hot_reload_runtime_request_log(state, &saved.config).await;
-    let restart_required = subagent_hot_reload.requires_restart()
-        || runtime_config_requires_restart(state, &saved.config).await;
-    let subagent_config_hot_reloaded = subagent_hot_reload.reloaded();
-    let subagent_config_repaired = subagent_hot_reload.repaired();
+    let subagent_hot_reload = SubagentHotReloadOutcome::default();
+    let route_request_log_hot_reload = RouteRequestLogHotReloadOutcome::default();
+    let restart_required = runtime_config_requires_restart(state, &saved.config).await;
+    let subagent_config_hot_reloaded = false;
+    let subagent_config_repaired = false;
     let subagent_config_health = subagent_hot_reload.health();
     let subagent_config_repair_reasons = subagent_hot_reload.repair_reasons();
     let subagent_config_hot_reload_error = subagent_hot_reload.error();
@@ -1814,12 +1759,11 @@ impl RouteRequestLogHotReloadOutcome {
     }
 }
 
-async fn hot_reload_runtime_request_log(
+async fn hot_reload_runtime_request_log_locked(
     state: &Arc<AppState>,
     config: &CodeyConfig,
 ) -> RouteRequestLogHotReloadOutcome {
     let desired = config.route_request_log.clone();
-    let _runtime_operation = state.runtime_operation.lock().await;
     let _config_commit_guard = state.config_write_lock.lock().await;
     let current_config = state.config.read().await.clone();
     if current_config.route_request_log != desired
@@ -1947,18 +1891,27 @@ fn should_reconcile_runtime_subagent_config(previous: &CodeyConfig, current: &Co
     previous.subagent_optimization && current.subagent_optimization
 }
 
+#[cfg(test)]
 pub(super) async fn hot_reload_runtime_subagent_config(
+    state: &Arc<AppState>,
+    config: &CodeyConfig,
+) -> SubagentHotReloadOutcome {
+    let _operation = state.runtime_operation.lock().await;
+    let outcome = hot_reload_runtime_subagent_config_locked(state, config).await;
+    if outcome.status == SubagentHotReloadStatus::Superseded {
+        let _commit = state.config_write_lock.lock().await;
+        config_apply::enqueue(state, true);
+    }
+    outcome
+}
+
+async fn hot_reload_runtime_subagent_config_locked(
     state: &Arc<AppState>,
     config: &CodeyConfig,
 ) -> SubagentHotReloadOutcome {
     let desired_config = RuntimeSubagentConfig::from_config(config);
 
-    // All code that needs both locks follows the lifecycle -> config order.
-    // Restart already holds the lifecycle lock while launch may synchronize and
-    // persist provider state, so taking the config lock first here would allow a
-    // save/restart lock inversion. Holding both locks across reconciliation still
-    // prevents an older save from committing role files after a newer config.
-    let _runtime_operation = state.runtime_operation.lock().await;
+    // 后台应用持有生命周期锁，文件写入期间允许保存新设置。
     let _config_commit_guard = state.config_write_lock.lock().await;
     let current_config = state.config.read().await.clone();
     let config_matches = current_config.subagent_optimization
@@ -1999,7 +1952,14 @@ pub(super) async fn hot_reload_runtime_subagent_config(
     }
 
     let runtime_config = current_config.clone();
+    drop(_config_commit_guard);
+    #[cfg(test)]
+    let reconcile = state.slow_apply_test.subagents.clone();
     let result = tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        if let Some(reconcile) = reconcile {
+            return reconcile(&runtime_config).map_err(|error| format!("{error:#}"));
+        }
         reconcile_runtime_subagent_roles(&runtime_config).map_err(|error| format!("{error:#}"))
     })
     .await
@@ -2007,9 +1967,11 @@ pub(super) async fn hot_reload_runtime_subagent_config(
     .and_then(std::convert::identity);
     match result {
         Ok(report) => {
-            if !report.repaired && !applied_config_changed {
-                return SubagentHotReloadOutcome::unchanged();
-            }
+            let _config_commit_guard = state.config_write_lock.lock().await;
+            let latest_config = state.config.read().await.clone();
+            let config_matches = latest_config.subagent_optimization
+                && RuntimeSubagentConfig::from_config(&latest_config) == desired_config
+                && latest_config.fast_context_tools == config.fast_context_tools;
             let current_runtime = state.runtime.lock().await.clone();
             let same_runtime = current_runtime
                 .as_ref()
@@ -2025,9 +1987,12 @@ pub(super) async fn hot_reload_runtime_subagent_config(
                 config_matches,
                 has_startup_error,
             ) {
-                return SubagentHotReloadOutcome::failed(
-                    "Codex 运行时在子代理配置热更新期间发生变化；需要重启以重新建立可信运行配置",
+                return SubagentHotReloadOutcome::superseded(
+                    "子代理热更新期间配置或运行时已变化；等待最新配置应用",
                 );
+            }
+            if !report.repaired && !applied_config_changed {
+                return SubagentHotReloadOutcome::unchanged();
             }
             runtime.mark_subagent_config_applied(&current_config).await;
             SubagentHotReloadOutcome::applied(
@@ -2372,3 +2337,6 @@ where
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod slow_apply_tests;
