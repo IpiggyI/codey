@@ -8,7 +8,7 @@ use base64::{
     engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD},
 };
 use reqwest::{Client, StatusCode, header::ACCEPT};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 static LAST_GOOD_USAGE_ENDPOINT: std::sync::atomic::AtomicUsize =
@@ -90,7 +90,7 @@ impl OfficialAuthCache {
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountUsageSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,14 +101,14 @@ pub struct AccountUsageSnapshot {
     pub secondary: Option<AccountUsageWindow>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credits: Option<AccountCredits>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_limits: Vec<AccountUsageLimitGroup>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_label: Option<String>,
     pub fetched_at: u64,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountUsageWindow {
     pub used_percent: f64,
@@ -117,7 +117,7 @@ pub struct AccountUsageWindow {
     pub resets_at: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountUsageLimitGroup {
     pub limit_name: String,
@@ -130,7 +130,7 @@ pub struct AccountUsageLimitGroup {
     pub blocked: bool,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountCredits {
     pub has_credits: bool,
@@ -320,6 +320,10 @@ pub async fn fetch_official_account_usage(
     let auth = tokio::task::spawn_blocking(move || read_official_auth(&auth_path))
         .await
         .context("读取 Codex 官方登录信息任务异常退出")??;
+    fetch_usage_for_auth(client, auth).await
+}
+
+pub(crate) async fn fetch_usage_for_auth(client: &Client, auth: OfficialAuth) -> Result<AccountUsageSnapshot> {
     let mut last_error = None;
 
     // 从上次成功的端点开始轮询，失败仍会回退到完整列表，结果不变但稳定
@@ -448,7 +452,7 @@ pub(crate) fn account_identity(path: &Path) -> Result<Value> {
     }))
 }
 
-fn official_auth_from_value(value: &Value) -> Result<OfficialAuth> {
+pub(crate) fn official_auth_from_value(value: &Value) -> Result<OfficialAuth> {
     let is_chatgpt = value
         .get("auth_mode")
         .and_then(Value::as_str)
@@ -495,7 +499,7 @@ fn official_auth_from_value(value: &Value) -> Result<OfficialAuth> {
     })
 }
 
-fn jwt_claims(token: &str) -> Option<Value> {
+pub(crate) fn jwt_claims(token: &str) -> Option<Value> {
     let mut parts = token.split('.');
     let _header = parts.next()?;
     let payload = parts.next()?;
@@ -513,7 +517,7 @@ fn jwt_claims(token: &str) -> Option<Value> {
     serde_json::from_slice::<Value>(&decoded).ok()
 }
 
-fn account_id_from_jwt(token: &str) -> Option<String> {
+pub(crate) fn account_id_from_jwt(token: &str) -> Option<String> {
     account_id_from_claims(&jwt_claims(token)?)
 }
 

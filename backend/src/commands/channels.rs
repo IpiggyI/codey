@@ -2,11 +2,11 @@ use super::*;
 
 pub(super) async fn list_channels(state: &Arc<AppState>) -> Result<Value, String> {
     let config = state.config.read().await.clone();
-    channel_list_at(codex_home(), &config)
+    channel_list_at(state, codex_home(), &config)
 }
 
-fn channel_list_at(home: &Path, config: &CodeyConfig) -> Result<Value, String> {
-    serde_json::to_value(crate::channels::list(home, config).map_err(|error| error.to_string())?)
+fn channel_list_at(state: &AppState, home: &Path, config: &CodeyConfig) -> Result<Value, String> {
+    serde_json::to_value(crate::channels::list_with_accounts(home, config, &state.official_accounts()).map_err(|error| error.to_string())?)
         .map_err(|error| error.to_string())
 }
 
@@ -30,25 +30,50 @@ async fn change_channel_at(
     if revision != config.settings_revision {
         return Err("Codey 设置已被其他操作更新，请刷新后重试".into());
     }
-    if set_default {
-        let id = argument::<String>(args, "channelId")?;
+    let _account_guard = state.official_account_lock.lock().await;
+    let store = state.official_accounts();
+    let id = argument::<Option<String>>(args, "channelId")?;
+    let stored_official = id.as_deref().and_then(|id| id.strip_prefix("official:"))
+        .filter(|id| *id != "unavailable")
+        .map(|id| store.get(id).map(|account| account.map(|_| id.to_string())))
+        .transpose().map_err(|e| e.to_string())?.flatten();
+    if let Some(id) = stored_official.as_deref() {
+        let channel_id = format!("official:{id}");
+        let channel = crate::channels::list_with_accounts(home, &config, &store)
+            .map_err(|e| e.to_string())?.channels.into_iter()
+            .find(|channel| channel.id == channel_id && channel.available).ok_or("所选渠道不可用")?;
+        if set_default {
+            let model = argument::<String>(args,"model")?;
+            if model.trim().is_empty() { return Err("渠道默认模型不能为空".into()); }
+            config.default_models_by_channel.insert(channel_id, model.trim().into());
+        } else {
+            if channel.default_model.as_deref().is_none_or(|model| model.trim().is_empty()) {
+                return Err("请先为渠道设置默认模型".into());
+            }
+            config.selected_channel_id = Some(channel_id);
+        }
+    } else if set_default {
+        let id = id.as_deref().ok_or("缺少 channelId")?;
         let model = argument::<String>(args, "model")?;
-        crate::channels::set_default(home, &mut config, &id, &model)
-            .map_err(|error| error.to_string())?;
+        crate::channels::set_default(home, &mut config, id, &model).map_err(|e| e.to_string())?;
     } else {
-        let id = argument::<Option<String>>(args, "channelId")?;
-        crate::channels::select(home, &mut config, id.as_deref())
-            .map_err(|error| error.to_string())?;
+        crate::channels::select(home, &mut config, id.as_deref()).map_err(|e| e.to_string())?;
     }
-    let snapshot = codex_provider::current_provider_snapshot_for_config(home, &config)
-        .map_err(|error| error.to_string())?;
-    config.attach_current_provider_snapshot(snapshot);
     config.settings_revision = config.settings_revision.saturating_add(1);
-    let channel_list = channel_list_at(home, &config)?;
-    save_config_to_store(state, &config).await?;
+    let mut finish = || -> anyhow::Result<Value> {
+        let snapshot = codex_provider::current_provider_snapshot_for_config(home, &config)?;
+        config.attach_current_provider_snapshot(snapshot);
+        let list = channel_list_at(state, home, &config).map_err(anyhow::Error::msg)?;
+        state.store.save(&config)?;
+        Ok(list)
+    };
+    let switched = stored_official.is_some() && !set_default;
+    let channel_list = if switched {
+        store.activate(home, stored_official.as_deref().unwrap(), finish)
+    } else { finish() }.map_err(|e| format!("{e:#}"))?;
     *state.config.write().await = config.clone();
     drop(_guard);
-    let restart_required = runtime_config_requires_restart(state, &config).await;
+    let restart_required = switched || runtime_config_requires_restart(state, &config).await;
     Ok(json!({
         "status": "ok",
         "channelList": channel_list,
@@ -181,4 +206,33 @@ async fn channels_restart_rule_compares_with_running_channel_and_model() {
         .unwrap();
         assert_eq!(result["restartRequired"], expected);
     }
+}
+
+#[tokio::test]
+async fn channels_stored_account_switch_and_provider_selection_use_separate_credentials() {
+    use crate::official_accounts::Account;
+    let (home, config) = crate::channels::tests::fixture();
+    let state = Arc::new(AppState::with_store(ConfigStore::new(home.path().join("codey/config.json"))));
+    *state.config.write().await = config;
+    let store = state.official_accounts();
+    store.import_current(home.path()).unwrap();
+    let target = store.upsert(Account::from_auth(json!({"auth_mode":"chatgpt",
+        "tokens":{"account_id":"second-account","access_token":"second-secret"}})).unwrap()).unwrap();
+    let id = format!("official:{}", target.id);
+    let original = std::fs::read(home.path().join("auth.json")).unwrap();
+    let list = channel_list_at(&state, home.path(), &state.config.read().await.clone()).unwrap();
+    assert_eq!(list["channels"].as_array().unwrap().iter().filter(|c| c["kind"] == "official").count(), 2);
+    assert!(!list.to_string().contains("second-secret"));
+    change_channel_at(&state,&json!({"channelId":id,"model":"official-model","expectedRevision":0}),true,home.path()).await.unwrap();
+    assert_eq!(std::fs::read(home.path().join("auth.json")).unwrap(),original);
+    let switched = change_channel_at(&state,&json!({"channelId":id,"expectedRevision":1}),false,home.path()).await.unwrap();
+    assert_eq!(switched["restartRequired"],true);
+    assert_eq!(switched["channelList"]["effectiveProviderId"],"openai");
+    let auth: Value = serde_json::from_slice(&std::fs::read(home.path().join("auth.json")).unwrap()).unwrap();
+    assert_eq!(auth,target.auth);
+    assert!(state.runtime.lock().await.is_none());
+    change_channel_at(&state,&json!({"channelId":"provider:b.dot","model":"provider-model","expectedRevision":2}),true,home.path()).await.unwrap();
+    change_channel_at(&state,&json!({"channelId":"provider:b.dot","expectedRevision":3}),false,home.path()).await.unwrap();
+    let after: Value = serde_json::from_slice(&std::fs::read(home.path().join("auth.json")).unwrap()).unwrap();
+    assert_eq!(after,target.auth);
 }

@@ -9,6 +9,7 @@ use std::sync::{
 use std::time::Duration;
 
 mod channels;
+mod official_accounts;
 mod config_apply;
 mod config_repair;
 mod diagnostics;
@@ -130,6 +131,9 @@ pub struct AppState {
     notification_watcher_started: Notify,
     wechat_claw_login_http_client: reqwest::Client,
     account_usage_cache: Mutex<account_usage::AccountUsageCache>,
+    official_account_lock: Mutex<()>,
+    official_account_logins: Mutex<crate::official_accounts::oauth::LoginSessions>,
+    official_account_usage: Mutex<crate::official_accounts::usage::UsageState>,
     pub runtime: Mutex<Option<Arc<CodeyRuntime>>>,
     runtime_operation: Mutex<()>,
     model_delivery_lock: Mutex<()>,
@@ -267,6 +271,9 @@ impl AppState {
             notification_watcher_started: Notify::new(),
             wechat_claw_login_http_client: wechat_claw_login_http_client(),
             account_usage_cache: Mutex::new(account_usage::AccountUsageCache::default()),
+            official_account_lock: Mutex::new(()),
+            official_account_logins: Mutex::new(Default::default()),
+            official_account_usage: Mutex::new(Default::default()),
             runtime: Mutex::new(None),
             runtime_operation: Mutex::new(()),
             model_delivery_lock: Mutex::new(()),
@@ -956,6 +963,11 @@ fn persisted_config_changed(previous: &CodeyConfig, next: &CodeyConfig) -> bool 
 
 pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Value {
     let result = match command {
+        "list_official_accounts" | "start_official_account_login" | "poll_official_account_login"
+        | "cancel_official_account_login" | "import_current_codex_login"
+        | "import_official_account_credential" | "set_default_official_account"
+        | "remove_official_account" | "query_official_account_usage" | "store_official_account_usage" =>
+            official_accounts::invoke(state, command, &args, codex_home()).await,
         "list_channels" => channels::list_channels(state).await,
         "select_channel" => channels::change_channel(state, &args, false).await,
         "set_channel_default_model" => channels::change_channel(state, &args, true).await,

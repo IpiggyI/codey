@@ -36,6 +36,7 @@ mod model_ownership;
 #[cfg(target_os = "macos")]
 mod native_update_ui;
 mod notifications;
+mod official_accounts;
 mod pending_approval;
 mod pet_slim_patch;
 mod plugin_marketplace;
@@ -266,6 +267,9 @@ fn build_async_runtime() -> Result<tokio::runtime::Runtime> {
 async fn run(lifecycle: Arc<DesktopLifecycle>) -> Result<()> {
     error_log::initialize();
     let state = Arc::new(AppState::default());
+    if let Err(error) = state.sync_official_accounts_at_startup(codex_config::codex_home()) {
+        eprintln!("启动时同步官方账号失败：{error:#}");
+    }
     let configured_codex_app_path = state.config.read().await.codex_app_path.clone();
     let _ = tokio::task::spawn_blocking(move || {
         error_log::refresh_codex_app_version(None, Some(&configured_codex_app_path));
