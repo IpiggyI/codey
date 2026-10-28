@@ -405,7 +405,7 @@ test("renders three buttons and the agreed cards for a full payload", async () =
     assert.equal(bar.querySelectorAll(".codey-cs-summary").length, 3);
     assert.equal(buttonText(env, "activity"), "4 轮 · 2 步 · 188 tok/s");
     assert.equal(buttonText(env, "tokens"), "132k tok · 缓存命中 93%");
-    assert.equal(buttonText(env, "session"), "上下文 10.3% · 36.4k");
+    assert.equal(buttonText(env, "session"), "10.3% · 36.4k");
     assert.deepEqual(cardStructure(env, "activity"), [
       "模型用时", "工具调用用时", "最近一次用时", "平均速度（本轮）", "最近一次速度", "本轮推理",
     ]);
@@ -451,7 +451,8 @@ test("renders three buttons and the agreed cards for a full payload", async () =
     assert.doesNotMatch(bar.__codeyCs.notes.tokens.textContent, /缓存剩余时间/);
     assert.equal(bar.__codeyCs.notes.session.textContent, "");
     assert.doesNotMatch(summary(env, "session").getAttribute("aria-label"), /压缩/);
-    assert.match(summary(env, "session").getAttribute("aria-label"), /上下文 10\.3% · 36\.4k/);
+    assert.match(summary(env, "session").getAttribute("aria-label"), /上下文占用 10\.3% · 36\.4k/);
+    assert.equal(bar.__codeyCs.contextSummary.title, "上下文占用");
   } finally {
     env.dispose();
   }
@@ -488,7 +489,8 @@ test("a payload with nulls shows — for every value it cannot read", async () =
     const bar = env.bar();
     assert.equal(buttonText(env, "activity"), "— 轮 · — 步 · 生成中");
     assert.equal(buttonText(env, "tokens"), "— · 缓存命中 —");
-    assert.equal(buttonText(env, "session"), "上下文 —");
+    assert.equal(buttonText(env, "session"), "—");
+    assert.match(summary(env, "session").getAttribute("aria-label"), /上下文占用 未知/);
     // 工具仍在运行时后端给 null，显示 —。
     for (const name of ["modelDuration", "toolDuration", "turnReasoning", "requestSpeed", "requestDuration",
       "totalTokens", "sessionCacheRate", "uncachedInputTokens", "cachedInputTokens", "outputTokens",
@@ -552,15 +554,15 @@ test("cost shows only when the usage carries a cost field", async () => {
     await flushTimers(30);
     env.notify(tokenUsageMessage());
     await flushTimers(30);
-    assert.equal(buttonText(env, "session"), "上下文 10.3% · 36.4k");
+    assert.equal(buttonText(env, "session"), "10.3% · 36.4k");
     assert.equal(rowHidden(env.bar(), "cost"), true);
     assert.equal(cardStructure(env, "session").includes("会话费用估算"), false);
     env.notify(tokenUsageMessage("conversation-1", { total: { totalCostUsd: 1.2834 } }));
     await flushTimers(30);
-    assert.equal(buttonText(env, "session"), "≈$1.28 · 上下文 10.3% · 36.4k");
+    assert.equal(buttonText(env, "session"), "≈$1.28 · 10.3% · 36.4k");
     assert.equal(rowHidden(env.bar(), "cost"), false);
     assert.equal(field(env.bar(), "cost"), "$1.283");
-    assert.match(summary(env, "session").getAttribute("aria-label"), /费用估算 ≈\$1\.28，上下文 10\.3% · 36\.4k/);
+    assert.match(summary(env, "session").getAttribute("aria-label"), /费用估算 ≈\$1\.28，上下文占用 10\.3% · 36\.4k/);
     assert.deepEqual(cardStructure(env, "session"), [
       "账号", "开始时间", "上次回复", "缓存剩余时间", "上下文",
       "最近一次 未缓存 / 输出 / 缓存读取", "压缩次数", "会话费用估算",
@@ -611,7 +613,7 @@ test("a session switch clears the previous conversation's numbers at once", asyn
     assertExpanded(env, false, "session");
     assert.equal(metric(bar, "total"), "—");
     assert.equal(metric(bar, "activity"), "— 轮 · — 步");
-    assert.equal(buttonText(env, "session"), "上下文 —");
+    assert.equal(buttonText(env, "session"), "—");
     for (const name of ["modelDuration", "requestSpeed", "requestCacheRate", "requestTokens", "cacheRemaining",
       "startedAt", "lastReplyAt", "context", "compactionCount", "totalTokens"]) {
       assert.equal(field(bar, name), "—", name);
@@ -938,14 +940,14 @@ test("recomputes the countdown when the configured cache time changes", async ()
   }
 });
 
-test("last request speed and duration use the three colour tiers", async () => {
+test("last request speed and duration show plain text without colour tiers", async () => {
   const cases = [
-    { output: 600, seconds: 10, speed: ["60 tok/s", "#22c55e"], duration: ["10.0s", "#22c55e"] },
-    { output: 599, seconds: 10, speed: ["60 tok/s", "#ffbf00"], duration: ["10.0s", "#22c55e"] },
-    { output: 450, seconds: 15, speed: ["30 tok/s", "#ffbf00"], duration: ["15.0s", "#ffbf00"] },
-    { output: 299, seconds: 10, speed: ["30 tok/s", "#ff3b30"], duration: ["10.0s", "#22c55e"] },
-    { output: 397, seconds: 40, speed: ["9.9 tok/s", "#ff3b30"], duration: ["40.0s", "#ff3b30"] },
-    { output: 83, seconds: 83, speed: ["1.0 tok/s", "#ff3b30"], duration: ["1m 23s", "#ff3b30"] },
+    { output: 600, seconds: 10, speed: "60 tok/s", duration: "10.0s" },
+    { output: 599, seconds: 10, speed: "60 tok/s", duration: "10.0s" },
+    { output: 450, seconds: 15, speed: "30 tok/s", duration: "15.0s" },
+    { output: 299, seconds: 10, speed: "30 tok/s", duration: "10.0s" },
+    { output: 397, seconds: 40, speed: "9.9 tok/s", duration: "40.0s" },
+    { output: 83, seconds: 83, speed: "1.0 tok/s", duration: "1m 23s" },
   ];
   for (const { output, seconds, speed, duration } of cases) {
     const env = createEnvironment({ statsBySession: { "conversation-1": { ...STATS, lastModelRequest: {
@@ -955,8 +957,8 @@ test("last request speed and duration use the three colour tiers", async () => {
     } } } });
     await flushTimers(30);
     const label = `${output} tokens in ${seconds}s`;
-    assert.deepEqual([field(env.bar(), "requestSpeed"), fieldColor(env.bar(), "requestSpeed")], speed, label);
-    assert.deepEqual([field(env.bar(), "requestDuration"), fieldColor(env.bar(), "requestDuration")], duration, label);
+    assert.deepEqual([field(env.bar(), "requestSpeed"), fieldColor(env.bar(), "requestSpeed") || ""], [speed, ""], label);
+    assert.deepEqual([field(env.bar(), "requestDuration"), fieldColor(env.bar(), "requestDuration") || ""], [duration, ""], label);
     env.dispose();
   }
 });

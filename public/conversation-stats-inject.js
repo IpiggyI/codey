@@ -282,7 +282,8 @@
           refs.cost.hidden = true;
           refs.costSeparator = separator(button);
           refs.costSeparator.hidden = true;
-          refs.contextSummary = make("span", "codey-cs-metric codey-cs-context", "上下文 —", button);
+          refs.contextSummary = make("span", "codey-cs-metric codey-cs-context", "—", button);
+          refs.contextSummary.title = "上下文占用";
         }
         const panel = make("section", "codey-cs-details", "", overlay);
         panel.id = `${barId}-${kind}`;
@@ -438,9 +439,6 @@
     return `${Math.round((cached / input) * 100)}%`;
   };
 
-  // 最近一次请求的速度与用时分档，阈值沿用原输入栏芯片。
-  const speedTone = (rate) => (rate >= 60 ? "ok" : rate >= 30 ? "warn" : "hot");
-  const durationTone = (seconds) => (seconds < 15 ? "ok" : seconds < 40 ? "warn" : "hot");
   const toneColor = (tone) => {
     if (tone === "hot") return "#ff3b30";
     if (tone === "warn") return "#ffbf00";
@@ -554,9 +552,7 @@
     const known = seconds > 0 && Number.isFinite(output);
     const rate = known ? output / seconds : 0;
     setText(refs.fields.requestSpeed, known ? formatRequestSpeed(rate) : "—");
-    setColor(refs.fields.requestSpeed, known ? toneColor(speedTone(rate)) : "");
     setText(refs.fields.requestDuration, known ? formatRequestDuration(seconds) : "—");
-    setColor(refs.fields.requestDuration, known ? toneColor(durationTone(seconds)) : "");
   };
 
   const renderSessionCard = (refs, usage, anchor, request) => {
@@ -570,8 +566,8 @@
     setText(refs.fields.context, contextKnown
       ? `${contextPercent} (${formatTokenCount(usage.contextUsedTokens)}/${formatTokenCount(usage.contextWindowTokens)})`
       : "—");
-    const contextSummary = contextKnown ? `上下文 ${contextPercent} · ${formatTokenCount(usage.contextUsedTokens)}` : "上下文 —";
-    setText(refs.contextSummary, contextSummary);
+    const contextText = contextKnown ? `${contextPercent} · ${formatTokenCount(usage.contextUsedTokens)}` : "—";
+    setText(refs.contextSummary, contextText);
     const compaction = Number.isInteger(request?.compactionCount) && request.compactionCount >= 0
       ? String(request.compactionCount) : "—";
     setText(refs.fields.compactionCount, compaction);
@@ -583,7 +579,7 @@
     setHidden(refs.costSeparator, !costKnown);
     setText(refs.fields.cost, costKnown ? `$${cost.toFixed(3)}` : "—");
     setText(refs.cost, costKnown ? `≈$${cost.toFixed(2)}` : "");
-    return { contextSummary, cost: costKnown ? refs.cost.textContent : "" };
+    return { contextLabel: `上下文占用 ${contextKnown ? contextText : "未知"}`, cost: costKnown ? refs.cost.textContent : "" };
   };
 
   const render = (anchor) => {
@@ -682,7 +678,7 @@
     setText(refs.notes.tokens, `${pendingNote}${sourceNote}`);
     refs.buttons.activity.setAttribute("aria-label", `会话总轮数 ${count(data.turnCount)} 轮，最近一轮统计 ${count(turn?.stepCount)} 步，本轮平均速度 ${speedText}，${status}。${speedNote}。查看统计详情`);
     refs.buttons.tokens.setAttribute("aria-label", `Token 用量，${scopeLabel} ${refs.total.textContent}，缓存命中 ${rate}，${status}。查看统计详情`);
-    refs.buttons.session.setAttribute("aria-label", `会话，${session.cost ? `费用估算 ${session.cost}，` : ""}${session.contextSummary}。查看会话详情`);
+    refs.buttons.session.setAttribute("aria-label", `会话，${session.cost ? `费用估算 ${session.cost}，` : ""}${session.contextLabel}。查看会话详情`);
     bar.dataset.running = running ? "true" : "false";
     bar.dataset.state = state;
     positionPanel();
