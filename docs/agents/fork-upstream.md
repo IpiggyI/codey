@@ -24,8 +24,8 @@
 
 | 侧 | 标签 | 提交 | 日期 |
 |---|---|---|---|
-| 本分叉 | `v1.3.0` | `release: v1.3.0` 提交 | 2026-10-18 |
-| 上游 | [`master`（包含 `v1.2.5`）](https://github.com/SuperGness/codey/tree/ec0bf0ea31c847bbc5ad10a6e4674b21a7b238fe) | [`ec0bf0e`](https://github.com/SuperGness/codey/commit/ec0bf0ea31c847bbc5ad10a6e4674b21a7b238fe) | 2026-10-03 核实远端，与本次固定目标一致 |
+| 本分叉 | `v1.4.0` | `release: v1.4.0` 提交 | 2026-10-28 |
+| 上游 | [`v1.3.8`](https://github.com/SuperGness/codey/releases/tag/v1.3.8) | [`530796a2`](https://github.com/SuperGness/codey/commit/530796a227f52f61369e208110cfbadd9797ae0d) | 2026-10-25 发布，2026-10-26 与 2026-10-27 两轮对照的固定目标 |
 | 早期内容锚点 | 上游 `v0.10.7` | `bd03e13` | 上次整段同步 |
 | vendor | 上游 `v1.3.8` | `530796a2` | 2026-10-26 整目录替换，保留本地改动 |
 
