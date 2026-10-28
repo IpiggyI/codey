@@ -1643,6 +1643,7 @@ fn third_party_template_supports_ultra(model: &Value) -> bool {
         .is_some_and(|slug| {
             [
                 "gpt-6-astra",
+                "gpt-6-sol",
                 "gpt-6-luna",
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
@@ -2430,6 +2431,46 @@ mod tests {
                 .windows(2)
                 .all(|pair| pair[0]["priority"].as_u64() < pair[1]["priority"].as_u64())
         );
+    }
+
+    #[test]
+    fn gpt_6_sol_catalog_keeps_ultra_without_expanding_off_list_models() {
+        let home = tempfile::tempdir().unwrap();
+        let mut cache = official_cache();
+        let selected = vec!["gpt-6-sol".to_string(), "off-list-model".to_string()];
+        for slug in &selected {
+            let mut model = cache["models"][0].clone();
+            model["slug"] = json!(slug);
+            model["visibility"] = json!("hide");
+            model["supported_reasoning_levels"] = json!([
+                {"effort": "low"}, {"effort": "medium"}, {"effort": "high"},
+                {"effort": "xhigh"}, {"effort": "max"}, {"effort": "ultra"}
+            ]);
+            cache["models"].as_array_mut().unwrap().push(model);
+        }
+        fs::write(
+            home.path().join("models_cache.json"),
+            serde_json::to_vec(&cache).unwrap(),
+        )
+        .unwrap();
+        refresh_for_provider(home.path(), false, Some(&selected), &selected).unwrap();
+        let catalog: Value =
+            serde_json::from_slice(&fs::read(home.path().join(DERIVED_CATALOG_FILE_NAME)).unwrap())
+                .unwrap();
+        let models = catalog["models"].as_array().unwrap();
+        for (slug, expected) in [
+            (
+                "gpt-6-sol",
+                vec!["low", "medium", "high", "xhigh", "max", "ultra"],
+            ),
+            (
+                "off-list-model",
+                vec!["low", "medium", "high", "xhigh", "max"],
+            ),
+        ] {
+            let model = models.iter().find(|model| model["slug"] == slug).unwrap();
+            assert_eq!(reasoning_efforts_from_value(model), expected, "{slug}");
+        }
     }
 
     #[test]

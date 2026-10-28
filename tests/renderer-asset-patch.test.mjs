@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
+import { readFile } from "node:fs/promises";
 
 import { loadStartupPatchTemplate } from "./helpers/startup-patch.mjs";
 
@@ -21,6 +22,84 @@ const entitlementSource = [
   "if(n!==`chatgpt`&&n!==`personalAccessToken`)return!1;",
   "let r=await requirements(e,t);return r.requirements?.featureRequirements?.fast_mode!==!1}",
 ].join("");
+
+const ultraQuerySource = await readFile(
+  new URL("./fixtures/codex-ultra-model-query.js", import.meta.url), "utf8",
+);
+
+function ultraQuery(source, { custom, caller, gate, efforts }) {
+  const calls = [];
+  const query = runInNewContext(source, {
+    di: undefined, qSn: () => [], kio: "efforts", yio: "models", Lg: "gate",
+    cg: "hosts", Ms: { FIVE_MINUTES: 300000 }, xio: (options) => options,
+  });
+  const result = query({
+    additionalAvailableModels: [], authMethod: "apikey", enabledReasoningEfforts: efforts,
+    hostId: "local", includeUltraReasoningEffort: caller, isCustomModelProvider: custom,
+    modelCatalogPath: "catalog.json", modelProvider: "provider",
+  }, {
+    get: (key, id) => {
+      calls.push([key, id]);
+      if (key === "gate") return gate;
+      if (key === "efforts") return new Set(["high"]);
+      if (key === "hosts") return ["local"];
+      return { availableModels: new Set(), useHiddenModels: false };
+    },
+  });
+  return { selected: result.select({ data: [] }), calls };
+}
+
+test("custom provider Ultra bypasses the official gate and preserves caller and user settings", async () => {
+  const { patch, records } = await loadRendererPatch();
+  const patched = patch("app://-/assets/app-initial-ultra.js", ultraQuerySource);
+  assert.equal(typeof patched, "string");
+  assert.deepEqual(records, []);
+  for (const caller of [false, true]) {
+    for (const gate of [false, true]) {
+      for (const efforts of [undefined, ["low", "ultra"]]) {
+        const { selected, calls } = ultraQuery(patched, { custom: true, caller, gate, efforts });
+        assert.equal(selected.includeUltraReasoningEffort, caller);
+        assert.deepEqual([...selected.enabledReasoningEfforts], efforts ? [...efforts, "persistent"] : ["high"]);
+        assert.equal(calls.some(([key]) => key === "gate"), false);
+      }
+    }
+  }
+});
+
+test("non-custom providers keep the official Ultra gate", async () => {
+  const { patch } = await loadRendererPatch();
+  const patched = patch("app://-/assets/app-initial-ultra.js", ultraQuerySource);
+  for (const caller of [false, true]) {
+    for (const gate of [false, true]) {
+      const options = { custom: false, caller, gate };
+      assert.equal(ultraQuery(patched, options).selected.includeUltraReasoningEffort, caller && gate);
+      assert.deepEqual(ultraQuery(patched, options).calls, ultraQuery(ultraQuerySource, options).calls);
+    }
+  }
+});
+
+test("a mismatched Ultra anchor preserves the source, records failure and skips only this item", async () => {
+  const { patch, records } = await loadRendererPatch();
+  const drifted = ultraQuerySource.replace("S=a&&d(", "S=a||d(");
+  assert.equal(patch("app://-/assets/app-initial-drifted.js", drifted), null);
+  const patched = patch("app://-/assets/app-initial-other.js", drifted + ";" + entitlementSource);
+  assert.ok(patched.startsWith(drifted + ";"));
+  assert.match(patched, /async function allowed\(e,t\)\{return!0\}/);
+  assert.equal(records.length, 2);
+  assert.ok(records.every(({ operation, context }) =>
+    operation === "renderer_patch:third-party Ultra reasoning" && context.matchCount === 0));
+});
+
+test("the Ultra patch leaves Ultrafast access and service tiers unchanged", async () => {
+  const { patch, records } = await loadRendererPatch();
+  const speed = "const supportsIndependentSpeedModes=true,ultrafast_mode=true;"
+    + "function speedAllowed(e,t){if(e==null)return!1;let n=kind(t);return t===`flex`||e[n??`fast`]}"
+    + "const settings={serviceTierAccess:access,isLoading:false};";
+  const patched = patch("app://-/assets/app-initial-ultra.js", ultraQuerySource + ";" + speed);
+  assert.ok(patched.endsWith(";" + speed));
+  assert.equal(patched, (ultraQuerySource + ";" + speed).replace("S=a&&d(Lg,`1186680773`)", "S=a&&(o||d(Lg,`1186680773`))"));
+  assert.deepEqual(records, []);
+});
 
 const nativeModelAccessSource = [
   "const includeUltraReasoningEffort=!0;",

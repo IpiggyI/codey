@@ -488,6 +488,22 @@
       );
     }
     if (
+      source.includes("includeUltraReasoningEffort:") &&
+      source.includes("isCustomModelProvider:") &&
+      source.includes("modelCatalogPath:") &&
+      source.includes("1186680773")
+    ) {
+      // 第三方 provider 按模型目录显示 Ultra，保留调用方和用户的思考强度设置。
+      // 宿主服务资源模块只把同一开关作为参数传入，没有模型目录查询，不在此改写。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(\(\{[^{}]*\bincludeUltraReasoningEffort\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\bisCustomModelProvider\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\s*,\s*\{[^{}]*\bget\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\)\s*=>\s*\{[^{}]*\b[$A-Z_a-z][$\w]*\s*=\s*\2\s*&&\s*)(\4\(\s*[$A-Z_a-z][$\w]*\s*,\s*(["'`])1186680773\6\s*\))/g,
+        (_match, prefix, _includeUltra, customProvider, _get, gate) =>
+          `${prefix}(${customProvider}||${gate})`,
+        "third-party Ultra reasoning",
+      );
+    }
+    if (
       source.includes("isServiceTierAllowed") &&
       source.includes("featureRequirements?.fast_mode") &&
       source.includes("authMethod:")
