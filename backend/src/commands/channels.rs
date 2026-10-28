@@ -61,13 +61,8 @@ async fn change_channel_at(
                 .default_models_by_channel
                 .insert(channel_id, model.trim().into());
         } else {
-            if channel
-                .default_model
-                .as_deref()
-                .is_none_or(|model| model.trim().is_empty())
-            {
-                return Err("请先为渠道设置默认模型".into());
-            }
+            crate::channels::require_switch_model(home, &config, &channel.id)
+                .map_err(|error| error.to_string())?;
             config.selected_channel_id = Some(channel_id);
         }
     } else if set_default {
@@ -108,8 +103,71 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn channels_stored_official_selection_uses_each_fallback_without_saving_it() {
+        for step in 0..4 {
+            let (home, mut config) = crate::channels::tests::fixture();
+            let state = Arc::new(AppState::with_store(ConfigStore::new(
+                home.path().join("codey/config.json"),
+            )));
+            let account = state
+                .official_accounts()
+                .import_current(home.path())
+                .unwrap();
+            let id = format!("official:{}", account.id);
+            if step == 0 {
+                config
+                    .default_models_by_channel
+                    .insert(id.clone(), "channel-model".into());
+            }
+            if step <= 1 {
+                config.default_model = "global-model".into();
+            }
+            if step == 3 {
+                let path = home.path().join("config.toml");
+                let text = std::fs::read_to_string(&path).unwrap();
+                std::fs::write(path, text.replace("original-model", "")).unwrap();
+            }
+            let before = config.default_models_by_channel.clone();
+            *state.config.write().await = config;
+            let auth = std::fs::read(home.path().join("auth.json")).unwrap();
+            let result = change_channel_at(
+                &state,
+                &json!({"channelId":id,"expectedRevision":0}),
+                false,
+                home.path(),
+            )
+            .await;
+            if step == 3 {
+                assert!(result.unwrap_err().contains("默认模型"));
+                assert_eq!(std::fs::read(home.path().join("auth.json")).unwrap(), auth);
+                assert_eq!(state.config.read().await.settings_revision, 0);
+            } else {
+                let result = result.unwrap();
+                let channels = result["channelList"]["channels"].as_array().unwrap();
+                let channel = channels.iter().find(|channel| channel["id"] == id).unwrap();
+                assert_eq!(
+                    channel["switchModel"],
+                    ["channel-model", "global-model", "original-model"][step]
+                );
+                assert_eq!(
+                    state.store.load().unwrap().default_models_by_channel,
+                    before
+                );
+            }
+            assert_eq!(state.config.read().await.default_models_by_channel, before);
+        }
+    }
+
+    #[tokio::test]
     async fn channels_commands_persist_without_starting_runtime_and_reject_stale_writes() {
         let (home, config) = crate::channels::tests::fixture();
+        let path = home.path().join("config.toml");
+        let original = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            original.replace("model = \"original-model\"", "model = \"\""),
+        )
+        .unwrap();
         let state = Arc::new(AppState {
             store: ConfigStore::new(home.path().join("codey.json")),
             config: RwLock::new(config),

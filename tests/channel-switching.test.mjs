@@ -10,17 +10,26 @@ import { autoStubModule, collectElements, createModuleGraph, elementProps, eleme
 const channels = await loadTypeScriptModule(new URL("../src/channels.ts", import.meta.url));
 const { isStaleConfig } = await loadTypeScriptModule(new URL("../src/configCommandResult.ts", import.meta.url));
 
-const entry = (id, overrides = {}) => ({
-  id,
-  kind: id.startsWith("official") ? "official" : "provider",
-  providerId: id.startsWith("official") ? "openai" : id.split(":")[1],
-  displayName: id.split(":")[1].toUpperCase(),
-  defaultModel: null,
-  current: false,
-  available: true,
-  unavailableReason: null,
-  ...overrides,
-});
+// switchModel 缺省跟随渠道自己的默认模型，与后端的解析顺序一致；其他来源由用例显式给出。
+const entry = (id, overrides = {}) => {
+  const merged = {
+    id,
+    kind: id.startsWith("official") ? "official" : "provider",
+    providerId: id.startsWith("official") ? "openai" : id.split(":")[1],
+    displayName: id.split(":")[1].toUpperCase(),
+    defaultModel: null,
+    modelOptions: [],
+    current: false,
+    available: true,
+    unavailableReason: null,
+    ...overrides,
+  };
+  return {
+    switchModel: merged.defaultModel,
+    switchModelSource: merged.defaultModel ? "channel" : null,
+    ...merged,
+  };
+};
 const listOf = (channelsList, selectedChannelId = null, notice = null) => ({
   channels: channelsList,
   selectedChannelId,
@@ -308,6 +317,31 @@ test("无法选择的渠道：当前、不可用和无稳定账号标识的官�
   assert.equal(channels.needsDefaultModel(entry("provider:b", { defaultModel: "m" })), false);
 });
 
+test("切换模型由 switchModel 决定：渠道没有自己的默认模型但有全局或 Codex 配置的模型时不需要先填写", () => {
+  assert.equal(channels.needsDefaultModel(entry("provider:b", { switchModel: "g", switchModelSource: "global" })), false);
+  assert.equal(channels.needsDefaultModel(entry("provider:b", { switchModel: "c", switchModelSource: "codex-config" })), false);
+  assert.equal(channels.needsDefaultModel(entry("provider:b", { defaultModel: "own", switchModel: null, switchModelSource: null })), true,
+    "以后端解析结果为准，前端不自行推断");
+});
+
+test("渠道行的默认模型说明：自己的默认模型、全局默认模型、Codex 配置、都没有", () => {
+  assert.equal(channels.defaultModelText(entry("provider:b", { defaultModel: "own" })), "默认模型：own");
+  assert.equal(channels.defaultModelText(entry("provider:b", { switchModel: "g", switchModelSource: "global" })),
+    "尚未设置默认模型，切换时使用 g（全局默认模型）");
+  assert.equal(channels.defaultModelText(entry("provider:b", { switchModel: "c", switchModelSource: "codex-config" })),
+    "尚未设置默认模型，切换时使用 c（Codex 配置）");
+  assert.equal(channels.defaultModelText(entry("provider:b")), "尚未设置默认模型");
+});
+
+test("编辑默认模型的候选：每个渠道用自己的清单，当前渠道把当前 provider 的清单排在前面并去重", () => {
+  assert.deepEqual(channels.channelModelOptions(entry("provider:b", { modelOptions: ["x", "y"] }), ["ma"]), ["x", "y"]);
+  assert.deepEqual(channels.channelModelOptions(entry("provider:b"), ["ma"]), [], "非当前渠道不借用当前 provider 的清单");
+  assert.deepEqual(
+    channels.channelModelOptions(entry("provider:a", { current: true, modelOptions: ["m2", "ma", "m3"] }), ["ma", "m1"]),
+    ["ma", "m1", "m2", "m3"],
+  );
+});
+
 const accountSwitch = (accountId, settingsRevision, restartRequired = true) => ({
   status: "ok",
   accounts: [{ id: accountId, accountId: `acct-${accountId}`, addedAt: 1, invalid: false, isDefault: true }],
@@ -586,7 +620,7 @@ test("模拟接口：列表字段、跟随用户配置与回退提示", async ()
   assert.equal(list.selectedChannelId, null);
   assert.equal(list.notice, null);
   assert.deepEqual(Object.keys(list.channels[0]).sort(),
-    ["available", "current", "defaultModel", "displayName", "id", "kind", "providerId", "unavailableReason"]);
+    ["available", "current", "defaultModel", "displayName", "id", "kind", "modelOptions", "providerId", "switchModel", "switchModelSource", "unavailableReason"]);
   assert.equal((await call("runtime_status")).channelNotice, null);
   const fallback = await loadMock("?channelFallback=1");
   assert.equal((await fallback("list_channels")).notice, FALLBACK);
@@ -617,12 +651,51 @@ test("模拟接口：校验与后端一致，不可用渠道和非整数修订�
     failedWith("参数 channelId 无效：invalid type: null, expected a string"));
   assert.deepEqual(await call("select_channel", { channelId: "official:unavailable", expectedRevision: 0 }),
     failedWith("所选渠道不可用"));
-  assert.deepEqual(await call("select_channel", { channelId: "provider:backup", expectedRevision: 0 }),
-    failedWith("请先为渠道设置默认模型"));
   assert.deepEqual(await call("select_channel", { channelId: "provider:backup", expectedRevision: 7 }),
     failedWith("Codey 设置已被其他操作更新，请刷新后重试"));
   assert.equal((await call("list_channels")).channels.find((item) => item.id === "official:unavailable").defaultModel, null);
   assert.equal((await call("load_codey_config")).config.settingsRevision, 0, "失败不改动修订");
+});
+
+async function clearGlobalDefault(call) {
+  const { config } = await call("load_codey_config");
+  await call("save_codey_config", { config: { ...config, defaultModel: "" } });
+  return (await call("load_codey_config")).config.settingsRevision;
+}
+const channelById = async (call, id) => (await call("list_channels")).channels.find((item) => item.id === id);
+
+test("模拟接口：切换模型依次取渠道默认模型、全局默认模型、Codex 配置，三处都没有才拒绝切换", async () => {
+  const call = await loadMock();
+  const globalDefault = (await call("load_codey_config")).config.defaultModel;
+  assert.ok(globalDefault);
+  const viaGlobal = await channelById(call, "provider:backup");
+  assert.deepEqual([viaGlobal.defaultModel, viaGlobal.switchModel, viaGlobal.switchModelSource], [null, globalDefault, "global"]);
+  assert.deepEqual(viaGlobal.modelOptions, ["claude-sonnet-4-5", "claude-opus-4-1"], "非当前渠道也有自己的模型清单");
+
+  const revision = await clearGlobalDefault(call);
+  const none = await channelById(call, "provider:backup");
+  assert.deepEqual([none.switchModel, none.switchModelSource], [null, null]);
+  assert.deepEqual(await call("select_channel", { channelId: "provider:backup", expectedRevision: revision }),
+    failedWith("请先为渠道设置默认模型"));
+
+  await call("set_channel_default_model", { channelId: "provider:backup", model: "own", expectedRevision: revision });
+  const own = await channelById(call, "provider:backup");
+  assert.deepEqual([own.switchModel, own.switchModelSource], ["own", "channel"]);
+
+  const withCodexConfig = await loadMock("?codexConfigModel=gpt-5.5");
+  const revisionAfterClear = await clearGlobalDefault(withCodexConfig);
+  const viaConfig = await channelById(withCodexConfig, "provider:backup");
+  assert.deepEqual([viaConfig.switchModel, viaConfig.switchModelSource], ["gpt-5.5", "codex-config"]);
+  assert.equal((await withCodexConfig("select_channel", { channelId: "provider:backup", expectedRevision: revisionAfterClear })).status, "ok");
+});
+
+test("模拟接口：全局默认模型为空时官方账号切换也使用 Codex 配置的模型，三处都没有才拒绝", async () => {
+  const none = await loadMock();
+  await clearGlobalDefault(none);
+  assert.equal((await none("set_default_official_account", { accountId: "preview-pro" })).status, "failed");
+  const withCodexConfig = await loadMock("?codexConfigModel=gpt-5.5");
+  await clearGlobalDefault(withCodexConfig);
+  assert.equal((await withCodexConfig("set_default_official_account", { accountId: "preview-pro" })).status, "ok");
 });
 
 test("模拟接口：成功路径递增修订，重启后不再要求重启", async () => {
@@ -857,6 +930,153 @@ test("单独设置默认模型只保存，不切换渠道", () => {
   elementProps(input).onChange("ma-2");
   elementProps(buttons(render(props), "保存默认模型")[0]).onPress();
   assert.deepEqual(calls, [["setDefault", "provider:a", "ma-2"]]);
+});
+
+const rowOf = (tree, name) => collectElements(tree, (node) => node.type === "li" && textContent(node).includes(name))[0];
+const comboOf = (tree, combobox) => collectElements(tree, (node) => elementType(node) === combobox.ManualModelCombobox)[0];
+
+test("渠道没有自己的默认模型但切换模型已有来源时，直接切换并写明所用模型和来源", () => {
+  const { render, buttons, calls } = section();
+  const list = listOf([
+    entry("provider:a", { displayName: "主中转", current: true, defaultModel: "ma" }),
+    entry("provider:b", { displayName: "备用中转", switchModel: "gpt-g", switchModelSource: "global" }),
+    entry("provider:c", { displayName: "第三中转", switchModel: "gpt-c", switchModelSource: "codex-config" }),
+  ]);
+  const tree = render({ channelList: list });
+  assert.ok(textContent(rowOf(tree, "备用中转")).includes("尚未设置默认模型，切换时使用 gpt-g（全局默认模型）"));
+  assert.ok(textContent(rowOf(tree, "第三中转")).includes("尚未设置默认模型，切换时使用 gpt-c（Codex 配置）"));
+  elementProps(buttons(rowOf(tree, "备用中转"), "切换到此渠道")[0]).onPress();
+  elementProps(buttons(rowOf(tree, "第三中转"), "切换到此渠道")[0]).onPress();
+  assert.deepEqual(calls, [["select", "provider:b"], ["select", "provider:c"]]);
+  assert.equal(buttons(render({ channelList: list }), "保存并切换").length, 0, "没有打开编辑行");
+});
+
+test("三处都没有切换模型时才打开编辑行", () => {
+  const { render, buttons, calls } = section();
+  const list = listOf([entry("provider:a", { current: true, defaultModel: "ma" }), entry("provider:b", { displayName: "备用中转" })]);
+  elementProps(buttons(rowOf(render({ channelList: list }), "备用中转"), "切换到此渠道")[0]).onPress();
+  assert.deepEqual(calls, []);
+  assert.equal(buttons(render({ channelList: list }), "保存并切换").length, 1);
+});
+
+test("编辑默认模型的候选来自该渠道自己的清单：非当前渠道不再为空，当前渠道合并去重", () => {
+  const { render, buttons, combobox } = section();
+  const list = listOf([
+    entry("provider:a", { displayName: "主中转", current: true, defaultModel: "ma", modelOptions: ["ma", "ma-2"] }),
+    entry("provider:b", { displayName: "备用中转", defaultModel: "mb", modelOptions: ["mb", "mb-2"] }),
+    entry("provider:c", { displayName: "空清单中转", defaultModel: "mc", modelOptions: [] }),
+  ]);
+  const optionsAfterOpening = (name) => {
+    elementProps(buttons(rowOf(render({ channelList: list }), name), "修改默认模型")[0]).onPress();
+    const options = elementProps(comboOf(render({ channelList: list }), combobox)).options;
+    elementProps(buttons(render({ channelList: list }), "取消")[0]).onPress();
+    return options;
+  };
+  assert.deepEqual(optionsAfterOpening("备用中转"), ["mb", "mb-2"]);
+  assert.deepEqual(optionsAfterOpening("主中转"), ["ma", "ma-2"], "当前 provider 清单（modelOptions 属性）在前，重复项只留一个");
+  assert.deepEqual(optionsAfterOpening("空清单中转"), []);
+});
+
+test("编辑行打开时焦点进入模型输入框", () => {
+  const { render, buttons, combobox } = section();
+  const list = listOf([entry("provider:a", { current: true, defaultModel: "ma" }), entry("provider:b", { displayName: "备用中转" })]);
+  elementProps(buttons(rowOf(render({ channelList: list }), "备用中转"), "设置默认模型")[0]).onPress();
+  assert.equal(elementProps(comboOf(render({ channelList: list }), combobox)).autoFocus, true);
+});
+
+test("渠道默认模型输入框选择加入无候选时的行内提示", () => {
+  const { render, buttons, combobox } = section();
+  const list = listOf([entry("provider:a", { current: true, defaultModel: "ma" }), entry("provider:b", { displayName: "备用中转" })]);
+  elementProps(buttons(rowOf(render({ channelList: list }), "备用中转"), "设置默认模型")[0]).onPress();
+  assert.equal(elementProps(comboOf(render({ channelList: list }), combobox)).emptyHint, "没有可选模型，可直接输入模型名称");
+});
+
+// 编辑行里持有焦点的元素会随编辑行卸载；这里用带 focus() 的假节点接住按钮的 ref，确认焦点被还回。
+function focusable(disabled = false) {
+  const node = { disabled, focused: 0, focus() { node.focused += 1; } };
+  return node;
+}
+const refOf = (button) => elementProps(button).ref;
+
+test("取消编辑行后焦点回到打开它的按钮，且只回一次", () => {
+  const { render, buttons } = section();
+  const list = listOf([entry("provider:a", { current: true, defaultModel: "ma" }), entry("provider:b", { displayName: "备用中转" })]);
+  const props = { channelList: list };
+  const row = () => rowOf(render(props), "备用中转");
+  assert.equal(refOf(buttons(row(), "设置默认模型")[0]), undefined, "没有取消前不要求焦点");
+
+  elementProps(buttons(row(), "设置默认模型")[0]).onPress();
+  elementProps(buttons(render(props), "取消")[0]).onPress();
+  const after = row();
+  assert.equal(refOf(buttons(after, "切换到此渠道")[0]), undefined);
+  const node = focusable();
+  refOf(buttons(after, "设置默认模型")[0])(node);
+  assert.equal(node.focused, 1);
+  assert.equal(refOf(buttons(row(), "设置默认模型")[0]), undefined, "焦点已归还，不再重复要求");
+});
+
+test("由「切换到此渠道」打开的编辑行取消后，焦点回到「切换到此渠道」", () => {
+  const { render, buttons } = section();
+  const list = listOf([entry("provider:a", { current: true, defaultModel: "ma" }), entry("provider:b", { displayName: "备用中转" })]);
+  const props = { channelList: list };
+  elementProps(buttons(rowOf(render(props), "备用中转"), "切换到此渠道")[0]).onPress();
+  elementProps(buttons(render(props), "取消")[0]).onPress();
+  const after = rowOf(render(props), "备用中转");
+  const node = focusable();
+  refOf(buttons(after, "切换到此渠道")[0])(node);
+  assert.equal(node.focused, 1);
+  assert.equal(refOf(buttons(after, "设置默认模型")[0]), undefined);
+});
+
+test("保存并切换后该渠道成为当前渠道，「切换到此渠道」被禁用，焦点改给默认模型按钮", () => {
+  const { render, buttons, calls, combobox } = section();
+  const before = listOf([entry("provider:a", { current: true, defaultModel: "ma" }), entry("provider:b", { displayName: "备用中转" })]);
+  const switched = listOf([
+    entry("provider:a", { defaultModel: "ma" }),
+    entry("provider:b", { displayName: "备用中转", current: true, defaultModel: "mb" }),
+  ], "provider:b");
+  elementProps(buttons(rowOf(render({ channelList: before }), "备用中转"), "切换到此渠道")[0]).onPress();
+  elementProps(comboOf(render({ channelList: before }), combobox)).onChange("mb");
+  elementProps(buttons(render({ channelList: before }), "保存并切换")[0]).onPress();
+  assert.deepEqual(calls, [["select", "provider:b", "mb"]]);
+  const row = rowOf(render({ channelList: switched }), "备用中转");
+  assert.equal(refOf(buttons(row, "切换到此渠道")[0]), undefined);
+  const node = focusable();
+  refOf(buttons(row, "修改默认模型")[0])(node);
+  assert.equal(node.focused, 1);
+});
+
+test("编辑行内按 Escape 与点「取消」一样关闭编辑行，并且不再向外层传递", () => {
+  const { render, buttons, combobox } = section();
+  const list = listOf([entry("provider:a", { current: true, defaultModel: "ma" }), entry("provider:b", { displayName: "备用中转" })]);
+  const props = { channelList: list };
+  elementProps(buttons(rowOf(render(props), "备用中转"), "设置默认模型")[0]).onPress();
+  const editor = collectElements(render(props), (node) => typeof elementProps(node)?.onKeyDown === "function")[0];
+  assert.ok(editor, "编辑行监听按键");
+  let stopped = 0;
+  elementProps(editor).onKeyDown({ key: "a", stopPropagation() { stopped += 1; } });
+  assert.equal(comboOf(render(props), combobox) !== undefined, true, "其他按键不关闭编辑行");
+  elementProps(editor).onKeyDown({ key: "Escape", stopPropagation() { stopped += 1; } });
+  assert.equal(stopped, 1);
+  const after = render(props);
+  assert.equal(comboOf(after, combobox), undefined);
+  const node = focusable();
+  refOf(buttons(rowOf(after, "备用中转"), "设置默认模型")[0])(node);
+  assert.equal(node.focused, 1, "Escape 关闭后同样归还焦点");
+});
+
+test("被禁用的按钮不抢焦点，请求保留到它可用", () => {
+  const { render, buttons } = section();
+  const list = listOf([entry("provider:a", { current: true, defaultModel: "ma" }), entry("provider:b", { displayName: "备用中转" })]);
+  const props = { channelList: list };
+  elementProps(buttons(rowOf(render(props), "备用中转"), "设置默认模型")[0]).onPress();
+  elementProps(buttons(render(props), "取消")[0]).onPress();
+  const disabledNode = focusable(true);
+  refOf(buttons(rowOf(render(props), "备用中转"), "设置默认模型")[0])(disabledNode);
+  assert.equal(disabledNode.focused, 0);
+  const enabledNode = focusable();
+  refOf(buttons(rowOf(render(props), "备用中转"), "设置默认模型")[0])(enabledNode);
+  assert.equal(enabledNode.focused, 1);
 });
 
 test("回退提示非空时显示，为空时隐藏", () => {

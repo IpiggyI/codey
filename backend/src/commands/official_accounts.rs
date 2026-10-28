@@ -171,20 +171,8 @@ pub(super) async fn switch_account(
     let _account_guard = state.official_account_lock.lock().await;
     let mut config = state.config.read().await.clone();
     let channel_id = format!("official:{id}");
-    // 官方渠道和其他渠道一样带模型覆盖：先用渠道默认模型，再用全局默认模型；都没有时在改写登录前拒绝。
-    let model = [
-        config.default_models_by_channel.get(&channel_id),
-        Some(&config.default_model),
-    ]
-    .into_iter()
-    .flatten()
-    .map(|model| model.trim())
-    .find(|model| !model.is_empty())
-    .map(str::to_string)
-    .ok_or("请先为该官方账号设置默认模型：在渠道列表中为它的渠道设置默认模型后再切换")?;
-    config
-        .default_models_by_channel
-        .insert(channel_id.clone(), model);
+    crate::channels::require_switch_model(home, &config, &channel_id)
+        .map_err(|error| error.to_string())?;
     config.selected_channel_id = Some(channel_id);
     config.settings_revision = config.settings_revision.saturating_add(1);
     let store = state.official_accounts();
@@ -357,6 +345,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn commands_official_accounts_switch_resolves_fallback_without_persisting_it() {
+        for step in 0..3 {
+            let (_dir, home, state, id) = fixture();
+            let channel_id = format!("official:{id}");
+            std::fs::write(home.join("config.toml"), "model='codex-model'\n").unwrap();
+            {
+                let mut config = state.config.write().await;
+                if step == 0 {
+                    config
+                        .default_models_by_channel
+                        .insert(channel_id.clone(), "channel-model".into());
+                }
+                if step <= 1 {
+                    config.default_model = "global-model".into();
+                }
+            }
+            let before = state.config.read().await.default_models_by_channel.clone();
+            switch_account(&state, &id, &home).await.unwrap();
+            let config = state.config.read().await.clone();
+            let overrides = crate::channels::runtime_overrides(&home, &config)
+                .unwrap()
+                .join("\n")
+                .parse::<toml_edit::DocumentMut>()
+                .unwrap();
+            assert_eq!(
+                overrides["model"].as_str(),
+                Some(["channel-model", "global-model", "codex-model"][step])
+            );
+            assert_eq!(config.default_models_by_channel, before);
+            assert_eq!(
+                state.store.load().unwrap().default_models_by_channel,
+                before
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn commands_official_accounts_switch_without_any_default_model_fails_before_touching_auth()
      {
         let (_dir, home, state, _id) = fixture();
@@ -379,7 +404,7 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(error.contains("请先为该官方账号设置默认模型"), "{error}");
+        assert!(error.contains("请先设置默认模型"), "{error}");
         assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), original);
         let after = state.config.read().await.clone();
         assert_eq!(after.settings_revision, before.settings_revision);

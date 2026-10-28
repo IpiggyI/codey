@@ -50,8 +50,11 @@ fn channels_list_selection_and_quoted_runtime_values() {
     assert!(channels.channels[2].id.starts_with("official:"));
     assert_eq!(channels.channels[2].provider_id, "openai");
     assert_eq!(channels.channels[1].default_model, None);
-    assert!(select(home.path(), &mut config, Some("provider:b.dot")).is_err());
-    assert_eq!(config.selected_channel_id, None);
+    select(home.path(), &mut config, Some("provider:b.dot")).unwrap();
+    assert_eq!(
+        runtime_overrides(home.path(), &config).unwrap()[1],
+        "model=\"original-model\""
+    );
     let model = "model.with.\"quote";
     set_default(home.path(), &mut config, "provider:b.dot", model).unwrap();
     select(home.path(), &mut config, Some("provider:b.dot")).unwrap();
@@ -77,15 +80,127 @@ fn channels_list_selection_and_quoted_runtime_values() {
 #[test]
 fn channels_official_selection_without_default_model_fails_like_other_channels() {
     let (home, mut config) = fixture();
-    let official = list(home.path(), &config).unwrap().channels[2].id.clone();
+    std::fs::write(
+        home.path().join("config.toml"),
+        "model_provider='a'\n[model_providers.a]\n",
+    )
+    .unwrap();
+    let official = list(home.path(), &config)
+        .unwrap()
+        .channels
+        .into_iter()
+        .find(|channel| channel.kind == "official")
+        .unwrap()
+        .id;
     assert!(official.starts_with("official:"));
     config.selected_channel_id = Some(official);
     assert!(config.default_model.is_empty());
     let error = runtime_overrides(home.path(), &config).unwrap_err();
+    assert!(error.to_string().contains("请先设置默认模型"), "{error}");
+}
+
+#[test]
+fn channels_switch_fallback_order_and_empty_rejection() {
+    for official in [false, true] {
+        for step in 0..4 {
+            let (home, mut config) = fixture();
+            let id = if official {
+                list(home.path(), &config).unwrap().channels[2].id.clone()
+            } else {
+                "provider:b.dot".into()
+            };
+            if step == 0 {
+                config
+                    .default_models_by_channel
+                    .insert(id.clone(), "channel-model".into());
+            }
+            if step <= 1 {
+                config.default_model = " global-model ".into();
+            }
+            if step == 3 {
+                let path = home.path().join("config.toml");
+                let text = std::fs::read_to_string(&path).unwrap();
+                std::fs::write(path, text.replace("original-model", "   ")).unwrap();
+            }
+            let before = config.default_models_by_channel.clone();
+            let selected = select(home.path(), &mut config, Some(&id));
+            if step == 3 {
+                assert!(selected.unwrap_err().to_string().contains("默认模型"));
+                config.selected_channel_id = Some(id.clone());
+                assert!(
+                    runtime_overrides(home.path(), &config)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("默认模型")
+                );
+            } else {
+                selected.unwrap();
+                let expected = ["channel-model", "global-model", "original-model"][step];
+                let source = ["channel", "global", "codex-config"][step];
+                let listed = list(home.path(), &config).unwrap();
+                let channel = listed.channels.iter().find(|c| c.id == id).unwrap();
+                assert_eq!(channel.switch_model.as_deref(), Some(expected));
+                assert_eq!(channel.switch_model_source, Some(source));
+                let parsed = runtime_overrides(home.path(), &config)
+                    .unwrap()
+                    .join("\n")
+                    .parse::<DocumentMut>()
+                    .unwrap();
+                assert_eq!(parsed["model"].as_str(), Some(expected));
+            }
+            assert_eq!(config.default_models_by_channel, before);
+            let value = serde_json::to_value(list(home.path(), &config).unwrap()).unwrap();
+            let channel = value["channels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["id"] == id)
+                .unwrap();
+            assert_eq!(channel["switchModel"].is_null(), step == 3);
+            assert_eq!(channel["switchModelSource"].is_null(), step == 3);
+        }
+    }
+}
+
+#[test]
+fn channels_model_options_use_catalog_under_third_party_auth_and_provider_ownership() {
+    let (home, mut config) = fixture();
+    std::fs::write(
+        home.path().join("auth.json"),
+        r#"{"auth_mode":"apikey","OPENAI_API_KEY":"fixture"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        home.path().join("models_cache.json"),
+        r#"{"models":[{"slug":"catalog-official","display_name":"官方模型","visibility":"list"}]}"#,
+    )
+    .unwrap();
+    let key = crate::model_ownership::ownership_key("b.dot", "https://b.example/v1");
+    config
+        .selected_models_by_provider
+        .insert(key.clone(), vec!["selected".into()]);
+    config
+        .upstream_models_by_provider
+        .insert(key, vec!["synced".into(), "selected".into()]);
+    config
+        .selected_models_by_provider
+        .insert("a".into(), vec!["unproven-legacy".into()]);
+    let listed = list(home.path(), &config).unwrap();
+    assert_eq!(listed.channels[0].model_options, Vec::<String>::new());
+    assert_eq!(listed.channels[1].model_options, ["selected", "synced"]);
     assert!(
-        error.to_string().contains("所选渠道缺少默认模型"),
-        "{error}"
+        listed.channels[2]
+            .model_options
+            .contains(&"catalog-official".into())
     );
+    let store = crate::official_accounts::OfficialAccountStore::new(&home.path().join("codey"));
+    for account in ["one", "two"] {
+        store.upsert(crate::official_accounts::Account::from_auth(serde_json::json!({"auth_mode":"chatgpt","tokens":{"account_id":account,"access_token":"fixture"}})).unwrap()).unwrap();
+    }
+    let listed = list_with_accounts(home.path(), &config, &store).unwrap();
+    for channel in listed.channels.iter().filter(|c| c.kind == "official") {
+        assert!(channel.model_options.contains(&"catalog-official".into()));
+    }
 }
 
 #[test]

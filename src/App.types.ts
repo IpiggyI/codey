@@ -195,12 +195,20 @@ export type CurrentProviderSnapshot = {
   channelId?: string;
 };
 
+export type ChannelSwitchModelSource = "channel" | "global" | "codex-config";
+
 export type ChannelEntry = {
   id: string;
   kind: "provider" | "official";
   providerId: string;
   displayName: string;
   defaultModel: string | null;
+  // 该渠道可选的模型名称，可能为空。
+  modelOptions: string[];
+  // 此刻切换会使用的模型；渠道默认模型、全局默认模型、Codex 配置的 model 都没有时为 null。
+  switchModel: string | null;
+  // switchModel 的来源，与 switchModel 同为 null。
+  switchModelSource: ChannelSwitchModelSource | null;
   current: boolean;
   available: boolean;
   unavailableReason: string | null;

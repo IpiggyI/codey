@@ -80,7 +80,30 @@ export function confirmThroughDialog(
   });
 }
 
-export const needsDefaultModel = (entry: ChannelEntry) => !entry.defaultModel?.trim();
+// 切换用的模型由后端按渠道默认模型、全局默认模型、Codex 配置的顶层 model 依次解析；
+// 三处都没有时才需要使用者先给出模型。
+export const needsDefaultModel = (entry: ChannelEntry) => !entry.switchModel?.trim();
+
+const SWITCH_MODEL_SOURCE_LABELS: Record<NonNullable<ChannelEntry["switchModelSource"]>, string> = {
+  channel: "渠道默认模型",
+  global: "全局默认模型",
+  "codex-config": "Codex 配置",
+};
+
+// 渠道行右侧的默认模型说明；没有自己的默认模型时，说明切换会用哪个模型、取自哪里。
+export function defaultModelText(entry: ChannelEntry) {
+  if (entry.defaultModel) return `默认模型：${entry.defaultModel}`;
+  if (entry.switchModel && entry.switchModelSource) {
+    return `尚未设置默认模型，切换时使用 ${entry.switchModel}（${SWITCH_MODEL_SOURCE_LABELS[entry.switchModelSource]}）`;
+  }
+  return "尚未设置默认模型";
+}
+
+// 编辑默认模型时的候选：当前渠道把当前 provider 的模型清单排在前面，再并入渠道自己的清单。
+export function channelModelOptions(entry: ChannelEntry, currentProviderOptions: string[]) {
+  const options = entry.current ? [...currentProviderOptions, ...entry.modelOptions] : entry.modelOptions;
+  return [...new Set(options)];
+}
 
 // 没有稳定账号标识的官方账号以此占位，后端不允许选择它。
 const UNAVAILABLE_OFFICIAL_ID = "official:unavailable";

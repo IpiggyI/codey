@@ -16,6 +16,9 @@ pub(crate) struct Channel {
     pub provider_id: String,
     pub display_name: String,
     pub default_model: Option<String>,
+    pub model_options: Vec<String>,
+    pub switch_model: Option<String>,
+    pub switch_model_source: Option<&'static str>,
     pub current: bool,
     pub available: bool,
     pub unavailable_reason: Option<String>,
@@ -47,6 +50,9 @@ fn provider_entries(document: &DocumentMut, config: &CodeyConfig) -> Vec<Channel
             let id = format!("provider:{provider_id}");
             channels.push(Channel {
                 default_model: config.default_models_by_channel.get(&id).cloned(),
+                model_options: provider_model_options(provider_id, provider, config),
+                switch_model: None,
+                switch_model_source: None,
                 id,
                 kind: "provider",
                 provider_id: provider_id.to_string(),
@@ -67,6 +73,61 @@ fn provider_entries(document: &DocumentMut, config: &CodeyConfig) -> Vec<Channel
     channels
 }
 
+fn provider_model_options(provider_id: &str, provider: &Item, config: &CodeyConfig) -> Vec<String> {
+    let snapshot = crate::model_ownership::CurrentProviderSnapshot::from_parts(
+        provider_id,
+        provider
+            .get("base_url")
+            .and_then(Item::as_str)
+            .unwrap_or(""),
+        "responses",
+        false,
+    );
+    let mut config = config.clone();
+    config.migrate_current_provider_model_lists(&snapshot);
+    crate::model_id::dedupe_preserving_first(
+        [
+            &config.selected_models_by_provider,
+            &config.upstream_models_by_provider,
+            &config.manual_third_party_models_by_provider,
+            &config.declared_official_models_by_provider,
+        ]
+        .into_iter()
+        .filter_map(|map| map.get(&snapshot.ownership_key))
+        .flatten()
+        .map(String::as_str),
+    )
+}
+
+pub(crate) fn switch_model(
+    document: &DocumentMut,
+    config: &CodeyConfig,
+    id: &str,
+) -> Option<(String, &'static str)> {
+    [
+        (
+            config.default_models_by_channel.get(id).map(String::as_str),
+            "channel",
+        ),
+        (Some(config.default_model.as_str()), "global"),
+        (document.get("model").and_then(Item::as_str), "codex-config"),
+    ]
+    .into_iter()
+    .find_map(|(model, source)| {
+        model
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(|model| (model.to_string(), source))
+    })
+}
+
+pub(crate) fn require_switch_model(home: &Path, config: &CodeyConfig, id: &str) -> Result<String> {
+    let loaded = ConfigManager::new(home.join("config.toml")).load()?;
+    switch_model(loaded.document(), config, id)
+        .map(|(model, _)| model)
+        .context("请先设置默认模型：渠道、Codey 全局或 Codex 配置中至少需要一个默认模型")
+}
+
 fn official_entry(home: &Path, document: &DocumentMut, config: &CodeyConfig) -> Channel {
     let mut channel = Channel {
         id: "official:unavailable".into(),
@@ -74,6 +135,9 @@ fn official_entry(home: &Path, document: &DocumentMut, config: &CodeyConfig) -> 
         provider_id: "openai".into(),
         display_name: "OpenAI 官方账号".into(),
         default_model: None,
+        model_options: Vec::new(),
+        switch_model: None,
+        switch_model_source: None,
         current: false,
         available: false,
         unavailable_reason: None,
@@ -130,8 +194,8 @@ pub(crate) fn resolve(
     if let Some(channel) = channel.filter(|channel| channel.available) {
         return Ok(Resolution {
             provider_id: channel.provider_id,
-            channel_id: Some(channel.id),
-            default_model: channel.default_model,
+            channel_id: Some(channel.id.clone()),
+            default_model: switch_model(document, config, &channel.id).map(|(model, _)| model),
             notice: None,
         });
     }
@@ -149,10 +213,42 @@ pub(crate) fn list(home: &Path, config: &CodeyConfig) -> Result<ChannelList> {
     let resolved = resolve(home, document, config)?;
     let mut channels = provider_entries(document, config);
     channels.push(official_entry(home, document, config));
+    let catalog_dir = if cfg!(test) {
+        home.to_path_buf()
+    } else {
+        crate::codex_config::codey_model_catalog_dir()
+    };
+    let official_models =
+        crate::codex_config::configured_user_model_catalog_path(home, &catalog_dir)
+            .and_then(|user_catalog| {
+                crate::model_catalog::available_official_models(
+                    home,
+                    &catalog_dir,
+                    user_catalog.as_deref(),
+                    &config.codex_app_path,
+                )
+            })
+            .map(|models| {
+                models
+                    .into_iter()
+                    .map(|model| model.slug)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_else(|error| {
+                eprintln!("读取渠道官方模型候选失败：{error:#}");
+                Vec::new()
+            });
     let has_provider = channels
         .iter()
         .any(|channel| channel.kind == "provider" && channel.provider_id == resolved.provider_id);
     for channel in &mut channels {
+        if channel.kind == "official" {
+            channel.model_options = official_models.clone();
+        }
+        if let Some((model, source)) = switch_model(document, config, &channel.id) {
+            channel.switch_model = Some(model);
+            channel.switch_model_source = Some(source);
+        }
         channel.current = match &resolved.channel_id {
             Some(id) => channel.id == *id,
             None => {
@@ -176,13 +272,7 @@ pub(crate) fn select(home: &Path, config: &mut CodeyConfig, id: Option<&str>) ->
             .into_iter()
             .find(|channel| channel.id == id && channel.available)
             .context("所选渠道不可用")?;
-        if channel
-            .default_model
-            .as_deref()
-            .is_none_or(|model| model.trim().is_empty())
-        {
-            bail!("请先为渠道设置默认模型");
-        }
+        require_switch_model(home, config, &channel.id)?;
     }
     config.selected_channel_id = id.map(str::to_string);
     Ok(())
@@ -194,21 +284,32 @@ pub(crate) fn list_with_accounts(
     store: &crate::official_accounts::OfficialAccountStore,
 ) -> Result<ChannelList> {
     let mut list = list(home, config)?;
+    let official_models = list
+        .channels
+        .iter()
+        .find(|channel| channel.kind == "official")
+        .map(|channel| channel.model_options.clone())
+        .unwrap_or_default();
     let loaded = ConfigManager::new(home.join("config.toml")).load()?;
+    let document = loaded.document();
     let disabled = crate::official_accounts::switch_disabled_reason(home)?;
     let current = crate::official_accounts::current_id(home)?;
     for account in store.accounts()? {
         let id = format!("official:{}", account.id);
         let summary = account.summary(current.as_deref());
         let provider_ok =
-            crate::codex_provider::official_channel_available(loaded.document(), &account.auth);
+            crate::codex_provider::official_channel_available(document, &account.auth);
         let reason = disabled
             .clone()
             .or_else(|| (!provider_ok).then(|| "openai provider 配置不支持官方登录".into()));
+        let model = switch_model(document, config, &id);
         list.channels
             .retain(|channel| channel.id != id && channel.id != "official:unavailable");
         list.channels.push(Channel {
             default_model: config.default_models_by_channel.get(&id).cloned(),
+            model_options: official_models.clone(),
+            switch_model: model.as_ref().map(|(model, _)| model.clone()),
+            switch_model_source: model.map(|(_, source)| source),
             current: current.as_deref() == Some(&account.id)
                 && list.effective_provider_id == "openai",
             id,
@@ -256,8 +357,7 @@ pub(crate) fn runtime_overrides(home: &Path, config: &CodeyConfig) -> Result<Vec
     }
     let model = resolved
         .default_model
-        .filter(|model| !model.trim().is_empty())
-        .context("所选渠道缺少默认模型，请先设置默认模型")?;
+        .context("请先设置默认模型：渠道、Codey 全局或 Codex 配置中至少需要一个默认模型")?;
     Ok(vec![
         format!(
             "model_provider={}",

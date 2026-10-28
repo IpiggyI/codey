@@ -51,6 +51,8 @@ if (import.meta.env.DEV) {
     const channelFallbackPreview = new URLSearchParams(window.location.search).get("channelFallback") === "1";
     // ?officialSwitchDisabled=1 预览 Codex 凭据存储不是 file 模式时禁用导入当前登录与切换。
     const officialSwitchDisabledPreview = new URLSearchParams(window.location.search).get("officialSwitchDisabled") === "1";
+    // ?codexConfigModel=gpt-5.5 预览 Codex 配置里有顶层 model 时的切换模型来源；默认没有。
+    const previewCodexConfigModel = new URLSearchParams(window.location.search).get("codexConfigModel")?.trim() || null;
     // ?officialBrowser=0 预览未能自动打开浏览器时显示授权地址。
     const officialBrowserPreview = new URLSearchParams(window.location.search).get("officialBrowser") !== "0";
     const previewEndpoints = {
@@ -314,21 +316,35 @@ if (import.meta.env.DEV) {
       return previewAccountsPayload({ accountId: account.id });
     };
     const previewChannelCatalog = () => [
-      { id: "provider:primary", kind: "provider", providerId: "primary", displayName: "主中转", available: true, unavailableReason: null },
-      { id: "provider:backup", kind: "provider", providerId: "backup", displayName: "备用中转 (Claude)", available: true, unavailableReason: null },
-      { id: "provider:offline", kind: "provider", providerId: "offline", displayName: "离线中转", available: false, unavailableReason: "环境变量 OFFLINE_API_KEY 未设置" },
+      { id: "provider:primary", kind: "provider", providerId: "primary", displayName: "主中转", available: true, unavailableReason: null, modelOptions: previewConfig.upstreamModelsByProvider.primary },
+      { id: "provider:backup", kind: "provider", providerId: "backup", displayName: "备用中转 (Claude)", available: true, unavailableReason: null, modelOptions: previewConfig.upstreamModelsByProvider.backup },
+      { id: "provider:offline", kind: "provider", providerId: "offline", displayName: "离线中转", available: false, unavailableReason: "环境变量 OFFLINE_API_KEY 未设置", modelOptions: [] as string[] },
       ...previewAccounts.map((account) => ({
         // 与后端一致：凭据存储不是 file 模式时官方渠道不可用。
         id: `official:${account.id}`, kind: "official" as const, providerId: "openai", displayName: account.email ?? account.accountId,
         available: previewSwitchDisabledReason === null, unavailableReason: previewSwitchDisabledReason,
+        modelOptions: previewOfficialModels.map((model) => model.slug),
       })),
-      { id: "official:unavailable", kind: "official", providerId: "openai", displayName: "官方账号（未登录）", available: false, unavailableReason: "没有可用的官方账号登录" },
+      { id: "official:unavailable", kind: "official", providerId: "openai", displayName: "官方账号（未登录）", available: false, unavailableReason: "没有可用的官方账号登录", modelOptions: [] as string[] },
     ] as const;
+    // 与后端一致：切换使用的模型依次取渠道默认模型、全局默认模型、Codex 配置的顶层 model。
+    const previewSwitchModel = (channelId: string) => {
+      const sources = [
+        ["channel", previewConfig.defaultModelsByChannel[channelId]],
+        ["global", previewConfig.defaultModel],
+        ["codex-config", previewCodexConfigModel],
+      ] as const;
+      for (const [source, candidate] of sources) {
+        const model = candidate?.trim();
+        if (model) return { switchModel: model, switchModelSource: source };
+      }
+      return { switchModel: null, switchModelSource: null };
+    };
     // 预览里“正在运行的 Codex”所用的渠道与模型，重启后与当前渠道对齐。
     const previewChannelRunKey = () => {
       const list = previewChannelList();
       const current = list.channels.find((entry) => entry.current);
-      return `${current?.id ?? ""}|${current?.defaultModel ?? ""}`;
+      return `${current?.id ?? ""}|${current?.switchModel ?? ""}`;
     };
     let previewChannelRunning = "";
     const previewChannelList = (): ChannelList => {
@@ -338,7 +354,9 @@ if (import.meta.env.DEV) {
       const effective = found ?? catalog[0];
       const channels: ChannelEntry[] = catalog.map((entry) => ({
         ...entry,
+        modelOptions: [...entry.modelOptions],
         defaultModel: previewConfig.defaultModelsByChannel[entry.id] ?? null,
+        ...previewSwitchModel(entry.id),
         current: entry.id === effective.id,
       }));
       return {
@@ -780,10 +798,8 @@ if (import.meta.env.DEV) {
           const target = previewAccounts.find((account) => account.id === accountId);
           if (!target) return failed("找不到官方账号");
           const channelId = `official:${accountId}`;
-          // 与后端一致：先用渠道默认模型，再用全局默认模型；都没有时拒绝切换。
-          const model = [previewConfig.defaultModelsByChannel[channelId], previewConfig.defaultModel]
-            .map((candidate) => candidate?.trim())
-            .find(Boolean);
+          // 与后端一致：先用渠道默认模型，再用全局默认模型，再用 Codex 配置的顶层 model；都没有时拒绝切换。
+          const model = previewSwitchModel(channelId).switchModel;
           if (!model) return failed("请先为该官方账号设置默认模型：在渠道列表中为它的渠道设置默认模型后再切换");
           const defaultsByChannel = { ...previewConfig.defaultModelsByChannel, [channelId]: model };
           previewConfig = {
@@ -878,9 +894,7 @@ if (import.meta.env.DEV) {
         }
         if (channelId !== null) {
           if (!entry) return failed("所选渠道不可用");
-          if (!previewConfig.defaultModelsByChannel[entry.id]?.trim()) {
-            return failed("请先为渠道设置默认模型");
-          }
+          if (!previewSwitchModel(entry.id).switchModel) return failed("请先为渠道设置默认模型");
         }
         previewConfig = {
           ...previewConfig,
