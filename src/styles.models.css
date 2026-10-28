@@ -861,3 +861,122 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.official-account-item.is-invalid {
+  background: rgba(255, 59, 48, 0.04);
+  box-shadow: inset 3px 0 0 #c4271c;
+}
+
+.official-account-plan-badge {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  box-sizing: border-box;
+  height: 20px;
+  padding: 0 7.5px;
+  border: 1px solid transparent;
+  border-radius: 9999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.official-account-plan-badge.is-plus {
+  background: rgba(147, 51, 234, 0.09);
+  color: #7c3aed;
+  border-color: rgba(147, 51, 234, 0.25);
+}
+
+.official-account-plan-badge.is-pro {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+
+.official-account-plan-badge.is-pro-100 {
+  background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+  color: #475569;
+  border-color: #cbd5e1;
+}
+
+.official-account-plan-badge.is-pro-200 {
+  background: linear-gradient(135deg, #fff8e7 0%, #f2dfb0 100%);
+  color: #78530e;
+  border-color: #d6b86b;
+}
+
+.official-account-plan-badge.is-pro-500 {
+  background: linear-gradient(135deg, #49305f 0%, #25182f 100%);
+  color: #f8e5af;
+  border-color: #b89654;
+}
+
+.official-account-plan-badge.is-team {
+  background: rgba(2, 132, 199, 0.09);
+  color: #0284c7;
+  border-color: rgba(2, 132, 199, 0.22);
+}
+
+.official-account-plan-badge.is-default {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--mac-text-secondary);
+  border-color: rgba(0, 0, 0, 0.1);
+}
+
+.official-account-usage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+.official-account-usage-cell {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.official-account-usage-percent {
+  padding: 1px 6.5px;
+  border-radius: 9999px;
+  font-size: 10.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.official-account-usage-percent.is-normal {
+  background: #d1fae5;
+  color: #007956;
+}
+
+.official-account-usage-percent.is-warning {
+  background: rgba(255, 149, 0, 0.12);
+  color: #b45309;
+}
+
+.official-account-usage-percent.is-danger {
+  background: rgba(255, 59, 48, 0.12);
+  color: #c92a2a;
+}
+
+.official-account-progress-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 9999px;
+  background: rgba(0, 0, 0, 0.07);
+}
+
+.official-account-progress-fill {
+  height: 100%;
+  border-radius: 9999px;
+}
+
+.official-account-progress-fill.is-normal {
+  background: #00bb7e;
+}
+
+.official-account-progress-fill.is-warning {
+  background: #ff9500;
+}
+
+.official-account-progress-fill.is-danger {
+  background: #ff3b30;
+}

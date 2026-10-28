@@ -65,6 +65,7 @@ import type {
   CrashpadCleanup,
   FastContextToolsStatus,
   ModelState,
+  OfficialAccountsResult,
   PluginMarketplaceStatus,
   RouterSessionDiagnosis,
   RuntimeStatus,
@@ -157,6 +158,7 @@ export function App({
   const [channelActionError, setChannelActionError] = useState<string | null>(null);
   const [channelVersionConflict, setChannelVersionConflict] = useState(false);
   const [restartPromptPending, setRestartPromptPending] = useState(false);
+  const [officialAccountsRefreshKey, setOfficialAccountsRefreshKey] = useState(0);
   const [routerSessionDiagnosis, setRouterSessionDiagnosis] =
     useState<RouterSessionDiagnosis | null>(null);
   const [fastContextToolsStatus, setFastContextToolsStatus] =
@@ -412,6 +414,7 @@ export function App({
     await runOperation("switch-channel", async () => {
       const outcome = await channelController.select(channelId, defaultModel);
       if (!reportChannelOutcome(outcome)) return;
+      setOfficialAccountsRefreshKey((key) => key + 1);
       setNotice(await noticeAfterChannelChange(refreshProviderAfterChannelChange, {
         tone: "info",
         text: outcome.kind === "applied" && outcome.restartRequired
@@ -419,6 +422,25 @@ export function App({
           : "已切换渠道",
       }));
     });
+  }
+
+  // 切换官方账号即切换渠道：在操作锁内执行，未保存的修改存在时不切换。
+  async function switchOfficialAccount(accountId: string): Promise<OfficialAccountsResult | null> {
+    if (dirty || isBusy) return null;
+    let accounts: OfficialAccountsResult | null = null;
+    await runOperation("switch-official-account", async () => {
+      const switched = await channelController.switchOfficialAccount(accountId);
+      accounts = switched.accounts;
+      if (switched.listError) setChannelLoadError(switched.listError);
+      if (!reportChannelOutcome(switched.outcome)) return;
+      setNotice(await noticeAfterChannelChange(refreshProviderAfterChannelChange, {
+        tone: "info",
+        text: switched.outcome.kind === "applied" && switched.outcome.restartRequired
+          ? "已切换官方账号，重启 Codex 后生效"
+          : "已切换官方账号",
+      }));
+    });
+    return accounts;
   }
 
   async function saveChannelDefaultModel(channelId: string, model: string) {
@@ -1151,6 +1173,8 @@ export function App({
   const handleSetChannelDefaultModel = useStableEvent(
     (channelId: string, model: string) => void saveChannelDefaultModel(channelId, model),
   );
+  const handleSwitchOfficialAccount = useStableEvent(switchOfficialAccount);
+  const handleOfficialAccountsChanged = useStableEvent(() => void refreshChannels());
   const handleRefreshChannels = useStableEvent(
     () => void runOperation("reload-config", load),
   );
@@ -1473,8 +1497,9 @@ export function App({
               </div>
             </>
           ),
-          models: (
+          models: (active) => (
             <ModelSection
+              active={active}
               config={config}
               currentProviderSnapshot={currentProviderSnapshot}
               officialAccountAvailable={status.officialAccountAvailable === true}
@@ -1501,6 +1526,11 @@ export function App({
               onSelectChannel={handleSelectChannel}
               onSetChannelDefaultModel={handleSetChannelDefaultModel}
               onRefreshChannels={handleRefreshChannels}
+              officialAccountsRefreshKey={officialAccountsRefreshKey}
+              onSwitchOfficialAccount={handleSwitchOfficialAccount}
+              onOfficialAccountsChanged={handleOfficialAccountsChanged}
+              onNotice={setNotice}
+              onRequestConfirmation={setConfirmation}
             />
           ),
           prompt: (

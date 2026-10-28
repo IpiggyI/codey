@@ -48,6 +48,8 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
     app,
     /onToggleAccountUsage=\{handleToggleAccountUsage\}/,
   );
+  assert.match(app, /onOfficialAccountsChanged=\{handleOfficialAccountsChanged\}/);
+  assert.match(app, /onSwitchOfficialAccount=\{handleSwitchOfficialAccount\}/);
   assert.equal(
     [...app.matchAll(/currentProviderSnapshot: result\.currentProviderSnapshot/g)].length,
     3,
@@ -72,6 +74,7 @@ test("settings panels keep stable handlers and skip unrelated parent renders", a
   assert.match(sections, /className="provider-model-groups"/);
   assert.match(sections, /modelState\.officialModelIds/);
   assert.match(sections, /checked=\{showAccountUsageInHeader\}/);
+  assert.match(sections, /<OfficialAccountsPanel\s/);
   assert.match(sections, /checked=\{checked\}/);
   assert.match(sections, /额度显示/);
   assert.match(sections, /缓存有效时间（分钟）/);

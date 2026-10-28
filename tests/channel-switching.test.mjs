@@ -214,6 +214,98 @@ test("无法选择的渠道：当前、不可用和无稳定账号标识的官�
   assert.equal(channels.needsDefaultModel(entry("provider:b", { defaultModel: "m" })), false);
 });
 
+const accountSwitch = (accountId, settingsRevision, restartRequired = true) => ({
+  status: "ok",
+  accounts: [{ id: accountId, accountId: `acct-${accountId}`, addedAt: 1, invalid: false, isDefault: true }],
+  defaultAccountId: accountId,
+  officialAccountAvailable: true,
+  officialAccountStatus: "authenticated",
+  switchDisabledReason: null,
+  accountId,
+  restartRequired,
+  settingsRevision,
+});
+const officialSelected = listOf([
+  entry("provider:a", { defaultModel: "ma" }),
+  entry("official:acct", { current: true, defaultModel: "global-default" }),
+], "official:acct");
+
+test("切换官方账号：只带账号标识，接纳新修订与所选渠道，并走既有重启确认", async () => {
+  const { state, controller } = harness({
+    handler: (command) => command === "set_default_official_account" ? accountSwitch("acct", 6) : officialSelected,
+  });
+  const switched = await controller.switchOfficialAccount("acct");
+  assert.deepEqual(state.calls.slice(0, 2), [
+    { command: "set_default_official_account", args: { accountId: "acct" } },
+    { command: "list_channels", args: {} },
+  ]);
+  assert.deepEqual(switched.outcome, { kind: "applied", restartRequired: true });
+  assert.equal(switched.accounts.accountId, "acct");
+  assert.equal(state.restarts, 1, "切换成功后进入既有重启确认，不直接重启");
+  assert.equal(state.config.settingsRevision, 6);
+  assert.equal(state.config.selectedChannelId, "official:acct");
+  assert.equal(state.config.defaultModelsByChannel["official:acct"], "global-default", "后端补上的默认模型进入配置");
+  assert.equal(state.list, officialSelected);
+  assert.equal(state.calls.some((call) => call.command === "restart_codey"), false);
+});
+
+test("切换官方账号后，下一次渠道操作带上新修订，不会触发版本冲突", async () => {
+  const { state, controller } = harness({
+    handler: (command, args) => {
+      if (command === "set_default_official_account") return accountSwitch("acct", 6);
+      if (command === "list_channels") return officialSelected;
+      if (args.expectedRevision !== 6) throw new Error("Codey 设置已被其他操作更新，请刷新后重试");
+      return mutation(selectedB, 7, true);
+    },
+  });
+  await controller.switchOfficialAccount("acct");
+  const outcome = await controller.select("provider:b");
+  assert.equal(outcome.kind, "applied");
+  assert.deepEqual(state.calls.at(-1), { command: "select_channel", args: { channelId: "provider:b", expectedRevision: 6 } });
+});
+
+test("切换官方账号失败：不改动配置与列表，不触发重启", async () => {
+  const { state, controller } = harness({ handler: () => { throw new Error("找不到官方账号"); } });
+  const switched = await controller.switchOfficialAccount("gone");
+  assert.deepEqual(switched, { outcome: { kind: "failed", message: "找不到官方账号", conflict: false }, accounts: null, listError: null });
+  assert.equal(state.config.settingsRevision, 5);
+  assert.equal(state.list, initialList);
+  assert.equal(state.restarts, 0);
+});
+
+test("切换官方账号后渠道列表读取失败：仍接纳修订与所选渠道并提示重启", async () => {
+  const { state, controller } = harness({
+    handler: (command) => {
+      if (command === "set_default_official_account") return accountSwitch("acct", 6);
+      throw new Error("bridge 未连接");
+    },
+  });
+  const switched = await controller.switchOfficialAccount("acct");
+  assert.equal(switched.outcome.kind, "applied");
+  assert.equal(switched.listError, "bridge 未连接");
+  assert.equal(state.config.settingsRevision, 6);
+  assert.equal(state.config.selectedChannelId, "official:acct");
+  assert.equal(state.list, initialList);
+  assert.equal(state.restarts, 1);
+});
+
+test("切换官方账号的修订低于已接纳修订：配置不回退，不触发重启，但返回账号列表", async () => {
+  const { state, controller } = harness({
+    handler: (command, _args, current) => {
+      if (command === "set_default_official_account") {
+        current.config = { ...current.config, settingsRevision: 9 };
+        return accountSwitch("acct", 6);
+      }
+      return officialSelected;
+    },
+  });
+  const switched = await controller.switchOfficialAccount("acct");
+  assert.deepEqual(switched.outcome, { kind: "stale" });
+  assert.equal(switched.accounts.accountId, "acct");
+  assert.equal(state.config.settingsRevision, 9);
+  assert.equal(state.restarts, 0);
+});
+
 const FALLBACK = "所选渠道已不可用，已回退到用户配置的默认 provider。";
 const withNotice = (notice) => listOf(initialList.channels, null, notice);
 
@@ -371,7 +463,7 @@ async function compileMock(url, root) {
   if (root) out += `\n//# instance ${++mockInstance}`;
   return `data:text/javascript;base64,${Buffer.from(out).toString("base64")}`;
 }
-async function loadMock(search = "") {
+async function loadMock(search = "", log = () => {}) {
   const savedWindow = globalThis.window;
   const savedLog = console.log;
   globalThis.window = { location: { search }, addEventListener() {}, localStorage: { getItem() {}, setItem() {} } };
@@ -386,10 +478,10 @@ async function loadMock(search = "") {
   globalThis.window = savedWindow;
   const nativeTimeout = globalThis.setTimeout;
   return async (command, args = {}) => {
-    const log = console.log;
-    console.log = () => {};
+    const savedConsole = console.log;
+    console.log = log;
     globalThis.setTimeout = (callback) => nativeTimeout(callback, 0);
-    try { return await api(command, args); } finally { globalThis.setTimeout = nativeTimeout; console.log = log; }
+    try { return await api(command, args); } finally { globalThis.setTimeout = nativeTimeout; console.log = savedConsole; }
   };
 }
 const failedWith = (message) => ({ status: "failed", message });
@@ -455,6 +547,100 @@ test("模拟接口：成功路径递增修订，重启后不再要求重启", as
   const followed = await call("select_channel", { channelId: null, expectedRevision: 2 });
   assert.equal(followed.channelList.selectedChannelId, null);
   assert.equal("channelId" in (await call("load_codey_config")).currentProviderSnapshot, false);
+});
+
+test("模拟接口：每个官方账号是一个渠道，账号摘要不含令牌", async () => {
+  const call = await loadMock();
+  const accounts = await call("list_official_accounts");
+  assert.equal(accounts.status, "ok");
+  assert.equal(accounts.switchDisabledReason, null);
+  assert.doesNotMatch(JSON.stringify(accounts), /token/i);
+  const channelIds = (await call("list_channels")).channels.map((item) => item.id);
+  for (const item of accounts.accounts) assert.ok(channelIds.includes(`official:${item.id}`), item.id);
+});
+
+test("模拟接口：切换官方账号递增修订、选中官方渠道并补上全局默认模型", async () => {
+  const call = await loadMock();
+  const switched = await call("set_default_official_account", { accountId: "preview-pro" });
+  assert.equal(switched.settingsRevision, 1);
+  assert.equal(switched.restartRequired, true);
+  assert.equal(switched.defaultAccountId, "preview-pro");
+  const list = await call("list_channels");
+  const current = list.channels.find((item) => item.current);
+  assert.equal(current.id, "official:preview-pro");
+  assert.equal(current.defaultModel, (await call("load_codey_config")).config.defaultModel);
+  assert.deepEqual(await call("set_default_official_account", { accountId: "gone" }), failedWith("找不到官方账号"));
+  assert.deepEqual(await call("set_default_official_account", {}), failedWith("缺少参数：accountId"));
+});
+
+test("模拟接口：在渠道列表选择库内官方账号的渠道，同样切换 Codex 当前登录的账号", async () => {
+  const call = await loadMock();
+  await call("set_channel_default_model", { channelId: "official:preview-pro", model: "gpt-x", expectedRevision: 0 });
+  const selected = await call("select_channel", { channelId: "official:preview-pro", expectedRevision: 1 });
+  assert.equal(selected.restartRequired, true);
+  assert.equal((await call("list_official_accounts")).defaultAccountId, "preview-pro");
+});
+
+test("模拟接口：凭据存储不是 file 模式时拒绝导入当前登录与切换", async () => {
+  const call = await loadMock("?officialSwitchDisabled=1");
+  const reason = (await call("list_official_accounts")).switchDisabledReason;
+  assert.match(reason, /不是 file 模式/);
+  assert.deepEqual(await call("import_current_codex_login"), failedWith(reason));
+  assert.deepEqual(await call("set_default_official_account", { accountId: "preview-pro" }), failedWith(reason));
+  // 与后端一致：官方渠道显示为不可用，渠道列表也不能绕过禁用原因。
+  const official = (await call("list_channels")).channels.filter((item) => item.kind === "official" && item.id !== "official:unavailable");
+  assert.ok(official.length > 0);
+  for (const item of official) {
+    assert.equal(item.available, false, item.id);
+    assert.equal(item.unavailableReason, reason, item.id);
+  }
+  assert.deepEqual(await call("set_channel_default_model", { channelId: "official:preview-pro", model: "gpt-x", expectedRevision: 0 }),
+    failedWith("所选渠道不可用"));
+  assert.deepEqual(await call("select_channel", { channelId: "official:preview-pro", expectedRevision: 0 }), failedWith("所选渠道不可用"));
+  assert.equal((await call("load_codey_config")).config.settingsRevision, 0, "失败不改动修订");
+  assert.equal((await call("list_official_accounts")).defaultAccountId, "preview-account", "失败不切换账号");
+});
+
+test("模拟接口：粘贴凭据的校验文案与后端一致，日志不记录凭据", async () => {
+  const logged = [];
+  const call = await loadMock("", (...args) => logged.push(JSON.stringify(args)));
+  assert.deepEqual(await call("import_official_account_credential", { credential: "  " }), failedWith("请粘贴刷新令牌或 OAuth JSON"));
+  assert.deepEqual(await call("import_official_account_credential", { credential: "{bad" }), failedWith("OAuth JSON 格式无效"));
+  assert.deepEqual(await call("import_official_account_credential", { credential: "[]" }), failedWith("OAuth JSON 必须是对象"));
+  assert.deepEqual(await call("import_official_account_credential", { credential: "{}" }), failedWith("OAuth JSON 缺少访问令牌或刷新令牌"));
+  assert.deepEqual(await call("import_official_account_credential", { credential: "short" }), failedWith("刷新令牌格式无效"));
+  const added = await call("import_official_account_credential", { credential: "rt-secret-preview-value-0123456789" });
+  assert.equal(added.status, "ok");
+  assert.ok(added.accounts.some((item) => item.id === added.accountId));
+  assert.ok(logged.length > 0);
+  assert.doesNotMatch(logged.join("\n"), /rt-secret-preview-value/);
+});
+
+test("模拟接口：账号额度回写只接受最新代次，登录轮询在取消后过期", async () => {
+  const call = await loadMock();
+  const first = await call("query_official_account_usage", { accountId: "preview-account", forceRefresh: true });
+  const second = await call("query_official_account_usage", { accountId: "preview-account", forceRefresh: true });
+  assert.ok(second.authGeneration > first.authGeneration);
+  assert.deepEqual(await call("store_official_account_usage", { accountId: "preview-account", authGeneration: first.authGeneration, snapshot: {} }),
+    failedWith("官方账号状态已变化，忽略旧的额度结果"));
+  assert.deepEqual(await call("store_official_account_usage", { accountId: "preview-account", authGeneration: second.authGeneration, snapshot: {} }), { status: "ok" });
+  assert.deepEqual(await call("query_official_account_usage", { accountId: "gone" }), { status: "error", message: "找不到官方账号" });
+
+  const started = await call("start_official_account_login");
+  assert.equal(started.status, "wait");
+  assert.deepEqual(await call("poll_official_account_login", { loginId: started.loginId }), { status: "wait" });
+  assert.deepEqual(await call("cancel_official_account_login", { loginId: started.loginId }), { status: "ok" });
+  assert.equal((await call("poll_official_account_login", { loginId: started.loginId })).status, "expired");
+});
+
+test("模拟接口：移除账号不改动 Codex 当前登录，也不自动切换其他账号", async () => {
+  const call = await loadMock();
+  const removed = await call("remove_official_account", { accountId: "preview-account" });
+  assert.equal(removed.accounts.some((item) => item.id === "preview-account"), false);
+  assert.equal(removed.defaultAccountId, null);
+  assert.equal(removed.officialAccountAvailable, true, "Codex 登录仍在");
+  const reimported = await call("import_current_codex_login");
+  assert.equal(reimported.accountId, "preview-account", "移除后可以再次导入当前登录");
 });
 
 function section() {
@@ -607,6 +793,26 @@ test("渠道列表读取失败时提示并可重新读取", () => {
   const tree = render({ channelList: null, loadError: "bridge 未连接" });
   assert.ok(textContent(tree).includes("bridge 未连接"));
   assert.equal(buttons(tree, "重新读取").length, 1);
+});
+
+test("控制台接线：官方账号与渠道互相刷新，账号切换走渠道控制器与操作锁", async () => {
+  const [app, modelSection] = await Promise.all([readSource("src/App.tsx"), readSource("src/ModelSection.tsx")]);
+  const switchChannelBody = app.slice(app.indexOf("async function switchChannel("), app.indexOf("async function switchOfficialAccount("));
+  assert.match(switchChannelBody, /if \(!reportChannelOutcome\(outcome\)\) return;\s*setOfficialAccountsRefreshKey\(\(key\) => key \+ 1\);/,
+    "渠道切换成功后刷新账号列表");
+  assert.match(app, /const handleOfficialAccountsChanged = useStableEvent\(\(\) => void refreshChannels\(\)\);/,
+    "账号增删后刷新渠道列表");
+  const switchAccountBody = app.slice(app.indexOf("async function switchOfficialAccount("), app.indexOf("async function saveChannelDefaultModel("));
+  assert.match(switchAccountBody, /if \(dirty \|\| isBusy\) return null;/);
+  assert.match(switchAccountBody, /runOperation\("switch-official-account"/);
+  assert.match(switchAccountBody, /channelController\.switchOfficialAccount\(accountId\)/);
+  assert.doesNotMatch(app, /"set_default_official_account"/, "切换只经由渠道控制器");
+  assert.match(app, /models: \(active\) => \(\s*<ModelSection\s+active=\{active\}/);
+  const panel = modelSection.match(/<OfficialAccountsPanel[\s\S]*?\/>/)?.[0];
+  assert.ok(panel, "ModelSection 渲染官方账号面板");
+  assert.match(panel, /active=\{active\}/);
+  assert.match(panel, /disabled=\{dirty \|\| isBusy\}/);
+  assert.ok(modelSection.indexOf("<ChannelSection") < modelSection.indexOf("<OfficialAccountsPanel"), "面板位于渠道之后");
 });
 
 test("控制台接线：重启走既有确认流程，渠道随页面加载读取且不轮询", async () => {

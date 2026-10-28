@@ -10,9 +10,12 @@ import {
 import type {
   ChannelList,
   Config,
+  Confirmation,
   CurrentProviderSnapshot,
   ModelContextConfig,
   ModelState,
+  Notice,
+  OfficialAccountsResult,
   RouterSessionDiagnosis,
 } from "./App.types";
 import { Card } from "@heroui/react";
@@ -31,6 +34,7 @@ import {
 } from "./components/ui";
 import { ChannelSection } from "./ChannelSection";
 import { ModelOrderEditor } from "./components/ModelOrderEditor";
+import { OfficialAccountsPanel } from "./OfficialAccountsPanel";
 import { modelIdsEqual, modelKey, uniqueModelIds } from "./modelIds";
 import { globalDefaultForProvider } from "./modelRoutes";
 import { SETTINGS_OVERLAY_Z_INDEX } from "./overlay.constants";
@@ -97,6 +101,12 @@ type ModelSectionProps = {
   onSelectChannel: (channelId: string | null, defaultModel?: string) => void;
   onSetChannelDefaultModel: (channelId: string, model: string) => void;
   onRefreshChannels: () => void;
+  active: boolean;
+  officialAccountsRefreshKey: number;
+  onSwitchOfficialAccount: (accountId: string) => Promise<OfficialAccountsResult | null>;
+  onOfficialAccountsChanged: () => void;
+  onNotice: (notice: Notice) => void;
+  onRequestConfirmation: (confirmation: Confirmation) => void;
 };
 
 type RouteModelGroup = {
@@ -133,6 +143,12 @@ function ModelSectionComponent({
   onSelectChannel,
   onSetChannelDefaultModel,
   onRefreshChannels,
+  active,
+  officialAccountsRefreshKey,
+  onSwitchOfficialAccount,
+  onOfficialAccountsChanged,
+  onNotice,
+  onRequestConfirmation,
 }: ModelSectionProps) {
   const [officialEditorOpen, setOfficialEditorOpen] = useState(false);
   const [officialModelDraft, setOfficialModelDraft] = useState<string[]>([]);
@@ -283,6 +299,17 @@ function ModelSectionComponent({
         onSelect={onSelectChannel}
         onSetDefaultModel={onSetChannelDefaultModel}
         onRefresh={onRefreshChannels}
+      />
+
+      <OfficialAccountsPanel
+        active={active}
+        disabled={dirty || isBusy}
+        refreshKey={officialAccountsRefreshKey}
+        popupContainer={popupContainer}
+        onSwitch={onSwitchOfficialAccount}
+        onAccountsChanged={onOfficialAccountsChanged}
+        onNotice={onNotice}
+        onRequestConfirmation={onRequestConfirmation}
       />
 
       {currentProviderSnapshot ? (

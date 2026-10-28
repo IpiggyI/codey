@@ -220,6 +220,52 @@ export type ChannelMutationResult = {
   restartRequired: boolean;
 };
 
+// 官方账号摘要：后端不返回令牌，前端类型也不声明任何凭据字段。
+export type OfficialAccount = {
+  id: string;
+  accountId: string;
+  addedAt: number;
+  invalid: boolean;
+  isDefault: boolean;
+  email?: string;
+  planType?: string;
+  lastRefresh?: string;
+};
+
+export type OfficialAccountsResult = {
+  status: "ok";
+  accounts: OfficialAccount[];
+  defaultAccountId: string | null;
+  officialAccountAvailable: boolean;
+  officialAccountStatus: string;
+  switchDisabledReason: string | null;
+  accountId?: string;
+};
+
+export type OfficialAccountSwitchResult = OfficialAccountsResult & {
+  accountId: string;
+  restartRequired: boolean;
+  settingsRevision: number;
+};
+
+export type OfficialUsageWindow = { usedPercent: number; windowMinutes: number; resetsAt?: number };
+
+export type OfficialUsageSnapshot = {
+  fetchedAt: number;
+  planType?: string;
+  primary?: OfficialUsageWindow;
+  secondary?: OfficialUsageWindow;
+  credits?: { hasCredits: boolean; unlimited: boolean; balance?: string };
+  additionalLimits?: Array<{
+    limitName: string;
+    limitId?: string;
+    primary?: OfficialUsageWindow;
+    secondary?: OfficialUsageWindow;
+    blocked: boolean;
+  }>;
+  accountLabel?: string;
+};
+
 export type ProviderStatus = {
   changed: boolean;
   provider: {
@@ -254,7 +300,9 @@ export type Confirmation = {
     | "restart"
     | "repair-codex-config"
     | "delete-notification-channel"
-    | "migrate-codey-router-sessions";
+    | "migrate-codey-router-sessions"
+    | "switch-official-account"
+    | "delete-official-account";
   title: string;
   description: string;
   confirmLabel: string;

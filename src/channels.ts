@@ -1,7 +1,18 @@
-import type { ChannelEntry, ChannelList, ChannelMutationResult, Config, Notice } from "./App.types";
+import type {
+  ChannelEntry,
+  ChannelList,
+  ChannelMutationResult,
+  Config,
+  Notice,
+  OfficialAccountSwitchResult,
+} from "./App.types";
 import { errorText } from "./appUtils";
 
-export type ChannelCommand = "list_channels" | "set_channel_default_model" | "select_channel";
+export type ChannelCommand =
+  | "list_channels"
+  | "set_channel_default_model"
+  | "select_channel"
+  | "set_default_official_account";
 
 // 后端版本冲突提示中的固定片段，用它判断是否提示使用者刷新。
 const VERSION_CONFLICT_MARKER = "已被其他操作更新";
@@ -10,6 +21,13 @@ export type ChannelOutcome =
   | { kind: "applied"; restartRequired: boolean }
   | { kind: "stale" }
   | { kind: "failed"; message: string; conflict: boolean };
+
+// accounts 只要后端切换成功就返回，即使配置接纳因修订过旧被拒绝。
+export type OfficialAccountSwitchOutcome = {
+  outcome: ChannelOutcome;
+  accounts: OfficialAccountSwitchResult | null;
+  listError: string | null;
+};
 
 export type ChannelControllerDeps = {
   call: <T>(command: ChannelCommand, args: Record<string, unknown>) => Promise<T>;
@@ -128,8 +146,42 @@ export function createChannelController(deps: ChannelControllerDeps) {
     return outcome;
   }
 
+  // 切换官方账号即切换到它的渠道。后端已保存修订号，这里沿用渠道的配置接纳流程，
+  // 保证下一次渠道请求带上新修订；列表读取失败时仍接纳修订与所选渠道。
+  async function switchOfficialAccount(accountId: string): Promise<OfficialAccountSwitchOutcome> {
+    let result: OfficialAccountSwitchResult;
+    try {
+      result = await deps.call<OfficialAccountSwitchResult>("set_default_official_account", { accountId });
+    } catch (error) {
+      return { outcome: failed(error), accounts: null, listError: null };
+    }
+    const generation = ++listGeneration;
+    let list: ChannelList | null = null;
+    let listError: string | null = null;
+    try {
+      list = await deps.call<ChannelList>("list_channels", {});
+    } catch (error) {
+      listError = errorText(error);
+    }
+    const latest = deps.readConfig();
+    const merged = latest && (list
+      ? mergeChannelResult(latest, {
+        status: "ok",
+        channelList: list,
+        settingsRevision: result.settingsRevision,
+        restartRequired: result.restartRequired,
+      })
+      : { ...latest, settingsRevision: result.settingsRevision, selectedChannelId: `official:${result.accountId}` });
+    if (!merged || !deps.adopt(merged, result.restartRequired)) {
+      return { outcome: { kind: "stale" }, accounts: result, listError };
+    }
+    if (list && generation === listGeneration) adoptList(list);
+    if (result.restartRequired) deps.askRestart();
+    return { outcome: { kind: "applied", restartRequired: result.restartRequired }, accounts: result, listError };
+  }
+
   // 运行状态响应到达时调用；较晚到达的 null 同样清除提示。
   const noteStatusNotice = (notice: string | null) => deps.setChannelNotice(notice);
 
-  return { refresh, select, setDefaultModel, noteStatusNotice };
+  return { refresh, select, setDefaultModel, switchOfficialAccount, noteStatusNotice };
 }
