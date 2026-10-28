@@ -122,6 +122,8 @@ pub struct AppState {
     #[cfg(test)]
     notification_codex_home: Option<PathBuf>,
     #[cfg(test)]
+    stats_codex_home: Option<PathBuf>,
+    #[cfg(test)]
     notification_watcher_failure: AtomicBool,
     #[cfg(test)]
     notification_watcher_started: Notify,
@@ -256,6 +258,8 @@ impl AppState {
             webhook_http_client_override: None,
             #[cfg(test)]
             notification_codex_home: None,
+            #[cfg(test)]
+            stats_codex_home: None,
             #[cfg(test)]
             notification_watcher_failure: AtomicBool::new(false),
             #[cfg(test)]
@@ -399,9 +403,9 @@ impl AppState {
             "/backend/health" => json!({"status":"ok"}),
             "/account/usage" => account_usage_snapshot(self).await,
             "/account/identity" => {
-                let path = codex_home().join("auth.json");
+                let home = codex_home().to_path_buf();
                 blocking_value("读取官方账号身份", move || {
-                    account_usage::account_identity(&path)
+                    account_usage::account_identity_for_home(&home)
                 })
                 .await
             }
@@ -424,6 +428,7 @@ impl AppState {
                 }
             }
             "/session/last-model-request" => last_model_request(self, &payload).await,
+            "/session/stats" => conversation_stats(self, &payload).await,
             "/session/titles" => cache_session_titles(self, &payload).await,
             "/session/timestamps" => {
                 let session_ids =
@@ -2198,6 +2203,39 @@ async fn last_model_request(state: &Arc<AppState>, payload: &Value) -> Value {
             Some(request) => json!({"status":"ok", "found": true, "request": request}),
             None => json!({"status":"ok", "found": false, "reason": "no-usage"}),
         })
+    })
+    .await
+}
+
+async fn conversation_stats(state: &Arc<AppState>, payload: &Value) -> Value {
+    let session_id =
+        crate::session_metadata::normalize_session_id(&bridge_string(payload, "sessionId"))
+            .to_owned();
+    if session_id.is_empty() || session_id.len() > 256 {
+        return api_error_message("会话 ID 缺失或过长");
+    }
+    #[cfg(not(test))]
+    let home = codex_home().to_path_buf();
+    #[cfg(test)]
+    let home = state
+        .stats_codex_home
+        .clone()
+        .expect("对话用量测试必须指定临时目录");
+    let lookup_id = session_id.clone();
+    let rollout = match with_session_metadata_cache(state, "查找会话记录", move |cache| {
+        cache.resolve_rollout_path(&home, &lookup_id)
+    })
+    .await
+    {
+        Ok(rollout) => rollout,
+        Err(error) => return api_error_message(error),
+    };
+    blocking_value("读取对话用量", move || {
+        let stats = rollout
+            .as_deref()
+            .map(|path| crate::conversation_stats::snapshot(path, &session_id))
+            .transpose()?;
+        Ok(json!({"status":"ok", "stats":stats}))
     })
     .await
 }

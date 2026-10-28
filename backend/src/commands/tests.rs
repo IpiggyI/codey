@@ -2,6 +2,47 @@ use super::*;
 use crate::config::ProviderProfile;
 
 #[tokio::test]
+async fn conversation_stats_bridge_returns_record_snapshot_envelope() {
+    let directory = tempfile::tempdir().unwrap();
+    let id = "00000000-0000-0000-0000-000000000034";
+    let sessions = directory.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    std::fs::write(sessions.join(format!("rollout-2026-10-28T00-00-00-{id}.jsonl")), format!(
+        "{}\n{}\n{}\n",
+        json!({"type":"session_meta","payload":{"id":id}}),
+        json!({"type":"event_msg","timestamp":"2026-10-28T00:00:00Z","payload":{"type":"task_started","turn_id":"one"}}),
+        json!({"type":"event_msg","timestamp":"2026-10-28T00:00:01Z","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":123}}}})
+    )).unwrap();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        stats_codex_home: Some(directory.path().to_owned()),
+        ..AppState::default()
+    });
+    let result = state
+        .bridge_request(
+            "/session/stats".into(),
+            json!({"sessionId":format!("local:{id}")}),
+        )
+        .await;
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["stats"]["totalTokens"], 123);
+    assert_eq!(result["stats"]["turnCount"], 1);
+    assert_eq!(result["stats"]["lastTurn"]["id"], "one");
+    assert_eq!(result.as_object().unwrap().len(), 2);
+    let empty = state
+        .bridge_request(
+            "/session/stats".into(),
+            json!({"sessionId":"00000000-0000-0000-0000-000000000035"}),
+        )
+        .await;
+    assert_eq!(empty, json!({"status":"ok","stats":null}));
+    let invalid = state
+        .bridge_request("/session/stats".into(), json!({}))
+        .await;
+    assert_eq!(invalid["status"], "failed");
+}
+
+#[tokio::test]
 async fn model_save_routes_accept_missing_or_null_ids_without_weakening_required_routes() {
     let directory = tempfile::tempdir().unwrap();
     let state = Arc::new(AppState {

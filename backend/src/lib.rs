@@ -10,6 +10,7 @@ mod commands;
 mod computer_use;
 mod config;
 mod context_recovery;
+mod conversation_stats;
 mod crashpad_pending_guard;
 #[cfg(windows)]
 mod desktop_instance;
