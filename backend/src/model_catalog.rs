@@ -239,6 +239,7 @@ fn refresh_for_provider_with_transport_preferences(args: CatalogRefreshArgs<'_>)
                 catalog_dir,
                 codex_home,
                 user_catalog,
+                codex_app_path,
             );
         }
         Err(error) => return Err(error),
@@ -275,7 +276,12 @@ fn refresh_for_provider_with_transport_preferences(args: CatalogRefreshArgs<'_>)
     }
     let official_models = &official_catalog.candidates;
     if user_catalog.is_some() && ensure_runtime_compatible_models(official_models).is_err() {
-        return materialize_user_catalog_without_generated(catalog_dir, codex_home, user_catalog);
+        return materialize_user_catalog_without_generated(
+            catalog_dir,
+            codex_home,
+            user_catalog,
+            codex_app_path,
+        );
     }
     let official_slugs = official_models
         .iter()
@@ -460,8 +466,10 @@ fn materialize_user_catalog_without_generated(
     catalog_dir: &Path,
     codex_home: &Path,
     user_catalog: Option<&Path>,
+    codex_app_path: &str,
 ) -> Result<usize> {
     materialize_derived_catalog(catalog_dir, codex_home, &[], user_catalog)?;
+    runtime_source::stamp_catalog(catalog_dir, codex_app_path)?;
     Ok(read_runtime_catalog_models(catalog_dir)?.len())
 }
 
