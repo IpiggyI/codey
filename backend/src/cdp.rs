@@ -50,7 +50,8 @@ pub(crate) const SETTINGS_OVERLAY_SCRIPT: &str =
 const PLUGIN_MARKETPLACE_FIX_SCRIPT: &str =
     include_str!("../../dist-overlay/inject/plugin-marketplace-fix.js");
 const PROMPT_OPTIMIZE_SCRIPT: &str = include_str!("../../dist-overlay/inject/prompt-optimize.js");
-const COMPOSER_USAGE_SCRIPT: &str = include_str!("../../dist-overlay/inject/composer-usage.js");
+const CONVERSATION_STATS_SCRIPT: &str =
+    include_str!("../../dist-overlay/inject/conversation-stats-inject.js");
 const QUOTA_UNLOCK_SCRIPT: &str = include_str!("../../dist-overlay/inject/quota-unlock.js");
 const MAX_INJECTION_ERROR_CHARS: usize = 500;
 const MAX_INJECTION_DETAIL_CHARS: usize = 2000;
@@ -366,20 +367,21 @@ pub fn prepare_injection_scripts(
             Feature,
         ),
         (
-            "composer-usage",
-            "输入栏用量",
-            COMPOSER_USAGE_SCRIPT,
+            "conversation-stats",
+            "对话用量",
+            CONVERSATION_STATS_SCRIPT,
             r#"(() => {
-              const usage = window.__codeyComposerUsage;
-              if (!usage || typeof usage.snapshot !== "function") return "";
-              const snapshot = usage.snapshot();
-              if (snapshot.ready !== true) return "";
-              if (snapshot.usageVisible === true) return "输入栏用量芯片已就绪";
-              if (snapshot.composerFound === false) {
+              const stats = window.__codeyConversationStats;
+              if (stats?.installed !== true || typeof stats.snapshot !== "function") return "";
+              const snapshot = stats.snapshot();
+              if (snapshot.anchorFound !== true) {
                 return { effective: false, inactive: true, detail: "等待输入栏" };
               }
-              return snapshot.subscribed === true
-                ? { effective: false, inactive: true, detail: "当前对话暂无用量" }
+              if (!snapshot.sessionId) {
+                return { effective: false, inactive: true, detail: "等待对话建立" };
+              }
+              return snapshot.mounted === true && snapshot.subscribed === true
+                ? "对话用量统计条已就绪"
                 : { effective: false, detail: "尚未订阅对话用量" };
             })()"#
                 .to_string(),
@@ -410,7 +412,7 @@ pub fn prepare_injection_scripts(
             + SECURITY_WARNING_SHIELD_SCRIPT.len()
             + PLUGIN_MARKETPLACE_FIX_SCRIPT.len()
             + PROMPT_OPTIMIZE_SCRIPT.len()
-            + COMPOSER_USAGE_SCRIPT.len()
+            + CONVERSATION_STATS_SCRIPT.len()
             + QUOTA_UNLOCK_SCRIPT.len()
             + 4096,
     );
@@ -2364,6 +2366,12 @@ assert.equal(nextPage.window.attempts, 1);
             prepared.descriptors[10].visibility,
             InjectionScriptVisibility::Feature
         );
+        assert_eq!(prepared.descriptors[9].id, "conversation-stats");
+        assert_eq!(prepared.descriptors[9].name, "对话用量");
+        assert_eq!(
+            prepared.descriptors[9].visibility,
+            InjectionScriptVisibility::Feature
+        );
         let snapshot_script = injection_status_snapshot_script(&prepared.descriptors);
         assert!(snapshot_script.contains("bridge-helpers"));
         assert!(snapshot_script.contains("effective: false"));
@@ -2372,6 +2380,9 @@ assert.equal(nextPage.window.attempts, 1);
         assert!(snapshot_script.contains("Object.prototype.hasOwnProperty.call"));
         assert!(snapshot_script.contains("模型列表响应补丁已安装"));
         assert!(snapshot_script.contains("插件市场桥接已接管"));
+        assert!(snapshot_script.contains("对话用量统计条已就绪"));
+        assert!(snapshot_script.contains("等待对话建立"));
+        assert!(snapshot_script.contains("尚未订阅对话用量"));
         assert!(snapshot_script.contains("for (const delay of [50, 200, 750])"));
         assert!(!snapshot_script.contains("user-script-1\": () =>"));
         let overlay_load_script = prepared_settings_overlay_load_script();
