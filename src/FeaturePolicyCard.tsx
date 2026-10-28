@@ -461,7 +461,7 @@ function FeaturePolicyCardComponent({
             }
             value={launchProxy}
             disabled={isBusy}
-            placeholder="留空不走代理，例如 http://127.0.0.1:7890"
+            placeholder="留空时 Codey 不修改代理设置，例如 http://127.0.0.1:7890"
             spellCheck={false}
             rightSection={
               launchProxy ? (

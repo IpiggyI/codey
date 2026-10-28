@@ -42,6 +42,40 @@ test("内置 Skill 只有查看入口，没有卸载入口", () => {
   assert.equal(removeButton(tree, "builtin-skill").length, 0);
 });
 
+test("每一行共用同一条左边缘：内置行也预留选择列，原因行与其他详情行同缩进", () => {
+  const graph = createModuleGraph(new URL("../src/features/codex-extensions/ExtensionList.tsx", import.meta.url), { stubs });
+  const base = { sourcePath: "/skills", manifestPath: "/skills/SKILL.md", description: "", enabled: true, readOnly: false, scope: "user" };
+  const entries = [
+    { ...base, id: "external", name: "external", ownership: "external" },
+    { ...base, id: "builtin", name: "imagegen", ownership: "builtin", scope: "system", readOnly: true, reason: "Codex 系统资源不可修改" },
+    { ...base, id: "fast-context", name: "fast-context", ownership: "external", canToggle: false, reason: "目录内容无法安全删除：文件超过大小限制" },
+  ];
+  const tree = graph.exports.ExtensionList({ kind: "skill", entries, busy: false, onAction() {}, onSelect() {} });
+  const [external, builtin, blocked] = matching(tree, (node) => elementType(node) === "article");
+  const classOf = (node) => String(elementProps(node).className ?? "");
+  // 图标前的选择列：每一行都有同样宽度的一列，只有可切换的行里才放复选框。
+  const selectColumn = (article) => matching(article, (node) => classOf(node).includes("mt-2 w-4 shrink-0"));
+  for (const article of [external, builtin, blocked]) assert.equal(selectColumn(article).length, 1);
+  assert.equal(matching(selectColumn(external)[0], (node) => elementType(node) === ui.Checkbox).length, 1);
+  assert.equal(matching(selectColumn(builtin)[0], (node) => elementType(node) === ui.Checkbox).length, 0);
+  assert.equal(matching(selectColumn(blocked)[0], (node) => elementType(node) === ui.Checkbox).length, 0);
+  // 详情行（路径、状态行、原因、操作栏）在每一行里都用同一个缩进。
+  const indents = (article) => new Set(matching(article, (node) => /sm:ml-/.test(classOf(node))).map((node) => classOf(node).match(/sm:ml-\S+/)[0]));
+  assert.deepEqual([...indents(external)], ["sm:ml-[76px]"]);
+  assert.deepEqual([...indents(builtin)], ["sm:ml-[76px]"]);
+  assert.deepEqual([...indents(blocked)], ["sm:ml-[76px]"]);
+  const reason = matching(blocked, (node) => elementType(node) === "p" && textContent(node).includes("目录内容无法安全删除"))[0];
+  assert.match(classOf(reason), /sm:ml-\[76px\]/);
+});
+
+test("没有选择列的列表仍用较小的缩进", () => {
+  const graph = createModuleGraph(new URL("../src/features/codex-extensions/ExtensionList.tsx", import.meta.url), { stubs });
+  const entry = { id: "a", name: "a", sourcePath: "/a", enabled: true, readOnly: false, reason: "说明" };
+  const tree = graph.exports.ExtensionList({ kind: "mcp", entries: [entry], busy: false, onAction() {} });
+  assert.equal(matching(tree, (node) => String(elementProps(node).className ?? "").includes("w-4 shrink-0")).length, 0);
+  assert.ok(matching(tree, (node) => String(elementProps(node).className ?? "").includes("sm:ml-12")).length > 0);
+});
+
 test("安装预览文件列表有界，来源可在预览期间编辑且最终操作含明确确认", () => {
   const graph = createModuleGraph(new URL("../src/features/codex-extensions/ExtensionEditor.tsx", import.meta.url), { stubs });
   const draft = { kind: "install", content: "/tmp/skill", isNew: true, installPreview: source };

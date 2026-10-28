@@ -197,63 +197,6 @@ input:focus-visible,
   width: 140px;
 }
 
-.config-header-feedback {
-  position: relative;
-}
-
-.feedback-qr-popover {
-  position: absolute;
-  z-index: 40;
-  top: calc(100% + 10px);
-  left: 50%;
-  display: grid;
-  width: 176px;
-  justify-items: center;
-  gap: 7px;
-  padding: 10px;
-  border: 1px solid rgba(0, 0, 0, 0.1);
-  border-radius: 12px;
-  background: #ffffff;
-  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.18);
-  color: #4b4b50;
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1.4;
-  opacity: 0;
-  pointer-events: none;
-  transform: translate(-50%, -4px);
-  visibility: hidden;
-  transition: opacity 150ms ease, transform 150ms ease, visibility 150ms ease;
-}
-
-.feedback-qr-popover::before {
-  position: absolute;
-  top: -5px;
-  left: 50%;
-  width: 9px;
-  height: 9px;
-  border-top: 1px solid rgba(0, 0, 0, 0.1);
-  border-left: 1px solid rgba(0, 0, 0, 0.1);
-  background: #ffffff;
-  content: "";
-  transform: translateX(-50%) rotate(45deg);
-}
-
-.feedback-qr-popover img {
-  display: block;
-  width: 156px;
-  height: 156px;
-  border-radius: 7px;
-  object-fit: cover;
-}
-
-.config-header-feedback:hover .feedback-qr-popover,
-.config-header-feedback:focus-within .feedback-qr-popover {
-  opacity: 1;
-  transform: translate(-50%, 0);
-  visibility: visible;
-}
-
 /* ==========================================================================
    Main Scroll & Page Container
    ========================================================================== */

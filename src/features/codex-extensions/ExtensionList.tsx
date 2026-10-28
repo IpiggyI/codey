@@ -83,7 +83,8 @@ export function ExtensionList({
         const isManaged = "ownership" in entry && entry.ownership === "managed";
         const checkResult = checks[entry.id];
         const working = busy && busyResourceId === entry.id;
-        const detailIndent = onSelect && canToggle(entry) ? "sm:ml-[76px]" : "sm:ml-12";
+        // 有选择列时，每一行都预留这一列（不可切换的行留空），图标与详情行的左边缘才一致。
+        const detailIndent = onSelect ? "sm:ml-[76px]" : "sm:ml-12";
 
         return (
           <article
@@ -94,17 +95,19 @@ export function ExtensionList({
             <div className="min-w-0 flex-1 px-4 pt-3.5 pb-2.5">
               <div className="flex items-start justify-between gap-3">
                 <div className="flex items-start gap-3 min-w-0 flex-1">
-                  {onSelect && canToggle(entry) && (
-                    <div className="mt-2 shrink-0">
-                      <Checkbox
-                        aria-label={`选择 ${entry.name}`}
-                        checked={selected.includes(entry.id)}
-                        disabled={
-                          busy ||
-                          (selected.length >= 100 && !selected.includes(entry.id))
-                        }
-                        onCheckedChange={() => onSelect(entry.id)}
-                      />
+                  {onSelect && (
+                    <div className="mt-2 w-4 shrink-0">
+                      {canToggle(entry) && (
+                        <Checkbox
+                          aria-label={`选择 ${entry.name}`}
+                          checked={selected.includes(entry.id)}
+                          disabled={
+                            busy ||
+                            (selected.length >= 100 && !selected.includes(entry.id))
+                          }
+                          onCheckedChange={() => onSelect(entry.id)}
+                        />
+                      )}
                     </div>
                   )}
                   <div
@@ -238,7 +241,7 @@ export function ExtensionList({
               </div>
 
               {!isBuiltin && !canToggle(entry) && !entry.reason && (
-                <p className="mb-0 mt-2 text-xs text-muted">
+                <p className={`mb-0 mt-2 text-xs text-muted ${detailIndent}`}>
                   {!isKnown
                     ? "无法确认启用状态，暂不可切换。"
                     : entry.configurationStatus === "invalid"
@@ -248,7 +251,7 @@ export function ExtensionList({
               )}
 
               {!isBuiltin && entry.reason && (
-                <p className="mb-0 mt-2 text-xs text-muted leading-relaxed">
+                <p className={`mb-0 mt-2 text-xs text-muted leading-relaxed ${detailIndent}`}>
                   {entry.reason}
                 </p>
               )}

@@ -114,6 +114,9 @@ test("launch proxy input lives in the Codex feature policy card", async () => {
   assert.match(cardSource, /aria-invalid=\{Boolean\(launchProxyError\)\}/);
   assert.match(cardSource, /validateCodexLaunchProxy\(launchProxy\)/);
   assert.match(cardSource, /重启 Codex 后生效/);
+  // 留空表示 Codey 不修改代理设置，不代表 Codex 不走代理。
+  assert.match(cardSource, /placeholder="留空时 Codey 不修改代理设置，例如 http:\/\/127\.0\.0\.1:7890"/);
+  assert.doesNotMatch(cardSource, /留空不走代理/);
   // 校验错误通过 aria-describedby 关联到输入框。
   assert.match(
     cardSource,

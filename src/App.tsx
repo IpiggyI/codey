@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   IconBrandGithub,
+  IconArrowBackUp as Undo,
   IconCheck,
   IconDeviceFloppy as Save,
   IconGitBranch as GitBranch,
   IconLoader2 as LoaderCircle,
-  IconMessageCircleQuestion,
   IconRefresh as RefreshCw,
   IconSettings,
   IconX,
@@ -99,21 +99,11 @@ const SWITCH_CONFIRMATIONS: Record<SwitchTarget, Omit<Confirmation, "run">> = {
   },
 };
 const extensionRequest: ExtensionTransport = (request) => invoke("codex_extensions", { request });
-const FEEDBACK_GROUP_QR_BASE_URL =
-  "https://pub-2d17a6a8bc22426a92e297a59f55ccc3.r2.dev/qr.png";
 const UNKNOWN_FAST_CONTEXT_TOOLS_STATUS: FastContextToolsStatus = {
   userConfigured: false,
   detectionFailed: true,
 };
 const CONFIG_LOAD_TIMEOUT_MS = 30_000;
-
-function localDateCacheKey(date: Date) {
-  return [
-    date.getFullYear(),
-    String(date.getMonth() + 1).padStart(2, "0"),
-    String(date.getDate()).padStart(2, "0"),
-  ].join("");
-}
 
 function currentProviderModelState(
   config: Config,
@@ -148,8 +138,6 @@ export function App({
   onAfterClose,
   onClose,
 }: AppProps) {
-  const feedbackGroupQrUrl =
-    `${FEEDBACK_GROUP_QR_BASE_URL}?date=${localDateCacheKey(new Date())}`;
   const [config, setConfig] = useState<Config | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const persistedConfigRef = useRef<Config | null>(null);
@@ -861,7 +849,8 @@ export function App({
     });
   }
 
-  function discardSettings() {
+  // 恢复上次保存的设置；close 为 false 时控制台保持打开。
+  function discardSettings(close = true) {
     if (isBusy) return;
     if (persistedConfigRef.current) {
       setConfig(persistedConfigRef.current);
@@ -869,7 +858,18 @@ export function App({
     setDirty(false);
     setModelPickerVisible(false);
     confirmationController.clear();
-    onClose?.();
+    if (close) onClose?.();
+  }
+
+  function askDiscardChanges() {
+    if (isBusy || !dirty) return;
+    setConfirmation({
+      action: "discard-settings",
+      title: "放弃未保存的更改？",
+      description: "将恢复上次保存的设置，控制台保持打开。",
+      confirmLabel: "放弃更改",
+      run: () => discardSettings(false),
+    });
   }
 
   function closeSettings() {
@@ -880,7 +880,7 @@ export function App({
       title: "放弃未保存的设置？",
       description: "关闭后将恢复上次保存的设置。",
       confirmLabel: "放弃更改并关闭",
-      run: discardSettings,
+      run: () => discardSettings(),
     });
   }
 
@@ -1146,6 +1146,7 @@ export function App({
   }
 
   const handleCloseSettings = useStableEvent(closeSettings);
+  const handleDiscardChanges = useStableEvent(askDiscardChanges);
   const handleSaveCurrent = useStableEvent(() => void saveCurrent());
   const handleRepairPluginMarketplace = useStableEvent(
     () => void repairPluginMarketplace(),
@@ -1284,22 +1285,6 @@ export function App({
 
       {embedded && (
         <div className="flex items-center gap-3 justify-self-center max-[520px]:gap-2">
-          <div className="config-header-feedback">
-            <Button
-              aria-describedby="codey-feedback-qr-description"
-              aria-label="问题反馈群，悬浮或聚焦查看二维码"
-              className="whitespace-nowrap max-[520px]:w-8! max-[520px]:px-0!"
-              size="sm"
-              variant="brand-outline"
-            >
-              <IconMessageCircleQuestion aria-hidden="true" />
-              <span className="max-[520px]:hidden">问题反馈群</span>
-            </Button>
-            <div className="feedback-qr-popover" role="tooltip">
-              <img src={feedbackGroupQrUrl} alt="问题反馈群二维码" />
-              <span id="codey-feedback-qr-description">扫码加入问题反馈群</span>
-            </div>
-          </div>
           <Button
             aria-label="打开 Codey GitHub 仓库"
             className="w-8! min-w-8! px-0!"
@@ -1342,6 +1327,19 @@ export function App({
               <span className="max-[520px]:hidden">
                 {restartStatusError ? "重新查询状态" : waitingForRestart ? "等待重启" : status.running ? "重启 Codex" : "未运行"}
               </span>
+            </Button>
+          )}
+          {dirty && (
+            <Button
+              aria-label="放弃更改"
+              className="max-[520px]:w-8! max-[520px]:px-0!"
+              disabled={isBusy}
+              onPress={handleDiscardChanges}
+              size="sm"
+              variant="ghost"
+            >
+              <Undo aria-hidden="true" />
+              <span className="max-[520px]:hidden">放弃更改</span>
             </Button>
           )}
           <Button

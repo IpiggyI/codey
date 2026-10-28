@@ -156,7 +156,7 @@ fn build_authorize_url(state: &str, challenge: &str) -> String {
 async fn bind_callback_listener(port: u16) -> Result<TcpListener> {
     TcpListener::bind(("127.0.0.1", port)).await.map_err(|error| {
         if error.kind() == std::io::ErrorKind::AddrInUse {
-            anyhow!("登录回调端口 127.0.0.1:{port} 已被占用，当前登录流程使用固定回调地址；请释放该端口后重试，或导入 Codex 现有登录")
+            anyhow!("登录回调端口 127.0.0.1:{port} 已被占用，当前登录流程使用固定回调地址；请释放该端口后重试，或导入 Codex 现有登录。端口也可能被 WSL 或 Docker 进程占用，例如 WSL 镜像网络下发布 1455 端口的容器，Windows netstat 可能不会列出它")
         } else {
             anyhow!("无法监听登录回调端口 127.0.0.1:{port}（{error}）")
         }
@@ -496,5 +496,6 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let error = bind_callback_listener(port).await.unwrap_err().to_string();
         assert!(error.contains("已被占用"));
+        assert!(error.contains("WSL") && error.contains("Docker") && error.contains("netstat"));
     }
 }
