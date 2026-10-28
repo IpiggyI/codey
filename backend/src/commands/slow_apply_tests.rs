@@ -237,7 +237,7 @@ async fn background_apply_writes_subagent_artifacts_without_touching_user_files(
     assert!(
         changed
             .iter()
-            .any(|path| path.to_string_lossy().contains("runtime/agents")),
+            .any(|path| path.starts_with("codey-state/codex-constraints/runtime/agents")),
         "{changed:?}"
     );
 }

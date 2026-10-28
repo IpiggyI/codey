@@ -153,23 +153,9 @@ fn restrict_backup_directory(_path: &Path) -> Result<()> {
 
 #[cfg(windows)]
 fn restrict_backup_directory(path: &Path) -> Result<()> {
-    let status = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", r#"
-$ErrorActionPreference = 'Stop'
-$acl = New-Object System.Security.AccessControl.DirectorySecurity
-$acl.SetAccessRuleProtection($true, $false)
-$sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-$acl.SetOwner($sid)
-$rule = New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
-$acl.AddAccessRule($rule)
-Set-Acl -LiteralPath $env:CODEY_CONFIG_BACKUP_DIR -AclObject $acl
-"#])
-        .env("CODEY_CONFIG_BACKUP_DIR", path)
-        .output().context("无法设置备份目录访问权限")?;
-    anyhow::ensure!(
-        status.status.success(),
-        "无法将备份目录限制为当前用户访问，未写入配置"
-    );
+    let restricted = crate::fs_util::restrict_directory_to_current_user(path)
+        .context("无法设置备份目录访问权限")?;
+    anyhow::ensure!(restricted, "无法将备份目录限制为当前用户访问，未写入配置");
     Ok(())
 }
 

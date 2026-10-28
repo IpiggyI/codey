@@ -134,7 +134,7 @@ $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
 $acl.SetOwner($sid)
 $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
 $acl.AddAccessRule($rule)
-Set-Acl -LiteralPath $env:CODEY_EXTENSIONS_BACKUP_DIR -AclObject $acl
+(Get-Item -LiteralPath $env:CODEY_EXTENSIONS_BACKUP_DIR).SetAccessControl($acl)
 "#]).env("CODEY_EXTENSIONS_BACKUP_DIR", path).output()
             .context("无法设置备份目录权限")?;
         ensure!(
@@ -160,5 +160,19 @@ mod tests {
         let error = snapshot(&root.join("data"), &[change], &[]).unwrap_err();
         assert!(error.to_string().contains("原版本不一致"));
         assert_eq!(fs::read(source).unwrap(), b"external");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn backup_can_snapshot_twice_into_the_same_data_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let source = root.join("config.toml");
+        fs::write(&source, b"original").unwrap();
+        for _ in 0..2 {
+            let change = Change::new(source.clone(), Some(b"replacement".to_vec())).unwrap();
+            let backup = snapshot(&root.join("data"), &[change], &[]).unwrap();
+            assert!(backup.join("manifest.json").is_file());
+        }
     }
 }

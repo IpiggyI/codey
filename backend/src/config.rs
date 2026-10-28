@@ -3,7 +3,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -2288,10 +2287,27 @@ fn default_subagent_reasoning_effort() -> String {
     DEFAULT_SUBAGENT_REASONING_EFFORT.to_string()
 }
 
+#[cfg(not(test))]
 pub fn default_config_path() -> PathBuf {
-    ProjectDirs::from("com", "Codey", "Codey")
+    directories::ProjectDirs::from("com", "Codey", "Codey")
         .map(|dirs| dirs.config_dir().join("config.json"))
         .unwrap_or_else(|| PathBuf::from(".codey").join("config.json"))
+}
+
+// 测试进程只使用自己的临时 Codey 配置目录，不读写真实用户目录。
+// shortcut: 静态 TempDir 不会析构; ceiling: 每个测试进程在系统临时目录留下一个 codey-test-config-* 目录; replace when: 测试改为显式注入 Codey 配置目录，或临时目录残留影响开发机与 CI
+#[cfg(test)]
+pub fn default_config_path() -> PathBuf {
+    static DIRECTORY: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    DIRECTORY
+        .get_or_init(|| {
+            tempfile::Builder::new()
+                .prefix("codey-test-config-")
+                .tempdir()
+                .expect("创建测试 Codey 配置目录失败")
+        })
+        .path()
+        .join("config.json")
 }
 
 #[derive(Debug, Clone)]

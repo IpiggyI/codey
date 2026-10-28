@@ -47,7 +47,7 @@ async fn resolve_request_config(
     .map_err(|_| "解析提示词优化配置任务失败".to_string())?
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn resolve_request_config_async_at(
     optimization: PromptOptimizationConfig,
     home: std::path::PathBuf,
