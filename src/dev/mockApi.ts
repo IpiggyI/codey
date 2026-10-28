@@ -1,7 +1,7 @@
 // Development-only preview data and a mock Codey bridge API. Loaded from
 // main.tsx via a dynamic import that only exists in Vite dev builds, so this
 // module never ships in the production overlay.
-import type { ProviderStatus, Config, ModelState } from "../App.types";
+import type { ProviderStatus, Config, ConfigApplyStatus, ModelState } from "../App.types";
 import {
   AUTO_REVIEW_MODEL,
   includesModelId,
@@ -51,6 +51,8 @@ if (import.meta.env.DEV) {
     };
     let previewActiveProfileId = "primary";
     let previewComputerUseReady = false;
+    // 预览中保存后先返回应用中，下一次运行状态查询时完成应用。
+    let previewConfigApply: ConfigApplyStatus | null = null;
     let previewRoutes: PreviewProfile[] = [
         {
           id: "primary",
@@ -403,7 +405,12 @@ if (import.meta.env.DEV) {
                   ? channel.urlConfigured && !validateNtfyTopic(channel.chatId)
                   : channel.urlConfigured),
           ).length;
+        const configApply = previewConfigApply;
+        if (previewConfigApply?.state === "pending") {
+          previewConfigApply = { revision: previewConfigApply.revision, state: "applied" };
+        }
         return {
+          configApply,
           running: true,
           appVersion: "0.2.0",
           codexAppVersion: "26.601.21317",
@@ -578,8 +585,13 @@ if (import.meta.env.DEV) {
           settingsRevision: previewConfig.settingsRevision + 1,
         };
         refreshPreviewModelState();
+        previewConfigApply = {
+          revision: (previewConfigApply?.revision ?? 0) + 1,
+          state: "pending",
+        };
         return {
           config: previewConfig,
+          configApply: previewConfigApply,
           modelState: previewModelState,
           providerStatus: previewProviderStatus(),
           currentProviderSnapshot: previewCurrentProviderSnapshot(),

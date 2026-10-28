@@ -1,6 +1,8 @@
-import type { Notice } from "./App.types";
+import type { ConfigApplyStatus, Notice } from "./App.types";
+import { configApplyNotice } from "./configApply";
 
 export type ModelRuntimeUpdate = {
+  configApply?: ConfigApplyStatus | null;
   restartRequired?: boolean;
   modelHotReloaded?: boolean;
   modelHotReloadDeferred?: boolean;
@@ -15,6 +17,7 @@ export function modelSelectionNotice(
   result: ModelRuntimeUpdate,
   summary: string,
 ): Notice {
+  if (result.configApply) return configApplyNotice(result.configApply);
   const messages = [summary];
   if (result.modelHotReloadError) {
     messages.push("Codex 模型列表刷新失败，重启 Codex 后生效");

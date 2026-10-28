@@ -34,6 +34,16 @@ import { useModelSelection } from "./useModelSelection";
 import type { CrashpadPendingStats, TraceLogStats } from "./traceLogTypes";
 import { useRuntimeStatus } from "./useRuntimeStatus";
 import {
+  configApplyBannerVisible,
+  configApplyCompletionNotice,
+  configApplyNotice,
+} from "./configApply";
+import {
+  applyConfigCommandResult,
+  isStaleConfig,
+  type ConfigCommandResult,
+} from "./configCommandResult";
+import {
   NoticeLoadingText,
   NoticeToast,
   useAppNoticeController,
@@ -45,6 +55,7 @@ import {
 import { useStableEvent } from "./useStableEvent";
 import type {
   AppProps,
+  ConfigApplyStatus,
   CurrentProviderSnapshot,
   ProviderStatus,
   Config,
@@ -117,7 +128,7 @@ export function App({
   const persistedConfigRef = useRef<Config | null>(null);
   const loadGenerationRef = useRef(0);
   const { status, setStatus, refreshStatus, refreshStatusForLoad,
-    restartStatusError, setRestartStatusError } =
+    restartStatusError, setRestartStatusError, acceptConfigApply, configApplyError, retryConfigApply } =
     useRuntimeStatus({
       active: !embedded || modalVisible,
       embedded,
@@ -149,6 +160,12 @@ export function App({
   useEffect(() => {
     if (restartStatusError) setNotice({ tone: "error", text: restartStatusError });
   }, [restartStatusError, setNotice]);
+  const previousConfigApplyRef = useRef(status.configApply);
+  useEffect(() => {
+    const notice = configApplyCompletionNotice(previousConfigApplyRef.current, status.configApply);
+    previousConfigApplyRef.current = status.configApply;
+    if (notice) setNotice(notice);
+  }, [status.configApply, setNotice]);
 
   const provider = providerStatus?.provider;
   const isBusy = busy !== null;
@@ -206,6 +223,9 @@ export function App({
       status.crashpadDiskProtectionActive,
     ],
   );
+  const handleConfigResult = useStableEvent(
+    (result: ConfigCommandResult) => applyCommandResult(result),
+  );
   const {
     subagentModelOptions,
     modelState,
@@ -240,8 +260,7 @@ export function App({
     currentProviderSnapshot,
     officialAccountAvailable: status.officialAccountAvailable === true,
     runOperation,
-    setPersistedConfig,
-    setStatus,
+    applyConfigResult: handleConfigResult,
     setNotice,
   });
 
@@ -365,6 +384,7 @@ export function App({
       providerStatus?: ProviderStatus;
       currentProviderSnapshot?: CurrentProviderSnapshot | null;
       modelState?: ModelState;
+      configApply?: ConfigApplyStatus | null;
       restartRequired?: boolean;
       modelHotReloaded?: boolean;
       modelHotReloadError?: string;
@@ -375,7 +395,7 @@ export function App({
       subagentConfigHotReloadError?: string;
       fastContextToolsStatus?: FastContextToolsStatus;
     }>("save_codey_config", { config: next });
-    setPersistedConfig(result.config);
+    if (!applyCommandResult(result)) return null;
     setFastContextToolsStatus(
       result.fastContextToolsStatus ?? UNKNOWN_FAST_CONTEXT_TOOLS_STATUS,
     );
@@ -387,19 +407,9 @@ export function App({
         },
       }),
     );
-    if (result.providerStatus) setProviderStatus(result.providerStatus);
-    if (result.currentProviderSnapshot !== undefined) {
-      setCurrentProviderSnapshot(result.currentProviderSnapshot);
-    }
-    if (result.modelState) setModelState(result.modelState);
-    if (typeof result.restartRequired === "boolean") {
-      setStatus((current) => ({
-        ...current,
-        restartRequired: result.restartRequired,
-      }));
-    }
-    setDirty(false);
     await refreshStatus().catch(() => undefined);
+    // 后台应用可能在刷新期间完成，提示以最新的应用状态为准。
+    if (result.configApply) result.configApply = acceptConfigApply(result.configApply);
     return result;
   }
 
@@ -411,14 +421,16 @@ export function App({
     if (isBusy) return false;
     setBusy("save-notification-channel");
     try {
-      await persist({
+      const result = await persist({
         ...current,
         webhook: {
           ...current.webhook,
           channels,
         },
       });
-      setNotice({ tone: "success", text: successText });
+      if (result) {
+        setNotice(result.configApply ? configApplyNotice(result.configApply) : { tone: "success", text: successText });
+      }
       return true;
     } catch (error) {
       setNotice({ tone: "error", text: errorText(error) });
@@ -477,16 +489,11 @@ export function App({
         providerStatus: ProviderStatus;
         currentProviderSnapshot?: CurrentProviderSnapshot | null;
         modelState: ModelState;
+        configApply?: ConfigApplyStatus | null;
         restartRequired?: boolean;
       }>("sync_current_provider");
-      setPersistedConfig(result.config);
-      setProviderStatus(result.providerStatus);
-      setCurrentProviderSnapshot(result.currentProviderSnapshot ?? null);
-      setModelState(result.modelState);
-      setStatus((current) => ({
-        ...current,
-        restartRequired: result.restartRequired ?? current.restartRequired,
-      }));
+      if (!applyCommandResult(result)) return;
+      if (result.currentProviderSnapshot === undefined) setCurrentProviderSnapshot(null);
       setNotice({
         tone: result.restartRequired ? "info" : "success",
         text: result.restartRequired
@@ -504,26 +511,28 @@ export function App({
     });
   }
 
-  function applyRouteResult(result: {
-    config: Config;
-    providerStatus?: ProviderStatus;
-    currentProviderSnapshot?: CurrentProviderSnapshot | null;
-    modelState?: ModelState;
-    restartRequired?: boolean;
-  }) {
-    setPersistedConfig(result.config);
-    if (result.providerStatus) setProviderStatus(result.providerStatus);
+  function adoptCommandConfig(incoming: Config) {
+    if (isStaleConfig(persistedConfigRef.current, incoming)) return null;
+    setPersistedConfig(incoming);
+    return { dirty: false };
+  }
+
+  function applyCommandResult(
+    result: ConfigCommandResult & { currentProviderSnapshot?: CurrentProviderSnapshot | null },
+  ) {
+    if (!applyConfigCommandResult(result, {
+      adoptConfig: adoptCommandConfig, acceptConfigApply, setDirty, setProviderStatus, setModelState, setStatus,
+    })) return false;
     if (result.currentProviderSnapshot !== undefined) {
       setCurrentProviderSnapshot(result.currentProviderSnapshot);
     }
-    if (result.modelState) setModelState(result.modelState);
-    if (typeof result.restartRequired === "boolean") {
-      setStatus((current) => ({
-        ...current,
-        restartRequired: result.restartRequired,
-      }));
-    }
-    setDirty(false);
+    return true;
+  }
+
+  function applyRouteResult(
+    result: ConfigCommandResult & { currentProviderSnapshot?: CurrentProviderSnapshot | null },
+  ) {
+    if (!applyCommandResult(result)) return false;
     window.dispatchEvent(
       new CustomEvent("codey:config-changed", {
         detail: {
@@ -532,6 +541,7 @@ export function App({
         },
       }),
     );
+    return true;
   }
 
   async function fetchRouteModels() {
@@ -549,12 +559,13 @@ export function App({
           modelState: ModelState;
           routeModelState: ModelState;
           models: string[];
+          configApply?: ConfigApplyStatus | null;
           restartRequired?: boolean;
           modelHotReloaded?: boolean;
         }>("fetch_route_models", {
           expectedRevision: savedConfig.settingsRevision,
         });
-        applyRouteResult(result);
+        if (!applyRouteResult(result)) return;
         openModelPicker(
           { ...result.routeModelState, officialModels: [] },
           "",
@@ -603,6 +614,7 @@ export function App({
       const modelResult = await invoke<{
         config: Config;
         modelState: ModelState;
+        configApply?: ConfigApplyStatus | null;
         restartRequired?: boolean;
         modelHotReloaded?: boolean;
       }>("save_official_route_models", {
@@ -614,8 +626,12 @@ export function App({
         showAccountUsageInHeader,
         modelContexts,
       });
-      applyRouteResult(modelResult);
+      if (!applyRouteResult(modelResult)) return;
       saved = true;
+      if (modelResult.configApply) {
+        setNotice(configApplyNotice(modelResult.configApply));
+        return;
+      }
       setNotice({
         tone: modelResult.restartRequired ? "info" : "success",
         text: modelResult.restartRequired
@@ -650,9 +666,14 @@ export function App({
       const result = await invoke<{
         config: Config;
         modelState: ModelState;
+        configApply?: ConfigApplyStatus | null;
         restartRequired?: boolean;
       }>("save_default_model", { model });
-      applyRouteResult(result);
+      if (!applyRouteResult(result)) return;
+      if (result.configApply) {
+        setNotice(configApplyNotice(result.configApply));
+        return;
+      }
       setNotice({
         tone: result.restartRequired ? "info" : "success",
         text: `已将全局默认模型设为「${currentProviderSnapshot.id} / ${model}」`,
@@ -664,6 +685,11 @@ export function App({
     if (!config) return;
     await runOperation("save", async () => {
       const result = await persist(config);
+      if (!result) return;
+      if (result.configApply) {
+        setNotice(configApplyNotice(result.configApply));
+        return;
+      }
       const subagentHotReloaded = Boolean(result.subagentConfigHotReloaded);
       const subagentHotReloadFailed = Boolean(result.subagentConfigHotReloadError);
       const subagentConfigRepaired = Boolean(result.subagentConfigRepaired);
@@ -1252,6 +1278,23 @@ export function App({
         <header className="z-30 flex flex-col border-b border-black/8 bg-white/75 px-5 py-2.5 backdrop-blur-xl">
           {configHeaderContent}
         </header>
+      )}
+
+      {configApplyBannerVisible(status.configApply, configApplyError) && status.configApply && (
+        <div
+          role={status.configApply.state === "failed" || configApplyError ? "alert" : "status"}
+          className="flex flex-wrap items-center gap-2 border-b border-black/8 px-5 py-2 text-xs"
+        >
+          {status.configApply.state === "pending" && !configApplyError && (
+            <LoaderCircle size={14} className="animate-spin" aria-hidden="true" />
+          )}
+          <span>{configApplyError || configApplyNotice(status.configApply).text}</span>
+          {configApplyError && (
+            <Button size="sm" variant="outline" onPress={() => void retryConfigApply()}>
+              重新查询状态
+            </Button>
+          )}
+        </div>
       )}
 
       <SettingsLayout

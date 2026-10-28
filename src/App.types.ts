@@ -136,7 +136,14 @@ export type InjectionScriptStatus = {
   error?: string;
 };
 
+export type ConfigApplyStatus = {
+  revision: number;
+  state: "pending" | "applied" | "restart_required" | "failed" | "saved";
+  error?: string | null;
+};
+
 export type RuntimeStatus = {
+  configApply?: ConfigApplyStatus | null;
   running: boolean;
   appVersion?: string;
   codexAppVersion?: string;
