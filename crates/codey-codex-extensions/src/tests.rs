@@ -7,26 +7,50 @@ fn project_mcp_backup_does_not_capture_a_skill_repository() {
     let root = temp.path().canonicalize().unwrap();
     let project = root.join("project");
     fs::create_dir_all(project.join(".codex")).unwrap();
-    fs::write(project.join("SKILL.md"), "---\nname: repository\ndescription: example\n---\n").unwrap();
+    fs::write(
+        project.join("SKILL.md"),
+        "---\nname: repository\ndescription: example\n---\n",
+    )
+    .unwrap();
     fs::create_dir_all(project.join(".git")).unwrap();
-    fs::write(project.join(".git/large-object"), vec![0; fsutil::MAX_FILE as usize + 1]).unwrap();
+    fs::write(
+        project.join(".git/large-object"),
+        vec![0; fsutil::MAX_FILE as usize + 1],
+    )
+    .unwrap();
     let original = b"# preserve\n[unknown]\nvalue = 7\n";
     let config = project.join(".codex/config.toml");
     fs::write(&config, original).unwrap();
     let data = root.join("codey/extensions");
     let service = ExtensionService::new(root.join("codex"), data.clone(), root.join("user"));
-    let scope = Scope::Project { project_path: project };
+    let scope = Scope::Project {
+        project_path: project,
+    };
     let revision = service.inventory(&scope).unwrap()["revision"].clone();
-    service.dispatch(json!({"action":"save_mcp", "scope":scope, "revision":revision,
-        "id":"demo", "configJson":{"command":"example", "enabled":false}, "confirmed":true})).unwrap();
-    let backup = fs::read_dir(data.join("backups")).unwrap().next().unwrap().unwrap().path();
-    let manifest: Value = serde_json::from_slice(&fs::read(backup.join("manifest.json")).unwrap()).unwrap();
+    service
+        .dispatch(
+            json!({"action":"save_mcp", "scope":scope, "revision":revision,
+        "id":"demo", "configJson":{"command":"example", "enabled":false}, "confirmed":true}),
+        )
+        .unwrap();
+    let backup = fs::read_dir(data.join("backups"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(backup.join("manifest.json")).unwrap()).unwrap();
     assert_eq!(manifest.as_array().unwrap().len(), 1);
     assert_eq!(manifest[0]["source"], json!(config));
     let saved = PathBuf::from(manifest[0]["backup"].as_str().unwrap());
     assert!(saved.is_file());
     assert_eq!(fs::read(saved).unwrap(), original);
-    assert!(fs::read_to_string(config).unwrap().contains("[mcp_servers.demo]"));
+    assert!(
+        fs::read_to_string(config)
+            .unwrap()
+            .contains("[mcp_servers.demo]")
+    );
 }
 
 fn cached_skill(f: &Fixture, relative: &str) -> PathBuf {

@@ -133,7 +133,7 @@ impl MockCdp {
                             && command["params"]["expression"]
                                 == codey_runtime_core::bridge::bridge_health_check_script();
                         if command["method"] == "Runtime.enable" {
-                                    // 启用运行时后发布页面的默认执行上下文。
+                            // 启用运行时后发布页面的默认执行上下文。
                             let created = serde_json::json!({
                                 "method": "Runtime.executionContextCreated",
                                 "params": {"context": {"id": 1, "auxData": {"isDefault": true}}},
@@ -183,12 +183,12 @@ impl MockCdp {
                             }
                             // 主窗口就绪探针返回页面状态的 JSON 字符串。
                             Some("Runtime.evaluate")
-                                if command["params"]["expression"]
-                                    .as_str()
-                                    .is_some_and(|expression| {
+                                if command["params"]["expression"].as_str().is_some_and(
+                                    |expression| {
                                         expression.starts_with("JSON.stringify({")
                                             && expression.contains("overlayError:")
-                                    }) =>
+                                    },
+                                ) =>
                             {
                                 let value = serde_json::json!({
                                     "href": "app://-/index.html",

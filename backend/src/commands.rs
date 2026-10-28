@@ -9,12 +9,12 @@ use std::sync::{
 use std::time::Duration;
 
 mod channels;
-mod official_accounts;
 mod config_apply;
 mod config_repair;
 mod diagnostics;
-mod models;
 mod extensions;
+mod models;
+mod official_accounts;
 mod plugins;
 mod prompt_optimization;
 mod runtime;
@@ -38,11 +38,10 @@ use models::{
     validate_deleted_third_party_models, validate_manual_model_selection,
 };
 use models::{
-    current_model_state_async,
-    native_web_search_capability_requires_restart, official_route_snapshots,
-    remote_compaction_transport_requires_restart, runtime_supports_current_routes_for_hot_reload,
-    sync_current_third_party_provider_state, sync_provider_models_for_launch,
-    websocket_transport_requires_restart,
+    current_model_state_async, native_web_search_capability_requires_restart,
+    official_route_snapshots, remote_compaction_transport_requires_restart,
+    runtime_supports_current_routes_for_hot_reload, sync_current_third_party_provider_state,
+    sync_provider_models_for_launch, websocket_transport_requires_restart,
 };
 pub use models::{
     fetch_route_models, save_default_model, save_official_route_models, save_selected_models,
@@ -963,11 +962,18 @@ fn persisted_config_changed(previous: &CodeyConfig, next: &CodeyConfig) -> bool 
 
 pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Value {
     let result = match command {
-        "list_official_accounts" | "start_official_account_login" | "poll_official_account_login"
-        | "cancel_official_account_login" | "import_current_codex_login"
-        | "import_official_account_credential" | "set_default_official_account"
-        | "remove_official_account" | "query_official_account_usage" | "store_official_account_usage" =>
-            official_accounts::invoke(state, command, &args, codex_home()).await,
+        "list_official_accounts"
+        | "start_official_account_login"
+        | "poll_official_account_login"
+        | "cancel_official_account_login"
+        | "import_current_codex_login"
+        | "import_official_account_credential"
+        | "set_default_official_account"
+        | "remove_official_account"
+        | "query_official_account_usage"
+        | "store_official_account_usage" => {
+            official_accounts::invoke(state, command, &args, codex_home()).await
+        }
         "list_channels" => channels::list_channels(state).await,
         "select_channel" => channels::change_channel(state, &args, false).await,
         "set_channel_default_model" => channels::change_channel(state, &args, true).await,

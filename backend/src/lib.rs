@@ -2,8 +2,8 @@ mod account_usage;
 mod cdp;
 mod channels;
 mod codex_config;
-mod codex_extensions;
 mod codex_config_guidance;
+mod codex_extensions;
 mod codex_provider;
 mod codex_startup_patch;
 mod codey_router_session_migrate;
@@ -15,7 +15,6 @@ mod conversation_stats;
 mod crashpad_pending_guard;
 #[cfg(windows)]
 mod desktop_instance;
-mod target_prefetch;
 mod error_log;
 pub mod fastctx;
 mod fastctx_route_gate;
@@ -56,6 +55,7 @@ mod subagent;
 mod subagent_gate;
 mod subagent_orchestrator;
 mod subagent_policy;
+mod target_prefetch;
 mod trace_log_guard;
 mod trace_log_stats;
 

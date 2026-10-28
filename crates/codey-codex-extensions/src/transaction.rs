@@ -120,11 +120,17 @@ mod tests {
             let path = root.join("config.toml");
             fs::write(&path, b"original").unwrap();
             let change = Change::new(path.clone(), after).unwrap();
-            let backup = commit_with_apply(&root, "test", vec![change], &[root.join("skills")], |target, bytes, mode| {
-                assert_eq!(backup_bytes(&root, &path), b"original");
-                assert_eq!(fs::read(&path).unwrap(), b"original");
-                fsutil::apply(target, bytes, mode)
-            })
+            let backup = commit_with_apply(
+                &root,
+                "test",
+                vec![change],
+                &[root.join("skills")],
+                |target, bytes, mode| {
+                    assert_eq!(backup_bytes(&root, &path), b"original");
+                    assert_eq!(fs::read(&path).unwrap(), b"original");
+                    fsutil::apply(target, bytes, mode)
+                },
+            )
             .unwrap();
             assert!(backup.starts_with(root.join("backups")));
             #[cfg(unix)]
@@ -143,9 +149,15 @@ mod tests {
         fs::write(&path, b"original").unwrap();
         fs::write(root.join("backups"), b"blocked").unwrap();
         let change = Change::new(path.clone(), Some(b"changed".to_vec())).unwrap();
-        let error = commit_with_apply(&root, "test", vec![change], &[root.join("skills")], |_, _, _| {
-            panic!("备份失败时不得写入");
-        })
+        let error = commit_with_apply(
+            &root,
+            "test",
+            vec![change],
+            &[root.join("skills")],
+            |_, _, _| {
+                panic!("备份失败时不得写入");
+            },
+        )
         .unwrap_err();
         assert!(error.to_string().contains("备份失败"));
         assert_eq!(fs::read(path).unwrap(), b"original");
@@ -158,10 +170,16 @@ mod tests {
         let path = root.join("config.toml");
         fs::write(&path, b"original").unwrap();
         let change = Change::new(path.clone(), Some(b"changed".to_vec())).unwrap();
-        let error = commit_with_apply(&root, "test", vec![change], &[root.join("skills")], |target, _, _| {
-            fs::write(target, b"external")?;
-            Ok(())
-        })
+        let error = commit_with_apply(
+            &root,
+            "test",
+            vec![change],
+            &[root.join("skills")],
+            |target, _, _| {
+                fs::write(target, b"external")?;
+                Ok(())
+            },
+        )
         .unwrap_err();
         assert!(format!("{error:#}").contains("提交后文件校验失败"));
         let backup = fs::read_dir(root.join("backups"))
@@ -185,22 +203,28 @@ mod tests {
         fs::write(&path, b"original").unwrap();
         fs::write(skill.join("resources/example"), b"resource").unwrap();
         let change = Change::new(path, Some(b"changed".to_vec())).unwrap();
-        commit_with_apply(&root, "test", vec![change], &[root.join("skills")], |target, bytes, mode| {
-            let backup = fs::read_dir(root.join("backups"))
-                .unwrap()
-                .next()
-                .unwrap()
-                .unwrap()
-                .path()
-                .join("0");
-            assert_eq!(fs::read(backup.join("SKILL.md")).unwrap(), b"original");
-            assert_eq!(
-                fs::read(backup.join("resources/example")).unwrap(),
-                b"resource"
-            );
-            assert!(backup.join("resources/empty").is_dir());
-            fsutil::apply(target, bytes, mode)
-        })
+        commit_with_apply(
+            &root,
+            "test",
+            vec![change],
+            &[root.join("skills")],
+            |target, bytes, mode| {
+                let backup = fs::read_dir(root.join("backups"))
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .path()
+                    .join("0");
+                assert_eq!(fs::read(backup.join("SKILL.md")).unwrap(), b"original");
+                assert_eq!(
+                    fs::read(backup.join("resources/example")).unwrap(),
+                    b"resource"
+                );
+                assert!(backup.join("resources/empty").is_dir());
+                fsutil::apply(target, bytes, mode)
+            },
+        )
         .unwrap();
     }
 
@@ -345,7 +369,12 @@ mod tests {
     }
 }
 
-pub fn commit(data: &Path, operation: &str, changes: Vec<Change>, skill_roots: &[PathBuf]) -> Result<PathBuf> {
+pub fn commit(
+    data: &Path,
+    operation: &str,
+    changes: Vec<Change>,
+    skill_roots: &[PathBuf],
+) -> Result<PathBuf> {
     commit_with_apply(data, operation, changes, skill_roots, fsutil::apply)
 }
 
@@ -377,7 +406,8 @@ fn commit_with_apply(
     for c in &changes {
         ensure!(c.matches_before()?, "文件已被其他程序修改，操作未提交");
     }
-    let backup = crate::backup::snapshot(data, &changes, skill_roots).context("备份失败，操作未提交")?;
+    let backup =
+        crate::backup::snapshot(data, &changes, skill_roots).context("备份失败，操作未提交")?;
     let id = uuid::Uuid::new_v4().to_string();
     audit(data, &id, operation, changes.len(), "prepared")?;
     let mut applied = 0;

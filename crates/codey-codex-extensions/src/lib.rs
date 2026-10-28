@@ -750,10 +750,13 @@ impl ExtensionService {
             .filter(|c| c.before.is_none())
             .map(|c| c.path.clone())
             .collect();
-        let backup = transaction::commit(&self.data_dir, action, changes, &self.skill_roots(&scope))
-            .inspect_err(|_| self.clean_empty_skill_dirs(&scope, &created))?;
+        let backup =
+            transaction::commit(&self.data_dir, action, changes, &self.skill_roots(&scope))
+                .inspect_err(|_| self.clean_empty_skill_dirs(&scope, &created))?;
         self.clean_empty_skill_dirs(&scope, &removed);
-        let inventory = self.inventory(&scope).with_context(|| format!("保存后清单校验失败；原内容备份：{}", backup.display()))?;
+        let inventory = self
+            .inventory(&scope)
+            .with_context(|| format!("保存后清单校验失败；原内容备份：{}", backup.display()))?;
         Ok(
             json!({"inventory":inventory,"applyStatus":if matches!(action, "save_mcp" | "set_mcp_enabled" | "set_mcps_enabled" | "remove_mcp") {"reload-required"} else {"restart-required"},"message":format!("配置已保存。{}原内容备份：{}", if action.contains("skill") { "请重启 Codex。" } else { "" }, backup.display())}),
         )

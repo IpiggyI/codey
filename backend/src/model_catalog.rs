@@ -549,16 +549,12 @@ pub(crate) fn selection_state_with_catalog_options(
     // slug prefix. An API-key provider may legitimately expose a model whose
     // id also appears in the official catalog; it must stay a third-party
     // catalog entry instead of acquiring official-account semantics.
-    let official_catalog = match read_official_entries_for_app(
-        home,
-        catalog_dir,
-        user_catalog,
-        codex_app_path,
-    ) {
-        Ok(catalog) => catalog,
-        Err(error) if official_provider => return Err(error),
-        Err(_) => Arc::new(OfficialCatalogEntries::default()),
-    };
+    let official_catalog =
+        match read_official_entries_for_app(home, catalog_dir, user_catalog, codex_app_path) {
+            Ok(catalog) => catalog,
+            Err(error) if official_provider => return Err(error),
+            Err(_) => Arc::new(OfficialCatalogEntries::default()),
+        };
     let official_entries = &official_catalog.candidates;
     let official_model_ids = official_entries
         .iter()

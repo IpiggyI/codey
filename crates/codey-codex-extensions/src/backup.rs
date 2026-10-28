@@ -7,7 +7,11 @@ use std::{
 };
 
 // 备份位于 Codey 数据目录，路径映射随备份保存，不写入审计日志。
-pub(crate) fn snapshot(data: &Path, changes: &[Change], skill_roots: &[PathBuf]) -> Result<PathBuf> {
+pub(crate) fn snapshot(
+    data: &Path,
+    changes: &[Change],
+    skill_roots: &[PathBuf],
+) -> Result<PathBuf> {
     let backups = data.join("backups");
     private_directory(&backups)?;
     let directory = backups.join(uuid::Uuid::new_v4().to_string());
@@ -17,11 +21,18 @@ pub(crate) fn snapshot(data: &Path, changes: &[Change], skill_roots: &[PathBuf])
         if change.before.is_none() {
             continue;
         }
-        let skill = skill_roots.iter().filter(|root| change.path.starts_with(root))
+        let skill = skill_roots
+            .iter()
+            .filter(|root| change.path.starts_with(root))
             .max_by_key(|root| root.components().count())
-            .and_then(|root| change.path.ancestors().skip(1)
-                .take_while(|path| *path != root && path.starts_with(root))
-                .find(|path| path.join("SKILL.md").is_file()));
+            .and_then(|root| {
+                change
+                    .path
+                    .ancestors()
+                    .skip(1)
+                    .take_while(|path| *path != root && path.starts_with(root))
+                    .find(|path| path.join("SKILL.md").is_file())
+            });
         targets.insert(skill.unwrap_or(&change.path).to_path_buf());
     }
     let mut manifest = Vec::new();
@@ -55,7 +66,6 @@ pub(crate) fn snapshot(data: &Path, changes: &[Change], skill_roots: &[PathBuf])
     )?;
     Ok(directory)
 }
-
 
 fn copy_file(source: &Path, target: &Path) -> Result<u64> {
     let bytes = fsutil::read(source)?.context("备份源文件已消失")?;

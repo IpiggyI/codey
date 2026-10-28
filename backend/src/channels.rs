@@ -188,8 +188,11 @@ pub(crate) fn select(home: &Path, config: &mut CodeyConfig, id: Option<&str>) ->
     Ok(())
 }
 
-pub(crate) fn list_with_accounts(home: &Path, config: &CodeyConfig,
-    store: &crate::official_accounts::OfficialAccountStore) -> Result<ChannelList> {
+pub(crate) fn list_with_accounts(
+    home: &Path,
+    config: &CodeyConfig,
+    store: &crate::official_accounts::OfficialAccountStore,
+) -> Result<ChannelList> {
     let mut list = list(home, config)?;
     let loaded = ConfigManager::new(home.join("config.toml")).load()?;
     let disabled = crate::official_accounts::switch_disabled_reason(home)?;
@@ -197,15 +200,26 @@ pub(crate) fn list_with_accounts(home: &Path, config: &CodeyConfig,
     for account in store.accounts()? {
         let id = format!("official:{}", account.id);
         let summary = account.summary(current.as_deref());
-        let provider_ok = crate::codex_provider::official_channel_available(loaded.document(), &account.auth);
-        let reason = disabled.clone().or_else(|| (!provider_ok).then(|| "openai provider 配置不支持官方登录".into()));
-        list.channels.retain(|channel| channel.id != id && channel.id != "official:unavailable");
+        let provider_ok =
+            crate::codex_provider::official_channel_available(loaded.document(), &account.auth);
+        let reason = disabled
+            .clone()
+            .or_else(|| (!provider_ok).then(|| "openai provider 配置不支持官方登录".into()));
+        list.channels
+            .retain(|channel| channel.id != id && channel.id != "official:unavailable");
         list.channels.push(Channel {
             default_model: config.default_models_by_channel.get(&id).cloned(),
-            current: current.as_deref() == Some(&account.id) && list.effective_provider_id == "openai",
-            id, kind: "official", provider_id: "openai".into(),
-            display_name: summary["email"].as_str().unwrap_or("OpenAI 官方账号").into(),
-            available: reason.is_none(), unavailable_reason: reason,
+            current: current.as_deref() == Some(&account.id)
+                && list.effective_provider_id == "openai",
+            id,
+            kind: "official",
+            provider_id: "openai".into(),
+            display_name: summary["email"]
+                .as_str()
+                .unwrap_or("OpenAI 官方账号")
+                .into(),
+            available: reason.is_none(),
+            unavailable_reason: reason,
         });
     }
     Ok(list)
@@ -240,8 +254,12 @@ pub(crate) fn runtime_overrides(home: &Path, config: &CodeyConfig) -> Result<Vec
     if resolved.channel_id.is_none() {
         return Ok(Vec::new());
     }
-    if resolved.channel_id.as_deref().is_some_and(|id| id.starts_with("official:"))
-        && resolved.default_model.is_none() {
+    if resolved
+        .channel_id
+        .as_deref()
+        .is_some_and(|id| id.starts_with("official:"))
+        && resolved.default_model.is_none()
+    {
         return Ok(vec!["model_provider=\"openai\"".into()]);
     }
     let model = resolved

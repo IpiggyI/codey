@@ -248,7 +248,10 @@ mod tests {
                 let count = stream.read(&mut request[received..]).await.unwrap();
                 assert_ne!(count, 0, "request ended before headers completed");
                 received += count;
-                if request[..received].windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                if request[..received]
+                    .windows(4)
+                    .any(|bytes| bytes == b"\r\n\r\n")
+                {
                     break;
                 }
             }

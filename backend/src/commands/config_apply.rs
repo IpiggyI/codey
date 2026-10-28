@@ -222,27 +222,38 @@ mod tests {
             directory.path().join("config.json"),
         )));
         let initial = state.config.read().await.clone();
-        *state.codex_app_version_cache.lock().await =
-            Some(runtime::CodexAppVersionCache::primed(initial.codex_app_path.clone()));
+        *state.codex_app_version_cache.lock().await = Some(runtime::CodexAppVersionCache::primed(
+            initial.codex_app_path.clone(),
+        ));
         let lifecycle = state.runtime_operation.lock().await;
-        let saved = tokio::time::timeout(
-            Duration::from_secs(3), save_codey_config(&state, initial),
-        ).await.unwrap().unwrap();
+        let saved =
+            tokio::time::timeout(Duration::from_secs(3), save_codey_config(&state, initial))
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(saved["configApply"]["state"], "pending");
         assert_eq!(saved["modelHotReloaded"], false);
         let mut newer = state.config.read().await.clone();
         newer.user_scripts = vec!["// 新设置".into()];
-        let latest = tokio::time::timeout(
-            Duration::from_secs(3), save_codey_config(&state, newer),
-        ).await.unwrap().unwrap();
+        let latest = tokio::time::timeout(Duration::from_secs(3), save_codey_config(&state, newer))
+            .await
+            .unwrap()
+            .unwrap();
         let snapshot = tokio::time::timeout(Duration::from_secs(3), runtime_status(&state))
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(snapshot["configApply"], latest["configApply"]);
-        assert!(latest["configApply"]["revision"].as_u64().unwrap()
-            > saved["configApply"]["revision"].as_u64().unwrap());
+        assert!(
+            latest["configApply"]["revision"].as_u64().unwrap()
+                > saved["configApply"]["revision"].as_u64().unwrap()
+        );
         assert_eq!(state.store.load().unwrap().user_scripts, ["// 新设置"]);
         drop(lifecycle);
-        assert_eq!(settled(&state).await["revision"], latest["configApply"]["revision"]);
+        assert_eq!(
+            settled(&state).await["revision"],
+            latest["configApply"]["revision"]
+        );
     }
 
     #[tokio::test]

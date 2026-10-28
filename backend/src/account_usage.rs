@@ -323,7 +323,10 @@ pub async fn fetch_official_account_usage(
     fetch_usage_for_auth(client, auth).await
 }
 
-pub(crate) async fn fetch_usage_for_auth(client: &Client, auth: OfficialAuth) -> Result<AccountUsageSnapshot> {
+pub(crate) async fn fetch_usage_for_auth(
+    client: &Client,
+    auth: OfficialAuth,
+) -> Result<AccountUsageSnapshot> {
     let mut last_error = None;
 
     // 从上次成功的端点开始轮询，失败仍会回退到完整列表，结果不变但稳定

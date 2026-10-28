@@ -5,14 +5,14 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+#[cfg(test)]
+use codey_runtime_core::bridge::install_bridge;
 use codey_runtime_core::bridge::{
     BridgeHandler, BridgeInstallOptions, BridgePumpHandle, bridge_health_check_script,
     install_bridge_with_options,
 };
 use codey_runtime_core::cdp::{CdpTarget, list_targets, pick_injectable_codex_page_target};
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
-use codey_runtime_core::bridge::install_bridge;
 
 use crate::error_log;
 
@@ -558,7 +558,9 @@ pub async fn retry_inject_with_prefetched_target(
     // 先限时交接预取，给常规枚举、桥接安装与确认留下预算。
     let mut prefetched_target = match prefetched_target {
         Some(prefetch) => {
-            let (target, diagnostics) = prefetch.wait(prefetch_handoff_deadline(started, deadline)).await;
+            let (target, diagnostics) = prefetch
+                .wait(prefetch_handoff_deadline(started, deadline))
+                .await;
             stats.prefetch = Some(diagnostics);
             target
         }
@@ -566,7 +568,10 @@ pub async fn retry_inject_with_prefetched_target(
     };
     let mut delay = Duration::from_millis(100);
     let phase = Arc::new(AtomicU8::new(InjectionPhase::DiscoverTargets as u8));
-    let mut previous_error = stats.prefetch.as_ref().and_then(|prefetch| prefetch.last_discovery_error.clone());
+    let mut previous_error = stats
+        .prefetch
+        .as_ref()
+        .and_then(|prefetch| prefetch.last_discovery_error.clone());
     let mut retained_bridge = None;
     let (last_error, detail) = loop {
         stats.attempts += 1;
@@ -597,11 +602,18 @@ pub async fn retry_inject_with_prefetched_target(
                 let detail = injection_failure_detail(&error);
                 let retry_budget = if matches!(current_phase, InjectionPhase::VerifyReadiness) {
                     delay + MINIMUM_VERIFICATION_BUDGET
-                } else { delay };
+                } else {
+                    delay
+                };
                 if tokio::time::Instant::now() + retry_budget > deadline {
-                    if let Some(bridge) = retained_bridge.take().filter(|bridge| !bridge.pump.is_finished()) {
+                    if let Some(bridge) = retained_bridge
+                        .take()
+                        .filter(|bridge| !bridge.pump.is_finished())
+                    {
                         stats.report("acceptedUnverified", started.elapsed(), Some(&detail));
-                        return Ok(bridge.into_injected(scripts.statuses_with_error("启动确认未完成，等待后台复核注入状态")));
+                        return Ok(bridge.into_injected(
+                            scripts.statuses_with_error("启动确认未完成，等待后台复核注入状态"),
+                        ));
                     }
                     stats.report("noRetryBudget", started.elapsed(), Some(&detail));
                     break (
@@ -676,7 +688,10 @@ impl InjectionRetryStats {
         let reached_debug_endpoint = self.phase_failures[InjectionPhase::SelectTarget as usize..]
             .iter()
             .any(|count| *count > 0)
-            || self.prefetch.as_ref().is_some_and(|prefetch| prefetch.reached_debug_endpoint);
+            || self
+                .prefetch
+                .as_ref()
+                .is_some_and(|prefetch| prefetch.reached_debug_endpoint);
         InjectionRetryFailure {
             error,
             detail: Some(detail),
@@ -982,12 +997,18 @@ async fn run_injection_attempt(
                 readiness: probe.summary(),
             }
         }
-        Err(failure) if failure.reinstall || bridge.pump.is_finished()
-            || target_health_error_requires_rediscovery(&failure.error)
-            || format!("{:#}", failure.error).contains("CDP websocket closed before response") => {
+        Err(failure)
+            if failure.reinstall
+                || bridge.pump.is_finished()
+                || target_health_error_requires_rediscovery(&failure.error)
+                || format!("{:#}", failure.error)
+                    .contains("CDP websocket closed before response") =>
+        {
             // 确认端明确要求重建：显式关掉这条会话（其文档脚本随会话注销），
             // 下一轮从头装桥。
-            if deadline.saturating_duration_since(tokio::time::Instant::now()) >= BRIDGE_CLOSE_RESERVED {
+            if deadline.saturating_duration_since(tokio::time::Instant::now())
+                >= BRIDGE_CLOSE_RESERVED
+            {
                 bridge.pump.close().await;
             } else {
                 // 临近整轮截止时直接释放泵，避免关闭握手吞掉已取得的确认错误。
@@ -1734,8 +1755,11 @@ mod tests {
             ..Default::default()
         };
         stats.record_failure(InjectionPhase::DiscoverTargets, Duration::ZERO);
-        assert!(!stats.into_failure(anyhow::anyhow!("unavailable"), String::new())
-            .debug_endpoint_unreachable());
+        assert!(
+            !stats
+                .into_failure(anyhow::anyhow!("unavailable"), String::new())
+                .debug_endpoint_unreachable()
+        );
     }
 
     #[test]
@@ -1899,8 +1923,6 @@ assert.equal(run({ __codeySettingsOverlay: null }, "app://-/index.html").overlay
         assert!(detail.contains("attemptMs=30000"));
         assert!(detail.contains("remainingMs=0"));
     }
-
-
 
     #[test]
     fn endpoint_unreachable_only_when_every_attempt_failed_to_enumerate_targets() {

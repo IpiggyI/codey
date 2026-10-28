@@ -1344,25 +1344,45 @@ process.stdout.write(JSON.stringify(result));
             let temp = tempfile::tempdir().unwrap();
             let mut service = TestService::start(temp.path()).await;
             service.answer_startup(json!([])).await;
-            service.attach_page("s1", "main", "about:blank", false).await;
+            service
+                .attach_page("s1", "main", "about:blank", false)
+                .await;
             let url = "app://-/assets/app-shared-52443cbe9ac4.js";
             let mut event = paused("s1", "asset", url, true);
             event["params"]["responseStatusCode"] = json!(203);
             service.send(event).await;
             let body = service.expect("Fetch.getResponseBody").await;
-            service.reply(&body, json!({ "body": "b3JpZ2luYWw=", "base64Encoded": true })).await;
+            service
+                .reply(
+                    &body,
+                    json!({ "body": "b3JpZ2luYWw=", "base64Encoded": true }),
+                )
+                .await;
             let evaluate = service.expect("Runtime.evaluate").await;
-            assert!(evaluate["params"]["expression"].as_str().unwrap().contains("\"original\""));
-            service.reply(&evaluate, json!({ "result": { "value": {
+            assert!(
+                evaluate["params"]["expression"]
+                    .as_str()
+                    .unwrap()
+                    .contains("\"original\"")
+            );
+            service
+                .reply(
+                    &evaluate,
+                    json!({ "result": { "value": {
                 "installed": true, "patched": patched.then_some("rewritten"), "logs": []
-            } } })).await;
+            } } }),
+                )
+                .await;
             if patched {
                 let fulfill = service.expect("Fetch.fulfillRequest").await;
                 assert_eq!(fulfill["params"]["responseCode"], 203);
                 assert_eq!(fulfill["params"]["body"], "cmV3cml0dGVu");
-                assert_eq!(fulfill["params"]["responseHeaders"], json!([
-                    { "name": "Content-Type", "value": "text/javascript" }
-                ]));
+                assert_eq!(
+                    fulfill["params"]["responseHeaders"],
+                    json!([
+                        { "name": "Content-Type", "value": "text/javascript" }
+                    ])
+                );
                 service.reply(&fulfill, json!({})).await;
             } else {
                 let pass = service.expect("Fetch.continueRequest").await;
@@ -1372,7 +1392,9 @@ process.stdout.write(JSON.stringify(result));
                 while service.context.cache.load(url).await.is_none() {
                     tokio::task::yield_now().await;
                 }
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
             let stats = service.context.page_stats("main").unwrap();
             assert_eq!(stats.patched, u64::from(patched));
             // 无需改写是正常结果，只有失败才累计 skipped。

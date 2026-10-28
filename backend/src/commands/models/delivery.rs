@@ -65,7 +65,9 @@ pub(crate) async fn hot_reload_runtime_models(state: &Arc<AppState>) -> ModelHot
     hot_reload_runtime_models_locked(state).await
 }
 
-pub(crate) async fn hot_reload_runtime_models_locked(state: &Arc<AppState>) -> ModelHotReloadOutcome {
+pub(crate) async fn hot_reload_runtime_models_locked(
+    state: &Arc<AppState>,
+) -> ModelHotReloadOutcome {
     let _delivery = state.model_delivery_lock.lock().await;
     if state.is_shutting_down() {
         return ModelHotReloadOutcome::default();

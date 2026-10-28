@@ -40,7 +40,7 @@ pub(super) fn binding_hash(channel: &NotificationChannelConfig) -> String {
             },
         ))
         .expect("notification binding serializes")
-            .as_bytes(),
+        .as_bytes(),
     )
 }
 

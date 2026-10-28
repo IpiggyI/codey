@@ -156,7 +156,12 @@ impl ExtensionService {
             self.skill_cache_inventory()?["revision"] == inventory["revision"],
             "缓存在准备删除期间发生变化，请刷新后重试"
         );
-        transaction::commit(&self.data_dir, "remove_skill_cache", changes, &[self.codex_home.join("plugins/cache")])?;
+        transaction::commit(
+            &self.data_dir,
+            "remove_skill_cache",
+            changes,
+            &[self.codex_home.join("plugins/cache")],
+        )?;
         clean_empty_dirs(&directory, 0);
         Ok(
             json!({"cache":self.skill_cache_inventory()?,"message":"已删除所选 Skill 缓存；插件可能需要重新下载相关资源。"}),

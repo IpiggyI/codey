@@ -222,7 +222,8 @@ fn channels_official_selection_with_malformed_auth_fails_after_openai_fallback()
     let listed = list(home.path(), &config).unwrap();
     assert_eq!(listed.effective_provider_id, "openai");
     assert!(listed.notice.is_some());
-    let snapshot = crate::codex_provider::current_provider_snapshot_for_config(home.path(), &config);
+    let snapshot =
+        crate::codex_provider::current_provider_snapshot_for_config(home.path(), &config);
     let display = crate::codex_provider::current_provider_for_config(home.path(), &config);
     assert!(
         snapshot

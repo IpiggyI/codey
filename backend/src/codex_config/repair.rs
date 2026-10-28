@@ -691,10 +691,17 @@ mod tests {
     fn exercise_runtime_config_lifecycle(home: &Path, marker: &Path, check: impl Fn(&str)) {
         let start = || {
             apply_isolated_test_runtime_config(
-                home, true, None, true, DEFAULT_SUBAGENT_MODEL,
-                DEFAULT_SUBAGENT_REASONING_EFFORT, None, marker,
+                home,
+                true,
+                None,
+                true,
+                DEFAULT_SUBAGENT_MODEL,
+                DEFAULT_SUBAGENT_REASONING_EFFORT,
+                None,
+                marker,
                 &marker.with_file_name("codex-backups"),
-            ).unwrap();
+            )
+            .unwrap();
             assert!(marker.is_file());
         };
         start();
@@ -719,11 +726,26 @@ mod tests {
         let (home, marker) = paths(temp.path());
         let project = temp.path().join("project");
         let files = [
-            (home.join("config.toml"), b"# user\r\n[mcp_servers.demo]\r\ncommand='example'\r\n".as_slice()),
-            (project.join(".codex/config.toml"), b"# project\n[mcp_servers.local]\ncommand='local'\n".as_slice()),
-            (home.join("skills/demo/SKILL.md"), b"---\nname: demo\ndescription: example\n---\n".as_slice()),
-            (home.join("skills/demo/resources/data.bin"), b"\x00\xffresource".as_slice()),
-            (project.join(".agents/skills/local/SKILL.md"), b"---\nname: local\ndescription: example\n---\n".as_slice()),
+            (
+                home.join("config.toml"),
+                b"# user\r\n[mcp_servers.demo]\r\ncommand='example'\r\n".as_slice(),
+            ),
+            (
+                project.join(".codex/config.toml"),
+                b"# project\n[mcp_servers.local]\ncommand='local'\n".as_slice(),
+            ),
+            (
+                home.join("skills/demo/SKILL.md"),
+                b"---\nname: demo\ndescription: example\n---\n".as_slice(),
+            ),
+            (
+                home.join("skills/demo/resources/data.bin"),
+                b"\x00\xffresource".as_slice(),
+            ),
+            (
+                project.join(".agents/skills/local/SKILL.md"),
+                b"---\nname: local\ndescription: example\n---\n".as_slice(),
+            ),
         ];
         for (path, bytes) in &files {
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -732,7 +754,12 @@ mod tests {
         let extensions = marker.with_file_name("codex-extensions");
         exercise_runtime_config_lifecycle(&home, &marker, |stage| {
             for (path, bytes) in &files {
-                assert_eq!(fs::read(path).unwrap(), *bytes, "{stage}: {}", path.display());
+                assert_eq!(
+                    fs::read(path).unwrap(),
+                    *bytes,
+                    "{stage}: {}",
+                    path.display()
+                );
             }
             assert!(!extensions.exists(), "{stage}: 不得创建扩展数据目录");
             assert!(!extensions.join("backups").exists());
