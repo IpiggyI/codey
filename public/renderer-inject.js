@@ -1395,11 +1395,18 @@
     window.clearTimeout(subagentHeaderTimer);
     subagentHeaderTimer = window.setTimeout(syncSubagentHeaders, 60);
   };
-  const subagentMutationOptions = { childList: true, subtree: true };
+  // class 决定元素是否为子代理标题栏，返回按钮的 aria-label 随子代理切换；
+  // 共享观察器只分发订阅声明过的属性记录，所以显式声明。
+  const subagentMutationOptions = {
+    attributes: true,
+    attributeFilter: ["aria-label", "class"],
+    childList: true,
+    subtree: true,
+  };
   let unsubscribeSubagentHeaders = window.__codeyMutationDispatcher?.subscribe?.(onSubagentHeaderMutations, subagentMutationOptions);
   if (!unsubscribeSubagentHeaders) {
     const observer = new MutationObserver(onSubagentHeaderMutations);
-    observer.observe(document.documentElement, subagentMutationOptions);
+    observer.observe(document.documentElement, { childList: true, subtree: true });
     unsubscribeSubagentHeaders = () => observer.disconnect();
   }
   const onSubagentHeaderClick = () => {
@@ -1475,6 +1482,14 @@
       const target = mutation.target instanceof HTMLElement
         ? mutation.target
         : mutation.target?.parentElement;
+      const conversationTurn = target?.closest?.("[data-turn-key]");
+      if (
+        mutation.type === "childList"
+        && conversationTurn
+        && conversationTurn.isConnected !== false
+      ) {
+        continue;
+      }
       if (
         target?.id === accountUsageId
         || target?.closest?.(`#${accountUsageId}`)

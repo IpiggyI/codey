@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { FakeElementCore } from "./helpers/fake-element.mjs";
+import { FakeElementCore, liveCollection } from "./helpers/fake-element.mjs";
 
 const MODEL_CONFIG_ID = "107580212";
 
@@ -98,10 +98,13 @@ async function loadPatch(
   ]);
   let nextTimer = 0;
   const timers = new Map();
+  const timerDelays = new Map();
   const windowListeners = new Map();
   const documentListeners = new Map();
   const mutationObserverInstalls = [];
   const dispatchedEvents = [];
+  const selectorScanCounts = new Map();
+  const elementQueryCounts = new Map();
   let wildcardScanCount = 0;
   const body = documentBody || {};
   if (queryClient) {
@@ -129,7 +132,9 @@ async function loadPatch(
     },
     querySelectorAll(selector) {
       if (selector === "*") wildcardScanCount += 1;
-      return documentBody ? body.querySelectorAll(selector) : [];
+      if (!documentBody) return [];
+      selectorScanCounts.set(selector, (selectorScanCounts.get(selector) || 0) + 1);
+      return body.querySelectorAll(selector);
     },
     addEventListener(name, listener) {
       const listeners = documentListeners.get(name) || new Set();
@@ -166,13 +171,15 @@ async function loadPatch(
     removeEventListener(name, listener) {
       windowListeners.get(name)?.delete(listener);
     },
-    setTimeout(callback) {
+    setTimeout(callback, delay = 0) {
       nextTimer += 1;
       timers.set(nextTimer, callback);
+      timerDelays.set(nextTimer, delay);
       return nextTimer;
     },
     clearTimeout(id) {
       timers.delete(id);
+      timerDelays.delete(id);
     },
     dispatchEvent(event) {
       dispatchedEvents.push(event);
@@ -210,12 +217,33 @@ async function loadPatch(
     { warn() {} },
   );
   const originalDispatchEvent = window.dispatchEvent;
+  let trackedBodyChildren = [];
+  if (documentBody) {
+    trackedBodyChildren = [...body.children];
+    Object.defineProperty(body, "children", {
+      configurable: true,
+      get: () => trackedBodyChildren,
+      set: (children) => { trackedBodyChildren = children; },
+    });
+  }
   Function("window", "document", "globalThis", "console", source)(
     window,
     document,
     window,
     { warn() {} },
   );
+  for (const element of documentBody ? allDocumentRoots().flatMap((root) => [root, ...root.querySelectorAll("*")]) : []) {
+    for (const method of ["querySelector", "querySelectorAll"]) {
+      const original = element[method];
+      if (typeof original !== "function") continue;
+      element[method] = function (selector) {
+        elementQueryCounts.set(element, new Map(elementQueryCounts.get(element) || []));
+        const bySelector = elementQueryCounts.get(element);
+        bySelector.set(selector, (bySelector.get(selector) || 0) + 1);
+        return original.call(this, selector);
+      };
+    }
+  }
   const patch = window.__codeyModelWhitelistPatch;
   if (bridgeReady) await patch.refresh();
   return {
@@ -251,6 +279,31 @@ async function loadPatch(
     wildcardScanCount() {
       return wildcardScanCount;
     },
+    selectorScanCount(selector) {
+      return selectorScanCounts.get(selector) || 0;
+    },
+    elementQueryCount(element, selector) {
+      return elementQueryCounts.get(element)?.get(selector) || 0;
+    },
+    recordElementQuery(element, selector) {
+      const bySelector = elementQueryCounts.get(element) || new Map();
+      bySelector.set(selector, (bySelector.get(selector) || 0) + 1);
+      elementQueryCounts.set(element, bySelector);
+    },
+    trackElementQueries(...elements) {
+      for (const element of elements) {
+        for (const method of ["querySelector", "querySelectorAll"]) {
+          const original = element?.[method];
+          if (typeof original !== "function") continue;
+          element[method] = function (selector) {
+            const bySelector = elementQueryCounts.get(element) || new Map();
+            bySelector.set(selector, (bySelector.get(selector) || 0) + 1);
+            elementQueryCounts.set(element, bySelector);
+            return original.call(this, selector);
+          };
+        }
+      }
+    },
     mutationObserverInstalls() {
       return mutationObserverInstalls;
     },
@@ -272,6 +325,30 @@ async function loadPatch(
       await Promise.resolve();
       await Promise.resolve();
       await Promise.resolve();
+    },
+    async runTimer(delay) {
+      const next = [...timers].find(([id]) => timerDelays.get(id) === delay);
+      assert.ok(next, `a ${delay}ms timer should be pending`);
+      const [id, callback] = next;
+      timers.delete(id);
+      timerDelays.delete(id);
+      callback();
+      await new Promise(setImmediate);
+    },
+    async runTimers(delay) {
+      for (let round = 0; round < 16; round += 1) {
+        const next = [...timers].find(([id]) => timerDelays.get(id) === delay);
+        if (!next) return;
+        const [id, callback] = next;
+        timers.delete(id);
+        timerDelays.delete(id);
+        callback();
+        await new Promise(setImmediate);
+      }
+      assert.fail(`more than 16 ${delay}ms timers remained pending`);
+    },
+    timerCount() {
+      return timers.size;
     },
   };
 }
@@ -790,7 +867,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "61");
+  assert.equal(patch.version, "62");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],
@@ -2968,7 +3045,7 @@ test("an open model picker hides a route row removed by a hot catalog update", a
   runtime.patch.dispose();
 });
 
-test("model picker observes row text changes after a route rename", async () => {
+test("model picker row text changes scan only their menu and deduplicate queued roots", async () => {
   const body = new FakeElementCore("body", { connected: true });
   const menu = body.appendChild(new FakeElementCore("div", {
     attributes: { role: "menu" },
@@ -3019,6 +3096,8 @@ test("model picker attaches text observers when a menu mounts later", async () =
     }],
   }, [statsigClient()], { documentBody: body });
 
+  // Drain the startup catalog delivery before measuring mutations.
+  await runtime.runTimers(0);
   assert.equal(runtime.mutationObserverInstalls().length, 1);
   const menu = new FakeElementCore("div", {
     attributes: { role: "menu" },
@@ -3034,36 +3113,262 @@ test("model picker attaches text observers when a menu mounts later", async () =
   assert.equal(installs.length, 2);
   assert.equal(installs[1].target, menu);
   assert.equal(installs[1].options.characterData, true);
+  const groupedMenuSelector = "[role='menu'], [role='listbox']";
+  const scansBefore = runtime.selectorScanCount(groupedMenuSelector);
+  const item = menu.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menuitemradio" },
+  }));
+  item.textContent = "relay/gpt-5.6-sol";
+  runtime.dispatchObserverMutations(menu, [{
+    type: "childList",
+    target: menu,
+    addedNodes: [item],
+    removedNodes: [],
+  }]);
+  await runtime.runTimers(0);
+  assert.equal(item.dataset.codeyRouteModel, "relay/gpt-5.6-sol");
+  assert.equal(runtime.selectorScanCount(groupedMenuSelector), scansBefore);
   runtime.patch.dispose();
 });
 
-test("model picker ignores streaming mutations outside the picker", async () => {
+// 线路模型菜单的测试目录：两条线路共用同一个源模型。
+const composerRouteModel = "relay-main/gpt-6-astra";
+const composerOtherRouteModel = "relay-backup/gpt-6-astra";
+const composerCatalog = (prefix = "主") => ({
+  status: "ok",
+  models: [composerRouteModel, composerOtherRouteModel],
+  default_model: composerRouteModel,
+  model_metadata: [
+    [composerRouteModel, prefix], [composerOtherRouteModel, "备"],
+  ].map(([model, route]) => ({
+    model,
+    display_name: `[${route}] gpt-6-astra`,
+    route_name: route,
+    route_prefix: route,
+    provider_id: model.split("/")[0],
+    source_model: "gpt-6-astra",
+  })),
+});
+
+test("model picker text changes scan only their menu and deduplicate queued roots", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const firstMenu = body.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menu" },
+  }));
+  const firstItem = firstMenu.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menuitemradio" },
+  }));
+  firstItem.textContent = composerRouteModel;
+  const secondMenu = body.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menu" },
+  }));
+  const secondItem = secondMenu.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menuitemradio" },
+  }));
+  secondItem.textContent = composerOtherRouteModel;
+  const runtime = await loadPatch(composerCatalog(), [statsigClient()], {
+    documentBody: body,
+  });
+  // Drain the startup catalog delivery so only text mutations create timers.
+  await runtime.runTimers(0);
+  runtime.patch.enhanceModelMenus();
+  for (const item of [firstItem, secondItem]) {
+    item.textContent = composerRouteModel;
+    delete item.dataset.codeyRouteModel;
+    delete item.dataset.codeyRouteName;
+  }
+  const groupedMenuSelector = "[role='menu'], [role='listbox']";
+  const scansBefore = runtime.selectorScanCount(groupedMenuSelector);
+  const textNode = { nodeType: 3, nodeValue: composerRouteModel, parentElement: firstItem };
+  firstItem.childNodes = [textNode];
+
+  runtime.dispatchObserverMutations(firstMenu, [{
+    type: "characterData",
+    target: textNode,
+  }]);
+  runtime.dispatchObserverMutations(firstMenu, [{
+    type: "childList",
+    target: firstItem,
+    addedNodes: [],
+    removedNodes: [],
+  }]);
+  await runtime.runTimer(0);
+
+  assert.equal(runtime.selectorScanCount(groupedMenuSelector), scansBefore);
+  assert.equal(firstItem.textContent, "gpt-6-astra");
+  assert.equal(firstItem.dataset.codeyRouteModel, composerRouteModel);
+  assert.equal(secondItem.dataset.codeyRouteModel, undefined);
+  assert.equal(runtime.timerCount(), 1);
+  runtime.patch.dispose();
+});
+
+test("nested turn wrappers enhance a menu mounted after patch startup", async () => {
   const body = new FakeElementCore("body", { connected: true });
   const turn = body.appendChild(new FakeElementCore("div", {
-    attributes: { "data-turn-key": "t1" },
+    attributes: { "data-turn-key": "model-in-turn" },
   }));
-  const runtime = await loadPatch({
-    status: "ok",
-    models: ["relay/gpt-5.6-sol"],
-    default_model: "relay/gpt-5.6-sol",
-    model_metadata: [{
-      model: "relay/gpt-5.6-sol",
-      display_name: "[新线] gpt-5.6-sol",
-      route_name: "新线路",
-      route_prefix: "新线",
-      provider_id: "relay",
-      source_model: "gpt-5.6-sol",
-    }],
-  }, [statsigClient()], { documentBody: body });
+  const runtime = await loadPatch(composerCatalog(), [statsigClient()], {
+    documentBody: body,
+  });
+  const wrapper = turn.appendChild(new FakeElementCore("div"));
+  const nested = wrapper.appendChild(new FakeElementCore("div"));
+  const menu = wrapper.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menu" },
+  }));
+  const item = menu.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menuitemradio" },
+  }));
+  item.textContent = composerRouteModel;
 
-  assert.equal(runtime.mutationObserverInstalls().length, 1);
   runtime.dispatchObserverMutations(body, [{
-    addedNodes: [new FakeElementCore("span")],
+    addedNodes: [wrapper],
     removedNodes: [],
     target: turn,
     type: "childList",
   }]);
+
+  assert.ok(runtime.mutationObserverInstalls().some((entry) => entry.target === menu));
+  assert.equal(nested.isConnected, true);
+  await runtime.runTimers(0);
+  assert.equal(item.textContent, "gpt-6-astra");
+  assert.equal(item.dataset.codeyRouteModel, composerRouteModel);
+  assert.equal(menu.children.find((child) => child.dataset.codeyRouteHeading)?.dataset.codeyRouteHeading, "主");
+  runtime.patch.dispose();
+});
+
+test("grouped menu subscriber still receives role and class changes through the shared dispatcher", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const candidate = body.appendChild(new FakeElementCore("div"));
+  const sharedObservers = [];
+  const previousMutationObserver = globalThis.MutationObserver;
+  // codey-bridge.js 读取全局 MutationObserver；提供它才会走共享派发器。
+  globalThis.MutationObserver = class {
+    constructor(callback) {
+      this.callback = callback;
+      sharedObservers.push(this);
+    }
+
+    observe(target, options) {
+      this.target = target;
+      this.options = options;
+    }
+
+    disconnect() {
+      this.disconnected = true;
+    }
+  };
+  let runtime;
+  try {
+    runtime = await loadPatch(composerCatalog(), [statsigClient()], { documentBody: body });
+  } finally {
+    globalThis.MutationObserver = previousMutationObserver;
+  }
+  const shared = sharedObservers.filter((observer) => !observer.disconnected).at(-1);
+  assert.ok(shared, "the shared dispatcher observer is installed");
+  assert.equal(runtime.mutationObserverInstalls().some((entry) => entry.target === body), false);
+  assert.ok(shared.options.attributeFilter.includes("role"));
+  assert.ok(shared.options.attributeFilter.includes("class"));
+
+  candidate.setAttribute("role", "menu");
+  shared.callback([{ type: "attributes", attributeName: "role", target: candidate }]);
+  assert.ok(
+    runtime.mutationObserverInstalls().some((entry) => entry.target === candidate),
+    "a role change that turns an element into a menu must reach the handler",
+  );
+  runtime.patch.dispose();
+});
+
+test("turn mutations accept NodeList-shaped added nodes", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const turn = body.appendChild(new FakeElementCore("div", {
+    attributes: { "data-turn-key": "model-in-turn-nodelist" },
+  }));
+  const runtime = await loadPatch(composerCatalog(), [statsigClient()], {
+    documentBody: body,
+  });
+  const wrapper = turn.appendChild(new FakeElementCore("div"));
+  const menu = wrapper.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menu" },
+  }));
+
+  runtime.dispatchObserverMutations(body, [{
+    addedNodes: liveCollection([wrapper]),
+    removedNodes: liveCollection([]),
+    target: turn,
+    type: "childList",
+  }]);
+
+  assert.ok(runtime.mutationObserverInstalls().some((entry) => entry.target === menu));
+  runtime.patch.dispose();
+});
+
+test("ordinary streaming wrappers are probed with a bounded subtree budget", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const turn = body.appendChild(new FakeElementCore("div", {
+    attributes: { "data-turn-key": "t1" },
+  }));
+  const content = turn.appendChild(new FakeElementCore("div"));
+  const catalog = composerCatalog("流式");
+  const runtime = await loadPatch({
+    ...catalog,
+  }, [statsigClient()], { documentBody: body });
+
   assert.equal(runtime.mutationObserverInstalls().length, 1);
+  const timersBefore = runtime.timerCount();
+  const added = new FakeElementCore("div");
+  for (let index = 0; index < 36; index += 1) {
+    const branch = added.appendChild(new FakeElementCore("div"));
+    branch.appendChild(new FakeElementCore("span")).textContent = `token-${index}`;
+  }
+  const branchChildren = added.children.map((branch) => branch.children);
+  let childListReads = 0;
+  added.children.forEach((branch, index) => {
+    Object.defineProperty(branch, "children", {
+      configurable: true,
+      get: () => {
+        childListReads += 1;
+        return branchChildren[index];
+      },
+      set: (children) => { branchChildren[index] = children; },
+    });
+  });
+  const originalTargetQuerySelectorAll = content.querySelectorAll;
+  const originalTargetQuerySelector = content.querySelector;
+  const originalAddedQuerySelectorAll = added.querySelectorAll;
+  const originalAddedQuerySelector = added.querySelector;
+  let targetSubtreeQueries = 0;
+  let targetDocumentSearches = 0;
+  let addedSubtreeQueries = 0;
+  let addedDocumentSearches = 0;
+  content.querySelectorAll = function (selector) {
+    targetSubtreeQueries += 1;
+    return originalTargetQuerySelectorAll.call(this, selector);
+  };
+  content.querySelector = function (selector) {
+    targetDocumentSearches += 1;
+    return originalTargetQuerySelector.call(this, selector);
+  };
+  added.querySelectorAll = function (selector) {
+    addedSubtreeQueries += 1;
+    return originalAddedQuerySelectorAll.call(this, selector);
+  };
+  added.querySelector = function (selector) {
+    addedDocumentSearches += 1;
+    return originalAddedQuerySelector.call(this, selector);
+  };
+  runtime.dispatchObserverMutations(body, [{
+    addedNodes: [added],
+    removedNodes: [],
+    target: content,
+    type: "childList",
+  }]);
+  assert.equal(targetSubtreeQueries, 0);
+  assert.equal(targetDocumentSearches, 0);
+  assert.equal(addedSubtreeQueries, 0);
+  assert.equal(addedDocumentSearches, 0);
+  assert.ok(childListReads < 24, `probe read ${childListReads} child lists`);
+  assert.equal(runtime.mutationObserverInstalls().length, 1);
+  assert.equal(runtime.timerCount(), timersBefore);
   runtime.patch.dispose();
 });
 
@@ -3443,6 +3748,76 @@ test("unchanged catalog retries and interactions do not repeat full React discov
   });
   assert.equal(runtime.wildcardScanCount(), 2);
   assert.equal(runtime.patch.delivery().revision, 2);
+  runtime.patch.dispose();
+});
+
+test("a recent successful discovery reuses mounted roots before the next full scan", async () => {
+  const catalog = {
+    status: "ok",
+    models: ["gpt-5.6-sol"],
+    default_model: "gpt-5.6-sol",
+  };
+  const body = new FakeElementCore("body", { connected: true });
+  const modelButton = body.appendChild(new FakeElementCore("button", {
+    attributes: { "aria-haspopup": "menu" },
+  }));
+  const queryClient = activeModelQueryClient(["stale-model"]);
+  const replacementQueryClient = activeModelQueryClient(["stale-model"]);
+  const runtime = await loadPatch(catalog, [statsigClient()], {
+    documentBody: body,
+    queryClient,
+  });
+
+  assert.equal(runtime.wildcardScanCount(), 1);
+  assert.deepEqual(queryClient.models(), catalog.models);
+  body.__reactFiber$codeyTest = {
+    memoizedProps: { queryClient: replacementQueryClient },
+  };
+  runtime.dispatchDocumentEvent("pointerdown", { target: modelButton });
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(runtime.wildcardScanCount(), 1, "the mounted-root pass must avoid the full document scan");
+  assert.deepEqual(replacementQueryClient.models(), catalog.models);
+  assert.deepEqual(queryClient.models(), catalog.models);
+
+  await runtime.patch.setCatalog({
+    ...catalog,
+    models: ["gpt-5.6-sol", "provider-new"],
+  });
+  assert.equal(runtime.wildcardScanCount(), 1, "a recent discovery does not repeat the full document walk");
+  assert.deepEqual(replacementQueryClient.models(), ["gpt-5.6-sol", "provider-new"]);
+  runtime.patch.dispose();
+});
+
+test("losing every known QueryClient re-enables the next forced discovery", async () => {
+  const catalog = {
+    status: "ok",
+    models: ["gpt-5.6-sol"],
+    default_model: "gpt-5.6-sol",
+  };
+  const body = new FakeElementCore("body", { connected: true });
+  const firstQueryClient = activeModelQueryClient(["gpt-5.6-sol"]);
+  const replacementQueryClient = activeModelQueryClient(["gpt-5.6-sol"]);
+  const runtime = await loadPatch(catalog, [statsigClient()], {
+    documentBody: body,
+    queryClient: firstQueryClient,
+  });
+
+  firstQueryClient.getQueriesData = () => null;
+  delete body.__reactFiber$codeyTest;
+  await runtime.patch.setCatalog(catalog);
+  assert.equal(runtime.wildcardScanCount(), 1, "a missing client alone does not force a scan");
+
+  body.__reactFiber$codeyTest = {
+    memoizedProps: { queryClient: replacementQueryClient },
+  };
+  await runtime.patch.setCatalog({
+    ...catalog,
+    models: ["gpt-5.6-sol", "provider-recovered"],
+  });
+  assert.equal(runtime.wildcardScanCount(), 2, "new graph evidence can rediscover after the cache is lost");
+  assert.deepEqual(replacementQueryClient.models(), ["gpt-5.6-sol", "provider-recovered"]);
   runtime.patch.dispose();
 });
 

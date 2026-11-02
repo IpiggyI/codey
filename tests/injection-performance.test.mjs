@@ -198,7 +198,7 @@ test("renderer core loads session tools after idle time or sidebar use", async (
   assert.match(modelWhitelist, /let groupedMenuObserver = null/);
   assert.match(modelWhitelist, /characterData:\s*true/);
   assert.doesNotMatch(inject, /__codeyBlockNativePetControls/);
-  assert.match(petShield, /const block = \(root = document\)/);
+  assert.match(petShield, /const block = \(root = document, options = \{\}\)/);
   assert.match(petShield, /if \(!enabled\) \{/);
   assert.match(bridge, /window\.__codeyMutationDispatcher = Object\.freeze/);
   assert.match(bridge, /const createShieldLifecycle = \(\{/);
@@ -207,6 +207,16 @@ test("renderer core loads session tools after idle time or sidebar use", async (
   assert.match(petShield, /__codeyMutationDispatcher\?\.createShieldLifecycle/);
   assert.match(securityShield, /__codeyMutationDispatcher\.subscribe/);
   assert.match(quotaDismiss, /__codeyMutationDispatcher\.subscribe/);
+  assert.match(quotaDismiss, /const conversationTurnSelector = "\[data-turn-key\]"/);
+  assert.match(quotaDismiss, /shouldSkipMountedTurnMutation/);
+  assert.match(quotaDismiss, /warningSurfaceSelector[\s\S]*node\.children[\s\S]*warningSurfaceSelector/);
+  assert.match(quotaDismiss, /pendingRoots\.values\(\)\.next\(\)\.value/);
+  assert.doesNotMatch(quotaDismiss, /pendingRoots\.add\(document\.documentElement\)/);
+  assert.match(securityShield, /const conversationTurnSelector = "\[data-turn-key\]"/);
+  assert.match(securityShield, /shouldSkipMountedTurnMutation/);
+  assert.match(securityShield, /warningSurfaceSelector[\s\S]*node\.children[\s\S]*warningSurfaceSelector/);
+  assert.match(securityShield, /pendingRoots\.values\(\)\.next\(\)\.value/);
+  assert.doesNotMatch(securityShield, /pendingRoots\.add\(document\.documentElement\)/);
   assert.doesNotMatch(petShield, /new MutationObserver/);
   assert.doesNotMatch(securityShield, /new MutationObserver/);
 });
