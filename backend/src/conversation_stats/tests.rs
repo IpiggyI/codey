@@ -386,6 +386,36 @@ fn conversation_stats_tool_item_boundaries_and_unassignable_records_are_unknown(
 }
 
 #[test]
+fn conversation_stats_mcp_call_item_and_call_output_share_one_interval() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("records.jsonl");
+    // MCP 调用的 item id 与 call_id 相同，完成事件带精确起止，输出记录稍后写入。
+    let base = 1_793_145_600_000_i64;
+    write(
+        &path,
+        &[
+            start(1, "one"),
+            tool(2, "call_m", false),
+            record(
+                4,
+                "event_msg",
+                json!({"type":"item_completed","started_at_ms":base + 2_500,"completed_at_ms":base + 4_000,
+                    "item":{"type":"McpToolCall","id":"call_m"}}),
+            ),
+            tool(5, "call_m", true),
+        ],
+    );
+    assert_eq!(
+        snapshot(&path, SESSION)
+            .unwrap()
+            .last_turn
+            .unwrap()
+            .tool_duration_ms,
+        Some(1500)
+    );
+}
+
+#[test]
 fn conversation_stats_foreign_segments_and_missing_response_ids_keep_reasoning_scoped() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("records.jsonl");

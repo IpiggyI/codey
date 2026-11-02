@@ -2038,7 +2038,12 @@
   window.__codeyCodexAssetReferencesFromSource = codexAssetReferencesFromSource;
 
   const discoverCodexAppAssetUrls = async () => {
-    const loadedUrls = codexAppAssetUrls();
+    // Codex 26.1027 loads app-initial through a dynamic import chain that leaves no
+    // page tag or resource timing; the service-tier installer records the URL the
+    // debugger reported.
+    const debuggerUrl = typeof window.__codeyServiceTierModuleUrl === "string"
+      ? window.__codeyServiceTierModuleUrl : "";
+    const loadedUrls = [...new Set([...codexAppAssetUrls(), debuggerUrl].filter(Boolean))];
     const discoveredUrls = loadedUrls.filter((url) => (
       url.includes("app-server-manager-signals-")
       || url.includes("app-initial-")
@@ -2114,7 +2119,7 @@
       return (
         candidate.length >= 2
         && candidate.length <= 3
-        && /AppServerManager RPC is not connected/.test(source)
+        && /AppServerManager RPC is (?:not connected|unavailable for hostId:)/.test(source)
         && /\.get\(/.test(source)
         && /\.forHost\(/.test(source)
       );
