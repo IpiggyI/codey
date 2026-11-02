@@ -101,6 +101,8 @@ pub struct AccountUsageSnapshot {
     pub secondary: Option<AccountUsageWindow>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credits: Option<AccountCredits>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reset_credits: Option<AccountResetCredits>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_limits: Vec<AccountUsageLimitGroup>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -137,6 +139,15 @@ pub struct AccountCredits {
     pub unlimited: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub balance: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountResetCredits {
+    #[serde(default)]
+    pub available_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_expires_at: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -368,6 +379,12 @@ pub(crate) async fn fetch_usage_for_auth(
             serde_json::from_slice::<Value>(&response).with_context(|| "官方额度响应格式无效")?;
         LAST_GOOD_USAGE_ENDPOINT.store(index, std::sync::atomic::Ordering::Relaxed);
         let mut snapshot = parse_account_usage(&payload, unix_timestamp())?;
+        if let Some(credits) = snapshot.reset_credits.as_mut()
+            && credits.available_count > 0
+            && credits.next_expires_at.is_none()
+        {
+            credits.next_expires_at = fetch_reset_credits_expiry(client, &auth, index).await;
+        }
         snapshot.account_label = auth.account_label;
         return Ok(snapshot);
     }
@@ -376,6 +393,84 @@ pub(crate) async fn fetch_usage_for_auth(
         "{}",
         last_error.unwrap_or_else(|| "未找到可用的官方额度接口".to_string())
     )
+}
+
+/// 重置次数的过期明细只在剩余次数大于零时才补查；请求失败、超时或响应
+/// 格式不符都不影响额度快照本身。
+async fn fetch_reset_credits_expiry(
+    client: &Client,
+    auth: &OfficialAuth,
+    usage_endpoint_index: usize,
+) -> Option<u64> {
+    let log_failure = |kind: &str, error: String, status: Option<u16>| {
+        let mut context = serde_json::json!({ "kind": kind });
+        if let Some(status) = status {
+            context["status"] = status.into();
+        }
+        crate::error_log::record_failure(
+            "reset_credits_expiry_failed",
+            "fetch_reset_credits_expiry",
+            error,
+            context,
+        );
+    };
+    let base = USAGE_ENDPOINTS[usage_endpoint_index].rsplit_once('/')?.0;
+    let endpoint = format!("{base}/rate-limit-reset-credits");
+    let mut request = client
+        .get(&endpoint)
+        .timeout(Duration::from_secs(8))
+        .header(ACCEPT, "application/json")
+        .header("user-agent", "codex_cli_rs")
+        .bearer_auth(&auth.access_token);
+    if let Some(account_id) = auth.account_id.as_deref() {
+        request = request.header("chatgpt-account-id", account_id);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|error| {
+            log_failure(
+                "request",
+                format!("请求额度重置次数明细失败：{}", error.without_url()),
+                None,
+            );
+        })
+        .ok()?;
+    let status = response.status();
+    if !status.is_success() {
+        log_failure(
+            "http_status",
+            format!("额度重置次数明细接口返回 {status}"),
+            Some(status.as_u16()),
+        );
+        return None;
+    }
+    let body = crate::http_response::read_bounded_body(
+        response,
+        MAX_ACCOUNT_USAGE_RESPONSE_BYTES,
+        "额度重置次数明细响应",
+    )
+    .await
+    .inspect_err(|error| {
+        log_failure("body_read", error.to_string(), Some(status.as_u16()));
+    })
+    .ok()?;
+    let payload: Value = serde_json::from_slice(&body)
+        .inspect_err(|error| {
+            log_failure(
+                "json_parse",
+                format!("额度重置次数明细响应格式无效：{error}"),
+                Some(status.as_u16()),
+            );
+        })
+        .ok()?;
+    let now = unix_timestamp();
+    reset_credits_next_expiry(&payload, now).or_else(|| {
+        ["rate_limit_reset_credits", "rateLimitResetCredits"]
+            .iter()
+            .find_map(|key| payload.get(*key))
+            .and_then(|summary| reset_credits_next_expiry(summary, now))
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -588,15 +683,68 @@ fn parse_account_usage(value: &Value, fetched_at: u64) -> Result<AccountUsageSna
 
     let plan_type = string_field(value, &["plan_type", "planType"])
         .or_else(|| string_field(snapshot, &["plan_type", "planType"]));
+    let reset_credits = parse_reset_credits(value, fetched_at)
+        .or_else(|| parse_reset_credits(snapshot, fetched_at));
     Ok(AccountUsageSnapshot {
         plan_type,
         primary,
         secondary,
         credits,
+        reset_credits,
         additional_limits: parse_additional_limits(value, snapshot, fetched_at),
         account_label: None,
         fetched_at,
     })
+}
+
+fn parse_reset_credits(value: &Value, fetched_at: u64) -> Option<AccountResetCredits> {
+    let summary = ["rate_limit_reset_credits", "rateLimitResetCredits"]
+        .iter()
+        .find_map(|key| value.get(*key))?;
+    let available_count = u64_field(summary, &["available_count", "availableCount"])?;
+    Some(AccountResetCredits {
+        available_count,
+        next_expires_at: reset_credits_next_expiry(summary, fetched_at),
+    })
+}
+
+/// 明细行里取最近一次未过期的过期时间；已核销或状态不明的行不再参与计算。
+fn reset_credits_next_expiry(summary: &Value, now: u64) -> Option<u64> {
+    summary
+        .get("credits")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter(|credit| {
+            !matches!(
+                string_field(credit, &["status"]).as_deref(),
+                Some("redeemed") | Some("unknown")
+            )
+        })
+        .filter_map(|credit| {
+            ["expires_at", "expiresAt"]
+                .iter()
+                .find_map(|key| credit.get(*key))
+                .and_then(reset_credit_timestamp)
+        })
+        .filter(|expires_at| *expires_at > now)
+        .min()
+}
+
+/// 官方明细接口的过期时间是 RFC3339 字符串，AppServer 明细行是 Unix 秒。
+fn reset_credit_timestamp(value: &Value) -> Option<u64> {
+    let timestamp = if let Some(text) = value.as_str() {
+        let trimmed = text.trim();
+        match chrono::DateTime::parse_from_rfc3339(trimmed) {
+            Ok(datetime) => datetime.timestamp(),
+            Err(_) => trimmed.parse::<f64>().ok()?.round() as i64,
+        }
+    } else {
+        value.as_f64()?.round() as i64
+    };
+    u64::try_from(timestamp)
+        .ok()
+        .filter(|timestamp| *timestamp > 0)
+        .map(normalize_timestamp)
 }
 
 fn parse_additional_limits(
@@ -1004,6 +1152,7 @@ mod tests {
                 balance: Some("10".to_string()),
             }),
             additional_limits: Vec::new(),
+            reset_credits: None,
             account_label: None,
             fetched_at: 1_700_000_000,
         }
@@ -1376,6 +1525,90 @@ mod tests {
         let secondary = snapshot.secondary.unwrap();
         assert_eq!(secondary.used_percent, 28.0);
         assert_eq!(secondary.resets_at, Some(1_700_086_400));
+    }
+
+    #[test]
+    fn parses_reset_credit_count_and_nearest_expiry() {
+        let now = 1_700_000_000;
+        for (summary_key, count_key, expiry_key, expiry) in [
+            (
+                "rate_limit_reset_credits",
+                "available_count",
+                "expires_at",
+                serde_json::json!("2023-11-14T22:15:00Z"),
+            ),
+            (
+                "rateLimitResetCredits",
+                "availableCount",
+                "expiresAt",
+                serde_json::json!(1_700_000_100_u64),
+            ),
+            (
+                "rateLimitResetCredits",
+                "availableCount",
+                "expiresAt",
+                serde_json::json!(1_700_000_100_000_u64),
+            ),
+        ] {
+            for nested in [false, true] {
+                let mut value = serde_json::json!({
+                    "rate_limits": {"primary": {"used_percent": 15.0, "window_minutes": 300}}
+                });
+                let summary = serde_json::json!({
+                    count_key: 2,
+                    "credits": [
+                        {"status": "available", expiry_key: expiry},
+                        {"status": "available", "expires_at": now + 200},
+                        {"status": "redeemed", "expires_at": now + 1},
+                        {"status": "unknown", "expires_at": now + 2},
+                        {"status": "available", "expires_at": now - 1},
+                        {"status": "available", "expires_at": now},
+                        {"status": "available", "expires_at": null}
+                    ]
+                });
+                if nested {
+                    value["rate_limits"][summary_key] = summary;
+                } else {
+                    value[summary_key] = summary;
+                }
+                let snapshot = parse_account_usage(&value, now).unwrap();
+                assert_eq!(
+                    snapshot.reset_credits,
+                    Some(AccountResetCredits {
+                        available_count: 2,
+                        next_expires_at: Some(now + 100),
+                    })
+                );
+                let encoded = serde_json::to_value(snapshot).unwrap();
+                assert_eq!(
+                    encoded,
+                    serde_json::json!({
+                        "primary": {"usedPercent": 15.0, "windowMinutes": 300},
+                        "resetCredits": {"availableCount": 2, "nextExpiresAt": now + 100},
+                        "fetchedAt": now
+                    })
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn reset_credits_without_expiry_serialize_only_the_count() {
+        for count in [0, 2] {
+            let value = serde_json::json!({
+                "primary": {"used_percent": 15.0, "window_minutes": 300},
+                "rate_limit_reset_credits": {"available_count": count}
+            });
+            let snapshot = parse_account_usage(&value, 1_700_000_000).unwrap();
+            assert_eq!(
+                serde_json::to_value(snapshot).unwrap(),
+                serde_json::json!({
+                    "primary": {"usedPercent": 15.0, "windowMinutes": 300},
+                    "resetCredits": {"availableCount": count},
+                    "fetchedAt": 1_700_000_000_u64
+                })
+            );
+        }
     }
 
     #[test]

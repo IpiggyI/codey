@@ -130,6 +130,7 @@ mod tests {
             primary: None,
             secondary: None,
             credits: None,
+            reset_credits: None,
             additional_limits: vec![],
             account_label: None,
             fetched_at: at,

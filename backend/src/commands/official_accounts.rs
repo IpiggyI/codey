@@ -681,6 +681,10 @@ mod tests {
                 primary: None,
                 secondary: None,
                 credits: None,
+                reset_credits: Some(account_usage::AccountResetCredits {
+                    available_count: 2,
+                    next_expires_at: Some(1_800_000_000),
+                }),
                 additional_limits: vec![],
                 account_label: None,
                 fetched_at: 10,
@@ -689,6 +693,13 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(response["status"], "ok");
+        assert_eq!(
+            response["resetCredits"],
+            json!({
+                "availableCount": 2,
+                "nextExpiresAt": 1_800_000_000
+            })
+        );
         assert!(!response.to_string().contains("secret"));
         assert_eq!(
             state

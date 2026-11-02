@@ -52,6 +52,8 @@ const PLUGIN_MARKETPLACE_FIX_SCRIPT: &str =
 const PROMPT_OPTIMIZE_SCRIPT: &str = include_str!("../../dist-overlay/inject/prompt-optimize.js");
 const CONVERSATION_STATS_SCRIPT: &str =
     include_str!("../../dist-overlay/inject/conversation-stats-inject.js");
+const QUOTA_NOTICE_DISMISS_SCRIPT: &str =
+    include_str!("../../dist-overlay/inject/quota-notice-dismiss.js");
 const QUOTA_UNLOCK_SCRIPT: &str = include_str!("../../dist-overlay/inject/quota-unlock.js");
 const MAX_INJECTION_ERROR_CHARS: usize = 500;
 const MAX_INJECTION_DETAIL_CHARS: usize = 2000;
@@ -333,6 +335,17 @@ pub fn prepare_injection_scripts(
             Feature,
         ),
         (
+            "quota-notice-dismiss",
+            "额度提示关闭",
+            QUOTA_NOTICE_DISMISS_SCRIPT,
+            r#"window.__codeyQuotaNoticeDismissInstalled === true
+              && typeof window.__codeyQuotaNoticeDismiss?.scan === "function"
+              && typeof window.__codeyQuotaNoticeDismiss?.dismiss === "function"
+              ? "额度提示关闭按钮已就绪" : """#
+                .to_string(),
+            Feature,
+        ),
+        (
             "settings-overlay-loader",
             "配置面板加载器",
             lazy_settings_overlay_loader_script(),
@@ -430,6 +443,7 @@ pub fn prepare_injection_scripts(
             + RENDERER_INJECT_SCRIPT.len()
             + PET_CONTROL_SHIELD_SCRIPT.len()
             + SECURITY_WARNING_SHIELD_SCRIPT.len()
+            + QUOTA_NOTICE_DISMISS_SCRIPT.len()
             + PLUGIN_MARKETPLACE_FIX_SCRIPT.len()
             + PROMPT_OPTIMIZE_SCRIPT.len()
             + CONVERSATION_STATS_SCRIPT.len()
@@ -1579,6 +1593,7 @@ fn lazy_settings_overlay_loader_script() -> &'static str {
   // 高于后端连接加求值的预算；桥接失联时不能让加载永远挂起、吞掉后续点击。
   const loadTimeoutMs = 15000;
   let loading = null;
+  let opening = false;
   const formatError = (error) => error instanceof Error
     ? `${error.name}: ${error.message}`
     : String(error || "未知错误");
@@ -1610,22 +1625,29 @@ fn lazy_settings_overlay_loader_script() -> &'static str {
       if (typeof window.__codexSessionDeleteBridge !== "function") {
         return Promise.reject(new Error("Codey bridge 尚未就绪"));
       }
-      loading = requestLoad(false);
+      // 失败的加载不能留在缓存里，否则悬停预加载失败后点击再也无法重试。
+      loading = requestLoad(false).catch((error) => {
+        loading = null;
+        throw error;
+      });
       return loading;
     },
     open() {
       this.toggle();
     },
     toggle() {
-      if (loading) return;
+      // 预加载进行中的点击等同一次加载完成后再打开，只防止重复打开。
+      if (opening) return;
+      opening = true;
       void this.load().then((overlay) => {
         if (typeof overlay.open === "function") overlay.open();
         else overlay.toggle();
       }).catch((error) => {
         const message = formatError(error);
         window.__codeyOverlayError = message;
-        loading = null;
         window.alert(`Codey 内嵌配置面板加载失败：${message}`);
+      }).finally(() => {
+        opening = false;
       });
     },
   };
@@ -2393,28 +2415,36 @@ assert.equal(nextPage.window.attempts, 1);
         assert!(prepared.scripts[1].contains("window.userScriptRan = true;"));
         assert!(prepared.scripts[1].contains(r#"status = "executed""#));
         assert!(prepared.scripts[1].contains("用户脚本 1 injection failed"));
-        assert_eq!(prepared.descriptors.len(), 11);
-        assert_eq!(prepared.descriptors[10].id, "user-script-1");
-        assert_eq!(prepared.descriptors[10].source, "user");
+        assert_eq!(prepared.descriptors.len(), 12);
+        let quota_notice = prepared
+            .descriptors
+            .iter()
+            .find(|descriptor| descriptor.id == "quota-notice-dismiss")
+            .unwrap();
+        assert_eq!(quota_notice.name, "额度提示关闭");
+        assert_eq!(quota_notice.visibility, InjectionScriptVisibility::Feature);
+        assert!(core.contains(QUOTA_NOTICE_DISMISS_SCRIPT));
+        assert_eq!(prepared.descriptors[11].id, "user-script-1");
+        assert_eq!(prepared.descriptors[11].source, "user");
         assert_eq!(
             prepared.descriptors[0].visibility,
             InjectionScriptVisibility::Internal
         );
         assert_eq!(prepared.descriptors[2].id, "service-tier");
         assert!(core.contains(service_tier::INSTALL_PATH));
-        assert_eq!(prepared.descriptors[6].id, "renderer-controls");
+        assert_eq!(prepared.descriptors[7].id, "renderer-controls");
         assert_eq!(
-            prepared.descriptors[6].visibility,
+            prepared.descriptors[7].visibility,
             InjectionScriptVisibility::Internal
         );
         assert_eq!(
-            prepared.descriptors[10].visibility,
+            prepared.descriptors[11].visibility,
             InjectionScriptVisibility::Feature
         );
-        assert_eq!(prepared.descriptors[9].id, "conversation-stats");
-        assert_eq!(prepared.descriptors[9].name, "对话用量");
+        assert_eq!(prepared.descriptors[10].id, "conversation-stats");
+        assert_eq!(prepared.descriptors[10].name, "对话用量");
         assert_eq!(
-            prepared.descriptors[9].visibility,
+            prepared.descriptors[10].visibility,
             InjectionScriptVisibility::Feature
         );
         let snapshot_script = injection_status_snapshot_script(&prepared.descriptors);
