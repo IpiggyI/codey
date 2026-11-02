@@ -4,7 +4,7 @@
 // stats.lastModelRequest 中与通知对上的请求时间为锚点。会话 id 取自可见 composer。
 (() => {
   const PROBE_KEY = "__codeyConversationStats";
-  const VERSION = 1;
+  const VERSION = 2;
   const previous = window[PROBE_KEY];
   if (previous?.installed && (previous.version === VERSION || !previous.dispose)) return;
   previous?.dispose?.();
@@ -28,6 +28,14 @@
     .map((attribute) => `[${attribute}]`)
     .join(",");
   const activeThreadSelector = '[data-app-action-sidebar-thread-active="true"]';
+  const conversationTurnSelector = "[data-turn-key]";
+  const contextAttributes = [
+    ...sessionIdAttributes,
+    "data-app-action-sidebar-thread-active",
+    "data-app-action-sidebar-thread-id",
+    "hidden",
+    "aria-hidden",
+  ];
   const POLL_IDLE_MS = 3_000;
   const POLL_ACTIVE_MS = 1_100;
   const RESCAN_DEBOUNCE_MS = 120;
@@ -347,17 +355,18 @@
     if (!overlay || !computed) return;
     for (const name of ["--text-primary", "--bg-primary", "--cs-text", "--cs-muted", "--cs-line", "--cs-surface"]) {
       const value = computed.getPropertyValue(name).trim();
+      if (overlay.style.getPropertyValue(name) === value) continue;
       if (value) overlay.style.setProperty(name, value);
       else overlay.style.removeProperty(name);
     }
-    overlay.style.colorScheme = computed.colorScheme;
+    setValue(overlay.style, "colorScheme", computed.colorScheme);
   };
 
   // 条上的会话累计沿用上游格式；卡片中来自原输入栏芯片的数值沿用芯片格式。
   const formatTotalTokens = (value) => {
     if (value == null || !Number.isFinite(value)) return "—";
     if (value < 1_000) return `${Math.round(value)}`;
-    if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k`;
+    if (value < 999_500) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k`;
     return `${(value / 1_000_000).toFixed(1)}M`;
   };
 
@@ -368,21 +377,25 @@
     const sign = value < 0 ? "-" : "";
     const absolute = Math.abs(value);
     if (absolute < 1_000) return `${sign}${Math.round(absolute)}`;
-    if (absolute < 1_000_000) return `${sign}${decimal(absolute / 1_000, 1)}k`;
+    // 接近一百万时四舍五入会显示成 1000k，提前切换到 M。
+    if (absolute < 999_500) return `${sign}${decimal(absolute / 1_000, 1)}k`;
     if (absolute < 1_000_000_000) return `${sign}${decimal(absolute / 1_000_000, 1)}M`;
     return `${sign}${decimal(absolute / 1_000_000_000, 1)}B`;
   };
 
-  const positionPanel = () => {
+  const positionPanel = (anchor, onlyIfMoved = false) => {
     const refs = statsElement?.__codeyCs;
     if (!refs?.active) return;
-    if (!statsElement.isConnected || !findVisibleComposerAnchor()) { setExpanded(false); return; }
+    if (!statsElement.isConnected || !(anchor === undefined ? findVisibleComposerAnchor() : anchor)) { setExpanded(false); return; }
     syncPanelTheme();
     const panel = refs.panels[refs.active];
     const rect = refs.buttons[refs.active].getBoundingClientRect();
-    const panelRect = panel.getBoundingClientRect();
     const height = window.innerHeight || document.documentElement.clientHeight;
     const width = window.innerWidth || document.documentElement.clientWidth;
+    const placement = [refs.active, rect.left, rect.top, rect.width, rect.height, width, height].join(":");
+    if (onlyIfMoved && refs.placement === placement) return;
+    refs.placement = placement;
+    const panelRect = panel.getBoundingClientRect();
     // 气泡贴近入口，鼠标可以直接移入；只覆盖编辑器，不推动页面布局。
     const available = Math.max(80, rect.top - 20);
     panel.style.left = `${Math.max(12, Math.min(rect.left + (rect.width - panelRect.width) / 2, width - panelRect.width - 12))}px`;
@@ -401,11 +414,11 @@
       const panel = refs.panels[key];
       const visible = expanded && key === active;
       if (!visible && panel.hasAttribute("popover") && panel.matches(":popover-open")) panel.hidePopover();
-      panel.hidden = !visible;
+      setHidden(panel, !visible);
       if (visible && panel.hasAttribute("popover") && !panel.matches(":popover-open")) {
         try { panel.showPopover(); } catch { panel.removeAttribute("popover"); }
       }
-      refs.buttons[key].setAttribute("aria-expanded", String(visible));
+      setAttribute(refs.buttons[key], "aria-expanded", String(visible));
     }
     if (expanded) positionPanel();
     else if (restoreFocus) {
@@ -503,9 +516,23 @@
     return "—";
   };
 
+  // 每次实际改写文字或显隐都计数；render 据此判断浮层尺寸是否可能变化。
+  let contentRevision = 0;
+
   const setText = (element, value) => {
     // 相同 textContent 仍会替换文本节点，触发其他页面观察器。
-    if (element.textContent !== value) element.textContent = value;
+    if (element.textContent === value) return false;
+    element.textContent = value;
+    contentRevision += 1;
+    return true;
+  };
+
+  const setValue = (target, key, value) => {
+    if (target[key] !== value) target[key] = value;
+  };
+
+  const setAttribute = (element, name, value) => {
+    if (element.getAttribute(name) !== value) element.setAttribute(name, value);
   };
 
   // 浏览器把颜色读回为 rgb()，按上次写入的值比较才能跳过重复写入。
@@ -516,7 +543,9 @@
   };
 
   const setHidden = (element, hidden) => {
-    if (element.hidden !== hidden) element.hidden = hidden;
+    if (element.hidden === hidden) return;
+    element.hidden = hidden;
+    contentRevision += 1;
   };
 
   // 倒计时只写卡片里的一格，每秒更新，不重绘整条。
@@ -586,10 +615,11 @@
     if (!bar) {
       // 输入框不可见（例如离开会话页）时，若旧宿主仍在隐藏会话里，显式
       // 隐藏状态条，避免恢复可见时短暂展示过期数据。
-      if (statsElement) { statsElement.hidden = true; setExpanded(false); }
+      if (statsElement) { setHidden(statsElement, true); setExpanded(false); }
       return;
     }
-    bar.hidden = false;
+    const revision = contentRevision;
+    setHidden(bar, false);
     const data = { ...stats };
     const sessionUsage = data.usageSource === "rollout" && data.usageScope === "session";
     const runtimeRequests = data.requestsScope === "runtime"
@@ -604,9 +634,9 @@
     }
     // 最近一轮由后端按用户 turn 归属聚合；不回退到会话累计或单次请求字段。
     for (const key of ["totalTokens", "inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteInputTokens", "requests", "inFlight"]) {
-      if (!Number.isFinite(data[key]) || data[key] < 0) data[key] = null;
+      if (!Number.isSafeInteger(data[key]) || data[key] < 0) data[key] = null;
     }
-    if (!Number.isInteger(data.turnCount) || data.turnCount < 0) data.turnCount = null;
+    if (!Number.isSafeInteger(data.turnCount) || data.turnCount < 0) data.turnCount = null;
     const formattedSpeed = formatSpeed(running && stale ? null : turn?.averageOutputTokensPerSecond);
     const speedKnown = formattedSpeed != null;
     const estimatedSpeed = turn?.speedIsEstimate === true;
@@ -620,11 +650,11 @@
     const rate = cacheRatePercent(data.inputTokens, data.cachedInputTokens) || "—";
     const refs = bar.__codeyCs;
     setText(refs.speed, speedText);
-    refs.speed.title = speedNote;
+    setValue(refs.speed, "title", speedNote);
     setText(refs["cache-rate"], rate);
     setText(refs.total, data.totalTokens == null ? "—" : `${formatTotalTokens(data.totalTokens)} tok`);
     const finite = value => Number.isFinite(value) && value >= 0;
-    const count = value => finite(value) ? value.toLocaleString("zh-CN") : "—";
+    const count = value => Number.isSafeInteger(value) && value >= 0 ? value.toLocaleString("zh-CN") : "—";
     const duration = (value) => {
       if (!finite(value)) return "—";
       const seconds = value / 1000;
@@ -640,11 +670,11 @@
       waiting: "等待会话", loading: "读取统计中", stale: "统计暂不可用", empty: "暂无统计",
       ok: fetchInFlight ? "更新统计中" : running ? "本轮进行中" : turn?.status === "aborted" ? "本轮已中止" : (sessionUsage ? "历史统计" : "运行期统计"),
     }[state];
-    bar.dataset.status = status;
+    setValue(bar.dataset, "status", status);
     // Token 数用紧凑写法（如 1.8M），悬停显示精确值。
     const setTokens = (element, value) => {
       setText(element, finite(value) ? formatTokenCount(value) : "—");
-      element.title = finite(value) ? `${count(value)} tok` : "";
+      setValue(element, "title", finite(value) ? `${count(value)} tok` : "");
     };
     const uncached = finite(data.inputTokens) && finite(data.cachedInputTokens) && data.cachedInputTokens <= data.inputTokens ? data.inputTokens - data.cachedInputTokens : null;
     setText(refs.fields.modelDuration, duration(turn?.modelDurationMs));
@@ -670,16 +700,17 @@
     const requestValues = [lastUncached, usage?.lastOutputTokens];
     setText(refs.fields.requestTokens, lastInput === undefined ? "—"
       : requestValues.map((value) => value === undefined ? "—" : formatTokenCount(value)).join(" / "));
-    refs.fields.requestTokens.title = lastInput === undefined ? ""
-      : requestValues.map((value) => value === undefined ? "—" : count(value)).join(" / ");
+    setValue(refs.fields.requestTokens, "title", lastInput === undefined ? ""
+      : requestValues.map((value) => value === undefined ? "—" : count(value)).join(" / "));
     renderCacheRemaining();
     const session = renderSessionCard(refs, usage, anchorEntry, request);
-    refs.buttons.activity.setAttribute("aria-label", `会话总轮数 ${count(data.turnCount)} 轮，最近一轮统计 ${count(turn?.stepCount)} 步，本轮平均速度 ${speedText}，${status}。${speedNote}。查看统计详情`);
-    refs.buttons.tokens.setAttribute("aria-label", `Token 用量，${scopeLabel} ${refs.total.textContent}，缓存命中 ${rate}，${status}。查看统计详情`);
-    refs.buttons.session.setAttribute("aria-label", `会话，${session.cost ? `费用估算 ${session.cost}，` : ""}${session.contextLabel}。查看会话详情`);
-    bar.dataset.running = running ? "true" : "false";
-    bar.dataset.state = state;
-    positionPanel();
+    setAttribute(refs.buttons.activity, "aria-label", `会话总轮数 ${count(data.turnCount)} 轮，最近一轮统计 ${count(turn?.stepCount)} 步，本轮平均速度 ${speedText}，${status}。${speedNote}。查看统计详情`);
+    setAttribute(refs.buttons.tokens, "aria-label", `Token 用量，${scopeLabel} ${refs.total.textContent}，缓存命中 ${rate}，${status}。查看统计详情`);
+    setAttribute(refs.buttons.session, "aria-label", `会话，${session.cost ? `费用估算 ${session.cost}，` : ""}${session.contextLabel}。查看会话详情`);
+    setValue(bar.dataset, "running", running ? "true" : "false");
+    setValue(bar.dataset, "state", state);
+    // 入口仍可能因侧栏或输入框布局变化而移动；位置和数据都不变时才跳过浮层测量。
+    positionPanel(anchor, contentRevision === revision);
   };
 
   const isRecord = (value) =>
@@ -834,8 +865,10 @@
   };
 
   const schedulePoll = (delay) => {
-    if (disposed) return;
     clearTimeout(pollTimer);
+    pollTimer = 0;
+    // 页面隐藏时不排下一轮轮询；visibilitychange 恢复可见后立即拉取。
+    if (disposed || document.visibilityState === "hidden") return;
     pollTimer = setTimeout(poll, delay);
   };
 
@@ -1169,10 +1202,7 @@
 
   const poll = async () => {
     if (disposed) return;
-    if (document.visibilityState === "hidden") {
-      schedulePoll(POLL_IDLE_MS);
-      return;
-    }
+    if (document.visibilityState === "hidden") return;
     const { anchor, sessionId } = resolveSessionContext();
     if (sessionId !== currentSessionId) {
       resetSession(sessionId);
@@ -1244,16 +1274,33 @@
         const target = mutation.target;
         if (!(target instanceof HTMLElement)) continue;
         if (containsStats(target)) continue;
-        if (
-          target.hasAttribute?.(conversationAttribute)
-          || target.hasAttribute?.("hidden")
-          || target.hasAttribute?.("aria-hidden")
-        ) {
+        const visibilityChanged = (
+          mutation.attributeName === "hidden"
+          || mutation.attributeName === "aria-hidden"
+        );
+        if (visibilityChanged) {
+          if (target.closest?.(conversationTurnSelector)) continue;
+          const host = statsElement?.parentElement;
+          const touchesComposer = host
+            ? target === host || host.contains(target) || target.contains(host)
+            : target.matches?.(composerInputSelector)
+              || target.querySelector?.(composerInputSelector);
+          if (!touchesComposer) continue;
+        }
+        if (contextAttributes.includes(mutation.attributeName)) {
           scheduleRescan();
           return;
         }
         continue;
       }
+      const target = mutation.target;
+      if (containsStats(target)) continue;
+      // 已挂载的对话轮次是消息内容；会话和输入框标记都在轮次之外，
+      // 流式输出新增的节点无需逐个做选择器查询。
+      if (
+        target instanceof HTMLElement
+        && target.closest?.(conversationTurnSelector)
+      ) continue;
       const nodes = [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])];
       for (const node of nodes) {
         if (!(node instanceof HTMLElement)) continue;
@@ -1267,13 +1314,14 @@
         if (
           node.matches?.(sessionAttributeSelector)
           || node.querySelector?.(sessionAttributeSelector)
+          || node.matches?.(activeThreadSelector)
           || node.querySelector?.(activeThreadSelector)
         ) {
           scheduleRescan();
           return;
         }
         // 会话容器子树变化一律重扫，代价只是一次 debounce 查询。
-        if (node.querySelector?.("[contenteditable='true'], textarea")) {
+        if (node.matches?.(composerInputSelector) || node.querySelector?.(composerInputSelector)) {
           scheduleRescan();
           return;
         }
@@ -1286,12 +1334,7 @@
     render();
     const options = {
       attributes: true,
-      attributeFilter: [
-        conversationAttribute,
-        "data-app-action-sidebar-thread-active",
-        "hidden",
-        "aria-hidden",
-      ],
+      attributeFilter: contextAttributes,
       childList: true,
       subtree: true,
     };
@@ -1313,6 +1356,7 @@
       if (document.visibilityState === "hidden") {
         clearTimeout(cacheTimer);
         cacheTimer = 0;
+        schedulePoll(0);
         return;
       }
       renderCacheRemaining();
@@ -1332,8 +1376,8 @@
       void loadSettings();
       void loadAccountIdentity();
     });
-    listen(window, "resize", positionPanel);
-    listen(document, "scroll", positionPanel, true);
+    listen(window, "resize", () => positionPanel());
+    listen(document, "scroll", () => positionPanel(), true);
     listen(document, "pointerdown", (event) => {
       if (statsElement && !containsStats(event.target)) setExpanded(false);
     });
