@@ -89,13 +89,38 @@ impl fmt::Display for ModelListError {
 
 impl std::error::Error for ModelListError {}
 
-pub async fn fetch(source: &ModelSyncRequest, client: &Client) -> Result<Vec<String>> {
+pub(crate) enum ModelHttpClient<'a> {
+    Fixed(&'a Client),
+    System(&'a crate::system_proxy_client::SystemProxyClient),
+}
+
+impl<'a> From<&'a Client> for ModelHttpClient<'a> {
+    fn from(client: &'a Client) -> Self {
+        Self::Fixed(client)
+    }
+}
+
+impl<'a> From<&'a crate::system_proxy_client::SystemProxyClient> for ModelHttpClient<'a> {
+    fn from(client: &'a crate::system_proxy_client::SystemProxyClient) -> Self {
+        Self::System(client)
+    }
+}
+
+pub(crate) async fn fetch<'a>(
+    source: &ModelSyncRequest,
+    client: impl Into<ModelHttpClient<'a>>,
+) -> Result<Vec<String>> {
+    let client = client.into();
     let base = source.base_url.trim().trim_end_matches('/');
     if base.is_empty() {
         anyhow::bail!("API 地址不能为空");
     }
     let endpoints = model_endpoints(source.base_url.trim())?;
     for (index, endpoint) in endpoints.iter().enumerate() {
+        let client = match &client {
+            ModelHttpClient::Fixed(client) => (*client).clone(),
+            ModelHttpClient::System(client) => client.current(endpoint).await,
+        };
         let mut request = client.get(endpoint).header(ACCEPT, "application/json");
         let anthropic_messages = source.upstream_protocol == UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES;
         let has_custom_authorization = source.request_headers.iter().any(|(name, value)| {

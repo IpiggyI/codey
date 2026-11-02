@@ -15,21 +15,25 @@ use crate::codex_provider::{
 use crate::config::PromptOptimizationConfig;
 use crate::error_log;
 use crate::prompt_optimization;
+use crate::system_proxy_client::SystemProxyClient;
 
-static OPTIMIZER_CLIENT: OnceLock<Client> = OnceLock::new();
+static OPTIMIZER_CLIENT: OnceLock<SystemProxyClient> = OnceLock::new();
 const CODEX_INSTALLATION_ID_HEADER: &str = "x-codex-installation-id";
 const CODEX_INSTALLATION_ID_FILE: &str = "installation_id";
 const AUTHORIZATION_HEADER: &str = "authorization";
 const CHATGPT_ACCOUNT_ID_HEADER: &str = "chatgpt-account-id";
 
-fn optimizer_client() -> Result<&'static Client, String> {
-    if let Some(client) = OPTIMIZER_CLIENT.get() {
-        return Ok(client);
-    }
-    let client = prompt_optimization::optimizer_http_client()?;
+async fn optimizer_client(base_url: &str) -> Result<Client, String> {
+    let client = match OPTIMIZER_CLIENT.get() {
+        Some(client) => client,
+        None => {
+            let client = prompt_optimization::optimizer_http_client()?;
+            OPTIMIZER_CLIENT.get_or_init(|| client)
+        }
+    };
     // Concurrent callers may build a duplicate client; the first successful
     // one wins and the rest reuse it.
-    Ok(OPTIMIZER_CLIENT.get_or_init(|| client))
+    Ok(client.current(base_url).await)
 }
 
 async fn resolve_request_config(
@@ -207,8 +211,8 @@ pub async fn optimize_prompt_command(state: &Arc<AppState>, text: String) -> Res
         return Err("提示词优化尚未启用，请先在 Codey 控制台开启".to_string());
     }
     let request_config = resolve_request_config(&optimization, &config).await?;
-    let client = optimizer_client()?;
-    match prompt_optimization::optimize_prompt_resolved(client, &request_config, &text).await {
+    let client = optimizer_client(&request_config.base_url).await?;
+    match prompt_optimization::optimize_prompt_resolved(&client, &request_config, &text).await {
         Ok(optimized) => Ok(json!({"optimized": optimized})),
         Err(error) => {
             let (error, context) =
@@ -235,8 +239,8 @@ pub async fn fetch_prompt_optimization_models_command(
     optimization.merge_redacted_secrets(&config.prompt_optimization);
     optimization.validate()?;
     let request_config = resolve_request_config(&optimization, &config).await?;
-    let client = optimizer_client()?;
-    let models = prompt_optimization::fetch_models_resolved(client, &request_config).await;
+    let client = optimizer_client(&request_config.base_url).await?;
+    let models = prompt_optimization::fetch_models_resolved(&client, &request_config).await;
     match models {
         Ok(models) => Ok(json!({"models": models})),
         Err(error) => {
@@ -265,8 +269,8 @@ pub async fn test_prompt_optimization_command(
     optimization.merge_redacted_secrets(&config.prompt_optimization);
     optimization.validate()?;
     let request_config = resolve_request_config(&optimization, &config).await?;
-    let client = optimizer_client()?;
-    match prompt_optimization::test_configuration_resolved(client, &request_config).await {
+    let client = optimizer_client(&request_config.base_url).await?;
+    match prompt_optimization::test_configuration_resolved(&client, &request_config).await {
         Ok(result) => Ok(json!({"status": "ok", "result": result})),
         Err(error) => {
             let (error, context) =

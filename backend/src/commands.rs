@@ -117,7 +117,7 @@ pub struct AppState {
     #[cfg(test)]
     slow_apply_test: slow_apply_tests::TestHooks,
     provider_model_sync_lock: Mutex<()>,
-    pub http_client: reqwest::Client,
+    pub(crate) http_client: crate::system_proxy_client::SystemProxyClient,
     #[cfg(test)]
     pub webhook_http_client_override: Option<reqwest::Client>,
     #[cfg(test)]
@@ -128,7 +128,7 @@ pub struct AppState {
     notification_watcher_failure: AtomicBool,
     #[cfg(test)]
     notification_watcher_started: Notify,
-    wechat_claw_login_http_client: reqwest::Client,
+    wechat_claw_login_http_client: crate::system_proxy_client::SystemProxyClient,
     account_usage_cache: Mutex<account_usage::AccountUsageCache>,
     official_account_lock: Mutex<()>,
     official_account_logins: Mutex<crate::official_accounts::oauth::LoginSessions>,
@@ -251,13 +251,14 @@ impl AppState {
             #[cfg(test)]
             slow_apply_test: slow_apply_tests::TestHooks::default(),
             provider_model_sync_lock: Mutex::new(()),
-            http_client: reqwest::Client::builder()
-                .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
-                .connect_timeout(Duration::from_secs(5))
+            http_client: crate::system_proxy_client::SystemProxyClient::new_blocking(|| {
+                reqwest::Client::builder()
+                    .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
+                    .connect_timeout(Duration::from_secs(5))
                 // TLS: system trust store via rustls native roots. Model sync
                 // does not carry Codey-owned certificates.
-                .build()
-                .expect("shared Codey HTTP client should be constructible"),
+            })
+            .expect("shared Codey HTTP client should be constructible"),
             #[cfg(test)]
             webhook_http_client_override: None,
             #[cfg(test)]
