@@ -187,7 +187,7 @@
       ${styleScope} button:focus-visible { outline: 2px solid var(--cs-text); outline-offset: 2px; }
       ${styleScope} .codey-cs-icon { display: inline-block; width: 15px; height: 15px; flex: 0 0 15px; background: currentColor; mask: var(--cs-icon) center / contain no-repeat; }
       ${styleScope} .codey-cs-metric { white-space: nowrap; }
-      ${styleScope} .codey-cs-details { -webkit-app-region: no-drag !important; pointer-events: auto !important; position: fixed; inset: auto; margin: 0; z-index: 1000; width: min(360px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; padding: 17px 18px 15px; color: var(--cs-text); background: var(--cs-surface); border: 1px solid var(--cs-line); border-radius: 15px; box-shadow: 0 5px 20px #0000000d; user-select: text; animation: codey-cs-enter 150ms ease-out; }
+      ${styleScope} .codey-cs-details { -webkit-app-region: no-drag !important; pointer-events: auto !important; position: fixed; inset: auto; margin: 0; z-index: 1000; width: min(300px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; padding: 15px 16px 13px; color: var(--cs-text); background: var(--cs-surface); border: 1px solid var(--cs-line); border-radius: 15px; box-shadow: 0 5px 20px #0000000d; user-select: text; animation: codey-cs-enter 150ms ease-out; }
       @keyframes codey-cs-enter { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
       ${styleScope} .codey-cs-heading { display: flex; align-items: center; gap: 8px; padding-bottom: 11px; margin-bottom: 10px; border-bottom: 1px solid var(--cs-line); }
       ${styleScope} .codey-cs-heading strong { font-size: 13px; font-weight: 550; white-space: nowrap; }
@@ -216,7 +216,7 @@
     ]],
     ["session", "会话", [
       ["account", "账号"], ["startedAt", "开始时间"], ["lastReplyAt", "上次回复"], ["cacheRemaining", "缓存剩余时间"],
-      ["context", "上下文"], ["requestTokens", "最近一次 未缓存 / 输出 / 缓存读取"],
+      ["context", "上下文"], ["requestTokens", "最近一次 输入/输出/缓存"],
       ["compactionCount", "压缩次数"], ["cost", "会话费用估算"],
     ]],
   ];
@@ -660,13 +660,10 @@
     renderRequestRows(refs, request);
     const requestRate = usage?.cacheHitRatePercent;
     setText(refs.fields.requestCacheRate, requestRate === undefined ? "—" : `${decimal(requestRate, 1)}%`);
-    // 未提供的一项显示 —；缓存未知或大于输入时不推算未缓存输入。
+    // 未提供的一项显示 —；输入已含缓存读取。
     const lastInput = usage?.lastInputTokens;
-    const lastCached = usage?.lastCachedInputTokens;
-    const lastUncached = lastInput !== undefined && lastCached !== undefined && lastCached <= lastInput
-      ? lastInput - lastCached : undefined;
     setText(refs.fields.requestTokens, lastInput === undefined ? "—"
-      : [lastUncached, usage.lastOutputTokens, lastCached]
+      : [lastInput, usage.lastOutputTokens, usage.lastCachedInputTokens]
         .map((value) => value === undefined ? "—" : formatTokenCount(value)).join(" / "));
     renderCacheRemaining();
     const session = renderSessionCard(refs, usage, anchorEntry, request);

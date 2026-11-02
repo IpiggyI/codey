@@ -5,8 +5,16 @@ use serde_json::Value;
 use super::state::{MAX_ITEMS, digest};
 
 #[derive(Default)]
+struct Call {
+    start: Option<i64>,
+    end: Option<i64>,
+    // 工具事件自带执行起止；同一 id 的调用与输出记录只在没有事件时计时。
+    from_item: bool,
+}
+
+#[derive(Default)]
 pub(super) struct ToolTiming {
-    calls: HashMap<[u8; 32], (Option<i64>, Option<i64>)>,
+    calls: HashMap<[u8; 32], Call>,
     unreliable: bool,
 }
 
@@ -38,8 +46,15 @@ impl ToolTiming {
             self.unreliable = true;
             return;
         }
-        let pair = self.calls.entry(key).or_default();
-        let endpoint = if is_start { &mut pair.0 } else { &mut pair.1 };
+        let call = self.calls.entry(key).or_default();
+        if call.from_item {
+            return;
+        }
+        let endpoint = if is_start {
+            &mut call.start
+        } else {
+            &mut call.end
+        };
         if endpoint.is_some() && *endpoint != time {
             self.unreliable = true;
         }
@@ -75,12 +90,16 @@ impl ToolTiming {
             self.unreliable = true;
             return;
         }
-        let pair = self.calls.entry(key).or_default();
+        let call = self.calls.entry(key).or_default();
+        if !call.from_item {
+            call.from_item = true;
+            call.end = None;
+        }
         if payload["type"] == "item_started" {
-            pair.0 = time;
+            call.start = time;
         } else {
-            pair.0 = pair.0.or_else(|| payload["started_at_ms"].as_i64());
-            pair.1 = payload["completed_at_ms"].as_i64().or(time);
+            call.start = payload["started_at_ms"].as_i64().or(call.start);
+            call.end = payload["completed_at_ms"].as_i64().or(time);
         }
     }
 
@@ -92,8 +111,8 @@ impl ToolTiming {
         let mut intervals = self
             .calls
             .values()
-            .map(|(start, end)| {
-                let (start, end) = ((*start)?, (*end)?);
+            .map(|call| {
+                let (start, end) = (call.start?, call.end?);
                 (end >= start && start >= turn_start && turn_end.is_none_or(|limit| end <= limit))
                     .then_some((start, end))
             })

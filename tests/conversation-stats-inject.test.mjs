@@ -414,7 +414,7 @@ test("renders three buttons and the agreed cards for a full payload", async () =
     ]);
     assert.deepEqual(cardStructure(env, "session"), [
       "账号", "开始时间", "上次回复", "缓存剩余时间", "上下文",
-      "最近一次 未缓存 / 输出 / 缓存读取", "压缩次数",
+      "最近一次 输入/输出/缓存", "压缩次数",
     ]);
     for (const key of ["cacheRemaining", "requestTokens"]) {
       assert.equal(panel(env, "session").querySelector(`[data-row="${key}"]`)?.getAttribute("data-row"), key);
@@ -440,7 +440,7 @@ test("renders three buttons and the agreed cards for a full payload", async () =
     assert.equal(field(bar, "cachedInputTokens"), "120,000 tok");
     assert.equal(field(bar, "outputTokens"), "3,100 tok");
     assert.equal(field(bar, "requestCacheRate"), "99.6%");
-    assert.equal(field(bar, "requestTokens"), "4 / 400 / 996");
+    assert.equal(field(bar, "requestTokens"), "1k / 400 / 996");
     assert.equal(field(bar, "cacheRemaining"), "29:00");
     assert.equal(field(bar, "account"), "Relay");
     assert.equal(field(bar, "startedAt"), localDateTime(NOW - 3_600_000));
@@ -565,7 +565,7 @@ test("cost shows only when the usage carries a cost field", async () => {
     assert.match(summary(env, "session").getAttribute("aria-label"), /费用估算 ≈\$1\.28，上下文占用 10\.3% · 36\.4k/);
     assert.deepEqual(cardStructure(env, "session"), [
       "账号", "开始时间", "上次回复", "缓存剩余时间", "上下文",
-      "最近一次 未缓存 / 输出 / 缓存读取", "压缩次数", "会话费用估算",
+      "最近一次 输入/输出/缓存", "压缩次数", "会话费用估算",
     ]);
   } finally {
     env.dispose();
@@ -974,7 +974,7 @@ test("last request speed divides the record's own output, not a newer notificati
     env.notify(tokenUsageMessage("conversation-1", { last: { inputTokens: 71_000, cachedInputTokens: 70_100, outputTokens: 900 } }));
     await flushTimers(30);
     assert.equal(field(env.bar(), "requestSpeed"), "40 tok/s");
-    assert.equal(field(env.bar(), "requestTokens"), "900 / 900 / 70.1k");
+    assert.equal(field(env.bar(), "requestTokens"), "71k / 900 / 70.1k");
   } finally {
     env.dispose();
   }
@@ -1461,17 +1461,17 @@ test("explains turn coverage, turn speed and merged tool time", async () => {
   }
 });
 
-test("last request tokens show — for unknown items and never derive uncached input from an unknown cache", async () => {
+test("last request tokens show the full input and — for unknown items", async () => {
   const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
   try {
     await flushTimers(30);
     env.notify(tokenUsageMessage("conversation-1", { last: { inputTokens: 1_000, cachedInputTokens: null, outputTokens: null } }));
     await flushTimers(30);
-    assert.equal(field(env.bar(), "requestTokens"), "— / — / —");
+    assert.equal(field(env.bar(), "requestTokens"), "1k / — / —");
     assert.equal(field(env.bar(), "requestCacheRate"), "—");
     env.notify(tokenUsageMessage("conversation-1", { last: { inputTokens: 1_000, cachedInputTokens: 1_200, outputTokens: 0 } }));
     await flushTimers(30);
-    assert.equal(field(env.bar(), "requestTokens"), "— / 0 / 1.2k");
+    assert.equal(field(env.bar(), "requestTokens"), "1k / 0 / 1.2k");
   } finally {
     env.dispose();
   }

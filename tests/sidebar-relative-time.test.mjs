@@ -1327,6 +1327,40 @@ test("discovers the current app-initial asset and resolves AppServerManager from
   assert.deepEqual(appServerRequests, [["account/rateLimits/read"]]);
 });
 
+test("discovers the debugger-located app-initial asset and its RPC resolver", async () => {
+  const entryUrl = "app://-/assets/index-b2375c20c2a9.js";
+  const appInitialUrl = "app://-/assets/app-initial-4267e52fe5b0.js";
+  const manager = { refreshRecentConversations() {}, sendRequest() {} };
+  const AppServerManagerService = Symbol("AppServerManagerService");
+  const scope = {
+    get: () => ({ forHost: (hostId) => (hostId === "local" ? manager : null) }),
+    query: {},
+    set() {},
+    watch() {},
+    when() {},
+  };
+  const row = new FakeElement();
+  row.__reactFiber$codeyTest = { memoizedState: { current: scope }, return: null };
+  const resolver = function appServerManagerRpcForHost(runtimeScope, hostId) {
+    const service = runtimeScope.get(AppServerManagerService);
+    if (service != null) return service.forHost(hostId);
+    throw new Error(`AppServerManager RPC is unavailable for hostId: ${hostId}`);
+  };
+  // The page tags and the entry source do not reference app-initial.
+  const { window } = loadInjection({
+    assetModules: new Map([[appInitialUrl, { hpr: resolver }]]),
+    entryScriptUrls: [entryUrl],
+    fetchHandler: async (url) => ({ ok: url === entryUrl, text: async () => "" }),
+    rows: [row],
+  });
+  window.__codeyServiceTierModuleUrl = appInitialUrl;
+
+  const controller = await window.__codeyLoadCodexSessionController();
+
+  assert.equal(controller.kind, "manager");
+  assert.equal(controller.manager, manager);
+});
+
 test("accepts only a unique semantic AppServerManager resolver", () => {
   const { window } = loadInjection();
   const direct = function appServerManagerForHost(scope, hostId) {
