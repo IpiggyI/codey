@@ -65,6 +65,14 @@ const CDP_WATCHDOG_UNHEALTHY_CONFIRM_INTERVAL: Duration = Duration::from_secs(5)
 const CDP_WATCHDOG_ENDPOINT_LOSS_LIMIT: u8 = 3;
 const CDP_WATCHDOG_ENDPOINT_RETRY_INTERVAL: Duration = Duration::from_secs(120);
 
+/// A probe that only confirms disappearance deliberately keeps the code unknown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CodexExit {
+    pub(crate) platform: &'static str,
+    pub(crate) exit_code: Option<i64>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InjectionHealth {
     Healthy,
@@ -862,6 +870,115 @@ fn injection_failure_cleanup_operation() -> &'static str {
     }
 }
 
+/// 启动尚未完成时也要保留整个进程树的清理责任，直到 stop 确认成功。
+pub(crate) struct PendingRuntimeCleanup {
+    home: PathBuf,
+    app_dir: PathBuf,
+    process_id: Option<u32>,
+    #[cfg(unix)]
+    process_group_id: Option<u32>,
+    child: Arc<Mutex<Option<Child>>>,
+}
+
+#[derive(Debug)]
+struct PendingStartupFailure {
+    cleanup: Arc<PendingRuntimeCleanup>,
+    message: String,
+}
+
+impl std::fmt::Debug for PendingRuntimeCleanup {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PendingRuntimeCleanup")
+            .field("app_dir", &self.app_dir)
+            .field("process_id", &self.process_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Display for PendingStartupFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for PendingStartupFailure {}
+
+impl PendingRuntimeCleanup {
+    pub(crate) fn from_error(error: &anyhow::Error) -> Option<Arc<Self>> {
+        error
+            .downcast_ref::<PendingStartupFailure>()
+            .map(|failure| Arc::clone(&failure.cleanup))
+    }
+
+    pub(crate) async fn stop(&self) -> Result<()> {
+        let result = self
+            .stop_with_cleanup(
+                stop_codex_processes(
+                    &self.app_dir,
+                    self.process_id,
+                    #[cfg(windows)]
+                    None,
+                    #[cfg(unix)]
+                    self.process_group_id,
+                ),
+                restore_runtime_config(&self.home),
+            )
+            .await;
+        if let Err(error) = &result {
+            error_log::record_failure(
+                "cleanup_failed",
+                "retry_failed_runtime_start_cleanup",
+                format!("{error:#}"),
+                serde_json::json!({"appPath": self.app_dir, "processId": self.process_id}),
+            );
+        }
+        result
+    }
+
+    async fn stop_with_cleanup(
+        &self,
+        process_stop: impl std::future::Future<Output = Result<()>>,
+        config_restore: impl std::future::Future<Output = Result<()>>,
+    ) -> Result<()> {
+        process_stop.await.context("清理 Codex 遗留进程失败")?;
+        if let Some(child) = self.child.lock().await.take() {
+            reap_child_after_cleanup(child, "reap_child_after_failed_start_cleanup").await;
+        }
+        config_restore.await.context("恢复 Codex 配置失败")?;
+        Ok(())
+    }
+}
+
+async fn cleanup_initial_renderer_failure(
+    cleanup: Arc<PendingRuntimeCleanup>,
+    error: anyhow::Error,
+    process_stop: impl std::future::Future<Output = Result<()>>,
+    config_restore: impl std::future::Future<Output = Result<()>>,
+) -> anyhow::Error {
+    match cleanup
+        .stop_with_cleanup(process_stop, config_restore)
+        .await
+    {
+        Ok(()) => error,
+        Err(stop_error) => {
+            error_log::record_failure(
+                "cleanup_failed",
+                injection_failure_cleanup_operation(),
+                format!("{stop_error:#}"),
+                serde_json::json!({"appPath": cleanup.app_dir, "processId": cleanup.process_id}),
+            );
+            PendingStartupFailure {
+                cleanup,
+                message: format!(
+                    "{error:#}；Codex 注入失败后的清理尚未完成，请退出残留 Codex 后重试：{stop_error:#}"
+                ),
+            }
+            .into()
+        }
+    }
+}
+
 struct InitialRendererInputs<'a> {
     debug_port: u16,
     handler: codey_runtime_core::bridge::BridgeHandler,
@@ -901,7 +1018,7 @@ async fn inject_initial_renderer(inputs: InitialRendererInputs<'_>) -> Result<cd
         stage: Some("startup.renderer_injection".to_string()),
         recoverable: Some(false),
     };
-    let mut error = recovery::recoverable(failure.into_error());
+    let error = recovery::recoverable(failure.into_error());
     error_log::record_failure_with_metadata(
         "injection_failed",
         "inject_cdp_bridge",
@@ -915,46 +1032,28 @@ async fn inject_initial_renderer(inputs: InitialRendererInputs<'_>) -> Result<cd
         }),
     );
 
-    if let Err(stop_error) = stop_codex_processes(
-        app_dir,
-        spawned.process_id,
-        #[cfg(windows)]
-        None,
+    let cleanup = Arc::new(PendingRuntimeCleanup {
+        home: home.to_path_buf(),
+        app_dir: app_dir.to_path_buf(),
+        process_id: spawned.process_id,
         #[cfg(unix)]
-        spawned.process_group_id,
+        process_group_id: spawned.process_group_id,
+        child: Arc::clone(child),
+    });
+    Err(cleanup_initial_renderer_failure(
+        cleanup,
+        error,
+        stop_codex_processes(
+            app_dir,
+            spawned.process_id,
+            #[cfg(windows)]
+            None,
+            #[cfg(unix)]
+            spawned.process_group_id,
+        ),
+        restore_runtime_config(home),
     )
-    .await
-    {
-        let context = serde_json::json!({
-            "appPath": app_dir,
-            "processId": spawned.process_id,
-        });
-        #[cfg(unix)]
-        let context = {
-            let mut context = context;
-            if let Some(context) = context.as_object_mut() {
-                context.insert(
-                    "processGroupId".to_string(),
-                    serde_json::json!(spawned.process_group_id),
-                );
-            }
-            context
-        };
-        error_log::record_failure(
-            "cleanup_failed",
-            injection_failure_cleanup_operation(),
-            format!("{stop_error:#}"),
-            context,
-        );
-        eprintln!("Codex 注入失败后的进程清理失败：{stop_error:#}");
-        error = anyhow::anyhow!(
-            "{error:#}；Codex 注入失败后的进程清理失败，请退出残留 Codex 后重试：{stop_error:#}"
-        );
-    }
-    if let Some(child) = child.lock().await.take() {
-        reap_child_after_cleanup(child, "reap_child_after_injection_failure").await;
-    }
-    Err(restore_runtime_config_after_error(home, error).await)
+    .await)
 }
 
 struct InjectionWatchdog {
@@ -1173,7 +1272,7 @@ struct RuntimeWatchers {
     crashpad_guard_task: tokio::task::JoinHandle<()>,
     exit_watchdog_shutdown: oneshot::Sender<()>,
     exit_watchdog_task: tokio::task::JoinHandle<()>,
-    codex_exit: oneshot::Receiver<()>,
+    codex_exit: oneshot::Receiver<CodexExit>,
 }
 
 struct RuntimeWatcherInputs {
@@ -1770,7 +1869,7 @@ impl CodeyRuntime {
         trace_log_write_protection_active: &AtomicBool,
         trace_log_guard_state: Arc<trace_log_guard::TraceLogGuardState>,
         crashpad_pending_stats: CrashpadPendingStatsHandle,
-    ) -> Result<(Self, oneshot::Receiver<()>)> {
+    ) -> Result<(Self, oneshot::Receiver<CodexExit>)> {
         let mut stage_timings = StartupStageTimings::default();
         let home = codex_home();
         trace_log_write_protection_active.store(false, Ordering::Release);
@@ -2140,6 +2239,9 @@ async fn restore_runtime_config_after_error(
     home: &std::path::Path,
     error: anyhow::Error,
 ) -> anyhow::Error {
+    if PendingRuntimeCleanup::from_error(&error).is_some() {
+        return error;
+    }
     match restore_runtime_config(home).await {
         Ok(()) => error,
         Err(restore_error) => {

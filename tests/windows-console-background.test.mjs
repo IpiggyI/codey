@@ -186,7 +186,7 @@ test("Windows source contract: missing Codex paths recover before startup", asyn
   );
 
   const recoverBeforeLaunch = launch.match(
-    /ensure_windows_codex_app_path\(state\)\s*\.await\?/,
+    /ensure_windows_codex_app_path\(state\)\s*\.await\s*(?:\.map_err\(anyhow::Error::msg\)\s*)?\?/,
   );
   assert.ok(recoverBeforeLaunch, "启动前必须恢复 Codex 路径并传播失败");
   assert.ok(
