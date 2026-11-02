@@ -266,7 +266,8 @@ pub fn prepare_injection_scripts(
               try {
                 const urls = [...new Set([...document.querySelectorAll('script[src],link[rel="modulepreload"][href]')]
                   .map(element => element.src || element.href)
-                  .concat(performance.getEntriesByType("resource").map(entry => entry.name))
+                  .concat(performance.getEntriesByType("resource").map(entry => entry.name),
+                    window.__codeyServiceTierModuleUrl || [])
                   .filter(url => /\/app-initial[^/]*\.js(?:[?#]|$)/.test(url)))];
                 if (urls.length === 1) {
                   const module = await import(urls[0]);

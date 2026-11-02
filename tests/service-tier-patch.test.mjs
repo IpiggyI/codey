@@ -46,6 +46,19 @@ for (const [name, source, installed] of [
   });
 }
 
+test("refresh finds the module recorded by the installer when the page names none", async () => {
+  const source = "function codeyReadServiceTier(){};codeyReadServiceTier.__codeyServiceTier=1;export {codeyReadServiceTier}";
+  const window = {
+    __codeyServiceTierModuleUrl: `data:text/javascript,${encodeURIComponent(source)}#/app-initial-test.js`,
+    __codeyServiceTierStatus: {status: "ready"},
+    __codeyInjectionStatus: {"service-tier": {id: "service-tier", status: "effective"}},
+  };
+  const run = new Function("window", "document", "performance", `return ${snapshot}`);
+  await run(window, {querySelectorAll: () => []}, {getEntriesByType: () => []});
+  assert.equal(window.__codeyInjectionStatus["service-tier"].status, "effective");
+  assert.equal(window.__codeyInjectionStatus["service-tier"].error, undefined);
+});
+
 test("refresh rejects a saved ready state without the installed reader", async () => {
   const window = {
     __codeyServiceTierStatus: {status: "ready"},

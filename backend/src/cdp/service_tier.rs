@@ -1,12 +1,16 @@
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 
 const PREPARE: &str = include_str!("service_tier.js");
 const OBJECT_GROUP: &str = "codey-service-tier";
+/// Time for the module to load and the React scope to mount after the page
+/// starts; matches the previous in-page polling budget.
+const DISCOVERY_BUDGET: Duration = Duration::from_secs(10);
 pub(super) const INSTALL_PATH: &str = "/internal/codey/service-tier/install";
 pub(super) const LOADER: &str = r#"(() => {
   const bridge = window.__codexSessionDeleteBridge;
@@ -31,6 +35,10 @@ struct Session {
     socket: WebSocketStream<MaybeTlsStream<TcpStream>>,
     id: u64,
     breakpoint: Option<String>,
+    /// `app-initial` script URLs reported by `Debugger.scriptParsed`. Current
+    /// Codex loads the module through a dynamic import chain that leaves no
+    /// page tag, and its resource timings may be cleared.
+    modules: BTreeSet<String>,
 }
 
 struct InstallAttempt<'a> {
@@ -71,6 +79,7 @@ impl Session {
                 continue;
             };
             let response: Value = serde_json::from_str(&text)?;
+            self.observe(&response);
             if response["id"].as_u64() != Some(id) {
                 continue;
             }
@@ -96,6 +105,43 @@ impl Session {
         Err(anyhow!("服务档位调试连接已关闭"))
     }
 
+    fn observe(&mut self, message: &Value) {
+        if message["method"] != "Debugger.scriptParsed" {
+            return;
+        }
+        if let Some(url) = message.pointer("/params/url").and_then(Value::as_str)
+            && is_service_tier_module(url)
+        {
+            self.modules.insert(url.to_string());
+        }
+    }
+
+    /// Enabling the debugger replays every parsed script, so a loaded module
+    /// is found at once; during startup this waits for the module to parse.
+    async fn discover_module(&mut self, deadline: Instant) -> Result<String> {
+        while self.modules.is_empty() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let Ok(message) = tokio::time::timeout(remaining, self.socket.next()).await else {
+                break;
+            };
+            let message = message.context("服务档位调试连接已关闭")??;
+            if let Message::Text(text) = message {
+                self.observe(&serde_json::from_str(&text)?);
+            }
+        }
+        match self.modules.len() {
+            1 => Ok(self.modules.first().cloned().unwrap_or_default()),
+            0 => bail!(
+                "未找到服务档位模块：调试器 {} 秒内没有报告已加载的 app-initial 脚本",
+                DISCOVERY_BUDGET.as_secs()
+            ),
+            count => bail!(
+                "找到 {count} 个服务档位模块：{}",
+                self.modules.iter().cloned().collect::<Vec<_>>().join("、")
+            ),
+        }
+    }
+
     async fn call(&mut self, object: &str, declaration: &str, by_value: bool) -> Result<Value> {
         self.command(
             "Runtime.callFunctionOn",
@@ -108,11 +154,26 @@ impl Session {
     }
 
     async fn apply(&mut self, attempt: &mut InstallAttempt<'_>) -> Result<()> {
+        let deadline = Instant::now() + DISCOVERY_BUDGET;
         self.command("Debugger.enable", json!({})).await?;
-        let prepared = self.command("Runtime.evaluate", json!({
-            "expression": format!("(async()=>{{{PREPARE};return codeyPrepareServiceTier()}})()"),
-            "awaitPromise": true, "objectGroup": OBJECT_GROUP,
-        })).await?;
+        let module = self.discover_module(deadline).await?;
+        let attempts = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis()
+            .div_ceil(100)
+            .max(1);
+        let prepared = self
+            .command(
+                "Runtime.evaluate",
+                json!({
+                    "expression": format!(
+                        "(async()=>{{{PREPARE};return codeyPrepareServiceTier({},{attempts})}})()",
+                        serde_json::to_string(&module)?
+                    ),
+                    "awaitPromise": true, "objectGroup": OBJECT_GROUP,
+                }),
+            )
+            .await?;
         let holder = object_id(&prepared)?;
         if self
             .call(&holder, "function(){return this.ready===true}", true)
@@ -181,6 +242,13 @@ impl Session {
     }
 }
 
+/// Same rule as the page check: the file name starts with `app-initial`.
+fn is_service_tier_module(url: &str) -> bool {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.starts_with("app-initial") && name.ends_with(".js")
+}
+
 /// Keeps only the first line of the error so page stacks stay out of the log.
 fn failure_detail(value: Option<&Value>) -> String {
     let line = value
@@ -221,6 +289,7 @@ async fn install_attempt(websocket_url: &str, attempt: &mut InstallAttempt<'_>) 
         socket,
         id: 0,
         breakpoint: None,
+        modules: BTreeSet::new(),
     };
     let result = tokio::time::timeout(Duration::from_secs(15), session.apply(attempt))
         .await

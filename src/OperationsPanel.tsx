@@ -1,6 +1,7 @@
 import { memo, useMemo, useState } from "react";
 import {
   IconActivity as Activity,
+  IconAlertTriangle,
   IconCode as Code,
   IconCloudCheck,
   IconCpu,
@@ -25,6 +26,7 @@ import { Badge, Button } from "./components/ui";
 import { flushCardClass } from "./uiClasses";
 import {
   buildEnabledOptimizationFeatures,
+  describeInjectionIssues,
   summarizeInjectionScripts,
   type EnabledOptimizationFeature as PresentationOptimizationFeature,
 } from "./runtimeStatusPresentation";
@@ -160,6 +162,14 @@ function OperationsPanelComponent({
     () => summarizeInjectionScripts(injectionScripts),
     [injectionScripts],
   );
+  const injectionIssues = useMemo(
+    () => describeInjectionIssues(injectionScripts),
+    [injectionScripts],
+  );
+  const failedInternalNames = injectionIssues
+    .filter((issue) => issue.internal)
+    .map((issue) => `“${issue.name}”`)
+    .join("、");
   const injectionStatusPending = injectionScripts.length === 0;
   const injectionError =
     internalInjectionError || failedInjectionScriptCount > 0;
@@ -288,9 +298,9 @@ function OperationsPanelComponent({
     {
       title: "系统优化",
       description: internalInjectionError
-        ? "基础组件运行异常，已确认生效的功能仍列于下方。"
+        ? `基础组件${failedInternalNames}运行异常。原因和处理方法见下方“异常项”。`
         : failedInjectionScriptCount > 0
-        ? `${failedInjectionScriptCount} 个脚本注入异常，下方仅列出已确认生效的功能。`
+        ? `${failedInjectionScriptCount} 个脚本注入异常。原因和处理方法见下方“异常项”。`
         : internalInjectionPending
           ? "基础组件状态确认中，已生效功能会自动更新。"
           : unverifiedInjectionScriptCount > 0
@@ -523,6 +533,56 @@ function OperationsPanelComponent({
                         );
                       })}
                     </div>
+                  )}
+
+                  {expandedStatusCard.showInjectionScripts &&
+                    injectionIssues.length > 0 && (
+                    <section
+                      className="injection-status-section"
+                      aria-labelledby="injection-issue-title"
+                    >
+                      <div className="injection-status-header">
+                        <h4 id="injection-issue-title">异常项</h4>
+                      </div>
+                      <div className="injection-status-list" role="list">
+                        {injectionIssues.map((issue) => (
+                          <div
+                            key={issue.id}
+                            className="injection-status-row"
+                            role="listitem"
+                          >
+                            <span
+                              className="injection-script-icon tone-destructive"
+                              aria-hidden="true"
+                            >
+                              <IconAlertTriangle size={15} />
+                            </span>
+                            <div className="injection-script-copy">
+                              <div className="injection-script-title">
+                                <span>{issue.name}</span>
+                                <span className="injection-script-source">
+                                  {issue.sourceLabel}
+                                </span>
+                              </div>
+                              <span className="injection-script-detail">
+                                原因：{issue.cause}
+                              </span>
+                              <span className="injection-script-detail">
+                                影响：{issue.impact}
+                              </span>
+                              <span className="injection-script-detail">
+                                处理：{issue.remedy}
+                              </span>
+                              {issue.error && (
+                                <code className="injection-script-error">
+                                  错误详情：{issue.error}
+                                </code>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </section>
                   )}
 
                   {expandedStatusCard.showInjectionScripts && (

@@ -1,23 +1,19 @@
-async function codeyPrepareServiceTier() {
-  let urls = [], scope;
-  for (let attempt = 0; attempt < 100; attempt++) {
-    urls = [...new Set([...document.querySelectorAll('script[src],link[rel="modulepreload"][href]')]
-    .map((element) => element.src || element.href)
-    .concat(performance.getEntriesByType("resource").map((entry) => entry.name))
-    .filter((url) => /\/app-initial[^/]*\.js(?:[?#]|$)/.test(url)))];
-    scope = codeyServiceTierScope();
-    if (urls.length && scope) break;
-    await new Promise((resolve) => setTimeout(resolve, 100));
-  }
-  if (urls.length !== 1) throw new Error("无法唯一定位服务档位模块");
-  const module = await import(urls[0]);
+async function codeyPrepareServiceTier(url, attempts) {
+  // The status refresh imports the same module to check the installed reader.
+  window.__codeyServiceTierModuleUrl = url;
+  const module = await import(url);
   const readers = [...new Set(Object.values(module))].filter((value) =>
     typeof value === "function" && (value.__codeyServiceTier === 1
       || value.toString().includes("Failed to read service tier for request")));
   if (readers.length !== 1) throw new Error("无法唯一定位服务档位读取函数");
   const reader = readers[0];
   if (reader.__codeyServiceTier === 1) return { ready: true };
-  const response = await fetch(urls[0]);
+  let scope = codeyServiceTierScope();
+  for (let attempt = 1; !scope && attempt < attempts; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    scope = codeyServiceTierScope();
+  }
+  const response = await fetch(url);
   if (!response.ok) throw new Error("读取服务档位模块失败");
   const expression = codeyServiceTierExpression(await response.text());
   if (!scope) throw new Error("无法定位服务档位读取作用域");

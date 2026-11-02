@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 async fn evaluate(probe: &mut Session, expression: &str) -> Value {
@@ -69,6 +70,7 @@ async fn browser_install() {
         socket,
         id: 0,
         breakpoint: None,
+        modules: BTreeSet::new(),
     };
     assert_eq!(
         evaluate(
@@ -110,6 +112,11 @@ async fn browser_install() {
         .await
         .unwrap();
     wait_status(&mut probe, "failed").await;
+    // Discovery found the late module; the failure comes from the source shape.
+    assert_eq!(
+        evaluate(&mut probe, "window.__codeyServiceTierStatus.error").await,
+        "服务档位页面检查失败：Runtime.evaluate：Error: 服务档位选择形态不兼容"
+    );
     assert_eq!(
         evaluate(&mut probe, "nativeTier.read.__codeyServiceTier===1").await,
         false
@@ -194,6 +201,35 @@ async fn pending_calls_survive_reload(url: &str, probe: &mut Session) {
     }
 }
 
+const MODULE_URL: &str = "app://-/assets/app-initial-4267e52fe5b0.js";
+
+fn script_parsed(url: &str) -> Message {
+    Message::Text(
+        json!({"method":"Debugger.scriptParsed","params":{"scriptId":url,"url":url}})
+            .to_string()
+            .into(),
+    )
+}
+
+#[test]
+fn module_filter_matches_the_page_check() {
+    for url in [
+        MODULE_URL,
+        "app://-/assets/app-initial.js?build=1",
+        "http://127.0.0.1:1/app-initial-fixture.js?incompatible#x",
+    ] {
+        assert!(is_service_tier_module(url), "{url}");
+    }
+    for url in [
+        "app://-/assets/app-main-9ad4d958c2f0.js",
+        "app://-/assets/app-initial-4267e52fe5b0.css",
+        "app://-/app-initial/index.js",
+        "",
+    ] {
+        assert!(!is_service_tier_module(url), "{url}");
+    }
+}
+
 #[tokio::test]
 async fn binding_failure_releases_breakpoint_and_objects() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -225,6 +261,19 @@ async fn binding_failure_releases_breakpoint_and_objects() {
             let message = ws.next().await.unwrap().unwrap();
             let command: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
             assert_eq!(command["method"], method);
+            if method == "Debugger.enable" {
+                // Replayed scripts may arrive before or after the response.
+                ws.send(script_parsed("app://-/assets/index-b2375c20c2a9.js"))
+                    .await
+                    .unwrap();
+            }
+            if method == "Runtime.evaluate" {
+                let expression = command["params"]["expression"].as_str().unwrap();
+                assert!(
+                    expression.contains(&format!("codeyPrepareServiceTier(\"{MODULE_URL}\",")),
+                    "{expression}"
+                );
+            }
             if method == "Debugger.setBreakpointOnFunctionCall" {
                 assert_eq!(command["params"]["condition"], "(true,false)");
             }
@@ -238,6 +287,9 @@ async fn binding_failure_releases_breakpoint_and_objects() {
             ))
             .await
             .unwrap();
+            if method == "Debugger.enable" {
+                ws.send(script_parsed(MODULE_URL)).await.unwrap();
+            }
         }
         assert!(matches!(ws.next().await, Some(Ok(Message::Close(_)))));
     });
@@ -251,7 +303,7 @@ async fn binding_failure_releases_breakpoint_and_objects() {
     server.await.unwrap();
 }
 
-async fn failed_install(responses: Vec<(&'static str, Value)>) -> String {
+async fn failed_install(responses: Vec<(&'static str, Value)>, modules: &'static [&str]) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
@@ -261,6 +313,11 @@ async fn failed_install(responses: Vec<(&'static str, Value)>) -> String {
             let message = ws.next().await.unwrap().unwrap();
             let command: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
             assert_eq!(command["method"], method);
+            if method == "Debugger.enable" && response.get("error").is_none() {
+                for module in modules {
+                    ws.send(script_parsed(module)).await.unwrap();
+                }
+            }
             response["id"] = command["id"].clone();
             ws.send(Message::Text(response.to_string().into()))
                 .await
@@ -291,7 +348,7 @@ async fn failures_keep_the_first_line_of_page_and_protocol_errors() {
         ),
     ];
     page.extend(cleanup());
-    let error = failed_install(page).await;
+    let error = failed_install(page, &[MODULE_URL]).await;
     assert!(
         error.ends_with("页面检查失败：Runtime.evaluate：Error: 服务档位权限形态不兼容"),
         "{error}"
@@ -301,10 +358,39 @@ async fn failures_keep_the_first_line_of_page_and_protocol_errors() {
         json!({"error":{"code":-32601,"message":"'Debugger.enable' wasn't found"}}),
     )];
     protocol.extend(cleanup());
-    let error = failed_install(protocol).await;
+    let error = failed_install(protocol, &[]).await;
     assert!(
         error.ends_with("调试命令失败：Debugger.enable：'Debugger.enable' wasn't found"),
         "{error}"
+    );
+}
+
+#[tokio::test]
+async fn module_discovery_reports_how_many_scripts_matched() {
+    let responses = || {
+        vec![
+            ("Debugger.enable", json!({"result":{}})),
+            ("Runtime.releaseObjectGroup", json!({"result":{}})),
+            ("Debugger.disable", json!({"result":{}})),
+        ]
+    };
+    let error = failed_install(responses(), &["app://-/assets/app-main-9ad4d958c2f0.js"]).await;
+    assert!(
+        error.starts_with("未找到服务档位模块：调试器 10 秒内没有报告已加载的 app-initial 脚本"),
+        "{error}"
+    );
+    let error = failed_install(
+        responses(),
+        &[
+            MODULE_URL,
+            "app://-/assets/app-initial-0000000000aa.js",
+            MODULE_URL,
+        ],
+    )
+    .await;
+    assert_eq!(
+        error,
+        format!("找到 2 个服务档位模块：app://-/assets/app-initial-0000000000aa.js、{MODULE_URL}")
     );
 }
 
