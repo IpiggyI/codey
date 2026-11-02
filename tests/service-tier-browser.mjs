@@ -14,18 +14,26 @@ const keys = Object.keys(serviceTierEnvironment());
 const moduleSource = `import {Xat as Xi,Uat as Tr,Wat as We,Yat as Lee} from "./shared-fixture.js";
   const {${keys.join(",")}}=window.nativeTierEnvironment;
   ${native}\nexport {x$s as read,_wo as select};`;
+// Current Codex loads app-initial as a static import of a dynamically imported
+// chunk: no tag names it and resource timings are cleared. The delayed import
+// makes a loader that runs at document start see the module parse later.
 const server = createServer((request, response) => {
   const url = new URL(request.url, "http://localhost");
-  const moduleUrl = `/app-initial-fixture.js${url.pathname === "/incompatible" ? "?incompatible" : ""}`;
+  const variant = url.pathname === "/incompatible" ? "?incompatible" : url.search;
   response.setHeader("Content-Type", url.pathname.endsWith(".js") ? "text/javascript" : "text/html");
   response.end(url.pathname === "/shared-fixture.js" ? `${shared}\nexport {Xat,Uat,Wat,Yat};`
+    : url.pathname === "/index-fixture.js"
+    ? `await new Promise((resolve) => setTimeout(resolve, 800));
+      window.nativeTier=(await import('./app-main-fixture.js${variant}')).tier;
+      document.querySelector('#root').__reactFiber$fixture={memoizedState:window.nativeTierEnvironment.scope};
+      performance.clearResourceTimings();window.ready=true;`
+    : url.pathname === "/app-main-fixture.js"
+    ? `export * as tier from './app-initial-fixture.js${variant}';`
     : url.pathname.endsWith(".js")
     ? (url.search ? moduleSource.replaceAll("serviceTierForRequest:", "unknown:") : moduleSource)
-    : `<link rel="modulepreload" href="${moduleUrl}"><body><div id="root"></div><script>
+    : `<body><div id="root"></div><script>
       window.nativeTierEnvironment=(${serviceTierEnvironment.toString()})();
-      document.querySelector('#root').__reactFiber$fixture={memoizedState:window.nativeTierEnvironment.scope};
-      </script><script type="module">window.nativeTier=await import('${moduleUrl}');
-      performance.clearResourceTimings();window.ready=true;</script>`);
+      </script><script type="module" src="/index-fixture.js${variant}"></script>`);
 });
 let userData, context;
 try {

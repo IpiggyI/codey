@@ -31,6 +31,105 @@ type OptimizationRuntimeStatus = Pick<
   | "crashpadDiskProtectionActive"
 >;
 
+export type InjectionIssue = {
+  id: string;
+  name: string;
+  internal: boolean;
+  sourceLabel: string;
+  cause: string;
+  impact: string;
+  remedy: string;
+  error?: string;
+};
+
+const ERROR_LOG_HINT =
+  "Codey 错误日志位于用户目录下的 .codex-session-delete/codey-errors.log。该日志跨日清空，请在出错当天提交。";
+
+// Impact of an internal component failure; feature names describe themselves.
+const INTERNAL_COMPONENT_IMPACTS: Record<string, string> = {
+  "bridge-helpers": "Codey 无法与 Codex 页面通信，依赖页面桥接的功能都不可用。",
+  "model-whitelist": "Codex 模型列表不会按 Codey 的模型设置过滤和补充。",
+  "service-tier":
+    "Codey 的服务档位兼容未安装。在非 ChatGPT 账号渠道下，模型选择器中选择的 Fast 档位可能不会带入请求。",
+  "settings-overlay-loader": "Codex 设置中的 Codey 配置面板可能无法打开。",
+  "renderer-controls": "侧栏会话工具、默认中文界面等页面增强可能不可用。",
+  "plugin-marketplace-compatibility": "插件市场可能无法显示和管理 Codey 内置市场的插件。",
+};
+
+const ISSUE_RULES: Array<{
+  pattern: RegExp;
+  cause: string;
+  remedy: string;
+}> = [
+  {
+    pattern: /未找到服务档位模块|\d+ 个服务档位模块|无法唯一定位服务档位模块/,
+    cause: "Codey 没有在 Codex 页面中找到唯一的服务档位模块。页面可能尚未加载该模块，也可能当前 Codex 版本改了模块文件名。",
+    remedy:
+      "请重启 Codex 一次。重启后仍然出现时，说明当前 Codex 版本与这个 Codey 版本不兼容：请把 Codey 更新到最新版本；已是最新版本时，请把错误详情和 Codey 错误日志提交给维护者。",
+  },
+  {
+    pattern: /形态不兼容|源码已变化|无法唯一定位|补偿匹配次数异常/,
+    cause: "当前 Codex 版本的页面代码与这个 Codey 版本的适配规则不一致。",
+    remedy:
+      "重启 Codex 通常无法恢复。请把 Codey 更新到最新版本；已是最新版本时，请把错误详情和 Codey 错误日志提交给维护者。",
+  },
+  {
+    pattern: /超时|deadline has elapsed|作用域/,
+    cause: "Codex 页面在等待时限内没有准备就绪，组件未能完成安装。",
+    remedy:
+      "重启 Codex 通常可以恢复。多次重启后仍然出现时，请把错误详情和 Codey 错误日志提交给维护者。",
+  },
+  {
+    pattern: /调试连接|调试命令失败|调试入口/,
+    cause: "Codey 与 Codex 页面的调试连接中断。",
+    remedy: "重启 Codex 通常可以恢复。",
+  },
+];
+
+export function describeInjectionIssues(
+  injectionScripts: readonly InjectionScriptStatus[],
+): InjectionIssue[] {
+  return injectionScripts
+    .filter((script) => script.status === "failed" || script.status === "unknown")
+    .map((script) => {
+      const internal = script.visibility === "internal";
+      const userScript = script.source === "user";
+      const error = script.error?.trim() || undefined;
+      const impact = internal
+        ? INTERNAL_COMPONENT_IMPACTS[script.id] ??
+          "该基础组件支撑的功能可能不可用。"
+        : `“${script.name}”未生效。`;
+      const rule = error
+        ? ISSUE_RULES.find(({ pattern }) => pattern.test(error))
+        : undefined;
+      const { cause, remedy } = userScript
+        ? {
+            cause: "用户脚本运行出错，或没有通过生效检查。",
+            remedy: "请检查脚本是否适用于当前 Codex 版本，或者停用该脚本。",
+          }
+        : script.status === "unknown"
+          ? {
+              cause: "Codey 没有读到该组件的运行结果。",
+              remedy: "请等待状态自动刷新。持续出现时，请重启 Codex。",
+            }
+          : rule ?? {
+              cause: "组件运行时出错。",
+              remedy:
+                "请重启 Codex。重启后仍然出现时，请把错误详情和 Codey 错误日志提交给维护者。",
+            };
+      return {
+        id: script.id,
+        name: script.name,
+        internal,
+        sourceLabel: internal ? "基础组件" : userScript ? "用户脚本" : "内置功能",
+        cause,
+        impact,
+        remedy: remedy.includes("错误日志") ? `${remedy}${ERROR_LOG_HINT}` : remedy,
+        error,
+      };
+    });
+}
+
 type InjectionStatusSummary = {
   failedInjectionScriptCount: number;
   internalInjectionError: boolean;

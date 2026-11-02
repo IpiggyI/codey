@@ -190,6 +190,81 @@ test("injection status summary separates internal failures from feature verifica
   });
 });
 
+test("injection issues explain each failure with cause, impact and remedy", async () => {
+  const { describeInjectionIssues } = await loadTypeScriptModule(
+    new URL("src/runtimeStatusPresentation.ts", root),
+  );
+  const tier = (error) => ({
+    id: "service-tier",
+    name: "服务档位兼容",
+    source: "builtin",
+    visibility: "internal",
+    status: "failed",
+    error,
+  });
+  const issues = describeInjectionIssues([
+    tier("服务档位页面检查失败：Runtime.evaluate：Error: 未找到服务档位模块：调试器 10 秒内没有报告 app-initial 脚本"),
+    tier("服务档位页面检查失败：Runtime.evaluate：Error: 找到 2 个服务档位模块：a, b"),
+    tier("服务档位页面检查失败：Runtime.evaluate：Error: 服务档位权限形态不兼容"),
+    tier("服务档位补偿超时: deadline has elapsed"),
+    tier("服务档位页面检查失败：Runtime.evaluate：Error: 无法定位服务档位读取作用域"),
+    tier("服务档位调试连接已关闭"),
+    tier("服务档位模块绑定未生效"),
+    {
+      id: "renderer-controls",
+      name: "渲染器控制",
+      source: "builtin",
+      visibility: "internal",
+      status: "unknown",
+    },
+    {
+      id: "user-script-1",
+      name: "我的脚本",
+      source: "user",
+      visibility: "feature",
+      status: "failed",
+      error: "ReferenceError: x is not defined",
+    },
+    {
+      id: "feature-ready",
+      name: "功能可用",
+      source: "builtin",
+      visibility: "feature",
+      status: "effective",
+    },
+  ]);
+
+  assert.equal(issues.length, 9);
+  const [missing, multiple, shape, timeout, scope, connection, binding, unknown, user] =
+    issues;
+  assert.match(missing.cause, /没有在 Codex 页面中找到唯一的服务档位模块/);
+  assert.match(missing.remedy, /^请重启 Codex 一次。.*更新到最新版本/);
+  assert.equal(multiple.cause, missing.cause);
+  assert.match(shape.cause, /页面代码与这个 Codey 版本的适配规则不一致/);
+  assert.match(shape.remedy, /^重启 Codex 通常无法恢复/);
+  for (const issue of [timeout, scope]) {
+    assert.match(issue.cause, /等待时限内没有准备就绪/);
+    assert.match(issue.remedy, /^重启 Codex 通常可以恢复/);
+  }
+  assert.match(connection.cause, /调试连接中断/);
+  assert.match(binding.cause, /^组件运行时出错/);
+  assert.match(binding.remedy, /\.codex-session-delete\/codey-errors\.log。该日志跨日清空/);
+  for (const issue of [missing, shape, timeout, connection, binding]) {
+    assert.equal(issue.internal, true);
+    assert.equal(issue.sourceLabel, "基础组件");
+    assert.match(issue.impact, /服务档位兼容未安装/);
+  }
+  assert.equal(shape.error, "服务档位页面检查失败：Runtime.evaluate：Error: 服务档位权限形态不兼容");
+  assert.match(unknown.cause, /没有读到该组件的运行结果/);
+  assert.match(unknown.impact, /侧栏会话工具/);
+  assert.equal(unknown.error, undefined);
+  assert.equal(user.internal, false);
+  assert.equal(user.sourceLabel, "用户脚本");
+  assert.equal(user.impact, "“我的脚本”未生效。");
+  assert.match(user.remedy, /停用该脚本/);
+  assert.equal(user.error, "ReferenceError: x is not defined");
+});
+
 test("status poll scheduler coalesces due work and stops after bounded failures", async () => {
   const {
     createStatusPollScheduler,
