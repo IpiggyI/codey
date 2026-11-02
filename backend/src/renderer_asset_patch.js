@@ -394,6 +394,19 @@
       );
     }
     if (
+      disablePet
+      && source.includes("`electron-avatar-overlay-restore-ready`")
+      && source.includes("shouldPrewarmAvatarOverlay:")
+    ) {
+      // 跳过隐藏头像浮窗的自动预热；语音仍按需创建共享浮窗。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(`electron-avatar-overlay-restore-ready`,\{[^{}]*?\bshouldPrewarmAvatarOverlay:)[^,{}]+/g,
+        (_match, prefix) => `${prefix}!1`,
+        "avatar overlay prewarm",
+      );
+    }
+    if (
       source.includes("72216192") &&
       source.includes("enable_i18n") &&
       source.includes("locale_source") &&
@@ -785,7 +798,7 @@
           ) ||
           (
             disablePet &&
-            /\/(?:(?:appearance-settings|pet-settings|pets-settings)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
+            /\/(?:(?:appearance-settings|pet-settings|pets-settings|app-runtime)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
               url.pathname,
             )
           )

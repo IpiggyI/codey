@@ -43,8 +43,13 @@ const PATCHABLE_ASSET_PREFIXES: [&str; 11] = [
     "read-service-tier-for-request",
     "subagent-activity-chip-group",
 ];
-/// 仅在关闭宠物时改写的设置页脚本。
-const PET_ASSET_PREFIXES: [&str; 3] = ["appearance-settings", "pet-settings", "pets-settings"];
+/// 仅在关闭宠物时改写的脚本：设置页预览资源，以及决定是否预热隐藏浮窗的运行时。
+const PET_ASSET_PREFIXES: [&str; 4] = [
+    "appearance-settings",
+    "pet-settings",
+    "pets-settings",
+    "app-runtime",
+];
 /// 等 Codex 调试端点就绪的总预算；超时后由下一次注入重新拉起服务。
 const CONNECT_BUDGET: Duration = Duration::from_secs(60);
 /// 端点未就绪时的重连间隔：主窗口通常在端点出现后数百毫秒内导航，间隔要短。
@@ -1444,6 +1449,8 @@ process.stdout.write(JSON.stringify(result));
         assert!(with_pet.contains(&"app://*/assets/app-initial*".to_string()));
         assert!(with_pet.contains(&"app://*/assets/pets-settings*".to_string()));
         assert!(!without_pet.iter().any(|url| url.contains("pets-settings")));
+        assert!(with_pet.contains(&"app://*/assets/app-runtime*".to_string()));
+        assert!(!without_pet.iter().any(|url| url.contains("app-runtime")));
         assert_eq!(with_pet.len(), without_pet.len() + PET_ASSET_PREFIXES.len());
     }
 

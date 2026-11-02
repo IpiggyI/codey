@@ -4,6 +4,25 @@ import test from "node:test";
 
 import { loadStartupPatchTemplate } from "./helpers/startup-patch.mjs";
 
+test("slim pet stops the hidden avatar overlay prewarm without blocking on-demand voice", async () => {
+  const runtimeSource = [
+    "function eJ(){let O=Y(`2635985366`),t=tJ(),s=Co(),Be=Cf();",
+    "(0,nJ.useEffect)(()=>{s||jr.dispatchMessage(`electron-avatar-overlay-restore-ready`,{onDemandEnabled:O,shouldPrewarmAvatarOverlay:t&&Be})},[O,t,s,Be]);}",
+  ].join("");
+  const url = "app://-/assets/app-runtime-aa2c0a69096f.js";
+  for (const disablePet of [true, false]) {
+    delete globalThis.__codeyRendererPatchInstalled;
+    (0, eval)(await loadStartupPatchTemplate({ disablePet }));
+    const patched = globalThis.__codeyRendererPatchEntry(url, runtimeSource);
+    if (!disablePet) {
+      assert.equal(patched, null, "app-runtime is only intercepted for the slim pet");
+      continue;
+    }
+    assert.match(patched, /\{onDemandEnabled:O,shouldPrewarmAvatarOverlay:!1\}/);
+    assert.equal(globalThis.__codeyRendererPatchEntry(url, patched), null, "the patch is idempotent");
+  }
+});
+
 // 原样摘自 Codex 26.1007.71326 的 app-initial-1ab6fbe93c4f.js。
 // 该缓存版本与用户日志版本不同，只验证已取得的真实函数形态。
 const nativeCatalogModelFilterFixture = "function ERi({additionalAvailableModels:e,apiKeyDaybreakSupported:t,authMethod:n,availableModels:r,hasConfiguredModelCatalog:i,isCustomModelProvider:a,model:o,useHiddenModels:s}){let c=o.availableAccessPrograms?.cyber;return n===`apikey`&&!t&&c!=null&&c.length>0&&!c.includes(`standard`)?!1:e?.has(o.model)===!0||o.model!==`codex-auto-review`&&(i&&!o.hidden||(s&&!a&&n!==`amazonBedrock`?r.has(o.model)||n===`apikey`&&t&&!o.hidden&&c?.some(e=>e!==`standard`)===!0:!o.hidden))}";
