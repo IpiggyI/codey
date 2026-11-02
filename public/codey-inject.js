@@ -1470,6 +1470,7 @@
   };
 
   const nativeThreadStatusClassPattern = /\b(?:animate-|spinner)\b/i;
+  const nativeThreadStatusTextPattern = /(running|processing|working|loading|streaming|generating|in progress|运行中|进行中|处理中|加载中|生成中)/i;
 
   const nativeElementLooksLikeThreadStatus = (element) => {
     if (!(element instanceof HTMLElement)) return false;
@@ -1483,7 +1484,7 @@
     ].join(" ");
     // A completed marker can remain on the active row until another thread is
     // selected. Only active work should temporarily displace the timestamp.
-    if (/(running|processing|working|loading|streaming|generating|in progress|运行中|进行中|处理中|加载中|生成中)/i.test(statusText)) return true;
+    if (nativeThreadStatusTextPattern.test(statusText)) return true;
     const className = String(element.className || "");
     if (nativeThreadStatusClassPattern.test(className)) return true;
     return [...(element.children || [])].some((child) => nativeElementLooksLikeThreadStatus(child));
@@ -5277,13 +5278,18 @@
           const relevantThreadClassChange = threadRow
             && mutation.attributeName === "class"
             && threadClassMutationMayAffectStatus(target, threadRow, mutation.oldValue);
+          // The running-state check reads aria-label inside the row, and an
+          // aria-label change may accompany a native status change, so any
+          // aria-label change inside a thread row rescans that row.
+          const relevantThreadStatusLabelChange = threadRow
+            && mutation.attributeName === "aria-label";
           const pureUiAttributeChange = [
             "aria-label",
             "aria-hidden",
             "disabled",
             "hidden",
           ].includes(mutation.attributeName);
-          if (relevantThreadClassChange || (
+          if (relevantThreadClassChange || relevantThreadStatusLabelChange || (
             mutation.attributeName !== "class"
             && !pureUiAttributeChange
           )) {
@@ -5365,6 +5371,7 @@
     attributes: true,
     attributeOldValue: true,
     attributeFilter: [
+      "aria-label",
       "aria-disabled",
       "aria-busy",
       "aria-expanded",

@@ -256,7 +256,7 @@ test("mutation dispatcher unions subscriptions and tears down only when empty", 
   assert.deepEqual(calls, []);
 
   calls.length = 0;
-  const firstUnknown = { type: "characterData" };
+  const firstUnknown = { type: "futureRecordType" };
   const secondUnknown = { type: "records" };
   activeObserver.callback([srcFlip, firstUnknown, classFlip, secondUnknown, added]);
   assert.deepEqual(calls, [
@@ -550,7 +550,7 @@ test("mutation dispatcher keeps unknown records fail-open and delivery objects i
       .replace("const mutationDispatchBudgetMs = 8;", "const mutationDispatchBudgetMs = Infinity;"),
   });
   const calls = [];
-  const unknown = { type: "characterData" };
+  const unknown = { type: "futureRecordType" };
   const anonymous = {};
   const dispatcher = runtime.window.__codeyMutationDispatcher;
   dispatcher.subscribe((records) => calls.push(["first", ...records]), {
@@ -1054,4 +1054,77 @@ test("fetch interceptors share one stable wrapper and unregister independently",
   unregisterInner();
   assert.equal(runtime.window.fetch, nativeFetch);
   assert.equal(shared.fetchSnapshot().installed, false);
+});
+
+test("a stalled mutation queue stays bounded without losing records and clears when empty", () => {
+  const runtime = createMutationDispatchRuntime();
+  const dispatcher = runtime.window.__codeyMutationDispatcher;
+  const firstRecords = [];
+  const secondRecords = [];
+  const unsubscribeFirst = dispatcher.subscribe((records) => {
+    firstRecords.push(...records);
+    runtime.advance(9);
+  }, { childList: true });
+  const unsubscribeSecond = dispatcher.subscribe(
+    (records) => secondRecords.push(...records),
+    { childList: true },
+  );
+  const burst = Array.from({ length: 1000 }, (_, id) => ({ id, type: "childList" }));
+  for (const record of burst) runtime.observe([record]);
+
+  assert.ok(dispatcher.snapshot().pendingBatchCount <= 64);
+  assert.equal(runtime.animationFrames.size, 1);
+  runtime.runAllAnimationFrames();
+  assert.deepEqual(firstRecords.map(({ id }) => id), burst.map(({ id }) => id));
+  assert.deepEqual(secondRecords.map(({ id }) => id), burst.map(({ id }) => id));
+  assert.equal(dispatcher.snapshot().pendingBatchCount, 0);
+
+  for (const record of burst) runtime.observe([record]);
+  assert.ok(dispatcher.snapshot().pendingBatchCount > 0);
+  assert.equal(runtime.animationFrames.size, 1);
+  unsubscribeFirst();
+  unsubscribeSecond();
+  assert.equal(dispatcher.snapshot().pendingBatchCount, 0);
+  assert.equal(runtime.animationFrames.size, 0);
+});
+
+test("a synchronous batch is never coalesced into a full queue", () => {
+  const runtime = createMutationDispatchRuntime();
+  const dispatcher = runtime.window.__codeyMutationDispatcher;
+  const criticalBatches = [];
+  dispatcher.subscribe(() => runtime.advance(9), { childList: true });
+  dispatcher.subscribe((records) => {
+    if (records.some((record) => record.critical)) criticalBatches.push(records);
+  }, {
+    childList: true,
+    requiresSynchronousDelivery: (records) => records.every((record) => record.critical),
+  });
+  for (let id = 0; id < 200; id += 1) runtime.observe([{ id, type: "childList" }]);
+  assert.equal(dispatcher.snapshot().pendingBatchCount, 64);
+
+  const critical = { critical: true, id: "critical", type: "childList" };
+  runtime.observe([critical]);
+
+  assert.deepEqual(criticalBatches, [[critical]]);
+});
+
+test("characterData subscriptions reach the native observer and only their subscribers", () => {
+  const runtime = createMutationDispatchRuntime();
+  const dispatcher = runtime.window.__codeyMutationDispatcher;
+  const childCalls = [];
+  const textCalls = [];
+  dispatcher.subscribe((records) => childCalls.push(...records), { childList: true });
+  assert.equal(runtime.observers.at(-1).options.characterData, undefined);
+  dispatcher.subscribe((records) => textCalls.push(...records), {
+    characterData: true,
+    childList: true,
+  });
+  assert.equal(runtime.observers.at(-1).options.characterData, true);
+
+  const edit = { type: "characterData" };
+  const added = { type: "childList" };
+  runtime.observe([edit, added]);
+  runtime.runAllAnimationFrames();
+  assert.deepEqual(childCalls, [added]);
+  assert.deepEqual(textCalls, [edit, added]);
 });

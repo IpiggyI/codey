@@ -704,3 +704,48 @@ test("config changes publish the shield's current injection status", async () =>
     { id: "security-warning-shield", status: "effective" },
   );
 });
+
+test("a resumed scan still reaches a warning after an earlier sibling is removed", async () => {
+  const runtime = createRuntime(
+    { hideFullAccessWarning: true },
+    { deferTimers: true },
+  );
+  for (let index = 0; index < 155; index += 1) {
+    runtime.body.appendChild(new FakeElement("div", "streamed output"));
+  }
+  const first = appendUltraConfirmation(runtime.body);
+  const second = appendUltraConfirmation(runtime.body);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  runtime.flushTimers();
+
+  assert.equal(first.fullAccessButton.clicks, 1);
+  assert.equal(second.fullAccessButton.clicks, 1);
+  assert.equal(second.warning.isConnected, false);
+  assert.equal(runtime.window.__codeySecurityWarningShield.snapshot().pendingRoots, 0);
+});
+
+test("pending root overflow widens the scan instead of dropping the oldest root", async () => {
+  const runtime = createRuntime(
+    { hideFullAccessWarning: true },
+    { deferTimers: true },
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  runtime.flushTimers();
+  const warnings = [];
+  for (let index = 0; index < 33; index += 1) {
+    const holder = runtime.body.appendChild(new FakeElement("div"));
+    warnings.push(appendEnglishWarning(holder));
+  }
+  runtime.mutationCallback([{
+    addedNodes: warnings.map(({ warning }) => warning),
+    target: runtime.body,
+    type: "childList",
+  }]);
+
+  runtime.flushTimers();
+
+  assert.equal(warnings[0].button.clicks, 1);
+  assert.equal(warnings.at(-1).button.clicks, 1);
+  assert.ok(warnings.every(({ button }) => button.clicks === 1));
+});

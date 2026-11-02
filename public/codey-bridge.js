@@ -196,8 +196,16 @@
   let mutationObserver = null;
   let nextMutationSubscriberId = 1;
   const pendingMutationBatches = [];
+  // Overflow policy: once this many batches wait, records coalesce into the
+  // newest unstarted batch, so every subscriber still receives every record
+  // in order while the batch count stays bounded.
+  // shortcut: coalescing bounds batches, not records; ceiling: a subscriber
+  // that never yields the frame lets the coalesced record array keep growing;
+  // replace when: a profile shows a coalesced batch holding over 10,000 records.
+  const maxPendingMutationBatches = 64;
   let mutationDispatchRunning = false;
   let mutationDispatchScheduled = false;
+  let cancelScheduledMutationDispatch = null;
   const mutationDispatchBudgetMs = 8;
   const maxMutationSubscribersPerFrame = 16;
 
@@ -236,6 +244,7 @@
   const mutationBelongsTo = (mutation, subscriber) => {
     const type = mutation?.type;
     if (type === "childList") return subscriber.childList;
+    if (type === "characterData") return subscriber.characterData;
     if (type === "attributes") {
       if (!subscriber.attributes) return false;
       if (subscriber.attributeFilter === null) return true;
@@ -265,12 +274,16 @@
       || mutationDispatchRunning
       || !pendingMutationBatches.length
     ) return;
+    const runScheduledDispatch = () => {
+      if (!mutationDispatchScheduled) return;
+      mutationDispatchScheduled = false;
+      cancelScheduledMutationDispatch = null;
+      dispatchMutationsFrame();
+    };
     if (typeof window.requestAnimationFrame === "function") {
       mutationDispatchScheduled = true;
-      window.requestAnimationFrame(() => {
-        mutationDispatchScheduled = false;
-        dispatchMutationsFrame();
-      });
+      const frameId = window.requestAnimationFrame(runScheduledDispatch);
+      cancelScheduledMutationDispatch = () => window.cancelAnimationFrame?.(frameId);
       return;
     }
     const scheduleTimer =
@@ -281,10 +294,17 @@
           : null;
     if (!scheduleTimer) return;
     mutationDispatchScheduled = true;
-    scheduleTimer(() => {
-      mutationDispatchScheduled = false;
-      dispatchMutationsFrame();
-    }, 0);
+    const timerId = scheduleTimer(runScheduledDispatch, 0);
+    cancelScheduledMutationDispatch = () => {
+      if (typeof window.clearTimeout === "function") window.clearTimeout(timerId);
+      else globalThis.clearTimeout?.(timerId);
+    };
+  };
+  const clearPendingMutationDispatch = () => {
+    pendingMutationBatches.length = 0;
+    cancelScheduledMutationDispatch?.();
+    cancelScheduledMutationDispatch = null;
+    mutationDispatchScheduled = false;
   };
 
   const batchSynchronousIndex = (batch) => {
@@ -359,6 +379,32 @@
     }
     if (pendingMutationBatches.length) scheduleMutationDispatch();
   };
+  const sameSubscribers = (left, right) => (
+    left.length === right.length
+    && left.every((subscriber, index) => subscriber === right[index])
+  );
+  // A batch that any subscriber needs synchronously keeps its own records and
+  // queue slot, so it may push the queue past the bound; only ordinary batches
+  // coalesce.
+  const coalesceIntoTail = (batch) => {
+    if (pendingMutationBatches.length < maxPendingMutationBatches) return false;
+    if (batch.synchronousIndex >= 0) return false;
+    const tail = pendingMutationBatches[pendingMutationBatches.length - 1];
+    if (
+      tail.index !== 0
+      || tail.synchronousIndex !== -1
+      || !sameSubscribers(tail.subscribers, batch.subscribers)
+    ) {
+      return false;
+    }
+    if (!Array.isArray(tail.mutations) || !Array.isArray(batch.mutations)) return false;
+    if (!tail.coalesced) {
+      tail.mutations = [...tail.mutations];
+      tail.coalesced = true;
+    }
+    for (const mutation of batch.mutations) tail.mutations.push(mutation);
+    return true;
+  };
   const dispatchMutationsImpl = (mutations) => {
     const batch = {
       index: 0,
@@ -366,8 +412,8 @@
       subscribers: [...mutationSubscribers.values()],
       synchronousIndex: undefined,
     };
-    pendingMutationBatches.push(batch);
     const hasSynchronousDelivery = batchSynchronousIndex(batch) >= 0;
+    if (!coalesceIntoTail(batch)) pendingMutationBatches.push(batch);
     if (
       !mutationDispatchRunning
       && (!mutationDispatchScheduled || hasSynchronousDelivery)
@@ -389,11 +435,13 @@
 
     let attributes = false;
     let attributeOldValue = false;
+    let characterData = false;
     let childList = false;
     let observeAllAttributes = false;
     const attributeFilter = new Set();
     for (const subscriber of mutationSubscribers.values()) {
       childList ||= subscriber.childList;
+      characterData ||= subscriber.characterData;
       attributes ||= subscriber.attributes;
       attributeOldValue ||= subscriber.attributeOldValue;
       if (!subscriber.attributes) continue;
@@ -403,9 +451,10 @@
         subscriber.attributeFilter.forEach((attribute) => attributeFilter.add(attribute));
       }
     }
-    if (!attributes && !childList) return;
+    if (!attributes && !childList && !characterData) return;
 
     const options = { attributes, childList, subtree: true };
+    if (characterData) options.characterData = true;
     if (attributes && attributeOldValue) options.attributeOldValue = true;
     if (attributes && !observeAllAttributes && attributeFilter.size) {
       options.attributeFilter = [...attributeFilter];
@@ -423,6 +472,7 @@
       callback,
       attributes,
       attributeOldValue: attributes && options.attributeOldValue === true,
+      characterData: options.characterData === true,
       childList: options.childList === true,
       attributeFilter: attributes && Array.isArray(options.attributeFilter)
         ? new Set(options.attributeFilter.map(String))
@@ -440,6 +490,7 @@
       if (!subscribed) return;
       subscribed = false;
       mutationSubscribers.delete(id);
+      if (!mutationSubscribers.size) clearPendingMutationDispatch();
       syncMutationObserver();
     };
   };
@@ -748,6 +799,7 @@
     createShieldLifecycle,
     snapshot: () => Object.freeze({
       observerInstalled: mutationObserver !== null,
+      pendingBatchCount: pendingMutationBatches.length,
       subscriberCount: mutationSubscribers.size,
     }),
     subscribe: subscribeMutations,

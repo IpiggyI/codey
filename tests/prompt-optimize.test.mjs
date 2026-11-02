@@ -9,6 +9,10 @@ const source = readFileSync(
   new URL("../public/prompt-optimize.js", import.meta.url),
   "utf8",
 );
+const bridgeSource = readFileSync(
+  new URL("../public/codey-bridge.js", import.meta.url),
+  "utf8",
+);
 
 class FakeElement extends FakeElementCore {
   constructor(tagName = "div", { visible = true, rect = null } = {}) {
@@ -452,6 +456,7 @@ const createEnvironment = (options = {}) => {
     sandbox.window.__codexSessionDeleteBridge = bridge;
   }
   const context = vm.createContext(sandbox);
+  if (options.withBridge) vm.runInContext(bridgeSource, context);
   vm.runInContext(source, context);
   const installedObserver = latestMutationObserver;
 
@@ -513,6 +518,7 @@ const createEnvironment = (options = {}) => {
       observeCalls: installedObserver?.observeCalls ?? 0,
       observesCharacterData: installedObserver?.options?.characterData === true,
     }),
+    getLatestObserver: () => latestMutationObserver,
     snapshot: () => context.window.__codeyPromptOptimize.snapshot(),
     setConfig: (next) => {
       config = next;
@@ -792,6 +798,28 @@ test("enables the optimize button only while the composer has content", async ()
   env.textarea.value = "";
   env.emitInput();
   assert.equal(button.disabled, true);
+});
+
+test("a text edit without an input event updates the button through the shared bridge", async () => {
+  const env = createEnvironment({
+    enabled: true,
+    apiKeyConfigured: true,
+    withBridge: true,
+  });
+  await flush();
+  const button = env.getElementById("codey-prompt-optimize-button");
+  assert.equal(button.disabled, true);
+  const observer = env.getLatestObserver();
+  assert.equal(observer.observed, true);
+  assert.equal(observer.options.characterData, true);
+
+  const text = new FakeElement("span");
+  env.textarea.appendChild(text);
+  env.textarea.value = "直接改写的文字";
+  observer.callback([{ type: "characterData", target: text }]);
+  await flush();
+
+  assert.equal(button.disabled, false);
 });
 
 test("does not mount the button when the feature is disabled", async () => {

@@ -156,7 +156,17 @@
     element,
     nextChildIndex: 0,
     visited: false,
+    visitedChildren: new WeakSet(),
   });
+  // `children` is live: removing an already scanned sibling between batches
+  // shifts the unscanned ones down. Step back over unscanned children so the
+  // resumed walk never skips one.
+  const nextChildIndexOf = (frame) => {
+    const children = frame.element.children;
+    let index = Math.min(frame.nextChildIndex, children.length);
+    while (index > 0 && !frame.visitedChildren.has(children[index - 1])) index -= 1;
+    return index;
+  };
   const createContinuation = (root, continuation = null) => {
     const segments = continuation?.segments
       ? [...continuation.segments]
@@ -198,9 +208,11 @@
         if (element.matches?.("button, [role=button]")) controls.push(element);
       }
       if (remaining?.value <= 0) break;
-      if (frame.nextChildIndex < element.children.length) {
-        const child = element.children[frame.nextChildIndex];
-        frame.nextChildIndex += 1;
+      const childIndex = nextChildIndexOf(frame);
+      if (childIndex < element.children.length) {
+        const child = element.children[childIndex];
+        frame.nextChildIndex = childIndex + 1;
+        frame.visitedChildren.add(child);
         childExpansions += 1;
         segment.push(createFrame(child));
       } else {
@@ -341,12 +353,26 @@
       pendingRoots.delete(pendingRoot);
       pendingRootStates.delete(pendingRoot);
     }
-    // Keep the bounded set local. Under a long streaming burst, retain the
-    // newest roots so a warning mounted later still gets scanned.
+    // Keep the bounded set local without dropping work: on overflow, widen
+    // the newest root to its common ancestor with the oldest one and scan that
+    // ancestor in full; it covers every pending root it contains.
     if (pendingRoots.size >= pendingRootLimit) {
-      const evicted = pendingRoots.values().next().value;
-      pendingRoots.delete(evicted);
-      pendingRootStates.delete(evicted);
+      const oldest = pendingRoots.values().next().value;
+      pendingRoots.delete(oldest);
+      pendingRootStates.delete(oldest);
+      if (oldest.isConnected !== false) {
+        let ancestor = root;
+        while (ancestor && !ancestor.contains?.(oldest)) ancestor = ancestor.parentElement;
+        const widened = ancestor || document.documentElement;
+        for (const pendingRoot of [...pendingRoots]) {
+          if (!widened.contains?.(pendingRoot)) continue;
+          pendingRoots.delete(pendingRoot);
+          pendingRootStates.delete(pendingRoot);
+        }
+        pendingRootStates.delete(widened);
+        pendingRoots.add(widened);
+        return;
+      }
     }
     pendingRoots.add(root);
     mergedContinuation = mergeContinuations(mergedContinuation, continuation);

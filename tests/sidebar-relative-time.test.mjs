@@ -39,6 +39,7 @@ function loadInjection({
   const pendingTimeouts = new Map();
   let nextTimeoutId = 1;
   let mutationCallback = null;
+  let observedOptions = null;
   let nowMs = Number.isFinite(now) ? now : Date.now();
   class FakeDate extends Date {
     constructor(...args) {
@@ -114,7 +115,9 @@ function loadInjection({
       constructor(callback) {
         mutationCallback = callback;
       }
-      observe() {}
+      observe(_target, options) {
+        observedOptions = options;
+      }
     },
     performance: { getEntriesByType: () => [] },
     URL,
@@ -129,6 +132,9 @@ function loadInjection({
     },
     document,
     notifyMutations: (mutations) => mutationCallback?.(mutations),
+    get observedOptions() {
+      return observedOptions;
+    },
     reinstall: () => vm.runInNewContext(source, context),
     runDueTimeouts() {
       const due = [...pendingTimeouts].filter(([, timer]) => timer.dueAt <= nowMs);
@@ -891,6 +897,86 @@ test("ignores cosmetic descendant class churn but tracks status class changes", 
     fiberReads > readsAfterStatusAppeared,
     "removing a status class must refresh the row through MutationRecord.oldValue",
   );
+  assert.equal(entry.item.getAttribute("data-codey-thread-running"), "true");
+});
+
+test("pins a thread whose status element turns running through aria-label only", async () => {
+  const entry = sidebarThreadEntry({ sessionId: "thread-aria-status" });
+  const status = new FakeElement();
+  status.setAttribute("aria-label", "Idle");
+  entry.nativeStatusRail.appendChild(status);
+  let fiberReads = 0;
+  Object.defineProperty(entry.row, "__reactFiber$test", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      fiberReads += 1;
+      return { memoizedProps: {}, return: null };
+    },
+  });
+  const { notifyMutations, observedOptions } = loadInjection({
+    rows: [entry.row],
+    signalDispatcher: async () => ({
+      data: [{ id: "thread-aria-status", updatedAt: 60 }],
+      nextCursor: null,
+    }),
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(observedOptions.attributeFilter.includes("aria-label"));
+  assert.notEqual(entry.item.getAttribute("data-codey-thread-running"), "true");
+
+  fiberReads = 0;
+  const outsideRow = new FakeElement();
+  outsideRow.setAttribute("aria-label", "Settings");
+  notifyMutations([{
+    type: "attributes",
+    target: outsideRow,
+    attributeName: "aria-label",
+    oldValue: null,
+  }]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fiberReads, 0, "an aria-label change outside thread rows should not rescan a row");
+
+  status.setAttribute("aria-label", "Running");
+  notifyMutations([{
+    type: "attributes",
+    target: status,
+    attributeName: "aria-label",
+    oldValue: "Idle",
+  }]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(entry.item.getAttribute("data-codey-thread-running"), "true");
+});
+
+test("rescans a thread row on any aria-label change inside it", async () => {
+  const entry = sidebarThreadEntry({ sessionId: "thread-aria-any" });
+  const status = new FakeElement();
+  status.setAttribute("aria-label", "Idle");
+  entry.nativeStatusRail.appendChild(status);
+  const statusFiber = {
+    memoizedProps: { statusState: { type: undefined, unread: false } },
+    return: null,
+  };
+  entry.row.__reactFiber$test = { memoizedProps: {}, return: statusFiber };
+  const { notifyMutations } = loadInjection({
+    rows: [entry.row],
+    signalDispatcher: async () => ({
+      data: [{ id: "thread-aria-any", updatedAt: 60 }],
+      nextCursor: null,
+    }),
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.notEqual(entry.item.getAttribute("data-codey-thread-running"), "true");
+
+  statusFiber.memoizedProps.statusState = { type: "running", unread: false };
+  status.setAttribute("aria-label", "Busy");
+  notifyMutations([{
+    type: "attributes",
+    target: status,
+    attributeName: "aria-label",
+    oldValue: "Idle",
+  }]);
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(entry.item.getAttribute("data-codey-thread-running"), "true");
 });
 

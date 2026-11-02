@@ -718,7 +718,12 @@ test("the mutation observer watches identity attributes and excludes display-onl
   ]) {
     assert.equal(filter.includes(attribute), true, `missing ${attribute}`);
   }
-  for (const attribute of ["style", "aria-label", "aria-hidden", "disabled", "hidden"]) {
+  assert.equal(
+    filter.includes("aria-label"),
+    true,
+    "missing aria-label: the sidebar running-state check reads a status element's aria-label",
+  );
+  for (const attribute of ["style", "aria-hidden", "disabled", "hidden"]) {
     assert.equal(filter.includes(attribute), false, `unexpected ${attribute}`);
   }
   runtime.window.__codeySessionToolsInstall.dispose();
