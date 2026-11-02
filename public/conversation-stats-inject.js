@@ -187,7 +187,7 @@
       ${styleScope} button:focus-visible { outline: 2px solid var(--cs-text); outline-offset: 2px; }
       ${styleScope} .codey-cs-icon { display: inline-block; width: 15px; height: 15px; flex: 0 0 15px; background: currentColor; mask: var(--cs-icon) center / contain no-repeat; }
       ${styleScope} .codey-cs-metric { white-space: nowrap; }
-      ${styleScope} .codey-cs-details { -webkit-app-region: no-drag !important; pointer-events: auto !important; position: fixed; inset: auto; margin: 0; z-index: 1000; width: min(300px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; padding: 15px 16px 13px; color: var(--cs-text); background: var(--cs-surface); border: 1px solid var(--cs-line); border-radius: 15px; box-shadow: 0 5px 20px #0000000d; user-select: text; animation: codey-cs-enter 150ms ease-out; }
+      ${styleScope} .codey-cs-details { -webkit-app-region: no-drag !important; pointer-events: auto !important; position: fixed; inset: auto; margin: 0; z-index: 1000; width: min(250px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; padding: 15px 16px 13px; color: var(--cs-text); background: var(--cs-surface); border: 1px solid var(--cs-line); border-radius: 15px; box-shadow: 0 5px 20px #0000000d; user-select: text; animation: codey-cs-enter 150ms ease-out; }
       @keyframes codey-cs-enter { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
       ${styleScope} .codey-cs-heading { display: flex; align-items: center; gap: 8px; padding-bottom: 11px; margin-bottom: 10px; border-bottom: 1px solid var(--cs-line); }
       ${styleScope} .codey-cs-heading strong { font-size: 13px; font-weight: 550; white-space: nowrap; }
@@ -196,8 +196,6 @@
       ${styleScope} .codey-cs-detail-row { display: flex; justify-content: space-between; gap: 14px; padding: 4px 0; }
       ${styleScope} dt { color: var(--cs-muted); }
       ${styleScope} dd { margin: 0; text-align: right; color: color-mix(in srgb, var(--cs-text) 72%, transparent); overflow-wrap: anywhere; }
-      ${styleScope} .codey-cs-note { margin: 10px 0 0; color: var(--cs-muted); font-size: 10px; line-height: 1.6; }
-      ${styleScope} .codey-cs-note:empty { display: none; }
       @media (max-width: 480px) { ${styleScope} .codey-cs-groups { gap: 2px; } ${styleScope} .codey-cs-summary { padding-inline: 6px; font-size: 11px; } ${styleScope} .codey-cs-details { padding: 14px; } }
       @media (prefers-reduced-motion: reduce) { ${styleScope} .codey-cs-details { animation: none; } }
     `;
@@ -212,11 +210,12 @@
     ]],
     ["tokens", "Token 用量", [
       ["sessionCacheRate", "会话缓存命中"], ["requestCacheRate", "最近一次缓存命中"],
-      ["uncachedInputTokens", "未缓存输入"], ["cachedInputTokens", "缓存读取"], ["outputTokens", "输出"],
+      ["uncachedInputTokens", "新增输入"], ["cachedInputTokens", "缓存读取"], ["outputTokens", "输出"],
+      ["requestTokens", "最近一次 新增输入/输出"],
     ]],
     ["session", "会话", [
-      ["account", "账号"], ["startedAt", "开始时间"], ["lastReplyAt", "上次回复"], ["cacheRemaining", "缓存剩余时间"],
-      ["context", "上下文"], ["requestTokens", "最近一次 输入/输出/缓存"],
+      ["account", "账号"], ["startedAt", "开始时间"], ["lastReplyAt", "上次回复"], ["context", "上下文"],
+      ["cacheRemaining", "缓存剩余时间"],
       ["compactionCount", "压缩次数"], ["cost", "会话费用估算"],
     ]],
   ];
@@ -243,7 +242,7 @@
       const overlay = make("div", "", "", document.body || document.documentElement);
       overlay.id = overlayId;
       overlay.style.display = "contents";
-      const refs = { overlay, buttons: {}, panels: {}, fields: {}, rows: {}, notes: {}, active: null, pinned: false, closeTimer: 0 };
+      const refs = { overlay, buttons: {}, panels: {}, fields: {}, rows: {}, active: null, pinned: false, closeTimer: 0 };
       // Tabler Icons v3.45.0 (MIT), matching the existing application icon family.
       const paths = {
         activity: ["M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0", "M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0", "M13.41 10.59l2.59 -2.59", "M7 12a5 5 0 0 1 5 -5"],
@@ -306,7 +305,6 @@
           refs.fields[key] = make("dd", "", "—", row);
           refs.fields[key].setAttribute("data-field", key);
         }
-        refs.notes[kind] = make("p", `codey-cs-note codey-cs-${kind}-note`, "", panel);
         refs.buttons[kind] = button;
         refs.panels[kind] = panel;
         const preview = () => { clearTimeout(refs.closeTimer); if (!refs.pinned && !refs.restoringFocus) setExpanded(true, false, kind); };
@@ -643,36 +641,39 @@
       ok: fetchInFlight ? "更新统计中" : running ? "本轮进行中" : turn?.status === "aborted" ? "本轮已中止" : (sessionUsage ? "历史统计" : "运行期统计"),
     }[state];
     bar.dataset.status = status;
-    const tokenValue = value => finite(value) ? `${count(value)} tok` : "—";
+    // Token 数用紧凑写法（如 1.8M），悬停显示精确值。
+    const setTokens = (element, value) => {
+      setText(element, finite(value) ? formatTokenCount(value) : "—");
+      element.title = finite(value) ? `${count(value)} tok` : "";
+    };
     const uncached = finite(data.inputTokens) && finite(data.cachedInputTokens) && data.cachedInputTokens <= data.inputTokens ? data.inputTokens - data.cachedInputTokens : null;
     setText(refs.fields.modelDuration, duration(turn?.modelDurationMs));
     setText(refs.fields.toolDuration, duration(turn?.toolDurationMs));
     setText(refs.fields.turnSpeed, speedText);
     setText(refs.fields.turnReasoning, finite(turn?.turnReasoningOutputTokens) ? formatTokenCount(turn.turnReasoningOutputTokens) : "—");
-    setText(refs.fields.totalTokens, tokenValue(data.totalTokens));
+    setTokens(refs.fields.totalTokens, data.totalTokens);
     setText(refs.fields.sessionCacheRate, rate);
-    setText(refs.fields.uncachedInputTokens, tokenValue(uncached));
-    setText(refs.fields.cachedInputTokens, tokenValue(data.cachedInputTokens));
-    setText(refs.fields.outputTokens, tokenValue(data.outputTokens));
+    setTokens(refs.fields.uncachedInputTokens, uncached);
+    setTokens(refs.fields.cachedInputTokens, data.cachedInputTokens);
+    setTokens(refs.fields.outputTokens, data.outputTokens);
     const usage = currentSessionId ? usageByThread.get(currentSessionId) : undefined;
     const anchorEntry = currentSessionId ? cacheAnchorByThread.get(currentSessionId) : undefined;
     const request = anchorEntry?.status === "ok" ? anchorEntry.request || {} : null;
     renderRequestRows(refs, request);
     const requestRate = usage?.cacheHitRatePercent;
     setText(refs.fields.requestCacheRate, requestRate === undefined ? "—" : `${decimal(requestRate, 1)}%`);
-    // 未提供的一项显示 —；输入已含缓存读取。
+    // 新增输入为输入减缓存读取；缓存未知或大于输入时不推算，显示 —。
     const lastInput = usage?.lastInputTokens;
+    const lastCached = usage?.lastCachedInputTokens;
+    const lastUncached = lastInput !== undefined && lastCached !== undefined && lastCached <= lastInput
+      ? lastInput - lastCached : undefined;
+    const requestValues = [lastUncached, usage?.lastOutputTokens];
     setText(refs.fields.requestTokens, lastInput === undefined ? "—"
-      : [lastInput, usage.lastOutputTokens, usage.lastCachedInputTokens]
-        .map((value) => value === undefined ? "—" : formatTokenCount(value)).join(" / "));
+      : requestValues.map((value) => value === undefined ? "—" : formatTokenCount(value)).join(" / "));
+    refs.fields.requestTokens.title = lastInput === undefined ? ""
+      : requestValues.map((value) => value === undefined ? "—" : count(value)).join(" / ");
     renderCacheRemaining();
     const session = renderSessionCard(refs, usage, anchorEntry, request);
-    const pendingNote = stale ? (stats ? "更新失败，当前数据可能已过期。" : "暂时无法读取统计，将自动重试。") : !currentSessionId ? "建立会话后显示统计。" : !stats ? "缺失数据以 — 显示。" : "";
-    const sourceNote = unknownUsage ? "Token 统计范围未知。" : sessionUsage ? "会话累计 Token 来自会话记录，缓存读取已包含在输入中。" : "";
-    const activityNote = turn ? "一次提问为一轮，步数为该轮的模型请求次数。" : "暂无可识别的最近一轮。";
-    const toolNote = finite(turn?.toolDurationMs) ? "工具调用用时按时间区间合并，并行调用不重复计算。" : "";
-    setText(refs.notes.activity, `${pendingNote}${activityNote}${toolNote}${speedNote}。`);
-    setText(refs.notes.tokens, `${pendingNote}${sourceNote}`);
     refs.buttons.activity.setAttribute("aria-label", `会话总轮数 ${count(data.turnCount)} 轮，最近一轮统计 ${count(turn?.stepCount)} 步，本轮平均速度 ${speedText}，${status}。${speedNote}。查看统计详情`);
     refs.buttons.tokens.setAttribute("aria-label", `Token 用量，${scopeLabel} ${refs.total.textContent}，缓存命中 ${rate}，${status}。查看统计详情`);
     refs.buttons.session.setAttribute("aria-label", `会话，${session.cost ? `费用估算 ${session.cost}，` : ""}${session.contextLabel}。查看会话详情`);

@@ -318,6 +318,7 @@ const tokenUsageMessage = (threadId = "conversation-1", { last, total, window = 
 
 const metric = (bar, name) => name === "status" ? bar.dataset.status : bar.querySelector(`.codey-cs-${name}`).textContent;
 const field = (bar, name) => bar.__codeyCs.fields[name].textContent;
+const fieldTitle = (bar, name) => bar.__codeyCs.fields[name].title;
 const fieldColor = (bar, name) => bar.__codeyCs.fields[name].style.color;
 const rowHidden = (bar, name) => bar.__codeyCs.rows[name].hidden === true;
 const summary = (env, kind = "activity") => env.bar().__codeyCs.buttons[kind];
@@ -360,7 +361,7 @@ const observeRenderWork = (env) => {
   };
   const refs = env.bar().__codeyCs;
   for (const element of [refs.speed, refs["cache-rate"], refs.total, refs.activity,
-    ...Object.values(refs.fields), ...Object.values(refs.notes)]) {
+    ...Object.values(refs.fields)]) {
     let value = element.textContent;
     Object.defineProperty(element, "textContent", {
       configurable: true,
@@ -386,7 +387,7 @@ test("refreshes with one composer scan per async phase and only writes changed t
     await flushTimers(30);
     assert.deepEqual(counts, { composerScans: 4, textWrites: 4 });
     assert.equal(metric(env.bar(), "total"), "500 tok");
-    assert.equal(field(env.bar(), "totalTokens"), "500 tok");
+    assert.equal(field(env.bar(), "totalTokens"), "500");
     assert.equal(metric(env.bar(), "speed"), "50.0 tok/s");
     assert.equal(field(env.bar(), "turnSpeed"), "50.0 tok/s");
   } finally {
@@ -410,21 +411,21 @@ test("renders three buttons and the agreed cards for a full payload", async () =
       "模型用时", "工具调用用时", "最近一次用时", "平均速度（本轮）", "最近一次速度", "本轮推理",
     ]);
     assert.deepEqual(cardStructure(env, "tokens"), [
-      "会话缓存命中", "最近一次缓存命中", "未缓存输入", "缓存读取", "输出",
+      "会话缓存命中", "最近一次缓存命中", "新增输入", "缓存读取", "输出", "最近一次 新增输入/输出",
     ]);
     assert.deepEqual(cardStructure(env, "session"), [
-      "账号", "开始时间", "上次回复", "缓存剩余时间", "上下文",
-      "最近一次 输入/输出/缓存", "压缩次数",
+      "账号", "开始时间", "上次回复", "上下文", "缓存剩余时间", "压缩次数",
     ]);
-    for (const key of ["cacheRemaining", "requestTokens"]) {
-      assert.equal(panel(env, "session").querySelector(`[data-row="${key}"]`)?.getAttribute("data-row"), key);
-      assert.equal(panel(env, "tokens").querySelector(`[data-row="${key}"]`), null, `${key} left the tokens card`);
+    assert.equal(panel(env, "tokens").querySelector('[data-row="cacheRemaining"]'), null);
+    assert.equal(panel(env, "session").querySelector('[data-row="requestTokens"]'), null);
+    for (const kind of ["activity", "tokens", "session"]) {
+      assert.equal(panel(env, kind).querySelector(".codey-cs-note"), null, `${kind} has no note`);
     }
     for (const kind of ["activity", "tokens", "session"]) {
       assert.equal(panel(env, kind).querySelector("strong").textContent,
         { activity: "最近一轮统计", tokens: "Token 用量", session: "会话" }[kind]);
       const rows = panel(env, kind).querySelectorAll("dt");
-      assert.equal(rows.length, { activity: 6, tokens: 5, session: 8 }[kind], kind);
+      assert.equal(rows.length, { activity: 6, tokens: 6, session: 7 }[kind], kind);
       assert.ok(rows.every((row) => !/TTFT|首 token/i.test(row.textContent)), `${kind} has no TTFT row`);
     }
     assert.equal(field(bar, "modelDuration"), "10秒");
@@ -434,13 +435,18 @@ test("renders three buttons and the agreed cards for a full payload", async () =
     // 最近一次请求速度 = 400 ÷ 10 秒，与本轮平均速度同时显示。
     assert.equal(field(bar, "requestSpeed"), "40 tok/s");
     assert.equal(field(bar, "requestDuration"), "10.0s");
-    assert.equal(field(bar, "totalTokens"), "131,500 tok");
+    assert.equal(field(bar, "totalTokens"), "131.5k");
+    assert.equal(fieldTitle(bar, "totalTokens"), "131,500 tok");
     assert.equal(field(bar, "sessionCacheRate"), "93%");
-    assert.equal(field(bar, "uncachedInputTokens"), "8,400 tok");
-    assert.equal(field(bar, "cachedInputTokens"), "120,000 tok");
-    assert.equal(field(bar, "outputTokens"), "3,100 tok");
+    assert.equal(field(bar, "uncachedInputTokens"), "8.4k");
+    assert.equal(fieldTitle(bar, "uncachedInputTokens"), "8,400 tok");
+    assert.equal(field(bar, "cachedInputTokens"), "120k");
+    assert.equal(fieldTitle(bar, "cachedInputTokens"), "120,000 tok");
+    assert.equal(field(bar, "outputTokens"), "3.1k");
+    assert.equal(fieldTitle(bar, "outputTokens"), "3,100 tok");
     assert.equal(field(bar, "requestCacheRate"), "99.6%");
-    assert.equal(field(bar, "requestTokens"), "1k / 400 / 996");
+    assert.equal(field(bar, "requestTokens"), "4 / 400");
+    assert.equal(fieldTitle(bar, "requestTokens"), "4 / 400");
     assert.equal(field(bar, "cacheRemaining"), "29:00");
     assert.equal(field(bar, "account"), "Relay");
     assert.equal(field(bar, "startedAt"), localDateTime(NOW - 3_600_000));
@@ -448,8 +454,6 @@ test("renders three buttons and the agreed cards for a full payload", async () =
     assert.equal(field(bar, "context"), "10.3% (36.4k/353.4k)");
     assert.equal(field(bar, "compactionCount"), "1");
     assert.equal(env.calls.some((call) => call.path === "/session/last-model-request"), false);
-    assert.doesNotMatch(bar.__codeyCs.notes.tokens.textContent, /缓存剩余时间/);
-    assert.equal(bar.__codeyCs.notes.session.textContent, "");
     assert.doesNotMatch(summary(env, "session").getAttribute("aria-label"), /压缩/);
     assert.match(summary(env, "session").getAttribute("aria-label"), /上下文占用 10\.3% · 36\.4k/);
     assert.equal(bar.__codeyCs.contextSummary.title, "上下文占用");
@@ -499,7 +503,6 @@ test("a payload with nulls shows — for every value it cannot read", async () =
     }
     assert.equal(field(bar, "turnSpeed"), "生成中");
     assert.equal(rowHidden(bar, "cost"), true);
-    assert.doesNotMatch(env.bar().__codeyCs.notes.activity.textContent, /工具调用用时按时间区间合并/);
   } finally {
     env.dispose();
   }
@@ -564,8 +567,7 @@ test("cost shows only when the usage carries a cost field", async () => {
     assert.equal(field(env.bar(), "cost"), "$1.283");
     assert.match(summary(env, "session").getAttribute("aria-label"), /费用估算 ≈\$1\.28，上下文占用 10\.3% · 36\.4k/);
     assert.deepEqual(cardStructure(env, "session"), [
-      "账号", "开始时间", "上次回复", "缓存剩余时间", "上下文",
-      "最近一次 输入/输出/缓存", "压缩次数", "会话费用估算",
+      "账号", "开始时间", "上次回复", "上下文", "缓存剩余时间", "压缩次数", "会话费用估算",
     ]);
   } finally {
     env.dispose();
@@ -588,8 +590,8 @@ test("estimated speed carries ≈ during generation and is corrected by the reco
       assert.equal(metric(env.bar(), "speed"), expected);
       assert.equal(field(env.bar(), "turnSpeed"), expected);
       // 估算只影响速度显示，会话累计只取记录中的总量。
-      assert.equal(field(env.bar(), "totalTokens"), "131,500 tok");
-      assert.equal(env.bar().__codeyCs.notes.activity.textContent.includes("含生成中的 Token 估算"), changes.speedIsEstimate === true);
+      assert.equal(field(env.bar(), "totalTokens"), "131.5k");
+      assert.equal(env.bar().__codeyCs.speed.title.includes("含生成中的 Token 估算"), changes.speedIsEstimate === true);
       assert.doesNotMatch(metric(env.bar(), "speed"), /等待输出/);
     }
   } finally {
@@ -974,7 +976,7 @@ test("last request speed divides the record's own output, not a newer notificati
     env.notify(tokenUsageMessage("conversation-1", { last: { inputTokens: 71_000, cachedInputTokens: 70_100, outputTokens: 900 } }));
     await flushTimers(30);
     assert.equal(field(env.bar(), "requestSpeed"), "40 tok/s");
-    assert.equal(field(env.bar(), "requestTokens"), "71k / 900 / 70.1k");
+    assert.equal(field(env.bar(), "requestTokens"), "900 / 900");
   } finally {
     env.dispose();
   }
@@ -1405,7 +1407,7 @@ test("preserves reported zero values", async () => {
   try {
     await flushTimers(30);
     assert.equal(metric(env.bar(), "total"), "0 tok");
-    assert.equal(field(env.bar(), "outputTokens"), "0 tok");
+    assert.equal(field(env.bar(), "outputTokens"), "0");
     assert.equal(metric(env.bar(), "cache-rate"), "0%");
     assert.equal(metric(env.bar(), "speed"), "0.0 tok/s");
     assert.equal(field(env.bar(), "toolDuration"), "0秒");
@@ -1431,14 +1433,13 @@ test("rejects invalid last turn values and does not borrow another scope", async
       env.refresh();
       await flushTimers(30);
       assert.equal(metric(env.bar(), "activity"), "4 轮 · — 步");
-      assert.match(env.bar().__codeyCs.notes.activity.textContent, /暂无可识别的最近一轮/);
     }
   } finally {
     env.dispose();
   }
 });
 
-test("explains turn coverage, turn speed and merged tool time", async () => {
+test("the speed tooltip explains turn coverage and turn speed", async () => {
   const env = createEnvironment();
   try {
     for (const [coverage, note] of [
@@ -1449,29 +1450,25 @@ test("explains turn coverage, turn speed and merged tool time", async () => {
       env.setStats("conversation-1", { ...STATS, lastTurn: { ...LAST_TURN, coverage } });
       env.refresh();
       await flushTimers(30);
-      assert.ok(env.bar().__codeyCs.notes.activity.textContent.includes(note));
+      assert.ok(env.bar().__codeyCs.speed.title.includes(note));
     }
-    const note = env.bar().__codeyCs.notes.activity.textContent;
-    assert.match(note, /一次提问为一轮，步数为该轮的模型请求次数/);
-    assert.match(note, /本轮输出 Token ÷ 本轮各次模型请求用时之和/);
-    assert.match(note, /工具调用用时按时间区间合并，并行调用不重复计算/);
-    assert.doesNotMatch(note, /可能重叠/);
+    assert.match(env.bar().__codeyCs.speed.title, /本轮输出 Token ÷ 本轮各次模型请求用时之和/);
   } finally {
     env.dispose();
   }
 });
 
-test("last request tokens show the full input and — for unknown items", async () => {
+test("last request tokens show new input and — for unknown or inconsistent cache", async () => {
   const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
   try {
     await flushTimers(30);
     env.notify(tokenUsageMessage("conversation-1", { last: { inputTokens: 1_000, cachedInputTokens: null, outputTokens: null } }));
     await flushTimers(30);
-    assert.equal(field(env.bar(), "requestTokens"), "1k / — / —");
+    assert.equal(field(env.bar(), "requestTokens"), "— / —");
     assert.equal(field(env.bar(), "requestCacheRate"), "—");
     env.notify(tokenUsageMessage("conversation-1", { last: { inputTokens: 1_000, cachedInputTokens: 1_200, outputTokens: 0 } }));
     await flushTimers(30);
-    assert.equal(field(env.bar(), "requestTokens"), "1k / 0 / 1.2k");
+    assert.equal(field(env.bar(), "requestTokens"), "— / 0");
   } finally {
     env.dispose();
   }
@@ -1671,7 +1668,7 @@ test("preserves the same session values while refreshing and marks failed values
     resolveRefresh({ status: "failed" });
     await flushTimers(30);
     assert.equal(metric(env.bar(), "total"), "132k tok");
-    assert.match(env.bar().__codeyCs.notes.activity.textContent, /可能已过期/);
+    assert.equal(env.bar().dataset.status, "统计暂不可用");
   } finally {
     env.dispose();
   }
