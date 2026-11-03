@@ -313,6 +313,8 @@ function loadInjection({
     Error,
     HTMLElement: FakeElement,
     MutationObserver,
+    // Node 22 contexts lack Symbol.dispose; share the host Symbol as the stats tests do.
+    Symbol,
     URL,
     URLSearchParams,
     console,
