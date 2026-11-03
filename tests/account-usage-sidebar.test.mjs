@@ -393,3 +393,143 @@ test("backend additionalLimits render in the details with names, blocked marker 
   const summary = usage.innerHTML.slice(0, usage.innerHTML.indexOf("codey-account-usage-details"));
   assert.doesNotMatch(summary, /Spark|Review/);
 });
+
+// 固定在本地 15:30，避开 hour12:false 在零点附近的 24:xx 写法。
+const localAfterDays = (days, hours = 15, minutes = 30) => {
+  const value = new Date();
+  value.setDate(value.getDate() + days);
+  value.setHours(hours, minutes, 0, 0);
+  return Math.floor(value.getTime() / 1000);
+};
+const monthDayLabel = (seconds) => {
+  const value = new Date(seconds * 1000);
+  return `${value.getMonth() + 1}月${value.getDate()}日 15:30`;
+};
+const resetCreditsBase = () => ({
+  status: "ok",
+  planType: "pro",
+  fetchedAt: Math.floor(Date.now() / 1000),
+  primary: { usedPercent: 15, windowMinutes: 300, resetsAt: localAfterDays(1) },
+  secondary: { usedPercent: 40, windowMinutes: 10080, resetsAt: localAfterDays(1) },
+});
+const renderedUsage = async (usageResult) => {
+  const env = mountSidebar({ usageResult });
+  await env.window.__codeyRefreshAccountUsage();
+  const usage = env.document.getElementById("codey-account-usage");
+  assert.ok(usage);
+  return usage;
+};
+
+test("reset credits render their count and the nearest expiry with the shared day-time label", async () => {
+  const usage = await renderedUsage({
+    ...resetCreditsBase(),
+    resetCredits: { availableCount: 3, nextExpiresAt: localAfterDays(1) },
+  });
+  assert.match(usage.innerHTML, /剩余重置次数[\s\S]*?codey-usage-detail-value">3 次</);
+  assert.match(usage.innerHTML, /<span>最近 明天 15:30 过期<\/span>/);
+  // 窗口重置时间仍然带“重置”后缀，过期时间不带。
+  assert.match(usage.innerHTML, /<span class="codey-usage-reset">明天 15:30 重置<\/span>/);
+  assert.doesNotMatch(usage.innerHTML, /过期[^<]*重置|重置[^<]*过期/);
+  const summary = usage.innerHTML.slice(0, usage.innerHTML.indexOf("codey-account-usage-details"));
+  assert.doesNotMatch(summary, /重置次数/);
+});
+
+test("reset credits show the count without an expiry when none is known", async () => {
+  const usage = await renderedUsage({ ...resetCreditsBase(), resetCredits: { availableCount: 1 } });
+  assert.match(usage.innerHTML, /剩余重置次数[\s\S]*?codey-usage-detail-value">1 次</);
+  assert.doesNotMatch(usage.innerHTML, /过期/);
+});
+
+test("reset credits do not show an expiry that has already passed", async () => {
+  const usage = await renderedUsage({
+    ...resetCreditsBase(),
+    resetCredits: { availableCount: 2, nextExpiresAt: Math.floor(Date.now() / 1000) - 60 },
+  });
+  assert.match(usage.innerHTML, /剩余重置次数[\s\S]*?codey-usage-detail-value">2 次</);
+  assert.doesNotMatch(usage.innerHTML, /过期/);
+});
+
+test("no reset-credit row renders when the field is absent or malformed", async () => {
+  for (const resetCredits of [undefined, null, {}, { availableCount: null }, { availableCount: "n/a" }, "3"]) {
+    const usage = await renderedUsage({ ...resetCreditsBase(), resetCredits });
+    assert.doesNotMatch(usage.innerHTML, /剩余重置次数|过期/, `resetCredits=${JSON.stringify(resetCredits)}`);
+  }
+});
+
+test("a zero reset-credit count is rendered as zero", async () => {
+  const usage = await renderedUsage({ ...resetCreditsBase(), resetCredits: { availableCount: 0 } });
+  assert.match(usage.innerHTML, /剩余重置次数[\s\S]*?codey-usage-detail-value">0 次</);
+});
+
+test("app-server reset credits keep the nearest unexpired, unredeemed expiry", async () => {
+  const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+  const nearest = localAfterDays(4);
+  const buildResponse = (summary) => ({
+    rateLimits: {
+      primary: appServerWindow(20, 300, resetsAt),
+      secondary: appServerWindow(45, 10080, resetsAt),
+      planType: "plus",
+    },
+    ...summary,
+  });
+  const rows = [
+    // 更近的过期时间属于已兑换、已过期或已经过去的明细，都不能显示。
+    { status: "redeemed", expiresAt: localAfterDays(1) },
+    { status: "expired", expiresAt: localAfterDays(2) },
+    { status: "available", expiresAt: Math.floor(Date.now() / 1000) - 3600 },
+    { status: "unknown", expiresAt: localAfterDays(3) },
+    { status: "available", expiresAt: localAfterDays(9) },
+    { status: "available", expiresAt: nearest },
+  ];
+  for (const summary of [
+    { rateLimitResetCredits: { availableCount: 2, credits: rows } },
+    { rate_limit_reset_credits: { available_count: 2, credits: rows.map(({ status, expiresAt }) => ({ status, expires_at: expiresAt * 1000 })) } },
+    { rateLimits: { primary: appServerWindow(20, 300, resetsAt), secondary: appServerWindow(45, 10080, resetsAt), rateLimitResetCredits: { availableCount: 2, credits: rows } } },
+  ]) {
+    const env = mountAppServerUsage(buildResponse(summary));
+    await env.window.__codeyRefreshAccountUsage();
+    const usage = env.document.getElementById("codey-account-usage");
+    assert.ok(usage);
+    assert.match(usage.innerHTML, /剩余重置次数[\s\S]*?codey-usage-detail-value">2 次</);
+    assert.match(usage.innerHTML, new RegExp(`最近 ${monthDayLabel(nearest)} 过期`));
+    assert.equal(usage.innerHTML.match(/过期/g).length, 1);
+  }
+});
+
+test("app-server reset credits without usable rows keep only the count", async () => {
+  const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+  const env = mountAppServerUsage({
+    rateLimits: { primary: appServerWindow(20, 300, resetsAt), secondary: appServerWindow(45, 10080, resetsAt) },
+    rateLimitResetCredits: { availableCount: 1, credits: [{ status: "redeemed", expiresAt: localAfterDays(2) }] },
+  });
+  await env.window.__codeyRefreshAccountUsage();
+  const usage = env.document.getElementById("codey-account-usage");
+  assert.ok(usage);
+  assert.match(usage.innerHTML, /剩余重置次数[\s\S]*?codey-usage-detail-value">1 次</);
+  assert.doesNotMatch(usage.innerHTML, /过期/);
+
+  const absent = mountAppServerUsage({
+    rateLimits: { primary: appServerWindow(20, 300, resetsAt), secondary: appServerWindow(45, 10080, resetsAt) },
+  });
+  await absent.window.__codeyRefreshAccountUsage();
+  assert.doesNotMatch(absent.document.getElementById("codey-account-usage").innerHTML, /剩余重置次数/);
+});
+
+test("details keep the fork's extras and put the updated time in the heading", async () => {
+  const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+  const usage = await renderedUsage({
+    ...resetCreditsBase(),
+    planType: "promax",
+    credits: { hasCredits: true, unlimited: false, balance: "12.500" },
+    additionalLimits: [{ limitName: "Spark", primary: { usedPercent: 10, windowMinutes: 300, resetsAt }, blocked: false }],
+    resetCredits: { availableCount: 1, nextExpiresAt: localAfterDays(1) },
+  });
+  assert.match(usage.innerHTML, /class="codey-usage-plan-tag" data-pro-tier="500">Pro 500</);
+  assert.match(usage.innerHTML, /Credits 余额[\s\S]*?12\.5</);
+  assert.match(usage.innerHTML, /剩余重置次数[\s\S]*?其他额度组[\s\S]*?Spark/);
+  assert.match(
+    usage.innerHTML,
+    /额度详情<\/span>\s*<span class="codey-usage-details-updated">更新于 \d{2}:\d{2}<\/span>\s*<\/div>\s*<div class="codey-usage-details-list">/,
+  );
+  assert.doesNotMatch(usage.innerHTML, /<div class="codey-usage-details-updated">/);
+});

@@ -153,11 +153,16 @@ fn optimization_upstream_protocol(
     }
 }
 
-fn build_optimizer_http_client(builder: reqwest::ClientBuilder) -> Result<Client, String> {
+fn optimizer_http_client_builder(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
     builder
         .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none())
+}
+
+#[cfg(test)]
+fn build_optimizer_http_client(builder: reqwest::ClientBuilder) -> Result<Client, String> {
+    optimizer_http_client_builder(builder)
         .build()
         .map_err(|error| format!("创建优化 HTTP 客户端失败：{error}"))
 }
@@ -166,8 +171,12 @@ fn build_optimizer_http_client(builder: reqwest::ClientBuilder) -> Result<Client
 /// `AppState` client caps connects at 5s, which is too tight for provider
 /// relays behind a system proxy (CONNECT + TLS handshake routinely exceed
 /// that). The per-request `.timeout()` still bounds the whole call.
-pub fn optimizer_http_client() -> Result<Client, String> {
-    build_optimizer_http_client(Client::builder())
+pub(crate) fn optimizer_http_client()
+-> Result<crate::system_proxy_client::SystemProxyClient, String> {
+    crate::system_proxy_client::SystemProxyClient::new_blocking(|| {
+        optimizer_http_client_builder(Client::builder())
+    })
+    .map_err(|error| format!("创建优化 HTTP 客户端失败：{error:#}"))
 }
 
 fn request_endpoint(

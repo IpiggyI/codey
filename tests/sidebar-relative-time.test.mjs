@@ -28,6 +28,7 @@ function loadInjection({
   bridgeHandler,
   entryScriptUrls = [],
   fetchHandler,
+  manualTimeouts = false,
   now,
   rows = [],
   signalDispatcher,
@@ -35,8 +36,10 @@ function loadInjection({
   const placeholder = new FakeElement();
   const intervalCallbacks = [];
   const canceledTimeouts = new Set();
+  const pendingTimeouts = new Map();
   let nextTimeoutId = 1;
   let mutationCallback = null;
+  let observedOptions = null;
   let nowMs = Number.isFinite(now) ? now : Date.now();
   class FakeDate extends Date {
     constructor(...args) {
@@ -70,6 +73,7 @@ function loadInjection({
     addEventListener() {},
     clearTimeout(timeoutId) {
       canceledTimeouts.add(timeoutId);
+      pendingTimeouts.delete(timeoutId);
     },
     dispatchEvent() {},
     localStorage: { length: 0, key: () => null, getItem: () => null, setItem() {} },
@@ -85,6 +89,13 @@ function loadInjection({
       const timeoutId = nextTimeoutId;
       nextTimeoutId += 1;
       if (delayMs === 5_000) return timeoutId;
+      if (manualTimeouts) {
+        pendingTimeouts.set(timeoutId, {
+          callback,
+          dueAt: nowMs + Math.max(0, Number(delayMs) || 0),
+        });
+        return timeoutId;
+      }
       queueMicrotask(() => {
         if (canceledTimeouts.delete(timeoutId)) return;
         if (advanceTimeoutClock) nowMs += Math.max(0, Number(delayMs) || 0);
@@ -104,14 +115,16 @@ function loadInjection({
       constructor(callback) {
         mutationCallback = callback;
       }
-      observe() {}
+      observe(_target, options) {
+        observedOptions = options;
+      }
     },
     performance: { getEntriesByType: () => [] },
     URL,
     URLSearchParams,
     window,
   };
-  if (Number.isFinite(now) || advanceTimeoutClock) context.Date = FakeDate;
+  if (Number.isFinite(now) || advanceTimeoutClock || manualTimeouts) context.Date = FakeDate;
   vm.runInNewContext(source, context);
   return {
     advanceTime: (milliseconds) => {
@@ -119,7 +132,17 @@ function loadInjection({
     },
     document,
     notifyMutations: (mutations) => mutationCallback?.(mutations),
+    get observedOptions() {
+      return observedOptions;
+    },
     reinstall: () => vm.runInNewContext(source, context),
+    runDueTimeouts() {
+      const due = [...pendingTimeouts].filter(([, timer]) => timer.dueAt <= nowMs);
+      due.forEach(([timeoutId, { callback }]) => {
+        if (!pendingTimeouts.delete(timeoutId)) return;
+        callback();
+      });
+    },
     runIntervals: () => intervalCallbacks.forEach((callback) => callback()),
     window,
   };
@@ -421,6 +444,187 @@ test("keeps three running threads prioritized through a transient status gap", a
   assert.equal(secondRunning.item.getAttribute("data-codey-thread-running"), "true");
 });
 
+for (const terminalType of [undefined, "completed", "error"]) {
+  for (const projectFirst of [false, true]) {
+    const outcome = terminalType || "status disappearance";
+    const scanOrder = projectFirst ? "project first" : "recent first";
+    test(`clears running priority from every duplicate after ${outcome} (${scanOrder})`, () => {
+      const sessionId = "client-new-thread:duplicate-ended";
+      const recent = sidebarThreadEntry({ running: true, sessionId });
+      const duplicate = sidebarThreadEntry({ running: true, sessionId });
+      const idle = sidebarThreadEntry({ sessionId: "client-new-thread:idle-neighbor" });
+      const project = sidebarProjectList();
+      project.list.appendChild(duplicate.item);
+      recent.list.appendChild(idle.item);
+      const rows = projectFirst
+        ? [duplicate.row, recent.row, idle.row]
+        : [recent.row, duplicate.row, idle.row];
+      const fixture = loadInjection({ manualTimeouts: true, rows });
+      const priorities = () => [recent, duplicate].map(({ item }) => (
+        item.getAttribute("data-codey-thread-running")
+      ));
+
+      assert.deepEqual(priorities(), ["true", "true"]);
+      recent.spinner.remove();
+      duplicate.spinner.remove();
+      if (terminalType) {
+        duplicate.row.__reactFiber$test = {
+          memoizedProps: { statusState: { type: terminalType, unread: false } },
+          return: null,
+        };
+      }
+      fixture.window.__codeyInstallThreadUpdatedTimes(fixture.document);
+      if (!terminalType) assert.deepEqual(priorities(), ["true", "true"]);
+
+      fixture.advanceTime(2_000);
+      fixture.runDueTimeouts();
+      assert.deepEqual(priorities(), [null, null], "all copies must leave running priority");
+
+      for (let cycle = 0; cycle < 3; cycle += 1) {
+        rows.reverse();
+        fixture.window.__codeyInstallThreadUpdatedTimes(fixture.document);
+        fixture.advanceTime(2_000);
+        fixture.runDueTimeouts();
+        fixture.runIntervals();
+        assert.deepEqual(priorities(), [null, null], `refresh cycle ${cycle + 1}`);
+      }
+      assert.deepEqual(recent.list.children, [recent.item, idle.item]);
+      assert.deepEqual(project.list.children, [duplicate.item]);
+    });
+  }
+}
+
+test("keeps a detached duplicate idle when remounted after completion", () => {
+  const sessionId = "client-new-thread:remounted-ended";
+  const recent = sidebarThreadEntry({ running: true, sessionId });
+  const duplicate = sidebarThreadEntry({ running: true, sessionId });
+  const project = sidebarProjectList();
+  project.list.appendChild(duplicate.item);
+  const rows = [recent.row, duplicate.row];
+  const fixture = loadInjection({ manualTimeouts: true, rows });
+
+  duplicate.item.remove();
+  duplicate.row.isConnected = false;
+  rows.pop();
+  recent.spinner.remove();
+  fixture.window.__codeyInstallThreadUpdatedTimes(recent.row);
+  fixture.advanceTime(2_000);
+  fixture.runDueTimeouts();
+  assert.equal(recent.item.getAttribute("data-codey-thread-running"), null);
+
+  duplicate.spinner.remove();
+  project.list.appendChild(duplicate.item);
+  duplicate.row.isConnected = true;
+  rows.push(duplicate.row);
+  fixture.window.__codeyInstallThreadUpdatedTimes(duplicate.row);
+
+  assert.equal(
+    duplicate.item.getAttribute("data-codey-thread-running"),
+    null,
+    "a previous row observation must not start a new running grace period",
+  );
+  fixture.runIntervals();
+  assert.equal(recent.item.getAttribute("data-codey-thread-running"), null);
+  assert.equal(duplicate.item.getAttribute("data-codey-thread-running"), null);
+});
+
+test("prioritizes a genuine new run after completion and duplicate rendering", () => {
+  const sessionId = "client-new-thread:duplicate-restarted";
+  const recent = sidebarThreadEntry({ running: true, sessionId });
+  const duplicate = sidebarThreadEntry({ sessionId });
+  const rows = [recent.row];
+  const fixture = loadInjection({ manualTimeouts: true, rows });
+  recent.spinner.remove();
+  fixture.window.__codeyInstallThreadUpdatedTimes(fixture.document);
+  fixture.advanceTime(2_000);
+  fixture.runDueTimeouts();
+  assert.equal(recent.item.getAttribute("data-codey-thread-running"), null);
+  rows.push(duplicate.row);
+  fixture.window.__codeyInstallThreadUpdatedTimes(duplicate.row);
+  assert.equal(duplicate.item.getAttribute("data-codey-thread-running"), null);
+
+  duplicate.nativeStatusRail.appendChild(duplicate.spinner);
+  fixture.window.__codeyInstallThreadUpdatedTimes(duplicate.row);
+  fixture.window.__codeyInstallThreadUpdatedTimes(fixture.document);
+
+  assert.equal(recent.item.getAttribute("data-codey-thread-running"), "true");
+  assert.equal(duplicate.item.getAttribute("data-codey-thread-running"), "true");
+  fixture.advanceTime(2_000);
+  fixture.runDueTimeouts();
+  fixture.runIntervals();
+  assert.equal(recent.item.getAttribute("data-codey-thread-running"), "true");
+  assert.equal(duplicate.item.getAttribute("data-codey-thread-running"), "true");
+});
+
+test("does not clear another host's running copies with the same session id", () => {
+  const sessionId = "client-new-thread:shared-id-across-hosts";
+  const local = sidebarThreadEntry({ running: true, sessionId });
+  const remote = sidebarThreadEntry({ running: true, sessionId });
+  remote.row.setAttribute("data-app-action-sidebar-thread-host-id", "other-host");
+  const rows = [local.row, remote.row];
+  const fixture = loadInjection({ manualTimeouts: true, rows });
+
+  local.spinner.remove();
+  local.row.__reactFiber$test = {
+    memoizedProps: { statusState: { type: "error", unread: false } },
+    return: null,
+  };
+  fixture.window.__codeyInstallThreadUpdatedTimes(fixture.document);
+  fixture.advanceTime(2_000);
+  fixture.runDueTimeouts();
+  fixture.runIntervals();
+
+  assert.equal(local.item.getAttribute("data-codey-thread-running"), null);
+  assert.equal(remote.item.getAttribute("data-codey-thread-running"), "true");
+});
+
+for (const detached of [false, true]) {
+  test(`ignores a stale running icon after an error (${detached ? "remounted" : "connected"} duplicate)`, () => {
+    const sessionId = "client-new-thread:stale-running-icon";
+    const recent = sidebarThreadEntry({ running: true, sessionId });
+    const duplicate = sidebarThreadEntry({ running: true, sessionId });
+    const rows = [recent.row, duplicate.row];
+    const fixture = loadInjection({ manualTimeouts: true, rows });
+    const duplicateList = duplicate.list;
+    if (detached) {
+      duplicate.item.remove();
+      duplicate.row.isConnected = false;
+      rows.pop();
+    }
+
+    recent.spinner.remove();
+    recent.row.__reactFiber$test = {
+      memoizedProps: { statusState: { type: "error", unread: false } },
+      return: null,
+    };
+    fixture.window.__codeyInstallThreadUpdatedTimes(recent.row);
+    assert.equal(recent.item.getAttribute("data-codey-thread-running"), null);
+
+    if (detached) {
+      duplicateList.appendChild(duplicate.item);
+      duplicate.row.isConnected = true;
+      rows.push(duplicate.row);
+    }
+    fixture.window.__codeyInstallThreadUpdatedTimes(duplicate.row);
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      fixture.advanceTime(2_000);
+      fixture.runDueTimeouts();
+      fixture.runIntervals();
+      assert.equal(recent.item.getAttribute("data-codey-thread-running"), null);
+      assert.equal(duplicate.item.getAttribute("data-codey-thread-running"), null);
+    }
+
+    // 另一副本仍显示上轮错误时，新的空闲到运行变化也应恢复置顶。
+    duplicate.spinner.remove();
+    fixture.window.__codeyInstallThreadUpdatedTimes(duplicate.row);
+    duplicate.nativeStatusRail.appendChild(duplicate.spinner);
+    fixture.window.__codeyInstallThreadUpdatedTimes(duplicate.row);
+    fixture.runIntervals();
+    assert.equal(recent.item.getAttribute("data-codey-thread-running"), "true");
+    assert.equal(duplicate.item.getAttribute("data-codey-thread-running"), "true");
+  });
+}
+
 test("carries running priority across a transient React row replacement", async () => {
   const sessionId = "client-new-thread:replaced-running";
   const running = sidebarThreadEntry({ running: true, sessionId });
@@ -693,6 +897,86 @@ test("ignores cosmetic descendant class churn but tracks status class changes", 
     fiberReads > readsAfterStatusAppeared,
     "removing a status class must refresh the row through MutationRecord.oldValue",
   );
+  assert.equal(entry.item.getAttribute("data-codey-thread-running"), "true");
+});
+
+test("pins a thread whose status element turns running through aria-label only", async () => {
+  const entry = sidebarThreadEntry({ sessionId: "thread-aria-status" });
+  const status = new FakeElement();
+  status.setAttribute("aria-label", "Idle");
+  entry.nativeStatusRail.appendChild(status);
+  let fiberReads = 0;
+  Object.defineProperty(entry.row, "__reactFiber$test", {
+    configurable: true,
+    enumerable: true,
+    get() {
+      fiberReads += 1;
+      return { memoizedProps: {}, return: null };
+    },
+  });
+  const { notifyMutations, observedOptions } = loadInjection({
+    rows: [entry.row],
+    signalDispatcher: async () => ({
+      data: [{ id: "thread-aria-status", updatedAt: 60 }],
+      nextCursor: null,
+    }),
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(observedOptions.attributeFilter.includes("aria-label"));
+  assert.notEqual(entry.item.getAttribute("data-codey-thread-running"), "true");
+
+  fiberReads = 0;
+  const outsideRow = new FakeElement();
+  outsideRow.setAttribute("aria-label", "Settings");
+  notifyMutations([{
+    type: "attributes",
+    target: outsideRow,
+    attributeName: "aria-label",
+    oldValue: null,
+  }]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fiberReads, 0, "an aria-label change outside thread rows should not rescan a row");
+
+  status.setAttribute("aria-label", "Running");
+  notifyMutations([{
+    type: "attributes",
+    target: status,
+    attributeName: "aria-label",
+    oldValue: "Idle",
+  }]);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(entry.item.getAttribute("data-codey-thread-running"), "true");
+});
+
+test("rescans a thread row on any aria-label change inside it", async () => {
+  const entry = sidebarThreadEntry({ sessionId: "thread-aria-any" });
+  const status = new FakeElement();
+  status.setAttribute("aria-label", "Idle");
+  entry.nativeStatusRail.appendChild(status);
+  const statusFiber = {
+    memoizedProps: { statusState: { type: undefined, unread: false } },
+    return: null,
+  };
+  entry.row.__reactFiber$test = { memoizedProps: {}, return: statusFiber };
+  const { notifyMutations } = loadInjection({
+    rows: [entry.row],
+    signalDispatcher: async () => ({
+      data: [{ id: "thread-aria-any", updatedAt: 60 }],
+      nextCursor: null,
+    }),
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.notEqual(entry.item.getAttribute("data-codey-thread-running"), "true");
+
+  statusFiber.memoizedProps.statusState = { type: "running", unread: false };
+  status.setAttribute("aria-label", "Busy");
+  notifyMutations([{
+    type: "attributes",
+    target: status,
+    attributeName: "aria-label",
+    oldValue: "Idle",
+  }]);
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(entry.item.getAttribute("data-codey-thread-running"), "true");
 });
 

@@ -742,3 +742,83 @@ fn terminate_process(pid: u32, required: bool) {
         assert!(status.success(), "failed to terminate FastCtx host {pid}");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn supervisor_reclaims_an_idle_worker_and_restarts_it_on_the_next_request() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut child, mut stdin, responses_rx) =
+        spawn_supervisor_with_test_worker_env(&temp, &[("CODEY_FASTCTX_WORKER_IDLE_MS", "200")]);
+    initialize_test_worker_session(&mut stdin, &responses_rx);
+
+    let first = wait_for_test_worker_start(temp.path(), 1)[0];
+    wait_for_process_gone(first);
+
+    send(
+        &mut stdin,
+        json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "test/large_response",
+            "params": {"bytes": 64}
+        }),
+    );
+    let response = response_with_id(&responses_rx, 2);
+    assert!(response.get("result").is_some(), "{response}");
+    let restarted = wait_for_test_worker_start(temp.path(), 2)[1];
+    assert_ne!(restarted, first);
+
+    // 有在途请求时不回收：测试 worker 不回应未知方法，请求一直挂起。
+    send(
+        &mut stdin,
+        json!({"jsonrpc": "2.0", "id": 3, "method": "test/unanswered"}),
+    );
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(
+        unsafe { libc::kill(restarted as i32, 0) },
+        0,
+        "busy worker was reclaimed"
+    );
+    assert_eq!(wait_for_test_worker_start(temp.path(), 2).len(), 2);
+
+    drop(stdin);
+    let status = wait_for_child(&mut child);
+    assert!(status.success(), "supervisor failed with {status}");
+}
+
+#[test]
+fn supervisor_replays_initialization_after_idle_reclaim_for_a_real_worker() {
+    let temp = tempfile::tempdir().unwrap();
+    let event_log = temp.path().join("runtime-events.log");
+    let (mut child, mut stdin, responses_rx) = spawn_supervisor_with_test_worker_env(
+        &temp,
+        &[
+            (
+                "CODEY_FASTCTX_TEST_WORKER_ARGUMENT",
+                "--codey-fastctx-mcp-worker",
+            ),
+            ("CODEY_FASTCTX_WORKER_IDLE_MS", "200"),
+            (
+                "FASTCTX_TEST_RUNTIME_EVENT_LOG",
+                event_log.to_str().unwrap(),
+            ),
+            ("FASTCTX_TEST_RUNTIME_IDLE_MS", "60000"),
+            ("FASTCTX_NO_PARENT_WATCH", "1"),
+        ],
+    );
+    initialize_test_worker_session(&mut stdin, &responses_rx);
+    let hosts = wait_for_host_starts(&event_log, 1);
+    std::thread::sleep(Duration::from_millis(1500));
+    send(
+        &mut stdin,
+        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+    );
+    let response = response_with_id(&responses_rx, 2);
+    drop(stdin);
+    let status = wait_for_child(&mut child);
+    for host in hosts {
+        terminate_process(host, false);
+    }
+    assert!(status.success(), "supervisor failed with {status}");
+    assert!(response["result"]["tools"].is_array(), "{response}");
+}

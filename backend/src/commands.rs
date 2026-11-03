@@ -53,6 +53,8 @@ use prompt_optimization::{
     fetch_prompt_optimization_models_command, optimize_prompt_command,
     test_prompt_optimization_command,
 };
+#[cfg(all(test, unix))]
+pub(crate) use runtime::cleanup_pending_runtime_start_with;
 use runtime::runtime_status_with_options;
 #[cfg(test)]
 use runtime::{begin_shutdown, launch_codey_inner};
@@ -117,7 +119,7 @@ pub struct AppState {
     #[cfg(test)]
     slow_apply_test: slow_apply_tests::TestHooks,
     provider_model_sync_lock: Mutex<()>,
-    pub http_client: reqwest::Client,
+    pub(crate) http_client: crate::system_proxy_client::SystemProxyClient,
     #[cfg(test)]
     pub webhook_http_client_override: Option<reqwest::Client>,
     #[cfg(test)]
@@ -128,12 +130,13 @@ pub struct AppState {
     notification_watcher_failure: AtomicBool,
     #[cfg(test)]
     notification_watcher_started: Notify,
-    wechat_claw_login_http_client: reqwest::Client,
+    wechat_claw_login_http_client: crate::system_proxy_client::SystemProxyClient,
     account_usage_cache: Mutex<account_usage::AccountUsageCache>,
     official_account_lock: Mutex<()>,
     official_account_logins: Mutex<crate::official_accounts::oauth::LoginSessions>,
     official_account_usage: Mutex<crate::official_accounts::usage::UsageState>,
     pub runtime: Mutex<Option<Arc<CodeyRuntime>>>,
+    pub(crate) failed_runtime_start: Mutex<Option<Arc<crate::launcher::PendingRuntimeCleanup>>>,
     runtime_operation: Mutex<()>,
     model_delivery_lock: Mutex<()>,
     diagnostic_storage_operation: Mutex<()>,
@@ -146,6 +149,9 @@ pub struct AppState {
     shutting_down: AtomicBool,
     restart_task: Mutex<Option<ScheduledRestart>>,
     runtime_generation: AtomicU64,
+    runtime_intent: watch::Sender<u64>,
+    #[cfg(any(windows, test))]
+    codex_crash_recovery: Mutex<runtime::CrashRecoveryBudget>,
     session_titles: RwLock<HashMap<String, String>>,
     session_metadata_cache: BlockingMutex<session_metadata::SessionMetadataCache>,
     completion_probe_cache: BlockingMutex<pending_approval::RecentSessionEventCache>,
@@ -251,13 +257,14 @@ impl AppState {
             #[cfg(test)]
             slow_apply_test: slow_apply_tests::TestHooks::default(),
             provider_model_sync_lock: Mutex::new(()),
-            http_client: reqwest::Client::builder()
-                .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
-                .connect_timeout(Duration::from_secs(5))
+            http_client: crate::system_proxy_client::SystemProxyClient::new_blocking(|| {
+                reqwest::Client::builder()
+                    .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
+                    .connect_timeout(Duration::from_secs(5))
                 // TLS: system trust store via rustls native roots. Model sync
                 // does not carry Codey-owned certificates.
-                .build()
-                .expect("shared Codey HTTP client should be constructible"),
+            })
+            .expect("shared Codey HTTP client should be constructible"),
             #[cfg(test)]
             webhook_http_client_override: None,
             #[cfg(test)]
@@ -274,6 +281,7 @@ impl AppState {
             official_account_logins: Mutex::new(Default::default()),
             official_account_usage: Mutex::new(Default::default()),
             runtime: Mutex::new(None),
+            failed_runtime_start: Mutex::new(None),
             runtime_operation: Mutex::new(()),
             model_delivery_lock: Mutex::new(()),
             diagnostic_storage_operation: Mutex::new(()),
@@ -286,6 +294,9 @@ impl AppState {
             shutting_down: AtomicBool::new(false),
             restart_task: Mutex::new(None),
             runtime_generation: AtomicU64::new(0),
+            runtime_intent: watch::channel(0).0,
+            #[cfg(any(windows, test))]
+            codex_crash_recovery: Mutex::new(runtime::CrashRecoveryBudget::default()),
             session_titles: RwLock::new(HashMap::new()),
             session_metadata_cache: BlockingMutex::new(
                 session_metadata::SessionMetadataCache::default(),
@@ -355,6 +366,7 @@ impl AppState {
 
     fn request_shutdown_with_reason(&self, reason: AppShutdownReason) {
         self.shutting_down.store(true, Ordering::Release);
+        self.cancel_pending_runtime_recovery();
         self.shutdown_reason.send_if_modified(|current| {
             if current.is_some() {
                 return false;
@@ -366,6 +378,11 @@ impl AppState {
 
     fn is_shutting_down(&self) -> bool {
         self.shutting_down.load(Ordering::Acquire)
+    }
+
+    fn cancel_pending_runtime_recovery(&self) {
+        self.runtime_intent
+            .send_modify(|intent| *intent = intent.wrapping_add(1));
     }
 
     pub async fn wait_for_shutdown(&self) -> AppShutdownReason {

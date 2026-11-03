@@ -32,14 +32,15 @@ const MAX_ILINK_RESPONSE_BYTES: usize = 1024 * 1024;
 /// QR status is an iLink long-poll endpoint. Keep its client separate from
 /// notification delivery so a temporary scan can wait efficiently without
 /// widening the short timeout used for one-way notifications.
-pub(super) fn wechat_claw_login_http_client() -> Client {
-    Client::builder()
-        .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(Duration::from_secs(3))
-        .timeout(Duration::from_secs(40))
-        .redirect(redirect::Policy::none())
-        .build()
-        .expect("create WeChat ClawBot login HTTP client")
+pub(super) fn wechat_claw_login_http_client() -> crate::system_proxy_client::SystemProxyClient {
+    crate::system_proxy_client::SystemProxyClient::new_blocking(|| {
+        Client::builder()
+            .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(40))
+            .redirect(redirect::Policy::none())
+    })
+    .expect("create WeChat ClawBot login HTTP client")
 }
 
 #[derive(Debug, Default)]
@@ -408,7 +409,10 @@ async fn run_wechat_claw_sync_channel(
             continue;
         }
         let result = sync_wechat_claw_channel(
-            &state.wechat_claw_login_http_client,
+            &state
+                .wechat_claw_login_http_client
+                .current(channel_state.channel.base_url.as_str())
+                .await,
             channel_state.channel.clone(),
             channel_state.notify_started,
         )
@@ -452,12 +456,15 @@ async fn run_wechat_claw_sync_channel(
     }
 }
 
-async fn notify_stop_wechat_claw_channels(client: &Client, channels: Vec<WechatClawSyncChannel>) {
+async fn notify_stop_wechat_claw_channels(
+    client: &crate::system_proxy_client::SystemProxyClient,
+    channels: Vec<WechatClawSyncChannel>,
+) {
     stream::iter(channels)
         .for_each_concurrent(None, |channel| async move {
             let result = async {
                 let request = sync_ilink_post_request(
-                    client,
+                    &client.current(channel.base_url.as_str()).await,
                     &channel.base_url,
                     &channel.bot_token,
                     "ilink/bot/msg/notifystop",
@@ -711,7 +718,10 @@ async fn refresh_wechat_claw_channel_context_locked(
         return Err(stale_token_cooldown_message(remaining));
     }
     let notify_request = sync_ilink_post_request(
-        &state.wechat_claw_login_http_client,
+        &state
+            .wechat_claw_login_http_client
+            .current(sync_channel.base_url.as_str())
+            .await,
         &sync_channel.base_url,
         &sync_channel.bot_token,
         "ilink/bot/msg/notifystart",
@@ -741,7 +751,10 @@ async fn refresh_wechat_claw_channel_context_locked(
     let update = match tokio::time::timeout(
         SYNC_RECOVERY_POLL_TIMEOUT,
         sync_wechat_claw_channel(
-            &state.wechat_claw_login_http_client,
+            &state
+                .wechat_claw_login_http_client
+                .current(sync_channel.base_url.as_str())
+                .await,
             sync_channel.clone(),
             true,
         ),
@@ -796,10 +809,15 @@ enum WechatClawLoginPhase {
 }
 
 pub(super) async fn start_wechat_claw_login(state: &AppState) -> Result<Value, String> {
-    let response = get_bot_qrcode_request(&state.wechat_claw_login_http_client)?
-        .send()
-        .await
-        .map_err(|_| "无法连接微信 ClawBot 登录服务，请检查网络后重试".to_string())?;
+    let response = get_bot_qrcode_request(
+        &state
+            .wechat_claw_login_http_client
+            .current(ILINK_BASE_URL)
+            .await,
+    )?
+    .send()
+    .await
+    .map_err(|_| "无法连接微信 ClawBot 登录服务，请检查网络后重试".to_string())?;
     let payload = login_response_json(response).await?;
     let qr_code = payload
         .get("qrcode")
@@ -897,6 +915,8 @@ async fn poll_wechat_claw_qr(
     let url = endpoint_url(&base_url, "ilink/bot/get_qrcode_status")?;
     let response = state
         .wechat_claw_login_http_client
+        .current(url.as_str())
+        .await
         .get(url)
         .query(&[("qrcode", qr_code)])
         .headers(ilink::headers(None))
@@ -1021,8 +1041,11 @@ async fn poll_wechat_claw_activation(
     notify_started: bool,
 ) -> Result<Value, String> {
     if !notify_started {
-        let request =
-            notify_start_request(&state.wechat_claw_login_http_client, &base_url, &bot_token)?;
+        let request = notify_start_request(
+            &state.wechat_claw_login_http_client.current(&base_url).await,
+            &base_url,
+            &bot_token,
+        )?;
         match activation_response_json(request, "激活", ActivationResponseContract::Strict).await
         {
             Ok(_) => {
@@ -1048,7 +1071,7 @@ async fn poll_wechat_claw_activation(
     }
 
     let request = get_updates_request(
-        &state.wechat_claw_login_http_client,
+        &state.wechat_claw_login_http_client.current(&base_url).await,
         &base_url,
         &bot_token,
         &get_updates_buf,

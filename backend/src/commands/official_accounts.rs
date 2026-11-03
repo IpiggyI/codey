@@ -54,9 +54,15 @@ pub(super) async fn invoke(
         }
         "import_official_account_credential" => {
             let input = string_argument(args, "credential")?;
-            let account = oauth::import_credential(&state.http_client, &input)
-                .await
-                .map_err(|e| e.to_string())?;
+            let account = oauth::import_credential(
+                &state
+                    .http_client
+                    .current("https://auth.openai.com/oauth/token")
+                    .await,
+                &input,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
             let _guard = state.official_account_lock.lock().await;
             add_account(state, account, home)
         }
@@ -109,9 +115,14 @@ fn add_account(
 async fn start_login(state: &Arc<AppState>) -> Result<Value, String> {
     let mut logins = state.official_account_logins.lock().await;
     logins.cancel_all().await;
-    let session = oauth::start_login(state.http_client.clone())
-        .await
-        .map_err(|e| e.to_string())?;
+    let session = oauth::start_login(
+        state
+            .http_client
+            .current("https://auth.openai.com/oauth/token")
+            .await,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     let auth_url = session.auth_url.clone();
     let callback_listening = session.callback_listening;
     let callback_error = session.callback_error.clone();
@@ -225,8 +236,15 @@ pub(super) async fn switch_account(
 }
 
 async fn query_usage(state: &Arc<AppState>, args: &Value, home: &Path) -> Result<Value, String> {
-    query_usage_with(state, args, home, |auth| {
-        account_usage::fetch_usage_for_auth(&state.http_client, auth)
+    query_usage_with(state, args, home, |auth| async move {
+        account_usage::fetch_usage_for_auth(
+            &state
+                .http_client
+                .current("https://chatgpt.com/backend-api/wham/usage")
+                .await,
+            auth,
+        )
+        .await
     })
     .await
 }
@@ -681,6 +699,10 @@ mod tests {
                 primary: None,
                 secondary: None,
                 credits: None,
+                reset_credits: Some(account_usage::AccountResetCredits {
+                    available_count: 2,
+                    next_expires_at: Some(1_800_000_000),
+                }),
                 additional_limits: vec![],
                 account_label: None,
                 fetched_at: 10,
@@ -689,6 +711,13 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(response["status"], "ok");
+        assert_eq!(
+            response["resetCredits"],
+            json!({
+                "availableCount": 2,
+                "nextExpiresAt": 1_800_000_000
+            })
+        );
         assert!(!response.to_string().contains("secret"));
         assert_eq!(
             state

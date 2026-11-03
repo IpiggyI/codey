@@ -79,8 +79,9 @@ impl Reader {
     fn read_append(&mut self, file: &mut File, len: u64, session_id: &str) -> Result<()> {
         file.seek(SeekFrom::Start(self.offset))?;
         let mut reader = BufReader::new(file.take(len - self.offset));
+        let mut line = Vec::new();
         loop {
-            let mut line = Vec::new();
+            line.clear();
             let mut consumed = 0u64;
             let mut oversized = false;
             loop {
@@ -88,7 +89,7 @@ impl Reader {
                 if buffer.is_empty() {
                     return Ok(());
                 }
-                let end = buffer.iter().position(|byte| *byte == b'\n');
+                let end = memchr::memchr(b'\n', buffer);
                 let size = end.map_or(buffer.len(), |end| end + 1);
                 consumed += size as u64;
                 if !oversized && line.len() + size <= MAX_LINE_BYTES {
@@ -133,6 +134,38 @@ fn boundary_digest(file: &mut (impl Read + Seek), offset: u64) -> Result<[u8; 32
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    fn assert_reader_snapshot(reader: &Reader, file: &File, total: u64, turns: u64, id: &str) {
+        let snapshot = reader.state.snapshot();
+        assert_eq!(snapshot.total_tokens, Some(total));
+        assert_eq!(snapshot.turn_count, Some(turns));
+        assert_eq!(snapshot.last_turn.unwrap().id, id);
+        assert_eq!(reader.offset, file.metadata().unwrap().len());
+    }
+
+    #[test]
+    fn append_reader_preserves_stats_across_large_buffered_content() {
+        use serde_json::json;
+        use std::io::Write;
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        let start = |id, second| json!({"timestamp":format!("2026-10-28T00:00:{second:02}Z"),"type":"event_msg","payload":{"type":"task_started","turn_id":id}});
+        writeln!(file, "{}", start("large", 0)).unwrap();
+        let content = json!({"timestamp":"2026-10-28T00:00:01Z","type":"response_item","payload":{"type":"function_call_output","output":"tool output 中文 ".repeat(8192)}});
+        for _ in 0..100 {
+            writeln!(file, "{content}").unwrap();
+        }
+        writeln!(file, "{}", json!({"timestamp":"2026-10-28T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"total_tokens":123}}}})).unwrap();
+        let mut reader = Reader::default();
+        reader.read(file.path(), "own").unwrap();
+        assert_reader_snapshot(&reader, file.as_file(), 123, 1, "large");
+
+        // 大行后的短记录和后续追加都必须独立解析，重复读取不能增加轮数。
+        writeln!(file, "{}", start("next", 3)).unwrap();
+        reader.read(file.path(), "own").unwrap();
+        reader.read(file.path(), "own").unwrap();
+        assert_reader_snapshot(&reader, file.as_file(), 123, 2, "next");
+    }
 
     struct Counted {
         file: Cursor<Vec<u8>>,

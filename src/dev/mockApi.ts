@@ -864,7 +864,9 @@ if (import.meta.env.DEV) {
             primary: { usedPercent: used, windowMinutes: 300, resetsAt: now + 2 * 3600 },
             secondary: { usedPercent: used / 2, windowMinutes: 10080, resetsAt: now + 3 * 86400 },
           };
-          return { ...snapshot, status: "ok", authGeneration: previewUsageGeneration };
+          // 后端快照带官方重置次数；OfficialUsageSnapshot 暂不声明该字段，只在预览返回里附带。
+          const resetCredits = { availableCount: 2, nextExpiresAt: now + 5 * 86400 };
+          return { ...snapshot, resetCredits, status: "ok", authGeneration: previewUsageGeneration };
         }
         if (command === "store_official_account_usage") {
           if (!("authGeneration" in args)) return failed("缺少参数：authGeneration");

@@ -18,7 +18,12 @@ use super::{
 };
 use crate::codex_config::codex_home;
 use crate::error_log;
-use crate::launcher::{CodeyRuntime, restore_previous_runtime_state};
+use crate::launcher::{CodexExit, CodeyRuntime, restore_previous_runtime_state};
+
+#[cfg(any(windows, test))]
+mod crash_recovery;
+#[cfg(any(windows, test))]
+pub(super) use crash_recovery::CrashRecoveryBudget;
 
 const CODEX_APP_VERSION_CACHE_TTL: Duration = Duration::from_secs(30);
 
@@ -366,10 +371,28 @@ async fn reclaim_initial_session_scan(
 
 async fn forward_codex_exit_to_codey_shutdown(
     exit_state: Arc<AppState>,
-    codex_exit: oneshot::Receiver<()>,
+    codex_exit: oneshot::Receiver<CodexExit>,
     runtime_generation: u64,
 ) {
-    if codex_exit.await.is_err() {
+    forward_codex_exit_with_operations(
+        exit_state,
+        codex_exit,
+        runtime_generation,
+        #[cfg(windows)]
+        Some(&crash_recovery::SystemRecovery),
+        #[cfg(all(test, not(windows)))]
+        None,
+    )
+    .await;
+}
+
+async fn forward_codex_exit_with_operations(
+    exit_state: Arc<AppState>,
+    codex_exit: oneshot::Receiver<CodexExit>,
+    runtime_generation: u64,
+    #[cfg(any(windows, test))] recovery: Option<&dyn crash_recovery::RecoveryOperations>,
+) {
+    let Ok(exit) = codex_exit.await else {
         let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
             "launcher.codex_exit_watch_closed",
             json!({
@@ -379,16 +402,27 @@ async fn forward_codex_exit_to_codey_shutdown(
             }),
         );
         return;
-    }
-    while exit_state.restart_in_progress.load(Ordering::Acquire) {
-        let settled = exit_state.restart_settled.notified();
-        if !exit_state.restart_in_progress.load(Ordering::Acquire) {
-            break;
+    };
+    #[cfg(any(windows, test))]
+    let observed_intent = *exit_state.runtime_intent.borrow();
+    #[cfg(any(windows, test))]
+    let observed_during_restart = exit_state.restart_in_progress.load(Ordering::Acquire);
+    let _operation = loop {
+        while exit_state.restart_in_progress.load(Ordering::Acquire) {
+            let settled = exit_state.restart_settled.notified();
+            if !exit_state.restart_in_progress.load(Ordering::Acquire) {
+                break;
+            }
+            if exit_state.is_shutting_down() {
+                return;
+            }
+            let _ = tokio::time::timeout(Duration::from_millis(250), settled).await;
         }
-        // 兜底超时只是防丢通知，正常路径由 RestartInProgressGuard
-        // 的析构即时唤醒。
-        let _ = tokio::time::timeout(Duration::from_millis(250), settled).await;
-    }
+        let operation = exit_state.runtime_operation.lock().await;
+        if !exit_state.restart_in_progress.load(Ordering::Acquire) {
+            break operation;
+        }
+    };
     // 重启期间旧 Codex 的退出不能关闭新一代运行时；只有当前受控
     // Codex 的自然退出才联动关闭 Codey 主进程。
     let current_generation = exit_state.runtime_generation.load(Ordering::Acquire);
@@ -399,30 +433,92 @@ async fn forward_codex_exit_to_codey_shutdown(
             "codeyProcessId": std::process::id(),
             "runtimeGeneration": runtime_generation,
             "currentRuntimeGeneration": current_generation,
-            "shutdownRequested": current_runtime,
+            "exit": exit,
+            "currentRuntime": current_runtime,
         }),
     );
-    if current_runtime {
-        exit_state.request_shutdown();
+    if !current_runtime || exit_state.is_shutting_down() {
+        return;
     }
+    #[cfg(any(windows, test))]
+    if let Some(recovery) = recovery
+        && crash_recovery::is_confirmed_windows_crash(exit)
+        && !observed_during_restart
+        && *exit_state.runtime_intent.borrow() == observed_intent
+    {
+        drop(_operation);
+        crash_recovery::recover_codex_exit(
+            &exit_state,
+            runtime_generation,
+            observed_intent,
+            exit,
+            recovery,
+        )
+        .await;
+        return;
+    }
+    exit_state.request_shutdown();
 }
 
 async fn launch_codey_inner_locked(state: &Arc<AppState>) -> Result<Value, String> {
+    launch_codey_inner_locked_for_intent(state, None)
+        .await
+        .map_err(|error| format!("{error:#}"))
+}
+
+fn ensure_launch_intent(state: &AppState, recovery_intent: Option<u64>) -> Result<(), String> {
     ensure_runtime_can_start(state)?;
+    if recovery_intent.is_some_and(|intent| *state.runtime_intent.borrow() != intent) {
+        return Err("已取消 Codex 异常退出恢复".to_string());
+    }
+    Ok(())
+}
+
+async fn ensure_recovery_launch_ready(
+    state: &AppState,
+    recovery_intent: Option<u64>,
+) -> anyhow::Result<()> {
+    ensure_launch_intent(state, recovery_intent).map_err(anyhow::Error::msg)?;
+    #[cfg(windows)]
+    if recovery_intent.is_some() {
+        match crash_recovery::query_current_session().await {
+            Ok(true) => {}
+            Ok(false) => return Err(crash_recovery::SessionNotInteractive.into()),
+            Err(error) => return Err(error.context("启动前无法确认 Windows 会话是否可交互")),
+        }
+    }
+    ensure_launch_intent(state, recovery_intent).map_err(anyhow::Error::msg)
+}
+
+async fn launch_codey_inner_locked_for_intent(
+    state: &Arc<AppState>,
+    recovery_intent: Option<u64>,
+) -> anyhow::Result<Value> {
+    ensure_launch_intent(state, recovery_intent).map_err(anyhow::Error::msg)?;
+    if state.failed_runtime_start.lock().await.is_some() {
+        // 确认上次启动遗留的进程已停止后，才能恢复配置或重新启动。
+        stop_codey_runtime_locked(state)
+            .await
+            .map_err(anyhow::Error::msg)?;
+    }
     if state.runtime.lock().await.is_some() {
         return Ok(json!({"status":"already_running"}));
     }
     let launch_started = std::time::Instant::now();
     #[cfg(windows)]
-    ensure_windows_codex_app_path(state).await?;
+    ensure_windows_codex_app_path(state)
+        .await
+        .map_err(anyhow::Error::msg)?;
     let resolve_app_path_ms = launch_started.elapsed().as_millis() as u64;
     stop_waiting_webhook_watcher(state).await;
     restore_previous_runtime_state(codex_home())
         .await
-        .map_err(|error| format!("恢复上次 Codey 临时 Codex 配置失败：{error}"))?;
+        .map_err(|error| anyhow::anyhow!("恢复上次 Codey 临时 Codex 配置失败：{error}"))?;
     let restore_preparation_ms = launch_started.elapsed().as_millis() as u64 - resolve_app_path_ms;
     let routes_started = std::time::Instant::now();
-    prepare_routes_for_current_launch(state).await?;
+    prepare_routes_for_current_launch(state)
+        .await
+        .map_err(anyhow::Error::msg)?;
     let routes_ms = routes_started.elapsed().as_millis() as u64;
     let imported_default_route = super::ensure_default_route_imported(state).await;
     let config = sync_provider_models_for_launch(state, imported_default_route).await;
@@ -448,7 +544,7 @@ async fn launch_codey_inner_locked(state: &Arc<AppState>) -> Result<Value, Strin
     } else {
         None
     };
-    if let Err(error) = ensure_runtime_can_start(state) {
+    if let Err(error) = ensure_recovery_launch_ready(state, recovery_intent).await {
         reclaim_initial_session_scan(state, initial_scan_task).await;
         return Err(error);
     }
@@ -477,7 +573,7 @@ async fn launch_codey_inner_locked(state: &Arc<AppState>) -> Result<Value, Strin
                 next.settings_revision = next.settings_revision.saturating_add(1);
                 if let Err(error) = super::save_config_to_store(state, &next).await {
                     reclaim_initial_session_scan(state, initial_scan_task).await;
-                    return Err(error);
+                    return Err(anyhow::Error::msg(error));
                 }
                 *state.config.write().await = next.clone();
                 config = next;
@@ -488,7 +584,10 @@ async fn launch_codey_inner_locked(state: &Arc<AppState>) -> Result<Value, Strin
                     reason,
                     json!({}),
                 );
-                ensure_runtime_can_start(state)?;
+                if let Err(error) = ensure_recovery_launch_ready(state, recovery_intent).await {
+                    reclaim_initial_session_scan(state, initial_scan_task).await;
+                    return Err(error);
+                }
                 started = CodeyRuntime::start(
                     &config,
                     handler,
@@ -506,16 +605,21 @@ async fn launch_codey_inner_locked(state: &Arc<AppState>) -> Result<Value, Strin
         Ok(started) => started,
         Err(error) => {
             reclaim_initial_session_scan(state, initial_scan_task).await;
-            return Err(format!("{error:#}"));
+            *state.failed_runtime_start.lock().await =
+                crate::launcher::PendingRuntimeCleanup::from_error(&error);
+            return Err(error);
         }
     };
-    if state.is_shutting_down() {
+    if ensure_launch_intent(state, recovery_intent).is_err() {
         let stop_error = runtime.stop().await.err();
+        if stop_error.is_some() {
+            *state.runtime.lock().await = Some(Arc::new(runtime));
+        }
         reclaim_initial_session_scan(state, initial_scan_task).await;
-        return Err(stop_error.map_or_else(
-            || "Codey 已进入退出流程，已取消本次 Codex 启动".to_string(),
-            |error| format!("Codey 已进入退出流程，停止刚启动的 Codex 失败：{error}"),
-        ));
+        return Err(anyhow::Error::msg(stop_error.map_or_else(
+            || "已取消本次 Codex 启动".to_string(),
+            |error| format!("取消启动时停止刚启动的 Codex 失败：{error}"),
+        )));
     }
     *state.runtime.lock().await = Some(Arc::new(runtime));
     let runtime_generation = state.runtime_generation.fetch_add(1, Ordering::AcqRel) + 1;
@@ -603,6 +707,7 @@ pub async fn schedule_restart_codey_runtime(state: &Arc<AppState>) -> Result<Val
         return Ok(json!({"status":"already_restarting"}));
     }
 
+    state.cancel_pending_runtime_recovery();
     let (cancel, cancel_rx) = oneshot::channel();
     let restart_state = Arc::clone(state);
     let task = tokio::spawn(async move {
@@ -676,19 +781,38 @@ async fn run_scheduled_restart(restart_state: Arc<AppState>, mut cancel: oneshot
 async fn stop_codey_runtime_locked(state: &Arc<AppState>) -> Result<Value, String> {
     super::stop_wechat_claw_service(state).await;
     stop_waiting_webhook_watcher(state).await;
+    let cleaned_failed_start =
+        cleanup_pending_runtime_start_with(state, |pending| async move { pending.stop().await })
+            .await?;
     let runtime = state.runtime.lock().await.take();
     if let Some(runtime) = runtime {
         if let Err(error) = runtime.stop().await {
             *state.runtime.lock().await = Some(runtime);
             return Err(format!("{error:#}"));
         }
-    } else {
+    } else if !cleaned_failed_start {
         restore_previous_runtime_state(codex_home())
             .await
             .map_err(|error| error.to_string())?;
     }
     *state.startup_error.write().await = None;
     Ok(json!({"status":"stopped"}))
+}
+
+pub(crate) async fn cleanup_pending_runtime_start_with<F>(
+    state: &Arc<AppState>,
+    stop: impl FnOnce(Arc<crate::launcher::PendingRuntimeCleanup>) -> F,
+) -> Result<bool, String>
+where
+    F: std::future::Future<Output = anyhow::Result<()>>,
+{
+    let pending = state.failed_runtime_start.lock().await.clone();
+    let cleaned_failed_start = pending.is_some();
+    if let Some(pending) = pending {
+        stop(pending).await.map_err(|error| format!("{error:#}"))?;
+        state.failed_runtime_start.lock().await.take();
+    }
+    Ok(cleaned_failed_start)
 }
 
 pub async fn stop_codey_runtime(state: &Arc<AppState>) -> Result<Value, String> {
@@ -699,6 +823,7 @@ pub async fn stop_codey_runtime(state: &Arc<AppState>) -> Result<Value, String> 
 
 pub async fn begin_shutdown(state: &Arc<AppState>) {
     state.shutting_down.store(true, Ordering::Release);
+    state.cancel_pending_runtime_recovery();
     let restart = state.restart_task.lock().await.take();
     if let Some(ScheduledRestart { cancel, task }) = restart {
         let _ = cancel.send(());
@@ -751,6 +876,7 @@ pub async fn schedule_migrate_codey_router_sessions(
         return Ok(json!({"status":"already_restarting"}));
     }
 
+    state.cancel_pending_runtime_recovery();
     let (cancel, cancel_rx) = oneshot::channel();
     let restart_state = Arc::clone(state);
     let task = tokio::spawn(async move {
@@ -867,7 +993,7 @@ mod tests {
     use tokio::sync::oneshot;
 
     use super::{
-        classify_runtime_start_error, forward_codex_exit_to_codey_shutdown,
+        CodexExit, classify_runtime_start_error, forward_codex_exit_to_codey_shutdown,
         runtime_feature_status_value, runtime_start_failure_context,
     };
     use crate::commands::{AppShutdownReason, AppState};
@@ -957,7 +1083,12 @@ mod tests {
             7,
         ));
 
-        exit_tx.send(()).expect("signal Codex exit");
+        exit_tx
+            .send(CodexExit {
+                platform: std::env::consts::OS,
+                exit_code: Some(0),
+            })
+            .expect("signal Codex exit");
         let reason = tokio::time::timeout(Duration::from_secs(1), state.wait_for_shutdown())
             .await
             .expect("Codey shutdown was not requested after Codex exited");
@@ -978,7 +1109,12 @@ mod tests {
             7,
         ));
 
-        exit_tx.send(()).expect("signal stale Codex exit");
+        exit_tx
+            .send(CodexExit {
+                platform: std::env::consts::OS,
+                exit_code: Some(0),
+            })
+            .expect("signal stale Codex exit");
         watcher.await.expect("Codex exit forwarding task failed");
 
         assert!(!state.is_shutting_down());

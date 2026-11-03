@@ -9,6 +9,10 @@ const source = readFileSync(
   new URL("../public/prompt-optimize.js", import.meta.url),
   "utf8",
 );
+const bridgeSource = readFileSync(
+  new URL("../public/codey-bridge.js", import.meta.url),
+  "utf8",
+);
 
 class FakeElement extends FakeElementCore {
   constructor(tagName = "div", { visible = true, rect = null } = {}) {
@@ -56,6 +60,7 @@ class FakeElement extends FakeElementCore {
   }
 
   getBoundingClientRect() {
+    if (activeGeometryCounter) activeGeometryCounter.count += 1;
     if (this.visible && this.rect) return { ...this.rect };
     return this.visible
       ? {
@@ -80,18 +85,21 @@ class FakeElement extends FakeElementCore {
 }
 
 let latestMutationObserver = null;
+let activeGeometryCounter = null;
 
 class FakeMutationObserver {
   constructor(callback) {
     this.callback = callback;
     this.observed = false;
+    this.options = null;
     this.observeCalls = 0;
     this.disconnectCalls = 0;
     latestMutationObserver = this;
   }
 
-  observe() {
+  observe(_target, options = {}) {
     this.observed = true;
+    this.options = options;
     this.observeCalls += 1;
   }
 
@@ -285,13 +293,15 @@ const createEnvironment = (options = {}) => {
   slashCommandList.appendChild(slashGoalCommand);
   let slashCommandsOpen = options.slashCommands === true;
   const includeComposer = options.composerDom !== false;
+  const composerContainer = new FakeElement("div");
+  composerContainer.appendChild(toolbar);
   documentElement.appendChild(body);
   body.appendChild(scope);
   if (includeComposer) {
     scope.appendChild(anchor);
     scope.appendChild(textarea);
     scope.appendChild(newChatInput);
-    scope.appendChild(toolbar);
+    scope.appendChild(composerContainer);
     toolbar.appendChild(accessButton);
     toolbar.appendChild(modelButton);
     toolbar.appendChild(microphoneButton);
@@ -386,6 +396,7 @@ const createEnvironment = (options = {}) => {
     },
   };
 
+  let geometryMeasureCount = 0;
   const window = {
     innerHeight: 800,
     innerWidth: 1280,
@@ -408,7 +419,15 @@ const createEnvironment = (options = {}) => {
       statusEvents.push(event);
       return true;
     },
-    getComputedStyle: () => ({ display: "block", visibility: "visible" }),
+    getComputedStyle: (element) => {
+      geometryMeasureCount += 1;
+      return {
+        display: "block",
+        visibility: "visible",
+        flexDirection: "row",
+        ...element.style,
+      };
+    },
   };
 
   const testSetTimeout = (callback, delay, ...args) => {
@@ -437,6 +456,7 @@ const createEnvironment = (options = {}) => {
     sandbox.window.__codexSessionDeleteBridge = bridge;
   }
   const context = vm.createContext(sandbox);
+  if (options.withBridge) vm.runInContext(bridgeSource, context);
   vm.runInContext(source, context);
   const installedObserver = latestMutationObserver;
 
@@ -450,6 +470,7 @@ const createEnvironment = (options = {}) => {
     injectionStatus: window.__codeyInjectionStatus["prompt-optimize"],
     statusEvents,
     newChatInput,
+    composerContainer,
     composerInnerControl,
     settingsPanel,
     settingsInput,
@@ -462,11 +483,42 @@ const createEnvironment = (options = {}) => {
     scope,
     getElementById: (id) => findById(documentElement, id),
     getComposerQueryCount: () => composerQueryCount,
+    getGeometryMeasureCount: () => geometryMeasureCount,
+    measureGeometryWhile: (run) => {
+      const previousCounter = activeGeometryCounter;
+      const counter = { count: 0 };
+      activeGeometryCounter = counter;
+      try {
+        run();
+      } finally {
+        activeGeometryCounter = previousCounter;
+      }
+      return counter.count;
+    },
+    measureGeometryAfter: (run, waitMs = 140) => {
+      const previousCounter = activeGeometryCounter;
+      const counter = { count: 0 };
+      activeGeometryCounter = counter;
+      run();
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          activeGeometryCounter = previousCounter;
+          resolve(counter.count);
+        }, waitMs);
+      });
+    },
+    emitWindowEvent: (type) => {
+      for (const handler of windowListeners.get(type) || []) {
+        handler.call(window);
+      }
+    },
     getObserverState: () => ({
       active: installedObserver?.observed === true,
       disconnectCalls: installedObserver?.disconnectCalls ?? 0,
       observeCalls: installedObserver?.observeCalls ?? 0,
+      observesCharacterData: installedObserver?.options?.characterData === true,
     }),
+    getLatestObserver: () => latestMutationObserver,
     snapshot: () => context.window.__codeyPromptOptimize.snapshot(),
     setConfig: (next) => {
       config = next;
@@ -489,6 +541,10 @@ const createEnvironment = (options = {}) => {
     },
     setFallbackInputs: (inputs) => {
       fallbackInputs = inputs;
+    },
+    setTextareaVisible: (visible) => {
+      textarea.visible = visible;
+      newChatInput.visible = visible;
     },
     openSlashCommands: () => {
       if (slashCommandsOpen) return;
@@ -526,6 +582,7 @@ test("mounts the optimize button when enabled and an API key is configured", asy
   assert.equal(button.disabled, true);
   assert.equal(button.getAttribute("aria-disabled"), "true");
   assert.equal(button.parentElement, env.toolbar);
+  assert.equal(env.snapshot().buttonState, "visible");
   assert.deepEqual(env.toolbar.children.slice(0, 3), [
     env.accessButton,
     button,
@@ -538,6 +595,7 @@ test("mounts the optimize button when enabled and an API key is configured", asy
     active: true,
     disconnectCalls: 0,
     observeCalls: 1,
+    observesCharacterData: true,
   });
 });
 
@@ -567,6 +625,134 @@ test("restores a removed optimize button promptly and coalesces repeated compose
   await flush();
   assert.equal(button.parentElement, env.toolbar);
   assert.ok(env.getComposerQueryCount() - before <= 2);
+});
+
+test("keeps raw turn changes from scanning while the mounted button has no insertion target", async () => {
+  const env = createEnvironment({
+    enabled: true,
+    apiKeyConfigured: true,
+    anchors: false,
+    newChatComposer: true,
+  });
+  await flush();
+  const button = env.getElementById("codey-prompt-optimize-button");
+  env.modelButton.visible = false;
+  env.emitMutation([
+    {
+      type: "attributes",
+      target: env.modelButton,
+      attributeName: "hidden",
+    },
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 280));
+  assert.equal(button.parentElement, env.toolbar);
+  assert.equal(button.style.display, "none");
+  assert.equal(env.snapshot().buttonState, "hidden");
+
+  const beforeQueries = env.getComposerQueryCount();
+  const beforeMeasurements = env.getGeometryMeasureCount();
+  const turn = new FakeElement("article");
+  for (let index = 0; index < 30; index += 1) {
+    const delta = new FakeElement("span");
+    turn.appendChild(delta);
+    env.emitMutation([
+      {
+        type: "childList",
+        target: turn,
+        addedNodes: [delta],
+        removedNodes: [],
+      },
+    ]);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(env.getComposerQueryCount(), beforeQueries);
+  assert.equal(env.getGeometryMeasureCount(), beforeMeasurements);
+
+  env.newChatInput.innerText = "连续 turn 后仍需写入";
+  env.emitInput(env.newChatInput);
+  assert.equal(button.disabled, false);
+});
+
+test("relocates a hidden mounted button for composer replacements and geometry changes", async () => {
+  const env = createEnvironment({
+    enabled: true,
+    apiKeyConfigured: true,
+    anchors: false,
+    newChatComposer: true,
+  });
+  await flush();
+  const button = env.getElementById("codey-prompt-optimize-button");
+  env.modelButton.visible = false;
+  env.emitMutation([
+    {
+      type: "attributes",
+      target: env.modelButton,
+      attributeName: "hidden",
+    },
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 280));
+  assert.equal(button.style.display, "none");
+  assert.equal(env.snapshot().buttonState, "hidden");
+
+  const replacementActions = new FakeElement("div");
+  replacementActions.style.display = "flex";
+  const replacementModel = new FakeElement("button", {
+    rect: {
+      bottom: 290,
+      height: 36,
+      left: 120,
+      right: 240,
+      top: 254,
+      width: 120,
+    },
+  });
+  replacementModel.textContent = "模型";
+  replacementActions.appendChild(replacementModel);
+  // 新操作行里模型按钮旁还有其他按钮，按钮应直接插入这一行。
+  replacementActions.appendChild(new FakeElement("span"));
+  env.composerContainer.appendChild(replacementActions);
+  env.modelButton.remove();
+  env.scope.querySelectorAll = (selector) => {
+    if (selector === "button, [role='button']") {
+      return [env.accessButton, replacementModel];
+    }
+    if (selector === "textarea, [contenteditable='true'], [role='textbox']") {
+      return [];
+    }
+    return [];
+  };
+  env.emitMutation([
+    {
+      type: "childList",
+      target: env.composerContainer,
+      addedNodes: [replacementActions],
+      removedNodes: [env.modelButton],
+    },
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 280));
+  assert.equal(button.parentElement, replacementActions);
+  assert.equal(button.style.display, "inline-flex");
+
+  replacementModel.visible = false;
+  env.emitMutation([
+    {
+      type: "attributes",
+      target: replacementModel,
+      attributeName: "hidden",
+    },
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 280));
+  assert.equal(button.style.display, "none");
+
+  const scrollMeasurements = await env.measureGeometryAfter(() => {
+    env.emitWindowEvent("scroll");
+  });
+  assert.ok(scrollMeasurements > 0);
+
+  const resizeMeasurements = await env.measureGeometryAfter(() => {
+    env.emitWindowEvent("resize");
+  });
+  assert.ok(resizeMeasurements > 0);
 });
 
 
@@ -614,6 +800,28 @@ test("enables the optimize button only while the composer has content", async ()
   assert.equal(button.disabled, true);
 });
 
+test("a text edit without an input event updates the button through the shared bridge", async () => {
+  const env = createEnvironment({
+    enabled: true,
+    apiKeyConfigured: true,
+    withBridge: true,
+  });
+  await flush();
+  const button = env.getElementById("codey-prompt-optimize-button");
+  assert.equal(button.disabled, true);
+  const observer = env.getLatestObserver();
+  assert.equal(observer.observed, true);
+  assert.equal(observer.options.characterData, true);
+
+  const text = new FakeElement("span");
+  env.textarea.appendChild(text);
+  env.textarea.value = "直接改写的文字";
+  observer.callback([{ type: "characterData", target: text }]);
+  await flush();
+
+  assert.equal(button.disabled, false);
+});
+
 test("does not mount the button when the feature is disabled", async () => {
   const env = createEnvironment({ enabled: false, apiKeyConfigured: true });
   await flush();
@@ -624,6 +832,7 @@ test("does not mount the button when the feature is disabled", async () => {
     active: false,
     disconnectCalls: 0,
     observeCalls: 0,
+    observesCharacterData: false,
   });
 });
 
@@ -643,6 +852,7 @@ test("disconnects the document observer when prompt optimization is turned off",
     active: false,
     disconnectCalls: 1,
     observeCalls: 1,
+    observesCharacterData: true,
   });
   assert.equal(
     env.getElementById("codey-prompt-optimize-button").style.display,
@@ -865,6 +1075,80 @@ test("rescans when a connected composer is replaced during navigation", async ()
 
   assert.equal(nextInput.innerText, "优化后的提示词");
   assert.equal(env.textarea.value, "");
+});
+
+test("skips geometry scans for child and character changes inside the tracked input", async () => {
+  const env = createEnvironment({
+    enabled: true,
+    apiKeyConfigured: true,
+    anchors: false,
+    newChatComposer: true,
+  });
+  await flush();
+  const button = env.getElementById("codey-prompt-optimize-button");
+  const before = env.getComposerQueryCount();
+  const text = new FakeElement("span");
+  env.newChatInput.appendChild(text);
+
+  env.emitMutation([
+    {
+      type: "childList",
+      target: env.newChatInput,
+      addedNodes: [text],
+      removedNodes: [],
+    },
+    {
+      type: "childList",
+      target: env.newChatInput,
+      addedNodes: [],
+      removedNodes: [text],
+    },
+    { type: "characterData", target: text },
+    {
+      type: "attributes",
+      target: env.newChatInput,
+      attributeName: "contenteditable",
+    },
+    {
+      type: "attributes",
+      target: env.newChatInput,
+      attributeName: "placeholder",
+    },
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 280));
+
+  assert.equal(env.getComposerQueryCount(), before);
+  assert.equal(button.parentElement, env.toolbar);
+
+  env.newChatInput.innerText = "即时状态";
+  env.emitInput(text);
+  assert.equal(button.disabled, false);
+  assert.equal(env.getComposerQueryCount(), before);
+});
+
+test("rescans for structural changes outside the tracked input", async () => {
+  const env = createEnvironment({
+    enabled: true,
+    apiKeyConfigured: true,
+    anchors: false,
+    newChatComposer: true,
+  });
+  await flush();
+  const before = env.getComposerQueryCount();
+  const externalContainer = new FakeElement("div");
+  externalContainer.appendChild(env.newChatInput);
+
+  env.emitMutation([
+    {
+      type: "childList",
+      target: env.composerContainer,
+      addedNodes: [externalContainer],
+      removedNodes: [],
+    },
+  ]);
+  await new Promise((resolve) => setTimeout(resolve, 280));
+
+  assert.ok(env.getComposerQueryCount() > before);
 });
 
 test("ignores unrelated DOM mutations while the composer remains connected", async () => {

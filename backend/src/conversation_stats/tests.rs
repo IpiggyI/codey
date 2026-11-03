@@ -93,6 +93,33 @@ fn fixture() -> Vec<Value> {
 }
 
 #[test]
+fn conversation_stats_cache_preserves_large_lines_and_later_appends() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("records.jsonl");
+    let mut records = vec![start(1, "one")];
+    for second in 2..5 {
+        records.push(record(
+            second,
+            "response_item",
+            json!({
+                "type":"function_call_output", "output":"工具输出 ".repeat(8192)
+            }),
+        ));
+    }
+    records.push(count(5, 20, 120));
+    write(&path, &records);
+    let mut cache = reader::Cache::default();
+    assert_eq!(cache.read(&path, SESSION).unwrap().total_tokens, Some(120));
+    append(&path, &[start(6, "two"), count(7, 40, 260)]);
+    for _ in 0..2 {
+        let result = cache.read(&path, SESSION).unwrap();
+        assert_eq!(result.total_tokens, Some(260));
+        assert_eq!(result.turn_count, Some(2));
+        assert_eq!(result.last_turn.unwrap().id, "two");
+    }
+}
+
+#[test]
 fn conversation_stats_counts_tokens_and_uses_local_request_windows() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("records.jsonl");

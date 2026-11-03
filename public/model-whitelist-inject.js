@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "61";
+  const patchVersion = "62";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -88,6 +88,10 @@
   const fullReactDiscoveryIntervalMs = 10_000;
   const maxTrackedModelListRequests = 256;
   const maxKnownModelQueryClients = 8;
+  const maxReactScanNodes = 120;
+  const maxReactScanVisits = 6_000;
+  const maxMutationProbeNodes = 24;
+  const maxMutationProbeVisits = 96;
   let nextFullReactDiscoveryAt = 0;
   const modelListRequestIds = new Set();
   const knownModelQueryClients = new Set();
@@ -95,6 +99,8 @@
   let originalDispatchEvent = null;
   let patchedDispatchEvent = null;
   let groupedMenuTimer = 0;
+  let pendingFullGroupedMenuScan = false;
+  let pendingGroupedMenuRoots = new Set();
   let groupedMenuObserver = null;
   const groupedMenuTextObservers = new Map();
   let modelDisplayTextTimer = 0;
@@ -1354,9 +1360,12 @@
     return true;
   };
 
-  const enhanceGroupedModelMenus = () => {
+  const enhanceGroupedModelMenus = (roots = null) => {
     if (nativeSelectionOnly) return;
-    if (!catalog.loaded || disposed || typeof document.querySelectorAll !== "function") return;
+    if (!catalog.loaded || disposed) return;
+    const requestedRoots = roots == null ? null : uniqueGroupedMenuRoots(roots);
+    if (requestedRoots?.length === 0) return;
+    if (!requestedRoots && typeof document.querySelectorAll !== "function") return;
     ensureGroupedMenuStyles();
     const byMenuLabel = new Map();
     for (const modelName of catalog.models) {
@@ -1367,8 +1376,13 @@
         if (menuLabel) byMenuLabel.set(menuLabel, { modelName, presentation, menuLabel });
       }
     }
-    const containers = Array.from(document.querySelectorAll(groupedMenuSelector) || []);
-    for (const container of containers) {
+    const containers = requestedRoots
+      ? requestedRoots.flatMap((root) => {
+          const container = groupedMenuContainer(root);
+          return container ? [container] : [];
+        })
+      : Array.from(document.querySelectorAll(groupedMenuSelector) || []);
+    for (const container of uniqueGroupedMenuRoots(containers)) {
       const items = Array.from(container.querySelectorAll?.(groupedMenuItemSelector) || []);
       const enhancedItems = [];
       const existingHeadings = directRouteHeadings(container);
@@ -1443,12 +1457,30 @@
     }
   };
 
-  const scheduleGroupedModelMenuEnhancement = () => {
+  const scheduleGroupedModelMenuEnhancement = (...args) => {
+    const [roots] = args;
     if (nativeSelectionOnly) return;
-    if (disposed || groupedMenuTimer || !catalog.loaded) return;
+    if (disposed || !catalog.loaded) return;
+    if (roots == null) {
+      pendingFullGroupedMenuScan = true;
+      pendingGroupedMenuRoots.clear();
+    } else {
+      for (const root of roots || []) {
+        const element = groupedMenuElement(root);
+        if (!element) continue;
+        pendingGroupedMenuRoots.add(element);
+        for (const menu of menusWithin(element)) pendingGroupedMenuRoots.add(menu);
+      }
+      if (pendingGroupedMenuRoots.size === 0) return;
+    }
+    if (groupedMenuTimer) return;
     groupedMenuTimer = window.setTimeout(() => {
       groupedMenuTimer = 0;
-      enhanceGroupedModelMenus();
+      const scanEverything = pendingFullGroupedMenuScan;
+      const pendingRoots = Array.from(pendingGroupedMenuRoots);
+      pendingFullGroupedMenuScan = false;
+      pendingGroupedMenuRoots.clear();
+      enhanceGroupedModelMenus(scanEverything ? null : pendingRoots);
     }, 0);
   };
 
@@ -1456,6 +1488,18 @@
     if (node && typeof node.matches === "function") return node;
     const parent = node?.parentElement;
     return parent && typeof parent.matches === "function" ? parent : null;
+  };
+
+  const uniqueGroupedMenuRoots = (roots) => {
+    const unique = [];
+    const seen = new Set();
+    for (const root of roots || []) {
+      const element = groupedMenuElement(root);
+      if (!element || seen.has(element)) continue;
+      seen.add(element);
+      unique.push(element);
+    }
+    return unique;
   };
 
   // This header is already mounted when CLI fallback injects the renderer.
@@ -1510,7 +1554,7 @@
   };
 
   const observeSubagentModelLabel = (element) => {
-    if (disposed || !isSubagentModelLabel(element)) return;
+    if (disposed || !element || !isSubagentModelLabel(element)) return false;
     if (!subagentModelLabels.has(element)) {
       const MutationObserver = window.MutationObserver || globalThis.MutationObserver;
       const observer = typeof MutationObserver === "function"
@@ -1521,13 +1565,20 @@
       observer?.observe(element, { childList: true, characterData: true, subtree: true });
     }
     updateSubagentModelLabel(element);
+    return true;
   };
 
-  const discoverSubagentModelLabels = (node) => {
+  const discoverSubagentModelLabels = (node, {
+    allowTurn = false,
+    probe = null,
+  } = {}) => {
     const element = groupedMenuElement(node);
-    if (!element || element.closest?.("[data-turn-key]")) return;
-    observeSubagentModelLabel(element);
+    if (!element || (!allowTurn && element.closest?.("[data-turn-key]"))) return;
+    if (element.matches?.(subagentModelLabelSelector)) {
+      observeSubagentModelLabel(element);
+    }
     for (const label of element.querySelectorAll?.(subagentModelLabelSelector) || []) {
+      if (probe && !probe.admit(label)) break;
       observeSubagentModelLabel(label);
     }
   };
@@ -1546,6 +1597,66 @@
     return element.closest?.(groupedMenuSelector) || null;
   };
 
+  const modelMutationContextSelector = [
+    groupedMenuSelector,
+    subagentModelLabelSelector,
+    "[class*='h-toolbar-pane']",
+  ].join(", ");
+  const boundedMutationProbe = (roots, target) => {
+    const seen = new Set();
+    const menus = [];
+    const targetElement = groupedMenuElement(target);
+    const targetInMenuContext = Boolean(targetElement?.closest?.(groupedMenuSelector));
+    const targetInModelContext = Boolean(targetElement?.closest?.(modelMutationContextSelector));
+    let nodes = 0;
+    let visits = 0;
+    let hasContext = targetInModelContext;
+    let menuContext = targetInMenuContext;
+    const inspect = (element) => {
+      if (!element || element.nodeType === 3 || seen.has(element)) return false;
+      if (nodes >= maxMutationProbeNodes || visits >= maxMutationProbeVisits) return false;
+      seen.add(element);
+      nodes += 1;
+      if (element.matches?.(groupedMenuSelector)) {
+        hasContext = true;
+        menuContext = true;
+        menus.push(element);
+        return true;
+      }
+      if (element.matches?.(subagentModelLabelSelector)) {
+        hasContext = observeSubagentModelLabel(element) || hasContext;
+      }
+      return true;
+    };
+    const queue = [];
+    const enqueue = (root) => {
+      const element = groupedMenuElement(root);
+      if (element) queue.push(element);
+    };
+    roots.forEach(enqueue);
+    for (let index = 0; index < queue.length
+      && nodes < maxMutationProbeNodes && visits < maxMutationProbeVisits; index += 1) {
+      const current = queue[index];
+      if (!current || current.nodeType === 3 || seen.has(current)) continue;
+      visits += 1;
+      if (!inspect(current)) continue;
+      for (const child of current.children || []) {
+        if (queue.length >= maxMutationProbeVisits) break;
+        queue.push(child);
+      }
+    }
+    return { hasContext, menuContext, menus, nodes, visits };
+  };
+
+  const probeAddedMutationNodes = (nodes, target) => {
+    if (!turnAncestor(target)) return null;
+    const roots = Array.from(nodes || [])
+      .filter((node) => node?.nodeType !== 3)
+      .map(groupedMenuElement)
+      .filter(Boolean);
+    return roots.length > 0 ? boundedMutationProbe(roots, target) : null;
+  };
+
   const menusWithin = (node) => {
     const element = groupedMenuElement(node);
     if (!element) return [];
@@ -1556,6 +1667,13 @@
     }
     return menus;
   };
+
+  const turnAncestor = (target) => target?.closest?.("[data-turn-key]") || null;
+
+  const isStreamingMutationInsideTurn = (mutation, target) => (
+    mutation.type === "childList"
+    && Boolean(turnAncestor(target))
+  );
 
   const stopGroupedMenuTextObserver = (container) => {
     const observer = groupedMenuTextObservers.get(container);
@@ -1568,7 +1686,7 @@
     if (!container || disposed || groupedMenuTextObservers.has(container)) return;
     const MutationObserver = window.MutationObserver || globalThis.MutationObserver;
     if (typeof MutationObserver !== "function") return;
-    const observer = new MutationObserver(scheduleGroupedModelMenuEnhancement);
+    const observer = new MutationObserver(() => scheduleGroupedModelMenuEnhancement([container]));
     // Route saves can rewrite only a menu row's text node. CharacterData has
     // to stay on the open picker, otherwise the short-name label stays
     // ungrouped until the menu is reopened.
@@ -1617,15 +1735,27 @@
     const discoveredMenus = [];
     let relevant = false;
     for (const mutation of mutations) {
-      const label = groupedMenuElement(mutation.target)?.closest?.(subagentModelLabelSelector);
+      const target = groupedMenuElement(mutation.target);
+      const turnProbe = probeAddedMutationNodes(mutation.addedNodes || [], mutation.target);
+      if (isStreamingMutationInsideTurn(mutation, target)) {
+        if (turnProbe?.hasContext) {
+          relevant = true;
+          if (!nativeSelectionOnly && turnProbe.menuContext) {
+            discoveredMenus.push(...turnProbe.menus);
+          }
+        }
+        continue;
+      }
+      const label = target?.closest?.(subagentModelLabelSelector);
       if (label) observeSubagentModelLabel(label);
-      const targetMenu = nativeSelectionOnly ? null : groupedMenuContainer(mutation.target);
+      const targetMenu = nativeSelectionOnly ? null : groupedMenuContainer(target);
       if (targetMenu) {
         relevant = true;
         discoveredMenus.push(targetMenu);
       }
       if (mutation.type === "characterData") continue;
-      for (const node of mutation.addedNodes || []) {
+      const addedNodes = mutation.addedNodes || [];
+      for (const node of addedNodes) {
         discoverSubagentModelLabels(node);
         const menus = nativeSelectionOnly ? [] : menusWithin(node);
         if (menus.length === 0) continue;
@@ -1643,10 +1773,22 @@
     for (const container of [...groupedMenuTextObservers.keys()]) {
       if (container.isConnected === false) stopGroupedMenuTextObserver(container);
     }
-    if (relevant) scheduleGroupedModelMenuEnhancement();
+    if (relevant) {
+      scheduleGroupedModelMenuEnhancement(
+        discoveredMenus.length > 0 ? discoveredMenus : null,
+      );
+    }
     for (const element of subagentModelLabels.keys()) {
       if (element.isConnected === false) stopSubagentModelLabel(element);
     }
+  };
+
+  // role 决定元素是否为模型菜单，class 决定子代理模型标签和工具栏。
+  // 共享观察器只分发订阅声明过的属性记录，所以订阅时显式声明。
+  const groupedMenuMutationOptions = {
+    attributes: true,
+    attributeFilter: ["class", "role"],
+    childList: true,
   };
 
   const installGroupedModelMenuObserver = () => {
@@ -1654,9 +1796,10 @@
     discoverSubagentModelLabels(document.body);
     const dispatcher = window.__codeyMutationDispatcher;
     if (typeof dispatcher?.subscribe === "function") {
-      const unsubscribe = dispatcher.subscribe(handleGroupedMenuMutations, {
-        childList: true,
-      });
+      const unsubscribe = dispatcher.subscribe(
+        handleGroupedMenuMutations,
+        groupedMenuMutationOptions,
+      );
       if (dispatcher.snapshot?.().observerInstalled) {
         groupedMenuObserver = { disconnect: unsubscribe };
         syncGroupedMenuTextObservers();
@@ -1737,14 +1880,14 @@
       ) || []),
     ].filter(Boolean);
     if (forceScan) {
-      nodes.push(...Array.from(document.querySelectorAll?.("*") || []).slice(0, 600));
+      nodes.push(...Array.from(document.querySelectorAll?.("*") || []).slice(0, maxReactScanNodes));
     }
     return nodes.filter((node, index, all) => all.indexOf(node) === index);
   };
 
   const scanReactObjectGraph = (forceScan = false, discover = false) =>
     codeyTimed(
-      forceScan ? "model-whitelist.scanReactObjectGraph.force" : "model-whitelist.scanReactObjectGraph",
+      forceScan ? "model-whitelist.scanReactObjectGraph.exhaustive" : "model-whitelist.scanReactObjectGraph",
       1,
       () => scanReactObjectGraphImpl(forceScan, discover),
     );
@@ -1764,7 +1907,7 @@
         !value
         || (typeof value !== "object" && typeof value !== "function")
         || visited.has(value)
-        || visitedCount >= 30_000
+        || visitedCount >= maxReactScanVisits
         // Current renderer builds wrap the query client in deep provider
         // stacks; the visited cap above keeps the wider hop budget bounded.
         || depth > 12
@@ -1833,14 +1976,21 @@
 
   const scanReactObjectGraphWhenDue = (forceScan = false, discover = false) => {
     const now = Date.now();
-    const runFullScan = forceScan || now >= nextFullReactDiscoveryAt;
+    // Mounted roots are enough to find clients after a recent successful
+    // discovery. A full document walk is reserved for the periodic fallback
+    // or for deliveries that still need to discover their first client.
+    const runFullScan = (
+      now >= nextFullReactDiscoveryAt
+      || (forceScan && knownModelQueryClients.size === 0)
+    );
+    const effectiveDiscover = discover || (forceScan && !runFullScan);
     if (!runFullScan && knownModelQueryClients.size === 0 && !discover) {
       return { queryClients: [], reactContainers: 0 };
     }
     if (runFullScan) {
       nextFullReactDiscoveryAt = now + fullReactDiscoveryIntervalMs;
     }
-    return scanReactObjectGraph(runFullScan, discover);
+    return scanReactObjectGraph(runFullScan, effectiveDiscover);
   };
 
   const currentDelivery = (revision) => !disposed && revision === catalogRevision;
@@ -3026,6 +3176,8 @@
       refreshTimer = 0;
       window.clearTimeout(groupedMenuTimer);
       groupedMenuTimer = 0;
+      pendingFullGroupedMenuScan = false;
+      pendingGroupedMenuRoots.clear();
       window.clearTimeout(providerMismatchNoticeTimer);
       providerMismatchNoticeTimer = 0;
       document.getElementById?.("codey-provider-mismatch-notice")?.remove?.();

@@ -922,3 +922,77 @@ test("keeps the rail entry while Codex marks the rail aria-hidden for a modal", 
   assert.ok(restored);
   assert.equal(restored.parentElement, replacement);
 });
+
+test("settings overlay preloads on a hover dwell, press, or focus but not a drive-by pass", async () => {
+  const fixture = createStartupUpdateFixture(async (path) => {
+    if (path === "/backend/status") return { status: "ok", availableUpdate: null };
+    if (path === "/backend/health") return { status: "ok" };
+    throw new Error(`unexpected bridge path: ${path}`);
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const button = fixture.document.getElementById("codey-settings-button");
+  let loads = 0;
+  fixture.window.__codeySettingsOverlay = {
+    __codeyLazyLoader: true,
+    load: async () => {
+      loads += 1;
+      throw new Error("passive preload failures stay silent");
+    },
+    toggle() {},
+  };
+  const preloadTimer = () => fixture.activeTimers().filter((timer) => timer.delay === 120).at(-1);
+
+  button.dispatchEvent({ type: "pointerenter" });
+  const pass = preloadTimer();
+  assert.equal(pass?.cleared, false, "hovering schedules a preload");
+  button.dispatchEvent({ type: "pointerleave" });
+  assert.equal(pass.cleared, true, "a drive-by pass cancels the preload");
+  assert.equal(loads, 0);
+
+  button.dispatchEvent({ type: "pointerenter" });
+  const dwell = preloadTimer();
+  dwell.cleared = true;
+  dwell.callback();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(loads, 1);
+
+  button.dispatchEvent({ type: "pointerdown" });
+  button.dispatchEvent({ type: "focus" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(loads, 3);
+  assert.deepEqual(fixture.alerts, []);
+});
+
+test("settings overlay preload is skipped for a non-lazy overlay and while the runtime is unavailable", async () => {
+  let healthy = false;
+  const fixture = createStartupUpdateFixture(async (path) => {
+    if (path === "/backend/status") return { status: "ok", availableUpdate: null };
+    if (path === "/backend/health") {
+      return healthy ? { status: "ok" } : { status: "failed", code: "bridge_unavailable" };
+    }
+    throw new Error(`unexpected bridge path: ${path}`);
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const button = fixture.document.getElementById("codey-settings-button");
+  assert.equal(button.getAttribute("data-codey-runtime-state"), "unavailable");
+
+  let loads = 0;
+  const overlay = { __codeyLazyLoader: true, load: async () => { loads += 1; }, toggle() {} };
+  fixture.window.__codeySettingsOverlay = overlay;
+  button.dispatchEvent({ type: "pointerdown" });
+  button.dispatchEvent({ type: "focus" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(loads, 0, "no preload while the runtime is unavailable");
+
+  healthy = true;
+  await fixture.window.__codeyRefreshRuntimeHealth();
+  assert.notEqual(button.getAttribute("data-codey-runtime-state"), "unavailable");
+  button.dispatchEvent({ type: "pointerdown" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(loads, 1, "a healthy runtime preloads the lazy loader");
+
+  fixture.window.__codeySettingsOverlay = { load: overlay.load, toggle() {} };
+  button.dispatchEvent({ type: "pointerdown" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(loads, 1, "no preload when the overlay is not the lazy loader");
+});

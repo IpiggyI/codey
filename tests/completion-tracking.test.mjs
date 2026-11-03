@@ -374,6 +374,7 @@ function loadInjection({
     alerts,
     bridgeCalls,
     confirmations,
+    document,
     emitMutations: (mutations) => mutationHandler?.(mutations),
     flushTimers: () => {
       while (timers.length) timers.shift()();
@@ -469,6 +470,38 @@ test("disposed native completion microtask never calls the old controller", asyn
   assert.deepEqual(events, []);
 });
 
+test("uses the visible retained session for initial reconciliation", async () => {
+  const events = [];
+  const hidden = new FakeElement({
+    "data-response-annotation-conversation": "session-hidden",
+  });
+  hidden.layoutHidden = true;
+  const visible = new FakeElement({
+    "data-response-annotation-conversation": "session-visible",
+  });
+  const selector = [
+    "[data-above-composer-conversation-id]",
+    "[data-session-id]",
+    "[data-conversation-id]",
+    "[data-thread-id]",
+    "[data-request-user-input-auto-resolution-conversation-id]",
+    "[data-response-annotation-conversation]",
+  ].join(", ");
+  loadInjection({
+    codexSessionController: createRecoveryController(events),
+    sessionElements: {
+      [selector]: [hidden, visible],
+    },
+  });
+
+  await flushMicrotasks();
+
+  assert.deepEqual(
+    events.map((event) => event.payload.conversationId),
+    ["session-visible"],
+  );
+});
+
 test("reconciles when the conversation appears after renderer startup", async () => {
   const events = [];
   const runtime = loadInjection({
@@ -549,6 +582,54 @@ test("discovers a cached local manager when its registry is no longer exported",
     assert.equal(runtime.window.__codeyPageCapabilities.usage.status, "available");
     assert.deepEqual(requests, ["account/rateLimits/read"]);
     assert.equal(reads.length, 1, "reuse the verified manager on subsequent calls");
+  }
+});
+
+test("React manager discovery enumerates an object shared by many fibers once per scan", () => {
+  const runtime = loadInjection({ initialSessionId: "" });
+  let enumerations = 0;
+  const shared = new Proxy(Object.fromEntries(Array.from({ length: 2_000 }, (_, index) => [`k${index}`, index])), {
+    ownKeys(target) {
+      enumerations += 1;
+      return Reflect.ownKeys(target);
+    },
+  });
+  const manager = { sendRequest() { throw Error("must not send"); } };
+  const scope = { query: null, get() {}, set() {}, watch() {}, when() {} };
+  let fiber = { memoizedState: { scope }, memoizedProps: { shared }, return: null };
+  for (let depth = 1; depth < 24; depth += 1) {
+    fiber = { memoizedProps: { shared }, return: fiber };
+  }
+  runtime.document.body.__reactFiber$shared = fiber;
+  const found = runtime.window.__codeyAppServerManagerFromReact((candidate, hostId) => (
+    candidate === scope && hostId === "local" ? manager : null
+  ));
+  assert.equal(found, manager, "the deepest fiber is still scanned");
+  assert.equal(enumerations, 1);
+});
+
+test("background completion reconcile backs off longer than other failed capabilities", async () => {
+  for (const [feature, capMs] of [["reconcile", 300_000], ["usage", 30_000]]) {
+    const runtime = loadInjection({ initialSessionId: "" });
+    let discoveries = 0;
+    runtime.document.scripts.push({ src: "app://-/assets/app-initial-unsupported.js" });
+    runtime.window.__codeyImportCodexAsset = async () => {
+      discoveries += 1;
+      return {};
+    };
+    const load = () => runtime.window.__codeyLoadCodexSessionController({ feature });
+    for (let failure = 0; failure < 10; failure += 1) {
+      await assert.rejects(load(), /暂不支持/);
+      runtime.advanceTime(600_000);
+    }
+    await assert.rejects(load(), /暂不支持/);
+    assert.equal(discoveries, 11, `${feature} retries after each expired backoff`);
+    runtime.advanceTime(capMs - 1);
+    await assert.rejects(load(), /暂不支持/);
+    assert.equal(discoveries, 11, `${feature} skips discovery inside its backoff cap`);
+    runtime.advanceTime(1);
+    await assert.rejects(load(), /暂不支持/);
+    assert.equal(discoveries, 12, `${feature} rediscovers once its backoff cap expires`);
   }
 });
 
