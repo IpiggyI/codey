@@ -639,6 +639,122 @@ test("resolves the native manager through its state key when the registry class 
   });
 });
 
+// Codex 26.1027 keeps AppServerManager in the desktop host process. The page
+// holds a Cap'n Web stub of its facade: a Proxy over a function whose prototype
+// declares dup/onRpcBroken and whose every other property is an RPC call.
+function hostedAppServerStub(handlers, events) {
+  const brokenCallbacks = [];
+  const prototype = Object.create(Function.prototype, {
+    dup: { value() { return this; } },
+    onRpcBroken: { value(callback) { brokenCallbacks.push(callback); } },
+  });
+  const target = function () {};
+  Object.setPrototypeOf(target, prototype);
+  const stub = new Proxy(target, {
+    get(object, property) {
+      if (typeof property === "symbol" || property in prototype) return Reflect.get(object, property);
+      return (...args) => {
+        const pending = Promise.resolve().then(() => {
+          if (!handlers[property]) throw new Error(`RPC method ${property} is not exposed`);
+          return handlers[property](...args);
+        });
+        pending[Symbol.dispose] = () => events.push(`dispose:${property}`);
+        return pending;
+      };
+    },
+  });
+  return { stub, breakConnection: () => brokenCallbacks.forEach((callback) => callback()) };
+}
+
+function hostedAppServerAssets(stub) {
+  const initialUrl = "app://-/assets/app-initial-session-delete.js";
+  // Same shape as the 26.1027 resolver: it returns the host stub, not a manager.
+  const resolver = function resolveHostRpc(scope, hostId) {
+    const connection = scope.get("connection", hostId);
+    if (connection == null) throw new Error(`AppServerManager RPC is unavailable for hostId: ${hostId}`);
+    return connection.forHost(hostId);
+  };
+  return {
+    [initialUrl]: { source: "export{resolveHostRpc as a};", module: { a: resolver } },
+    scopeGet: (requested, hostId) => {
+      if (requested !== "connection" || hostId !== "local") throw new Error("unknown state");
+      return { forHost: () => stub };
+    },
+  };
+}
+
+test("deletes through the desktop host session manager RPC stub", async () => {
+  const events = [];
+  const { stub } = hostedAppServerStub({
+    discardConversationFromCache: (id) => { events.push(`discard:${id}`); },
+    refreshRecentConversations: () => { events.push("refresh"); return 1; },
+  }, events);
+  const runtime = loadInjection({
+    dispatcher: null, codexAssets: hostedAppServerAssets(stub),
+    bridge: async (path) => {
+      if (path === "/session/delete") { events.push("persist"); return { status: "ok", deleted: true }; }
+      return { status: "ok" };
+    },
+  });
+  events.length = 0;
+  runtime.thread.querySelector("[data-codey-session-delete]").click();
+  runtime.document.body.querySelector("[data-codey-session-delete-confirm]").click();
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, [
+    "discard:thread-1", "dispose:discardConversationFromCache", "persist",
+    "refresh", "dispose:refreshRecentConversations",
+    "refresh", "dispose:refreshRecentConversations",
+  ]);
+  assert.equal(runtime.window.__codeyCodexSessionController.manager, stub);
+  assert.equal(runtime.thread.getAttribute("data-codey-session-delete-state"), "deleted");
+  assert.doesNotMatch(runtime.document.getElementById("codey-runtime-toast")?.textContent, /列表同步暂未完成/);
+});
+
+test("host session manager release rejection or timeout never deletes", async (t) => {
+  for (const outcome of ["reject", "timeout"]) await t.test(outcome, async () => {
+    const events = [];
+    const { stub } = hostedAppServerStub({
+      discardConversationFromCache: (id) => {
+        events.push(`discard:${id}`);
+        if (outcome === "reject") throw new Error("host unavailable");
+        return new Promise(() => {});
+      },
+      refreshRecentConversations: () => { events.push("refresh"); },
+    }, events);
+    const runtime = loadInjection({ dispatcher: null, codexAssets: hostedAppServerAssets(stub) });
+    events.length = 0;
+    runtime.thread.querySelector("[data-codey-session-delete]").click();
+    runtime.document.body.querySelector("[data-codey-session-delete-confirm]").click();
+    await new Promise((resolve) => setImmediate(resolve));
+    if (outcome === "timeout") {
+      runtime.fireTimers(5000);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.equal(events.includes("refresh"), false);
+    assert.equal(runtime.bridgeCalls.some(({ path }) => path === "/session/delete"), false);
+    assert.equal(runtime.thread.getAttribute("data-codey-session-delete-state"), null);
+    assert.match(runtime.document.getElementById("codey-runtime-toast")?.textContent,
+      outcome === "timeout" ? /释放会话超时/ : /释放会话失败/);
+  });
+});
+
+test("host session manager enables list refresh only and is dropped when the RPC breaks", async () => {
+  const events = [];
+  const { stub, breakConnection } = hostedAppServerStub({
+    refreshRecentConversations: () => { events.push("refresh"); },
+  }, events);
+  const runtime = loadInjection({ dispatcher: null, codexAssets: hostedAppServerAssets(stub) });
+  const load = runtime.window.__codeyLoadCodexSessionController;
+  assert.equal((await load({ feature: "refresh" })).manager, stub);
+  assert.equal(await runtime.window.__codeyRefreshRecentLocalSessions(), true);
+  assert.deepEqual(events, ["refresh", "dispose:refreshRecentConversations"]);
+  await assert.rejects(load({ feature: "deleteMessages" }), { code: "codey_capability_unavailable" });
+  await assert.rejects(load({ requireCompletionReconcile: true }), { code: "codey_capability_unavailable" });
+  breakConnection();
+  assert.equal(runtime.window.__codeyCodexSessionController, null);
+});
+
 test("native registry release rejection or timeout never evicts or deletes an old session", async (t) => {
   for (const outcome of ["reject", "timeout"]) await t.test(outcome, async () => {
     const events = [];

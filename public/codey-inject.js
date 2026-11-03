@@ -2645,7 +2645,61 @@
     }
   };
 
+  // Codex 26.1027 runs AppServerManager in the desktop host process; the page
+  // only holds an RPC stub of its facade. Every stub property is callable, so
+  // the stub is recognized by the dup/onRpcBroken methods on its prototype.
+  const isAppServerRpcStub = (value) => (
+    typeof value === "function"
+    && Boolean(declaredMethod(value, "dup"))
+    && Boolean(declaredMethod(value, "onRpcBroken"))
+  );
+
+  // Release each RPC result after use, as Codex does for host calls.
+  const callHostedAppServer = async (call) => {
+    const pending = call();
+    try {
+      return await pending;
+    } finally {
+      try { pending?.[Symbol.dispose]?.(); } catch {}
+    }
+  };
+
+  // A broken stub stays callable but every call rejects; drop the cached
+  // controller so the next operation discovers the reconnected stub.
+  const watchedHostedManagers = new WeakSet();
+  const watchHostedManager = (manager) => {
+    if (watchedHostedManagers.has(manager)) return;
+    watchedHostedManagers.add(manager);
+    try {
+      manager.onRpcBroken(() => {
+        if (window.__codeyCodexSessionController?.manager === manager) {
+          window.__codeyCodexSessionController = null;
+        }
+      });
+    } catch {}
+  };
+
+  const hostedSessionController = (manager) => {
+    watchHostedManager(manager);
+    return {
+      kind: "manager",
+      manager,
+      discardConversation: (sessionId) => callHostedAppServer(() => manager.discardConversationFromCache(sessionId)),
+      // The host facade does not expose handleThreadDeletion. The discard above
+      // already evicted the conversation and its summary; re-list from the app
+      // server so the deleted thread is not restored from a stale list.
+      notifyConversationDeleted: () => callHostedAppServer(() => manager.refreshRecentConversations()),
+      prepareMessageDeletion: null,
+      planMessageDeletion: null,
+      revertMessageDeletion: null,
+      finishMessageDeletion: null,
+      refreshRecentConversations: () => callHostedAppServer(() => manager.refreshRecentConversations()),
+      reconcileCompletedConversation: null,
+    };
+  };
+
   const managerSessionController = (manager) => {
+    if (isAppServerRpcStub(manager)) return hostedSessionController(manager);
     const canDeleteMessages = isLocalMessageDeletionManager(manager);
     return {
       kind: "manager",
