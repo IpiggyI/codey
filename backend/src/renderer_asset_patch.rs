@@ -119,7 +119,18 @@ pub(crate) struct CodexPaths {
 
 /// Codex 启动前调用：替换旧服务，从端点一出现就开始挂载页面。
 pub(crate) fn start_service(debug_port: u16, disable_pet: bool, paths: Option<CodexPaths>) {
+    error_log::begin_renderer_patch_launch();
+    start_service_at(debug_port, disable_pet, paths, chrono::Utc::now());
+}
+
+fn start_service_at(
+    debug_port: u16,
+    disable_pet: bool,
+    paths: Option<CodexPaths>,
+    started_at: chrono::DateTime<chrono::Utc>,
+) {
     let mut context = ServiceContext::new(disable_pet, default_cache_dir());
+    context.started_at = started_at;
     if let Some(paths) = &paths {
         context.start_asset_scan(paths);
     }
@@ -143,7 +154,7 @@ pub(crate) fn start_service(debug_port: u16, disable_pet: bool, paths: Option<Co
 /// 注入路径调用：同一端口的服务仍在运行时什么都不做；重启时沿用上次启动
 /// 登记的 Codex 路径。
 pub(crate) fn ensure_service(debug_port: u16, disable_pet: bool) {
-    let (running, paths) = {
+    let (running, paths, started_at) = {
         let slot = service_slot().lock().expect("patch service slot poisoned");
         let service = slot.as_ref();
         (
@@ -153,10 +164,13 @@ pub(crate) fn ensure_service(debug_port: u16, disable_pet: bool) {
                     && !service.task.is_finished()
             }),
             service.and_then(|service| service.paths.clone()),
+            service
+                .map(|service| service.context.started_at)
+                .unwrap_or_else(chrono::Utc::now),
         )
     };
     if !running {
-        start_service(debug_port, disable_pet, paths);
+        start_service_at(debug_port, disable_pet, paths, started_at);
     }
 }
 
@@ -164,6 +178,94 @@ pub(crate) fn ensure_service(debug_port: u16, disable_pet: bool) {
 pub(crate) fn page_stats(target_id: &str) -> Option<PageStats> {
     let slot = service_slot().lock().expect("patch service slot poisoned");
     slot.as_ref()?.context.page_stats(target_id)
+}
+
+pub(crate) fn mark_main_page(target_id: &str) {
+    if let Some(service) = service_slot()
+        .lock()
+        .expect("patch service slot poisoned")
+        .as_ref()
+    {
+        *service
+            .context
+            .main_target
+            .lock()
+            .expect("patch main target poisoned") = Some(target_id.to_string());
+    }
+}
+
+pub(crate) fn component_status() -> Value {
+    let context = service_slot()
+        .lock()
+        .expect("patch service slot poisoned")
+        .as_ref()
+        .map(|service| service.context.clone());
+    context.map_or_else(
+        || patch_component(None, None, &[], false),
+        |context| {
+            let target = context
+                .main_target
+                .lock()
+                .expect("patch main target poisoned");
+            let stats = target
+                .as_deref()
+                .and_then(|target| context.page_stats(target));
+            let scan = context.scan.lock().expect("patch scan poisoned");
+            let failures = error_log::renderer_patch_failures_since(context.started_at);
+            match failures {
+                Ok(labels) => {
+                    let mut seen = context.failures.lock().expect("patch failures poisoned");
+                    seen.extend(labels);
+                    patch_component(
+                        stats,
+                        scan.as_ref(),
+                        &seen.iter().cloned().collect::<Vec<_>>(),
+                        context.disable_pet,
+                    )
+                }
+                Err(error) => {
+                    let mut status = patch_component(None, None, &[], context.disable_pet);
+                    status["detail"] = json!(format!("等待错误日志读取恢复：{error:#}"));
+                    status
+                }
+            }
+        },
+    )
+}
+
+fn patch_component(
+    stats: Option<PageStats>,
+    scan: Option<&crate::renderer_asset_scan::AssetScan>,
+    runtime_failures: &[String],
+    disable_pet: bool,
+) -> Value {
+    let mut component = json!({
+        "id": "renderer-asset-patch", "name": "页面资源补丁", "visibility": "internal",
+        "source": "builtin", "status": "executed", "detail": "等待资源扫描和主页面提前附着"
+    });
+    if !stats.is_some_and(|stats| stats.attached_before_load) {
+        return component;
+    }
+    let Some(scan) = scan else {
+        return component;
+    };
+    let mut failures = scan.missing_items(disable_pet);
+    failures.extend_from_slice(runtime_failures);
+    failures.sort();
+    failures.dedup();
+    component["status"] = json!(if failures.is_empty() {
+        "effective"
+    } else {
+        "failed"
+    });
+    component["detail"] = json!("已核对当前安装包及本次启动的补丁记录");
+    if !failures.is_empty() {
+        component["error"] = json!(format!(
+            "页面资源补丁不兼容，缺少前置字面量或无法唯一匹配：{}",
+            failures.join("、")
+        ));
+    }
+    component
 }
 
 /// `attachedBeforeLoad` 为 false 且 `patched` 为 0 说明挂上时首个文档已加载，
@@ -188,6 +290,11 @@ struct PageEntry {
 type PendingAssetScan = tokio::task::JoinHandle<Result<crate::renderer_asset_scan::ScanOutcome>>;
 
 struct ServiceContext {
+    started_at: chrono::DateTime<chrono::Utc>,
+    main_target: Mutex<Option<String>>,
+    scan: Mutex<Option<crate::renderer_asset_scan::AssetScan>>,
+    failures: Mutex<std::collections::BTreeSet<String>>,
+    uncacheable_assets: Mutex<std::collections::HashSet<String>>,
     install_script: Arc<str>,
     /// 当前拦截规则。离线扫描完成后换成精确地址，并下发给已挂上的页面。
     patterns: Mutex<Value>,
@@ -208,6 +315,11 @@ impl ServiceContext {
     fn new(disable_pet: bool, cache_dir: PathBuf) -> Self {
         let install_script: Arc<str> = Arc::from(renderer_asset_patch_document_script(disable_pet));
         Self {
+            started_at: chrono::Utc::now(),
+            main_target: Mutex::new(None),
+            scan: Mutex::new(None),
+            failures: Mutex::new(std::collections::BTreeSet::new()),
+            uncacheable_assets: Mutex::new(std::collections::HashSet::new()),
             cache: PatchCache::new(cache_dir, &install_script),
             install_script,
             patterns: Mutex::new(fetch_patterns(disable_pet, None)),
@@ -235,6 +347,17 @@ impl ServiceContext {
             .expect("asset scan slot poisoned") = Some(tokio::task::spawn_blocking(move || {
             crate::renderer_asset_scan::load_or_scan(&app_dir, &cache_file, &anchors)
         }));
+    }
+
+    async fn cache_response(&self, url: &str, patch: Option<StoredPatch>) {
+        let failed = self
+            .uncacheable_assets
+            .lock()
+            .expect("patch cache exclusions poisoned")
+            .contains(url);
+        if !failed {
+            self.cache.store(url, patch).await;
+        }
     }
 
     fn current_patterns(&self) -> Value {
@@ -287,6 +410,7 @@ impl ServiceContext {
         );
         *self.patterns.lock().expect("patch pattern slot poisoned") =
             fetch_patterns(self.disable_pet, Some(&outcome.scan));
+        *self.scan.lock().expect("patch scan poisoned") = Some(outcome.scan);
         true
     }
 
@@ -1002,7 +1126,7 @@ async fn on_request_paused(
                 "renderer_asset_patch.rewrite",
                 json!({ "url": url, "outcome": "patched" }),
             );
-            context.cache.store(url, Some(patch)).await;
+            context.cache_response(url, Some(patch)).await;
         }
         Ok(None) => {
             log_service_event(
@@ -1010,7 +1134,7 @@ async fn on_request_paused(
                 json!({ "url": url, "outcome": "unchanged" }),
             );
             pass_through();
-            context.cache.store(url, None).await;
+            context.cache_response(url, None).await;
         }
         Err(error) => {
             log_patch_skip(url, format!("{error:#}"));
@@ -1065,6 +1189,14 @@ async fn patch_response(
     drop(response);
     let outcome: PatchOutcome =
         serde_json::from_value(outcome_value).context("补丁求值结果格式无效")?;
+    // 同一页面会抑制重复失配日志；本次启动内始终禁止缓存失配资产。
+    if !outcome.logs.is_empty() {
+        context
+            .uncacheable_assets
+            .lock()
+            .expect("patch cache exclusions poisoned")
+            .insert(url.to_string());
+    }
     for record in &outcome.logs {
         record_patch_log(record);
     }
@@ -1624,6 +1756,56 @@ process.stdout.write(JSON.stringify(result));
     }
 
     #[tokio::test]
+    async fn renderer_asset_mismatches_are_rechecked_on_the_next_launch() {
+        for patched in [None, Some("other_patch()".to_string())] {
+            let temp = tempfile::tempdir().unwrap();
+            for _launch in 0..2 {
+                let mut service = TestService::start(temp.path()).await;
+                service.answer_startup(json!([])).await;
+                service.attach_page("s1", "main", "", true).await;
+                service.expect("Runtime.runIfWaitingForDebugger").await;
+                let url = "app://-/assets/123.0123456789.js";
+                service.send(paused("s1", "request", url, false)).await;
+                let intercept = service.expect("Fetch.continueRequest").await;
+                assert_eq!(intercept["params"]["interceptResponse"], true);
+                service.reply(&intercept, json!({})).await;
+                service.send(paused("s1", "request", url, true)).await;
+                let body = service.expect("Fetch.getResponseBody").await;
+                service
+                    .reply(
+                        &body,
+                        json!({"body": "supportsIndependentSpeedModes;ultrafast_mode"}),
+                    )
+                    .await;
+                let evaluate = service.expect("Runtime.evaluate").await;
+                let log = json!({"operation": "renderer_patch:service tier access", "error": "gate matched 0 times"}).to_string();
+                service
+                    .reply(
+                        &evaluate,
+                        json!({"result": {"value": {
+                            "installed": true, "patched": patched, "logs": [log]
+                        }}}),
+                    )
+                    .await;
+                let response = service
+                    .expect(if patched.is_some() {
+                        "Fetch.fulfillRequest"
+                    } else {
+                        "Fetch.continueRequest"
+                    })
+                    .await;
+                service.reply(&response, json!({})).await;
+                let context = service.context.clone();
+                service.finish().await;
+                assert!(context.cache.load(url).await.is_none());
+                // 重复求值不再输出日志时，仍不能把该资产写入缓存。
+                context.cache_response(url, None).await;
+                assert!(context.cache.load(url).await.is_none());
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn existing_pages_are_attached_explicitly() {
         let temp = tempfile::tempdir().unwrap();
         let mut service = TestService::start(temp.path()).await;
@@ -1970,6 +2152,88 @@ process.stdout.write(JSON.stringify(result));
     }
 
     #[test]
+    fn renderer_asset_component_only_counts_current_launch_records() {
+        let start = chrono::DateTime::parse_from_rfc3339("2026-11-05T00:00:00.500Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let record = |time: &str| {
+            json!({
+                "timestamp": time, "platform": "test", "event": "patch_failed",
+                "operation": "renderer_patch:service tier access", "error": "mismatch"
+            })
+            .to_string()
+        };
+        let old = record("2026-11-05T00:00:00.499Z");
+        let current = record("2026-11-05T00:00:00.501Z");
+        let scan = crate::renderer_asset_scan::AssetScan {
+            numeric_chunks: 1,
+            candidates: vec![],
+            items: vec![],
+        };
+        let stats = Some(PageStats {
+            attached_before_load: true,
+            ..PageStats::default()
+        });
+        let old_failures = error_log::renderer_patch_failures_in(&old, start);
+        assert_eq!(
+            patch_component(stats, Some(&scan), &old_failures, false)["status"],
+            "effective"
+        );
+        let failures = error_log::renderer_patch_failures_in(&format!("{old}\n{current}"), start);
+        assert_eq!(failures, ["service tier access"]);
+        let status = patch_component(stats, Some(&scan), &failures, false);
+        assert_eq!(status["status"], "failed");
+        assert!(
+            status["error"]
+                .as_str()
+                .unwrap()
+                .contains("service tier access")
+        );
+        assert_eq!(
+            patch_component(None, Some(&scan), &failures, false)["status"],
+            "executed"
+        );
+        assert_eq!(
+            patch_component(stats, None, &failures, false)["status"],
+            "executed"
+        );
+        assert_eq!(
+            patch_component(Some(PageStats::default()), Some(&scan), &failures, false)["status"],
+            "executed"
+        );
+    }
+
+    #[test]
+    fn renderer_asset_component_surfaces_offline_failure() {
+        let scan = crate::renderer_asset_scan::AssetScan {
+            numeric_chunks: 1,
+            candidates: vec![],
+            items: vec![crate::renderer_asset_scan::ItemCoverage {
+                label: "service tier access".into(),
+                present: false,
+                legacy: None,
+                disable_pet: false,
+            }],
+        };
+        let status = patch_component(
+            Some(PageStats {
+                attached_before_load: true,
+                ..PageStats::default()
+            }),
+            Some(&scan),
+            &[],
+            false,
+        );
+        assert_eq!(status["status"], "failed");
+        assert!(
+            status["error"]
+                .as_str()
+                .unwrap()
+                .contains("service tier access")
+        );
+    }
+
+    #[test]
     fn plain_response_source_moves_instead_of_copying() {
         let mut body = json!({ "result": { "body": "", "base64Encoded": false } });
         let stored = body
@@ -2128,6 +2392,7 @@ process.stdout.write(JSON.stringify(result));
                 .collect()
         };
         let scan = crate::renderer_asset_scan::AssetScan {
+            items: Vec::new(),
             numeric_chunks: 9012,
             candidates: vec![
                 "348410.ae8bb87271.js".to_string(),
@@ -2141,6 +2406,7 @@ process.stdout.write(JSON.stringify(result));
         assert!(exact.contains(&"app://*/assets/app-initial*".to_string()));
 
         let named = crate::renderer_asset_scan::AssetScan {
+            items: Vec::new(),
             numeric_chunks: 0,
             candidates: Vec::new(),
         };
@@ -2232,6 +2498,7 @@ process.stdout.write(JSON.stringify(result));
                     gate.recv().unwrap();
                     Ok(crate::renderer_asset_scan::ScanOutcome {
                         scan: crate::renderer_asset_scan::AssetScan {
+                            items: Vec::new(),
                             numeric_chunks: 2,
                             candidates: vec!["async/24191.589dcc9878.js".to_string()],
                         },

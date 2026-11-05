@@ -191,3 +191,26 @@ test("a drifted gate skips only itself and repeated failures stay deduplicated",
   ]);
   assert.ok(records.every(({ context }) => context.matchCount === 0));
 });
+
+
+test("every renderer patch label has anchors covered by the unchanged asset prefilter", async () => {
+  const source = await readFile(new URL("../backend/src/renderer_asset_patch.js", import.meta.url), "utf8");
+  const readTable = (name) => JSON.parse(source.split(`/*codey-renderer-patch-${name}*/`)[1]
+    .split(`/*end-codey-renderer-patch-${name}*/`)[0]);
+  const items = readTable("items");
+  const anchors = readTable("anchors");
+  const labels = [...source.split("const patchCodexRendererAsset =")[1].matchAll(/^\s*"([^"\n]+)",\n\s*\);/gm)]
+    .map((match) => match[1]);
+  assert.deepEqual([...new Set(items.map((item) => item.label))].sort(), [...new Set(labels)].sort());
+  assert.equal(new Set(items.map((item) => item.label)).size, items.length);
+  for (const item of items) {
+    assert.ok(item.alternatives.length > 0, item.label);
+    for (const alternative of item.alternatives) {
+      assert.ok(alternative.every((literal) => typeof literal === "string" && literal.length), item.label);
+      assert.ok(alternative.some((literal) => anchors.includes(literal)), item.label);
+    }
+  }
+  for (const anchor of anchors) {
+    assert.ok(items.some((item) => item.alternatives.some((alt) => alt.includes(anchor))), anchor);
+  }
+});

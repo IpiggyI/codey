@@ -47,6 +47,7 @@ const ERROR_LOG_HINT =
 
 // Impact of an internal component failure; feature names describe themselves.
 const INTERNAL_COMPONENT_IMPACTS: Record<string, string> = {
+  "renderer-asset-patch": "模型与速度档位、默认中文界面或后台资源优化可能失效。",
   "bridge-helpers": "Codey 无法与 Codex 页面通信，依赖页面桥接的功能都不可用。",
   "model-whitelist": "Codex 模型列表不会按 Codey 的模型设置过滤和补充。",
   "settings-overlay-loader": "Codex 设置中的 Codey 配置面板可能无法打开。",
@@ -59,6 +60,11 @@ const ISSUE_RULES: Array<{
   cause: string;
   remedy: string;
 }> = [
+  {
+    pattern: /页面资源补丁不兼容/,
+    cause: "当前 Codex 安装包缺少补丁所需的代码，或代码无法唯一匹配。",
+    remedy: "请更新 Codey；仍然出现时，请将受影响项目和 Codey 错误日志提交给维护者。",
+  },
   {
     pattern: /形态不兼容|源码已变化|无法唯一定位|补偿匹配次数异常/,
     cause: "当前 Codex 版本的页面代码与这个 Codey 版本的适配规则不一致。",

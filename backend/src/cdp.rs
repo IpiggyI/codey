@@ -844,6 +844,7 @@ struct EstablishedInjection {
 
 impl EstablishedInjection {
     fn into_injected(self, injection_statuses: Arc<[InjectionScriptStatus]>) -> InjectedTarget {
+        crate::renderer_asset_patch::mark_main_page(&self.target_id);
         let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
             "cdp.renderer_asset_patch_summary",
             serde_json::json!({ "targetId": self.target_id,

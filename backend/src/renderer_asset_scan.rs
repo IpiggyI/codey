@@ -29,6 +29,103 @@ pub(crate) struct AssetScan {
     pub(crate) numeric_chunks: usize,
     /// 含补丁前置字面量的数字 chunk，路径相对资源目录，如 `async/24191.589dcc9878.js`。
     pub(crate) candidates: Vec<String>,
+    pub(crate) items: Vec<ItemCoverage>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PatchItem {
+    pub(crate) label: String,
+    pub(crate) alternatives: Vec<Vec<String>>,
+    pub(crate) legacy: Option<String>,
+    #[serde(default)]
+    pub(crate) disable_pet: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ItemCoverage {
+    pub(crate) label: String,
+    pub(crate) present: bool,
+    pub(crate) legacy: Option<String>,
+    pub(crate) disable_pet: bool,
+}
+
+pub(crate) fn patch_items() -> Result<Vec<PatchItem>> {
+    let script = include_str!("renderer_asset_patch.js");
+    let body = script
+        .split_once("/*codey-renderer-patch-items*/")
+        .context("缺少逐项补丁定义")?
+        .1
+        .split_once("/*end-codey-renderer-patch-items*/")
+        .context("缺少逐项补丁定义结束标记")?
+        .0;
+    serde_json::from_str(body).context("逐项补丁定义无效")
+}
+
+struct Coverage {
+    matcher: AhoCorasick,
+    alternatives: Vec<Vec<Vec<usize>>>,
+    items: Vec<ItemCoverage>,
+}
+
+impl Coverage {
+    fn new() -> Result<Self> {
+        let definitions = patch_items()?;
+        let mut literals = Vec::new();
+        let alternatives = definitions
+            .iter()
+            .map(|item| {
+                item.alternatives
+                    .iter()
+                    .map(|alt| {
+                        let start = literals.len();
+                        literals.extend(alt.iter().cloned());
+                        (start..literals.len()).collect()
+                    })
+                    .collect()
+            })
+            .collect();
+        Ok(Self {
+            matcher: AhoCorasick::new(literals)?,
+            alternatives,
+            items: definitions
+                .into_iter()
+                .map(|item| ItemCoverage {
+                    label: item.label,
+                    present: false,
+                    legacy: item.legacy,
+                    disable_pet: item.disable_pet,
+                })
+                .collect(),
+        })
+    }
+
+    fn observe(&mut self, bytes: &[u8]) {
+        let mut found = vec![false; self.matcher.patterns_len()];
+        for hit in self.matcher.find_overlapping_iter(bytes) {
+            found[hit.pattern().as_usize()] = true;
+        }
+        for (item, alternatives) in self.items.iter_mut().zip(&self.alternatives) {
+            item.present |= alternatives
+                .iter()
+                .any(|alt| alt.iter().all(|index| found[*index]));
+        }
+    }
+}
+
+impl AssetScan {
+    pub(crate) fn missing_items(&self, disable_pet: bool) -> Vec<String> {
+        self.items
+            .iter()
+            .filter(|item| {
+                !item.present
+                    && (self.numeric_chunks == 0 || item.legacy.is_none())
+                    && (!item.disable_pet || disable_pet)
+            })
+            .map(|item| item.label.clone())
+            .collect()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -150,17 +247,23 @@ impl AssetSource {
     }
 }
 
-/// 资源目录里的数字 chunk：根目录与 `async/` 子目录，规则与拦截时一致。
-fn numeric_chunk_paths<'a>(
-    entries: impl Iterator<Item = (&'a str, bool)>,
+fn script_entries<'a>(
+    node: &'a serde_json::Map<String, Value>,
     prefix: &str,
-    found: &mut Vec<String>,
+    entries: &mut Vec<(String, &'a Value)>,
 ) {
-    for (name, is_file) in entries {
-        if is_file && numeric_asset_name(name) {
-            found.push(format!("{prefix}{name}"));
+    for (name, value) in node {
+        let relative = format!("{prefix}{name}");
+        if let Some(children) = value.get("files").and_then(Value::as_object) {
+            script_entries(children, &format!("{relative}/"), entries);
+        } else if name.ends_with(".js") {
+            entries.push((relative, value));
         }
     }
+}
+
+fn is_numeric_chunk(relative: &str) -> bool {
+    numeric_asset_name(relative.strip_prefix("async/").unwrap_or(relative))
 }
 
 fn scan_asar(archive: &Path, unpacked: &Path, matcher: &AhoCorasick) -> Result<AssetScan> {
@@ -192,20 +295,8 @@ fn scan_asar(archive: &Path, unpacked: &Path, matcher: &AhoCorasick) -> Result<A
         .context("ASAR 中没有 webview/assets 目录")?;
 
     let mut entries: Vec<(String, &Value)> = Vec::new();
-    for (name, node) in assets {
-        if name == "async" {
-            if let Some(children) = node.get("files").and_then(Value::as_object) {
-                for (child, child_node) in children {
-                    if child_node.get("files").is_none() && numeric_asset_name(child) {
-                        entries.push((format!("async/{child}"), child_node));
-                    }
-                }
-            }
-        } else if node.get("files").is_none() && numeric_asset_name(name) {
-            entries.push((name.clone(), node));
-        }
-    }
-
+    script_entries(assets, "", &mut entries);
+    let mut coverage = Coverage::new()?;
     let mut candidates = Vec::new();
     let mut buffer = Vec::new();
     for (relative, node) in &entries {
@@ -238,49 +329,45 @@ fn scan_asar(archive: &Path, unpacked: &Path, matcher: &AhoCorasick) -> Result<A
             file.read_exact(&mut buffer)
                 .with_context(|| format!("无法读取 ASAR 条目：{relative}"))?;
         }
-        if matcher.is_match(&buffer) {
+        coverage.observe(&buffer);
+        if is_numeric_chunk(relative) && matcher.is_match(&buffer) {
             candidates.push(relative.clone());
         }
     }
     candidates.sort();
     Ok(AssetScan {
-        numeric_chunks: entries.len(),
+        numeric_chunks: entries
+            .iter()
+            .filter(|(name, _)| is_numeric_chunk(name))
+            .count(),
         candidates,
+        items: coverage.items,
     })
 }
 
 fn scan_directory(assets: &Path, matcher: &AhoCorasick) -> Result<AssetScan> {
-    let list = |dir: &Path| -> Result<Vec<(String, bool)>> {
-        let mut names = Vec::new();
-        let entries = match std::fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(names),
-            Err(error) => {
-                return Err(error).with_context(|| format!("无法列出资源目录：{}", dir.display()));
-            }
-        };
-        for entry in entries {
+    fn walk(root: &Path, dir: &Path, paths: &mut Vec<String>) -> Result<()> {
+        for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
-            names.push((
-                entry.file_name().to_string_lossy().into_owned(),
-                entry.file_type()?.is_file(),
-            ));
+            if entry.file_type()?.is_dir() {
+                walk(root, &entry.path(), paths)?;
+            } else if entry.file_type()?.is_file()
+                && entry.path().extension().is_some_and(|ext| ext == "js")
+            {
+                paths.push(
+                    entry
+                        .path()
+                        .strip_prefix(root)?
+                        .to_string_lossy()
+                        .replace('\\', "/"),
+                );
+            }
         }
-        Ok(names)
-    };
+        Ok(())
+    }
     let mut paths = Vec::new();
-    let root = list(assets)?;
-    numeric_chunk_paths(
-        root.iter().map(|(name, file)| (name.as_str(), *file)),
-        "",
-        &mut paths,
-    );
-    let nested = list(&assets.join("async"))?;
-    numeric_chunk_paths(
-        nested.iter().map(|(name, file)| (name.as_str(), *file)),
-        "async/",
-        &mut paths,
-    );
+    walk(assets, assets, &mut paths)?;
+    let mut coverage = Coverage::new()?;
     let mut candidates = Vec::new();
     for relative in &paths {
         let path = assets.join(relative);
@@ -288,14 +375,16 @@ fn scan_directory(assets: &Path, matcher: &AhoCorasick) -> Result<AssetScan> {
         ensure!(size <= MAX_SCANNED_ASSET_BYTES, "资源文件过大：{relative}");
         let bytes = std::fs::read(&path)
             .with_context(|| format!("无法读取资源文件：{}", path.display()))?;
-        if matcher.is_match(&bytes) {
+        coverage.observe(&bytes);
+        if is_numeric_chunk(relative) && matcher.is_match(&bytes) {
             candidates.push(relative.clone());
         }
     }
     candidates.sort();
     Ok(AssetScan {
-        numeric_chunks: paths.len(),
+        numeric_chunks: paths.iter().filter(|name| is_numeric_chunk(name)).count(),
         candidates,
+        items: coverage.items,
     })
 }
 
@@ -308,6 +397,77 @@ mod tests {
             "sendMessageFromView".to_string(),
             "serviceTierAccess:".to_string(),
         ]
+    }
+
+    #[test]
+    fn renderer_asset_real_package_has_no_offline_failures() {
+        let assets = Path::new("/tmp/codex-26.1029-webview/assets");
+        if !assets.is_dir() {
+            eprintln!("未提供真实 Codex 包，跳过目录扫描");
+            return;
+        }
+        let matcher = AhoCorasick::new(anchors()).unwrap();
+        let scan = scan_directory(assets, &matcher).unwrap();
+        assert!(
+            scan.missing_items(true).is_empty(),
+            "{:?}",
+            scan.missing_items(true)
+        );
+        println!(
+            "真实包存在项目：{:?}",
+            scan.items
+                .iter()
+                .filter(|item| item.present)
+                .map(|item| &item.label)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn renderer_asset_missing_one_item_is_exact_and_cached() {
+        let temp = tempfile::tempdir().unwrap();
+        let assets = temp.path().join("resources/app/webview/assets");
+        std::fs::create_dir_all(&assets).unwrap();
+        std::fs::write(assets.parent().unwrap().join("index.html"), "fixture").unwrap();
+        for (index, item) in patch_items().unwrap().iter().enumerate() {
+            if item.label != "service tier access" {
+                std::fs::write(
+                    assets.join(format!("{index}.0123456789.js")),
+                    item.alternatives[0].join(";"),
+                )
+                .unwrap();
+            }
+        }
+        let cache = temp.path().join("scan.json");
+        let first = load_or_scan(temp.path(), &cache, &anchors()).unwrap();
+        assert_eq!(first.scan.missing_items(true), ["service tier access"]);
+        let cached = load_or_scan(temp.path(), &cache, &anchors()).unwrap();
+        assert!(cached.cached);
+        assert_eq!(cached.scan, first.scan);
+    }
+
+    #[test]
+    fn renderer_asset_alternative_requires_literals_in_one_script() {
+        let mut coverage = Coverage::new().unwrap();
+        coverage.observe(b"supportsIndependentSpeedModes");
+        coverage.observe(b"ultrafast_mode");
+        assert!(
+            !coverage
+                .items
+                .iter()
+                .find(|item| item.label == "service tier access")
+                .unwrap()
+                .present
+        );
+        coverage.observe(b"supportsIndependentSpeedModes;ultrafast_mode");
+        assert!(
+            coverage
+                .items
+                .iter()
+                .find(|item| item.label == "service tier access")
+                .unwrap()
+                .present
+        );
     }
 
     /// 按 Electron ASAR 格式写一个最小归档：Pickle 头 + JSON 索引 + 正文。
@@ -422,13 +582,8 @@ mod tests {
         )
         .unwrap()
         .scan;
-        assert_eq!(
-            scan,
-            AssetScan {
-                numeric_chunks: 0,
-                candidates: Vec::new()
-            }
-        );
+        assert_eq!(scan.numeric_chunks, 0);
+        assert!(scan.candidates.is_empty());
     }
 
     #[test]

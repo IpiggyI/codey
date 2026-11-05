@@ -220,7 +220,14 @@ fn take_context_version(context: &mut Value, key: &str) -> Option<String> {
 }
 
 fn normalize_record(record: &mut ErrorRecord) {
-    record.timestamp = normalize_beijing_timestamp(&record.timestamp);
+    record.timestamp = if record.operation.starts_with("renderer_patch:") {
+        DateTime::parse_from_rfc3339(&record.timestamp)
+            .unwrap_or_else(|_| beijing_now())
+            .with_timezone(&beijing_offset())
+            .to_rfc3339_opts(SecondsFormat::AutoSi, false)
+    } else {
+        normalize_beijing_timestamp(&record.timestamp)
+    };
     if record.platform.trim().is_empty() {
         record.platform = std::env::consts::OS.to_string();
     }
@@ -723,7 +730,11 @@ pub fn record_failure_with_metadata(
         }
     }
     let mut record = ErrorRecord {
-        timestamp: format_beijing_timestamp(now),
+        timestamp: if operation.starts_with("renderer_patch:") {
+            now.to_rfc3339_opts(SecondsFormat::Nanos, false)
+        } else {
+            format_beijing_timestamp(now)
+        },
         platform: std::env::consts::OS.to_string(),
         versions: ErrorVersions::current(),
         event,
@@ -921,6 +932,42 @@ fn append_records(records: &[ErrorRecord], today: NaiveDate) -> anyhow::Result<(
         .map_err(|_| anyhow::anyhow!("Codey error log lock is poisoned"))?
         .append(&path, today, &lines)
         .map_err(anyhow::Error::from)
+}
+
+pub(crate) fn begin_renderer_patch_launch() {
+    if let Some(cache) = FAILURE_DEDUP.get()
+        && let Ok(mut cache) = cache.lock()
+    {
+        cache
+            .entries
+            .retain(|key, _| !key.operation.starts_with("renderer_patch:"));
+    }
+}
+
+pub(crate) fn renderer_patch_failures_since(start: DateTime<Utc>) -> anyhow::Result<Vec<String>> {
+    let contents = match fs::read_to_string(error_log_path()) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).context("无法读取页面资源补丁错误日志"),
+    };
+    Ok(renderer_patch_failures_in(&contents, start))
+}
+
+pub(crate) fn renderer_patch_failures_in(contents: &str, start: DateTime<Utc>) -> Vec<String> {
+    let mut labels = std::collections::BTreeSet::new();
+    for line in contents.lines() {
+        let Ok(record) = serde_json::from_str::<ErrorRecord>(line) else {
+            continue;
+        };
+        if record.event == "patch_failed"
+            && DateTime::parse_from_rfc3339(&record.timestamp).is_ok_and(|time| time >= start)
+            && let Some(label) = record.operation.strip_prefix("renderer_patch:")
+            && !label.is_empty()
+        {
+            labels.insert(label.to_string());
+        }
+    }
+    labels.into_iter().collect()
 }
 
 pub fn error_log_path() -> PathBuf {
@@ -1212,7 +1259,7 @@ mod tests {
         normalize_record(&mut record);
         assert_eq!(record.stage, None);
         assert_eq!(record.recoverable, None);
-        assert_eq!(record.timestamp, "2026-08-02T11:21:24+08:00");
+        assert_eq!(record.timestamp, "2026-08-02T11:21:24.543+08:00");
         assert_eq!(
             record.versions.codey.as_deref(),
             Some(env!("CARGO_PKG_VERSION"))
@@ -1239,7 +1286,7 @@ mod tests {
 
         normalize_record(&mut record);
 
-        assert_eq!(record.timestamp, "2026-08-15T16:28:19+08:00");
+        assert_eq!(record.timestamp, "2026-08-15T16:28:19.264+08:00");
         assert_eq!(record.versions.electron.as_deref(), Some("151.0.0"));
         assert_eq!(record.versions.chrome.as_deref(), Some("151.0.0"));
         assert_eq!(record.versions.node.as_deref(), Some("24.14.0"));

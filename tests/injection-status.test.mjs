@@ -404,3 +404,24 @@ test("a timed-out status request cannot commit a late response", async () => {
     else globalThis.window = previousWindow;
   }
 });
+
+
+test("renderer asset failure has Chinese cause, impact and remedy", async () => {
+  const { describeInjectionIssues, summarizeInjectionScripts } = await loadTypeScriptModule(
+    new URL("src/runtimeStatusPresentation.ts", root),
+  );
+  const component = {
+    id: "renderer-asset-patch", name: "页面资源补丁", source: "builtin",
+    visibility: "internal", status: "failed",
+    error: "页面资源补丁不兼容，缺少前置字面量或无法唯一匹配：service tier access",
+  };
+  const [issue] = describeInjectionIssues([component]);
+  assert.equal(issue.name, "页面资源补丁");
+  assert.match(issue.impact, /模型与速度档位/);
+  assert.match(issue.cause, /缺少补丁所需的代码/);
+  assert.match(issue.remedy, /请更新 Codey/);
+  assert.match(issue.error, /service tier access/);
+  assert.equal(summarizeInjectionScripts([component]).internalInjectionError, true);
+  assert.deepEqual(describeInjectionIssues([{ ...component, status: "executed" }]), []);
+  assert.deepEqual(describeInjectionIssues([{ ...component, status: "effective" }]), []);
+});

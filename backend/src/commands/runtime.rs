@@ -219,11 +219,13 @@ async fn runtime_status_at(
         } else {
             runtime.injection_statuses.read().await.clone()
         };
-        object.insert(
-            "injectionScripts".into(),
-            serde_json::to_value(injection_statuses.as_ref())
-                .expect("injection statuses must be JSON-serializable"),
-        );
+        let mut injection_statuses = serde_json::to_value(injection_statuses.as_ref())
+            .expect("injection statuses must be JSON-serializable");
+        injection_statuses
+            .as_array_mut()
+            .expect("injection statuses must be an array")
+            .push(crate::renderer_asset_patch::component_status());
+        object.insert("injectionScripts".into(), injection_statuses);
     }
     if let Some(object) = status.as_object_mut() {
         object.insert(

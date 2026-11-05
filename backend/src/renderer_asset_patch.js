@@ -318,6 +318,33 @@
     ].join("");
   // 每项改写的前置字面量。资源一个都不含时整段跳过；Codey 后端读取同一份
   // 列表，在把资源送进页面求值前预筛。新增改写必须登记它依赖的字面量。
+  // 逐项前置字面量：任一组完整出现即适用；legacy 只豁免新版数字构建的缺失。
+  const rendererPatchItems = /*codey-renderer-patch-items*/[
+    {"label": "app server manager registry", "alternatives": [["inactiveThreadUnsubscriber.clearConversationStreamOwnership", "getStreamRole(", "updateConversationState("]]},
+    {"label": "model route bridge preflight", "alternatives": [["codex-message-from-view", "sendMessageFromView", "Failed to send message from view"]]},
+    {"label": "app server request route preflight", "alternatives": [["AppServerRequestClient is missing a message dispatcher", "mcp_request_enqueued"]]},
+    {"label": "app server request identity tracking", "alternatives": [["AppServerRequestClient is missing a message dispatcher", "mcp_request_enqueued"]]},
+    {"label": "app server model result rewrite", "alternatives": [["AppServerRequestClient is missing a message dispatcher", "mcp_request_enqueued"]]},
+    {"label": "pet settings avatar resources", "alternatives": [["settings.", "import", "codex-avatar"], ["settings.", "import", "codex-pet-assets"], ["settings.", "import", "avatar-mascot-button"], ["settings.", "import", "use-avatar-options"]], "legacy": "旧版 Vite 设置页的静态导入；Rspack 已使用数字模块。", "disablePet": true},
+    {"label": "avatar overlay prewarm", "alternatives": [["shouldPrewarmAvatarOverlay:", "electron-avatar-overlay-restore-ready"]], "disablePet": true},
+    {"label": "pricing webview prewarm", "alternatives": [["forcePricingRefreshInBackground", "use_embedded_checkout"]]},
+    {"label": "credit checkout webview prewarm", "alternatives": [["isPrewarm:", "use_embedded_credit_checkout"]]},
+    {"label": "hosted app server manager marker", "alternatives": [["Desktop host did not provide its AppServerManager service"]]},
+    {"label": "default Chinese locale", "alternatives": [["72216192", "enable_i18n", "locale_source", ".localeOverride"]]},
+    {"label": "thread owner discovery coalescing", "alternatives": [["maybe_resume_owner_discovery_failed", "followExistingOwner", ".clientCoordination.findThreadOwner"]], "legacy": "旧版页面内所有者发现入口；26.1029 数字资源中已无这些前置字面量。"},
+    {"label": "completed thread reconciliation", "alternatives": [["getHasInProgressLocalConversation(", "inactiveThreadUnsubscriber.clearConversationStreamOwnership", "getConversationStreamRevision("]]},
+    {"label": "model allowlist", "alternatives": [["\"amazonBedrock\"!==", "availableAccessPrograms?.cyber", "useHiddenModels:"], ["useHiddenModels:", "availableModels:", "includeUltraReasoningEffort", "amazonBedrock"]]},
+    {"label": "model visibility", "alternatives": [["\"amazonBedrock\"!==", "availableAccessPrograms?.cyber", "useHiddenModels:"], ["useHiddenModels:", "includeUltraReasoningEffort", "amazonBedrock"]]},
+    {"label": "third-party Ultra reasoning", "alternatives": [["includeUltraReasoningEffort:", "isCustomModelProvider:", "modelCatalogPath:", "1186680773"]]},
+    {"label": "service tier access", "alternatives": [["supportsIndependentSpeedModes", "ultrafast_mode"]]},
+    {"label": "service tier access state", "alternatives": [["serviceTierAccess:", "isLoading:"]]},
+    {"label": "service tier request model validation", "alternatives": [["Failed to read service tier for request"]]},
+    {"label": "fast model trigger availability", "alternatives": [["composer.intelligenceDropdown.model.title", "modelPickerTriggerConfig:", "selectedServiceTierIconKind:"], ["composer.intelligenceDropdown.tooltip", "modelPickerTriggerConfig:", "selectedServiceTierIconKind:"]]},
+    {"label": "fast model trigger fallback", "alternatives": [["composer.intelligenceDropdown.model.title", "modelPickerTriggerConfig:", "selectedServiceTierIconKind:"]], "legacy": "旧版模型入口的 Fast 标识；新版入口原生检查配置。"},
+    {"label": "app state heartbeat snapshot", "alternatives": [["electron-app-state-snapshot-request"]]},
+    {"label": "interaction CPU sampling", "alternatives": [["activeInteractions=new Map", "beginCpuSampling"]]},
+    {"label": "interaction heartbeat", "alternatives": [["activeInteractions=new Map", "beginCpuSampling"]]}
+  ]/*end-codey-renderer-patch-items*/;
   const rendererPatchAnchors = /*codey-renderer-patch-anchors*/[
     "inactiveThreadUnsubscriber.clearConversationStreamOwnership",
     "sendMessageFromView",
@@ -341,6 +368,10 @@
     "Failed to read service tier for request",
     "maybe_resume_owner_discovery_failed"
   ]/*end-codey-renderer-patch-anchors*/;
+  if (rendererPatchItems.some((item) => item.alternatives.some((literals) =>
+    !literals.some((literal) => rendererPatchAnchors.includes(literal))))) {
+    throw new Error("页面资源补丁逐项定义与预筛字面量不一致");
+  }
   const patchCodexRendererAsset = (source) => {
     if (!rendererPatchAnchors.some((anchor) => source.includes(anchor))) return source;
     let patched = source;
