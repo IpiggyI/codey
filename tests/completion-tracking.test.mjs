@@ -350,6 +350,8 @@ function loadInjection({
       },
     },
     MutationObserver,
+    // Node 22 contexts lack Symbol.dispose; share the host Symbol as the stats tests do.
+    Symbol,
     TextEncoder,
     URLSearchParams,
     window,
