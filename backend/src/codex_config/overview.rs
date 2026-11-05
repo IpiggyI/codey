@@ -1,6 +1,6 @@
 use super::*;
 use crate::subagent_overview::{
-    Channel, Content, HookEvent, Item, Override, RoleEntry, Template, TriggerItems,
+    Channel, Content, HookEvent, Item, Override, Reader, RoleEntry, Template, TriggerItems,
 };
 
 /// 按启动流程的同一套函数规划概览内容，只读取文件，不创建或改写任何文件。
@@ -47,6 +47,19 @@ pub(crate) fn runtime_overview_items(
         .into_iter()
         .map(|role| role_entry(&constraints, role, &every_role[role], fastctx.as_deref()))
         .collect::<Result<Vec<_>>>()?;
+    // 与启动时提交的策略相同：只含启用的角色，模型已换成运行时名称。
+    let launch_roles = every_role
+        .iter()
+        .filter(|(role, _)| enabled_roles.contains_key(*role))
+        .map(|(role, selection)| (role.clone(), selection.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let policy = runtime_policy_item(
+        codex_home,
+        &constraints,
+        &launch_roles,
+        fastctx.as_deref(),
+        &catalog,
+    );
     Ok(TriggerItems {
         master: master_items(
             &constraints,
@@ -56,7 +69,7 @@ pub(crate) fn runtime_overview_items(
         )?,
         roles,
         scope_guard: scope_guard_items(),
-        gate: gate_items(codex_home),
+        gate: gate_items(policy),
     })
 }
 
@@ -104,6 +117,7 @@ fn role_entry(
         ),
     ];
     entry.content = Some(Content {
+        reader: Reader::Codex,
         format: "toml",
         text: String::from_utf8(plan.contents).context("子代理角色文档不是 UTF-8")?,
     });
@@ -137,6 +151,7 @@ fn master_items(
         None,
     )];
     root_item.content = Some(Content {
+        reader: Reader::Codex,
         format: "markdown",
         text: runtime_root_instructions_for_roles(&root, enabled_roles),
     });
@@ -157,6 +172,7 @@ fn master_items(
         None,
     )];
     collaboration_item.content = Some(Content {
+        reader: Reader::Codex,
         format: "text",
         text: append_constraint_text("", &collaboration),
     });
@@ -173,6 +189,7 @@ fn master_items(
         None,
     )];
     mode_item.content = Some(Content {
+        reader: Reader::Codex,
         format: "text",
         text: ROOT_AGENT_MULTI_AGENT_MODE_HINT.into(),
     });
@@ -332,6 +349,7 @@ fn scope_guard_items() -> Vec<Item> {
         item.events = hook_events(std::slice::from_ref(spec), scope_guard_hook_purpose);
         item.overrides = hook_overrides();
         item.content = Some(Content {
+            reader: Reader::Codex,
             format: "markdown",
             text: text.into(),
         });
@@ -355,7 +373,7 @@ fn scope_guard_items() -> Vec<Item> {
     ]
 }
 
-fn gate_items(codex_home: &Path) -> Vec<Item> {
+fn gate_items(policy: Item) -> Vec<Item> {
     let mut hooks = Item::new(
         "gate-hooks",
         "门禁钩子",
@@ -364,12 +382,97 @@ fn gate_items(codex_home: &Path) -> Vec<Item> {
     );
     hooks.events = hook_events(&SUBAGENT_GATE_HOOKS, gate_hook_purpose);
     hooks.overrides = hook_overrides();
+    vec![hooks, policy]
+}
+
+/// 内容由启动时提交策略所用的同一个生成函数给出；规划失败只记在这一项上。
+fn runtime_policy_item(
+    codex_home: &Path,
+    constraints: &Path,
+    roles: &BTreeMap<String, SubagentRoleConfig>,
+    fastctx: Option<&str>,
+    catalog: &crate::subagent_policy::SubagentCatalogSnapshot,
+) -> Item {
     let mut policy = Item::new(
         "runtime-policy",
         "子代理身份记录",
-        "记录本次启动启用的角色、模型和角色配置文件的校验值，门禁据此核对子代理身份。这里不展示文件内容。",
+        "记录本次启动启用的角色、模型、思考强度和角色配置文件的校验值，门禁据此核对子代理身份。思考强度同样可能在启动时按模型目录调整。",
         Channel::File,
     );
     policy.destination = Some(crate::subagent_gate::runtime_subagent_policy_paths(codex_home).0);
-    vec![hooks, policy]
+    let contents = plan_runtime_agent_files(constraints, roles, fastctx).and_then(|plans| {
+        crate::subagent_gate::runtime_subagent_policy_bytes(
+            roles,
+            &runtime_agent_plan_hashes(&plans),
+            catalog,
+        )
+    });
+    match contents.and_then(|bytes| String::from_utf8(bytes).context("子代理身份记录不是 UTF-8"))
+    {
+        Ok(text) => {
+            policy.content = Some(Content {
+                format: "json",
+                reader: Reader::Codey,
+                text,
+            });
+        }
+        Err(error) => policy.error = Some(format!("{error:#}")),
+    }
+    policy
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_policy_content_is_the_file_launch_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex-home");
+        let codey_home = temp.path().join("codey-state");
+        let marker = codey_home.join("codex-lease.json");
+        fs::create_dir_all(&home).unwrap();
+        let mut config = crate::config::CodeyConfig {
+            subagent_optimization: true,
+            ..Default::default()
+        };
+        config
+            .subagent_roles
+            .get_mut(SUBAGENT_ROLE_WORKER)
+            .unwrap()
+            .enabled = false;
+        // 与启动器相同：目录快照取自当前设置，而不是测试辅助函数的空快照。
+        apply_isolated_runtime_router_config(
+            &home,
+            RouterApplyOptions {
+                model_catalog_path: None,
+                default_model: None,
+                fastctx_command: None,
+                subagent_optimization: true,
+                scope_guard: false,
+                subagent_model: &config.subagent_model,
+                subagent_reasoning_effort: &config.subagent_reasoning_effort,
+                subagent_roles: Some(&config.subagent_roles),
+                subagent_catalog: crate::subagent_policy::catalog_snapshot_for_config(&config),
+                marker: &marker,
+                backup_root: &codey_home.join("codex-backups"),
+            },
+        )
+        .unwrap();
+        let (policy_path, _) = crate::subagent_gate::runtime_subagent_policy_paths(&home);
+        let written = fs::read(&policy_path).unwrap();
+
+        let items = runtime_overview_items(&codey_home, &home, &config).unwrap();
+        let policy = items
+            .gate
+            .iter()
+            .find(|item| item.id == "runtime-policy")
+            .unwrap();
+        assert_eq!(policy.destination.as_deref(), Some(policy_path.as_path()));
+        assert!(policy.error.is_none());
+        let content = policy.content.as_ref().unwrap();
+        assert_eq!(content.reader, Reader::Codey);
+        assert_eq!(content.text.as_bytes(), written);
+        assert!(!content.text.contains(SUBAGENT_ROLE_WORKER));
+    }
 }

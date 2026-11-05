@@ -60,8 +60,13 @@ type OverviewContext = {
 
 const SUMMARY_CLASS =
   "flex cursor-pointer list-none items-start gap-1.5 rounded-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent [&::-webkit-details-marker]:hidden";
-const CHEVRON_CLASS =
-  "mt-0.5 shrink-0 text-muted transition-transform group-open:rotate-90";
+// 嵌套折叠各用自己的命名分组：外层展开时，内层箭头不跟着旋转。
+const SECTION_GROUP_CLASS = "group/rt-section";
+const SECTION_CHEVRON_CLASS =
+  "mt-0.5 shrink-0 text-muted transition-transform group-open/rt-section:rotate-90";
+const ITEM_GROUP_CLASS = "group/rt-item";
+const ITEM_CHEVRON_CLASS =
+  "mt-0.5 shrink-0 text-muted transition-transform group-open/rt-item:rotate-90";
 const CODE_BLOCK_CLASS =
   "m-0 max-h-96 overflow-auto whitespace-pre rounded-md bg-black/[0.03] p-2 font-mono text-[11px] leading-relaxed";
 const CODE_CLASS = "rounded bg-black/[0.05] px-1 py-0.5 font-mono text-[11px]";
@@ -152,7 +157,9 @@ function renderOverrides(overrides: SubagentRuntimeOverride[]) {
   );
 }
 
-function renderEvents(events: SubagentRuntimeItem["events"]) {
+type SharedHookNote = (event: string) => string | null;
+
+function renderEvents(events: SubagentRuntimeItem["events"], sharedNote: SharedHookNote) {
   if (events.length === 0) return null;
   return renderField(
     "钩子",
@@ -161,26 +168,42 @@ function renderEvents(events: SubagentRuntimeItem["events"]) {
         <li key={hook.event} className="list-none">
           <span>{hook.name}</span> <code className={CODE_CLASS}>{hook.event}</code>
           <span className="text-muted">：{hook.purpose}</span>
+          {sharedNote(hook.event) ? (
+            <span className="block text-muted">{sharedNote(hook.event)}</span>
+          ) : null}
         </li>
       ))}
     </ul>,
   );
 }
 
-function renderContent(content: SubagentRuntimeContent | null) {
+// 原文按原样显示，里面的「根代理」和角色标识属于发送内容，不是本页的命名。
+function verbatimNote(content: SubagentRuntimeContent, channel: SubagentRuntimeChannel) {
+  if (content.reader === "codey") return "以下为写入该文件的原文，只供 Codey 门禁读取，不发给 Codex。";
+  const lead = {
+    override: "以下为通过启动参数发送给 Codex 的原文",
+    hook: "以下为钩子发送给 Codex 的原文",
+    file: "以下为写入该文件、由 Codex 读取的原文",
+  }[channel];
+  return `${lead}，按原样显示；其中的用词和角色标识属于原文，不是本页的命名。`;
+}
+
+function renderContent(content: SubagentRuntimeContent | null, channel: SubagentRuntimeChannel) {
   if (!content) return null;
+  const format = FORMAT_LABELS[content.format] ?? content.format;
   return (
-    <details className="group">
+    <details className={ITEM_GROUP_CLASS}>
       <summary className={SUMMARY_CLASS}>
-        <IconChevronRight size={13} className={CHEVRON_CLASS} aria-hidden="true" />
-        <span>{`查看内容（${FORMAT_LABELS[content.format] ?? content.format}）`}</span>
+        <IconChevronRight size={13} className={ITEM_CHEVRON_CLASS} aria-hidden="true" />
+        <span>{content.reader === "codex" ? `查看发送给 Codex 的原文（${format}）` : `查看文件原文（${format}）`}</span>
       </summary>
-      <pre className={`${CODE_BLOCK_CLASS} mt-1.5`}>{content.text}</pre>
+      <p className="m-0 mt-1.5 text-muted">{verbatimNote(content, channel)}</p>
+      <pre className={`${CODE_BLOCK_CLASS} mt-1`}>{content.text}</pre>
     </details>
   );
 }
 
-function renderItem(item: SubagentRuntimeItem, trigger: string) {
+function renderItem(item: SubagentRuntimeItem, trigger: string, sharedNote: SharedHookNote = () => null) {
   return (
     <div key={item.id} className={CARD_CLASS}>
       <div className="flex flex-wrap items-center gap-1.5">
@@ -192,8 +215,9 @@ function renderItem(item: SubagentRuntimeItem, trigger: string) {
       {item.destination ? renderField("写入位置", <span className={PATH_CLASS}>{item.destination}</span>) : null}
       {renderTemplate(item.template, item.channel)}
       {renderOverrides(item.overrides)}
-      {renderEvents(item.events)}
-      {renderContent(item.content)}
+      {renderEvents(item.events, sharedNote)}
+      {item.error ? <p className="m-0 text-danger" role="alert">{`无法生成内容：${item.error}`}</p> : null}
+      {renderContent(item.content, item.channel)}
     </div>
   );
 }
@@ -246,7 +270,7 @@ function renderRole(
           {renderOverrides(plan.overrides)}
           {renderField("模型", `${plan.model}；思考强度：${effort}（启动时可能按模型目录调整，见上方说明）`)}
           {plan.error ? <p className="m-0 text-danger" role="alert">{`无法生成角色配置：${plan.error}`}</p> : null}
-          {renderContent(plan.content)}
+          {renderContent(plan.content, "file")}
         </>
       ) : (
         <p className="m-0 text-danger" role="alert">后端没有返回这个角色的计划。</p>
@@ -300,7 +324,7 @@ function renderBasis(overview: SubagentRuntimeOverview, context: OverviewContext
   );
 }
 
-function renderGate(overview: SubagentRuntimeOverview, context: OverviewContext) {
+function renderGate(overview: SubagentRuntimeOverview, context: OverviewContext, sharedNote: SharedHookNote) {
   const { gate } = overview;
   const trigger = `开启「${MASTER_SWITCH}」`;
   return renderGroup(
@@ -308,7 +332,7 @@ function renderGate(overview: SubagentRuntimeOverview, context: OverviewContext)
     renderStateBadges(context.draft.subagentOptimization, context.draft.subagentOptimization !== context.saved.subagentOptimization, ["已开启", "未开启"]),
     `随「${MASTER_SWITCH}」一起开启。子代理工作期间，Codey 用钩子检查每次工具调用和子代理的启动与停止，按门禁规则限制子代理的权限、并发和汇合。`,
     <>
-      {gate.items.map((item) => renderItem(item, trigger))}
+      {gate.items.map((item) => renderItem(item, trigger, sharedNote))}
       <div className={CARD_CLASS}>
         <strong className="text-xs">门禁并发上限</strong>
         <p className="m-0 leading-relaxed">
@@ -333,12 +357,13 @@ function renderGate(overview: SubagentRuntimeOverview, context: OverviewContext)
           <p className="m-0 text-muted">没有门禁规则。</p>
         ) : (
           gate.rules.items.map((rule) => (
-            <details key={rule.id} className="group">
+            <details key={rule.id} className={ITEM_GROUP_CLASS}>
               <summary className={SUMMARY_CLASS}>
-                <IconChevronRight size={13} className={CHEVRON_CLASS} aria-hidden="true" />
+                <IconChevronRight size={13} className={ITEM_CHEVRON_CLASS} aria-hidden="true" />
                 <span className="min-w-0 flex-1 leading-relaxed">{rule.explanation}</span>
               </summary>
-              <pre className={`${CODE_BLOCK_CLASS} mt-1.5`}>{rule.definition}</pre>
+              <p className="m-0 mt-1.5 text-muted">以下为规则定义，整理格式后显示，由 Codey 门禁读取，不发给 Codex。</p>
+              <pre className={`${CODE_BLOCK_CLASS} mt-1`}>{rule.definition}</pre>
             </details>
           ))
         )}
@@ -357,6 +382,18 @@ function renderReady(
   const plan = (id: SubagentRoleId) => overview.roles.find((role) => role.id === id);
   const masterTrigger = `开启「${MASTER_SWITCH}」`;
   const scopeTrigger = `开启「${SCOPE_GUARD_SWITCH}」`;
+  // 门禁和防御性编程控制各自为同一事件注册一组钩子；在两处都说明，避免读成重复。
+  const events = (items: SubagentRuntimeItem[]) => new Set(items.flatMap((item) => item.events.map(({ event }) => event)));
+  const scopeEvents = events(overview.scopeGuard);
+  const gateEvents = events(overview.gate.items);
+  const gateNote: SharedHookNote = (event) =>
+    scopeEvents.has(event)
+      ? `「${SCOPE_GUARD_SWITCH}」也为这个事件单独注册了一组钩子，见该开关的分组；两组分别注册、各自执行。`
+      : null;
+  const scopeNote: SharedHookNote = (event) =>
+    gateEvents.has(event)
+      ? `「${MASTER_SWITCH}」也为这个事件单独注册了一组门禁钩子，见「门禁、钩子与并发」；两组分别注册、各自执行。`
+      : null;
   return (
     <div className="space-y-4 text-xs">
       {renderBasis(overview, context, roles)}
@@ -379,9 +416,9 @@ function renderReady(
         `「${SCOPE_GUARD_SWITCH}」开关`,
         renderStateBadges(draft.scopeGuard, draft.scopeGuard !== overview.saved.scopeGuard, ["已开启", "未开启"]),
         `开启后，Codey 用钩子把防御性编程规则交给新建、清空和压缩后的主会话，以及新启动的子代理。不写入文件，不依赖「${MASTER_SWITCH}」。`,
-        overview.scopeGuard.map((item) => renderItem(item, scopeTrigger)),
+        overview.scopeGuard.map((item) => renderItem(item, scopeTrigger, scopeNote)),
       )}
-      {renderGate(overview, context)}
+      {renderGate(overview, context, gateNote)}
     </div>
   );
 }
@@ -460,11 +497,11 @@ export function SubagentRuntimeOverviewSection({
 
   return (
     <details
-      className="group rounded-lg border border-default px-3 py-2.5"
+      className={`${SECTION_GROUP_CLASS} rounded-lg border border-default px-3 py-2.5`}
       onToggle={(event) => setOpen(event.currentTarget.open)}
     >
       <summary className={SUMMARY_CLASS}>
-        <IconChevronRight size={14} className={CHEVRON_CLASS} aria-hidden="true" />
+        <IconChevronRight size={14} className={SECTION_CHEVRON_CLASS} aria-hidden="true" />
         <div className="min-w-0 flex-1">
           <strong className="text-xs">运行方式</strong>
           <p className="m-0 mt-0.5 text-[11.5px] leading-relaxed text-muted">

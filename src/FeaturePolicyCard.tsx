@@ -317,7 +317,7 @@ export function SubagentPolicyCardComponent({
               </div>
               <div className="feature-disabled-text">
                 <strong>子代理角色与调度增强已关闭</strong>
-                <p>开启后仅在宽范围、可并行或需要专门证据时选择性委派，并提供五类专用角色与汇合门禁。</p>
+                <p>开启后仅在宽范围、可并行或需要专门证据时选择性派生子代理，并提供五类专用角色与汇合门禁。</p>
               </div>
             </div>
           )}

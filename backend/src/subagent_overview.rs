@@ -87,9 +87,18 @@ pub(crate) struct HookEvent {
     pub(crate) purpose: &'static str,
 }
 
+/// 内容原文由谁读取：交给 Codex 的提示与配置，或只供 Codey 门禁读取的记录。
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum Reader {
+    Codex,
+    Codey,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct Content {
     pub(crate) format: &'static str,
+    pub(crate) reader: Reader,
     pub(crate) text: String,
 }
 
@@ -104,6 +113,7 @@ pub(crate) struct Item {
     pub(crate) overrides: Vec<Override>,
     pub(crate) events: Vec<HookEvent>,
     pub(crate) content: Option<Content>,
+    pub(crate) error: Option<String>,
 }
 
 impl Item {
@@ -123,6 +133,7 @@ impl Item {
             overrides: Vec::new(),
             events: Vec::new(),
             content: None,
+            error: None,
         }
     }
 }

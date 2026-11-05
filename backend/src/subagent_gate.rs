@@ -27,7 +27,8 @@ pub(crate) use runtime_policy::write_runtime_subagent_policy;
 use runtime_policy::{RuntimeSubagentPolicy, read_optional_runtime_policy_file};
 pub(crate) use runtime_policy::{
     begin_runtime_subagent_policy_update, clear_runtime_subagent_policy,
-    commit_runtime_subagent_policy, runtime_subagent_policy_matches, runtime_subagent_policy_paths,
+    commit_runtime_subagent_policy, runtime_subagent_policy_bytes, runtime_subagent_policy_matches,
+    runtime_subagent_policy_paths,
 };
 use state::*;
 

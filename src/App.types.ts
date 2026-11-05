@@ -359,8 +359,10 @@ export type SubagentRuntimeOverride = {
   value: string | null;
 };
 
+/** reader 指出原文由谁读取：交给 Codex 的提示与配置，或只供 Codey 门禁读取的记录。 */
 export type SubagentRuntimeContent = {
   format: "markdown" | "toml" | "json" | "text";
+  reader: "codex" | "codey";
   text: string;
 };
 
@@ -374,6 +376,7 @@ export type SubagentRuntimeItem = {
   overrides: SubagentRuntimeOverride[];
   events: Array<{ event: string; name: string; purpose: string }>;
   content: SubagentRuntimeContent | null;
+  error: string | null;
 };
 
 /** 角色的交付计划不带标题，显示名称取自子代理角色列表。 */

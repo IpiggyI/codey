@@ -5,6 +5,7 @@ import { autoStubModule, collectElements, createModuleGraph, elementProps, eleme
 
 const heroui = autoStubModule("heroui");
 const ui = autoStubModule("ui");
+const icons = autoStubModule("icons");
 
 const policyGraph = createModuleGraph(new URL("../src/FeaturePolicyCard.tsx", import.meta.url), {
   stubs: {
@@ -15,7 +16,7 @@ const policyGraph = createModuleGraph(new URL("../src/FeaturePolicyCard.tsx", im
   },
 });
 const overviewGraph = createModuleGraph(new URL("../src/components/SubagentRuntimeOverview.tsx", import.meta.url), {
-  stubs: { "./ui": ui, "@tabler/icons-react": autoStubModule("icons") },
+  stubs: { "./ui": ui, "@tabler/icons-react": icons },
 });
 
 const find = (tree, type) => collectElements(tree, (node) => elementType(node) === type);
@@ -67,6 +68,7 @@ const item = (overrides) => ({
   overrides: [],
   events: [],
   content: null,
+  error: null,
   ...overrides,
 });
 
@@ -82,7 +84,7 @@ const OVERVIEW = {
       channel: "override",
       template: { path: "/home/u/.codey/codex-constraints/root-instructions.md", exists: true },
       overrides: [{ label: "主代理指令（追加）", key: "developer_instructions", value: null }],
-      content: { format: "markdown", text: "# 调度\n- 一行很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长" },
+      content: { format: "markdown", reader: "codex", text: "# 调度\n- 一行很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长" },
     }),
     item({
       id: "codex-agent-settings",
@@ -99,7 +101,7 @@ const OVERVIEW = {
     overrides: [{ label: "注册角色配置文件", key: `agents.${id}.config_file`, value: `/home/u/.codey/codex-constraints/runtime/agents/${id}.toml` }],
     model: "gpt-test",
     reasoningEffort: "high",
-    content: { format: "toml", text: `name = "${id}"` },
+    content: { format: "toml", reader: "codex", text: `name = "${id}"` },
     error: id === "codey_visual_worker" ? "解析模板失败" : null,
   })),
   scopeGuard: [
@@ -109,7 +111,15 @@ const OVERVIEW = {
       description: "钩子把规则交给主代理",
       channel: "hook",
       events: [{ event: "SessionStart", name: "会话开始时", purpose: "注入完整规则" }],
-      content: { format: "markdown", text: "# 适度原则" },
+      content: { format: "markdown", reader: "codex", text: "# 完整规则" },
+    }),
+    item({
+      id: "scope-guard-child",
+      title: "子代理规则",
+      description: "钩子把规则交给子代理",
+      channel: "hook",
+      events: [{ event: "SubagentStart", name: "子代理启动时", purpose: "注入短版规则" }],
+      content: { format: "markdown", reader: "codex", text: "# 短版" },
     }),
   ],
   gate: {
@@ -119,9 +129,19 @@ const OVERVIEW = {
         title: "门禁钩子",
         description: "按门禁规则放行或拦截",
         channel: "hook",
-        events: [{ event: "PreToolUse", name: "调用工具前", purpose: "检查权限和并发上限" }],
+        events: [
+          { event: "PreToolUse", name: "调用工具前", purpose: "检查权限和并发上限" },
+          { event: "SubagentStart", name: "子代理启动时", purpose: "登记子代理身份" },
+        ],
       }),
-      item({ id: "runtime-policy", title: "子代理身份记录", description: "门禁据此核对身份", channel: "file", destination: "/home/u/.codex/codey-subagent-gate-v3/runtime-subagent-policy.json" }),
+      item({
+        id: "runtime-policy",
+        title: "子代理身份记录",
+        description: "门禁据此核对身份",
+        channel: "file",
+        destination: "/home/u/.codex/codey-subagent-gate-v3/runtime-subagent-policy.json",
+        content: { format: "json", reader: "codey", text: "{\n  \"schemaVersion\": 2\n}" },
+      }),
     ],
     concurrency: { readOnly: 4, writable: 1 },
     rules: {
@@ -314,4 +334,84 @@ test("运行方式默认折叠，且位于子代理卡片内并拿到草稿设�
   assert.equal(section.props.open, undefined, "默认不展开");
   assert.ok(textContent(section).includes("运行方式"));
   assert.equal(byTag(section, "pre").length, 0, "折叠时不渲染内容");
+});
+
+test("子代理页面和运行方式只用「派生」一种说法", () => {
+  const texts = [
+    textContent(renderPanel({ status: "ready", overview: OVERVIEW })),
+    textContent(renderPanel({ status: "ready", overview: OVERVIEW }, { draft: { ...structuredClone(DRAFT), subagentOptimization: false } })),
+  ];
+  for (const subagentOptimization of [true, false]) {
+    policyGraph.restart();
+    texts.push(textContent(policyGraph.exports.SubagentPolicyCard({
+      config: { ...structuredClone(DRAFT), subagentOptimization },
+      popupContainer: null,
+      isBusy: false,
+      subagentModelOptions: [],
+      onConfigChange() {},
+      onSubagentOptimizationChange() {},
+    })));
+  }
+  assert.ok(texts[3].includes("选择性派生子代理"), "关闭时的卡片说明用「派生」");
+  for (const text of texts) {
+    for (const word of ["委派", "派发"]) assert.ok(!text.includes(word), word);
+  }
+});
+
+test("子代理身份记录展示文件原文，并注明只供 Codey 门禁读取", () => {
+  const tree = renderPanel({ status: "ready", overview: OVERVIEW });
+  const policy = cards(tree).find((card) => cardTitle(card) === "子代理身份记录");
+  const text = textContent(policy);
+  assert.ok(text.includes("写入位置：/home/u/.codex/codey-subagent-gate-v3/runtime-subagent-policy.json"));
+  assert.ok(text.includes("查看文件原文（JSON）"));
+  assert.ok(text.includes("只供 Codey 门禁读取，不发给 Codex"));
+  assert.equal(textContent(byTag(policy, "pre")[0]), OVERVIEW.gate.items[1].content.text);
+});
+
+test("每段原文上方都标明这是按原样显示的原文", () => {
+  const tree = renderPanel({ status: "ready", overview: OVERVIEW });
+  const blocks = byTag(tree, "details");
+  assert.ok(blocks.length > 0);
+  for (const block of blocks) {
+    const children = [block.props.children].flat(Infinity).filter(Boolean);
+    const pre = children.findIndex((child) => child.type === "pre");
+    assert.ok(pre > 0, "每个折叠块都有内容");
+    const label = textContent(children[pre - 1]);
+    assert.ok(/原文|规则定义/.test(label), label);
+  }
+  const root = cards(tree).find((card) => cardTitle(card) === "主代理指导");
+  assert.ok(textContent(root).includes("查看发送给 Codex 的原文（Markdown）"));
+  assert.ok(textContent(root).includes("以下为通过启动参数发送给 Codex 的原文，按原样显示；其中的用词和角色标识属于原文，不是本页的命名。"));
+  const quickScan = roleCard(tree, "快速定位")[0];
+  assert.ok(textContent(quickScan).includes("以下为写入该文件、由 Codex 读取的原文"));
+  const scope = cards(tree).find((card) => cardTitle(card) === "主会话规则");
+  assert.ok(textContent(scope).includes("以下为钩子发送给 Codex 的原文"));
+});
+
+test("嵌套折叠各用自己的分组名，外层展开不带动内层箭头", () => {
+  const tree = renderPanel({ status: "ready", overview: OVERVIEW });
+  const groupOf = (className) => /(?:^|\s)group\/([\w-]+)/.exec(className ?? "")?.[1];
+  const inner = byTag(tree, "details");
+  for (const block of inner) {
+    assert.equal(groupOf(block.props.className), "rt-item");
+    const chevron = find(block, icons.IconChevronRight)[0];
+    assert.match(elementProps(chevron).className, /(?:^|\s)group-open\/rt-item:rotate-90\b/);
+  }
+  const section = overviewGraph.exports.SubagentRuntimeOverviewSection(overviewSectionProps());
+  assert.equal(groupOf(section.props.className), "rt-section");
+  const outerChevron = find(byTag(section, "summary")[0], icons.IconChevronRight)[0];
+  assert.match(elementProps(outerChevron).className, /(?:^|\s)group-open\/rt-section:rotate-90\b/);
+  const bare = collectElements(tree, (node) => /(?:^|\s)group-open:/.test(node.props?.className ?? ""));
+  assert.equal(bare.length, 0, "不再使用匹配任意外层的 group-open");
+});
+
+test("两个分组都列出的钩子事件，各自说明是分别注册的", () => {
+  const tree = renderPanel({ status: "ready", overview: OVERVIEW });
+  const gate = textContent(cards(tree).find((card) => cardTitle(card) === "门禁钩子"));
+  const child = textContent(cards(tree).find((card) => cardTitle(card) === "子代理规则"));
+  const root = textContent(cards(tree).find((card) => cardTitle(card) === "主会话规则"));
+  assert.ok(gate.includes("「防御性编程控制」也为这个事件单独注册了一组钩子"));
+  assert.ok(child.includes("「Codey 子代理角色与调度增强」也为这个事件单独注册了一组门禁钩子"));
+  assert.ok(!root.includes("单独注册"), "只在一个分组出现的事件不加说明");
+  assert.equal(gate.split("单独注册").length - 1, 1, "门禁里只有子代理启动时这一项共享");
 });
