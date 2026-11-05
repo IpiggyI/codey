@@ -24,6 +24,7 @@ test("传入 emptyHint 且没有候选模型时，不挂载下拉层，只在输
   assert.equal(find(tree, heroui.ComboBox.Popover).length, 0, "不弹出空的下拉层");
   // 传入空数组也会让组件允许打开空的下拉层，所以无候选时不传 items。
   assert.equal(elementProps(find(tree, heroui.ComboBox)[0]).items, undefined);
+  assert.equal(elementProps(find(tree, heroui.ComboBox)[0]).allowsEmptyCollection, false);
   assert.equal(elementProps(find(tree, heroui.ComboBox.Trigger)[0]).className, "hidden");
   assert.ok(textContent(tree).includes(HINT));
   const hint = collectElements(tree, (node) => node.type === "p")[0];
@@ -41,6 +42,7 @@ test("传入 emptyHint 且没有候选时仍可输入任意模型名称", () => 
 test("不传 emptyHint 时行为不变：空列表仍传 items、挂载下拉层，并保留下拉层内的原有提示（提示词优化卡片依赖它）", () => {
   const tree = render({ options: [] });
   assert.deepEqual(elementProps(find(tree, heroui.ComboBox)[0]).items, []);
+  assert.equal(elementProps(find(tree, heroui.ComboBox)[0]).allowsEmptyCollection, true, "空集合时下拉层不会立刻关闭，空状态提示才能显示");
   assert.equal(find(tree, heroui.ComboBox.Popover).length, 1);
   assert.equal(elementProps(find(tree, heroui.ComboBox.Trigger)[0]).className, undefined);
   const listBox = find(tree, heroui.ListBox)[0];

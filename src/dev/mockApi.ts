@@ -865,7 +865,8 @@ if (import.meta.env.DEV) {
             secondary: { usedPercent: used / 2, windowMinutes: 10080, resetsAt: now + 3 * 86400 },
           };
           // 后端快照带官方重置次数；OfficialUsageSnapshot 暂不声明该字段，只在预览返回里附带。
-          const resetCredits = { availableCount: 2, nextExpiresAt: now + 5 * 86400 };
+          // plus 账号的最近过期时间落在 12 小时内，用来预览过期预警。
+          const resetCredits = { availableCount: 2, nextExpiresAt: now + (account.planType === "plus" ? 6 * 3600 : 5 * 86400) };
           return { ...snapshot, resetCredits, status: "ok", authGeneration: previewUsageGeneration };
         }
         if (command === "store_official_account_usage") {

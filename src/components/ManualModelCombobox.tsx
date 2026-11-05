@@ -69,6 +69,8 @@ export function ManualModelCombobox({
     <ComboBox
       aria-label={ariaLabel}
       allowsCustomValue
+      // 空集合默认会立刻关闭下拉层，导致空状态提示一闪而过；挂载下拉层时允许空集合保持打开。
+      allowsEmptyCollection={showPopup}
       fullWidth
       className="w-full min-w-0"
       // 只在有候选时传 items：传入空数组也会让组件允许打开空的下拉层。
