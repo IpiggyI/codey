@@ -1,9 +1,9 @@
 use super::*;
-use anyhow::Context;
 use crate::official_accounts::{
     OfficialAccountStore,
     oauth::{self, LoginPhase},
 };
+use anyhow::Context;
 
 impl AppState {
     pub(crate) fn official_accounts(&self) -> OfficialAccountStore {
@@ -92,10 +92,14 @@ fn invoke_local(
             if crate::official_accounts::current_id(home)?.as_deref() == Some(id) {
                 store.sync_from_codex(home)?;
             }
-            let account = store.get(id)?.with_context(|| format!("找不到要导出的官方账号：{id}"))?;
+            let account = store
+                .get(id)?
+                .with_context(|| format!("找不到要导出的官方账号：{id}"))?;
             let content = serde_json::to_string_pretty(&account.export_credential())?;
-            anyhow::ensure!(content.len() <= crate::official_accounts::MAX_MANUAL_CREDENTIAL_BYTES,
-                "账号凭据超过现有手动导入的大小上限，无法生成可导入的 JSON");
+            anyhow::ensure!(
+                content.len() <= crate::official_accounts::MAX_MANUAL_CREDENTIAL_BYTES,
+                "账号凭据超过现有手动导入的大小上限，无法生成可导入的 JSON"
+            );
             Ok(json!({"status":"ok","fileName":account.export_file_name(),"content":content}))
         }
         "import_current_codex_login" => {
