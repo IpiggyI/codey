@@ -63,3 +63,82 @@ test("autoFocus 交给输入框", () => {
   assert.equal(elementProps(find(render({ options: ["a"], autoFocus: true }), heroui.Input)[0]).autoFocus, true);
   assert.equal(elementProps(find(render({ options: ["a"] }), heroui.Input)[0]).autoFocus, undefined);
 });
+
+const MODELS = ["gpt-5", "gpt-5-mini", "provider-fast-coder", "deepseek-chat"];
+const items = (tree) => elementProps(find(tree, heroui.ComboBox)[0]).items;
+const ids = (tree) => items(tree).map((item) => item.id);
+
+test("已有值且不输入直接打开时显示全部候选，值不会把列表缩成一项", () => {
+  graph.reset();
+  assert.deepEqual(ids(render({ options: MODELS, value: "provider-fast-coder" })), MODELS);
+  // 值与候选不完全一致时，自定义行仍排第一，候选保持完整。
+  assert.deepEqual(ids(render({ options: MODELS, value: "gpt-5-x" })), ["gpt-5-x", ...MODELS]);
+  // 精确匹配忽略大小写和首尾空白。
+  assert.deepEqual(ids(render({ options: MODELS, value: " GPT-5 " })), MODELS);
+});
+
+test("用户输入后按输入过滤，下拉层关闭后下一次打开恢复完整列表", () => {
+  graph.reset();
+  const props = { options: MODELS, value: "gpt-5" };
+  const input = () => elementProps(find(render(props), heroui.Input)[0]);
+  const combo = () => elementProps(find(render(props), heroui.ComboBox)[0]);
+  assert.deepEqual(ids(render(props)), MODELS);
+  input().onInput();
+  assert.deepEqual(ids(render(props)), ["gpt-5", "gpt-5-mini"]);
+  // 没有匹配项时回退为全部候选，自定义行排第一。
+  props.value = "zzz";
+  assert.deepEqual(ids(render(props)), ["zzz", ...MODELS]);
+  props.value = "gpt-5";
+  combo().onOpenChange(true);
+  assert.deepEqual(ids(render(props)), ["gpt-5", "gpt-5-mini"], "打开事件不清除输入过滤");
+  combo().onOpenChange(false);
+  assert.deepEqual(ids(render(props)), MODELS);
+});
+
+test("没有下拉层时的输入不记为过滤，之后拉到列表首次打开显示全部", () => {
+  graph.reset();
+  elementProps(find(render({ options: [], emptyHint: HINT, value: "gpt-5" }), heroui.Input)[0]).onInput();
+  assert.deepEqual(ids(render({ options: MODELS, emptyHint: HINT, value: "gpt-5" })), MODELS);
+});
+
+test("选择候选项或自定义行仍然把值交给 onChange", () => {
+  const picked = [];
+  const tree = render({ options: MODELS, value: "mine", onChange: (value) => picked.push(value) });
+  const select = elementProps(find(tree, heroui.ComboBox)[0]).onSelectionChange;
+  select("gpt-5-mini");
+  select("mine");
+  select(null);
+  assert.deepEqual(picked, ["gpt-5-mini", "mine"]);
+});
+
+test("清空按钮仍然清空输入框", () => {
+  const typed = [];
+  const tree = render({ options: MODELS, value: "gpt-5", onChange: (value) => typed.push(value) });
+  const clear = collectElements(tree, (node) => node.type === "button")[0];
+  elementProps(clear).onClick({ preventDefault() {}, stopPropagation() {} });
+  assert.deepEqual(typed, [""]);
+});
+
+test("没有候选但已有值时，下拉层给出自定义行和不可选的未获取提示；值为空时仍是原有空状态", () => {
+  graph.reset();
+  const withValue = render({ options: [], value: "my-model" });
+  const rows = items(withValue);
+  assert.deepEqual(rows.map((item) => [item.id, Boolean(item.custom), Boolean(item.note)]), [
+    ["my-model", true, false],
+    ["\u0000not-fetched", false, true],
+  ]);
+  assert.ok(rows[1].label.includes("获取列表"));
+  const listBox = find(withValue, heroui.ListBox)[0];
+  const note = collectElements(elementProps(listBox).children(rows[1]), (node) => elementType(node) === heroui.ListBox.Item)[0];
+  assert.equal(elementProps(note).isDisabled, true, "说明行不可选");
+  const custom = collectElements(elementProps(listBox).children(rows[0]), (node) => elementType(node) === heroui.ListBox.Item)[0];
+  assert.ok(!elementProps(custom).isDisabled);
+  assert.deepEqual(items(render({ options: [], value: "" })), []);
+  assert.equal(find(render({ options: [], value: "" }), heroui.ComboBox.Popover).length, 1);
+});
+
+test("传入 emptyHint 且没有候选时，已有值也不产生说明行或下拉层", () => {
+  const tree = render({ options: [], emptyHint: HINT, value: "my-model" });
+  assert.equal(items(tree), undefined);
+  assert.equal(find(tree, heroui.ComboBox.Popover).length, 0);
+});
