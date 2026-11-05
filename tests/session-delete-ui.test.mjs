@@ -741,7 +741,7 @@ test("host session manager release rejection or timeout never deletes", async (t
   });
 });
 
-test("host session manager enables list refresh only and is dropped when the RPC breaks", async () => {
+test("host session manager serves refresh, deletion and reconcile and is dropped when the RPC breaks", async () => {
   const events = [];
   const { stub, breakConnection } = hostedAppServerStub({
     refreshRecentConversations: () => { events.push("refresh"); },
@@ -751,8 +751,8 @@ test("host session manager enables list refresh only and is dropped when the RPC
   assert.equal((await load({ feature: "refresh" })).manager, stub);
   assert.equal(await runtime.window.__codeyRefreshRecentLocalSessions(), true);
   assert.deepEqual(events, ["refresh", "dispose:refreshRecentConversations"]);
-  await assert.rejects(load({ feature: "deleteMessages" }), { code: "codey_capability_unavailable" });
-  await assert.rejects(load({ requireCompletionReconcile: true }), { code: "codey_capability_unavailable" });
+  assert.equal((await load({ feature: "deleteMessages" })).manager, stub);
+  assert.equal((await load({ requireCompletionReconcile: true })).manager, stub);
   breakConnection();
   assert.equal(runtime.window.__codeyCodexSessionController, null);
 });

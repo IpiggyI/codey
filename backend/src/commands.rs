@@ -986,6 +986,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         | "cancel_official_account_login"
         | "import_current_codex_login"
         | "import_official_account_credential"
+        | "export_official_account_credential"
         | "set_default_official_account"
         | "remove_official_account"
         | "query_official_account_usage"
@@ -996,6 +997,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         "select_channel" => channels::change_channel(state, &args, false).await,
         "set_channel_default_model" => channels::change_channel(state, &args, true).await,
         "load_codey_config" => load_codey_config(state).await,
+        "subagent_runtime_overview" => subagent_runtime_overview(state).await,
         "save_codey_config" => match codey_config_save_input(&args) {
             Ok(input) => save_codey_config_input(state, input).await,
             Err(error) => Err(error),
@@ -1235,6 +1237,24 @@ pub async fn clear_route_request_logs(state: &Arc<AppState>) -> Result<Value, St
         ),
     };
     serde_json::to_value(result).map_err(|error| format!("请求日志清理结果序列化失败：{error}"))
+}
+
+async fn subagent_runtime_overview(state: &Arc<AppState>) -> Result<Value, String> {
+    let config = state.config.read().await.clone();
+    tokio::task::spawn_blocking(move || {
+        let codey_home = crate::config::default_config_path();
+        let overview = crate::subagent_overview::build(
+            codey_home
+                .parent()
+                .ok_or_else(|| "Codey 配置路径缺少父目录".to_string())?,
+            codex_home(),
+            &config,
+        )
+        .map_err(|error| format!("读取子代理运行概览失败：{error:#}"))?;
+        serde_json::to_value(overview).map_err(|error| format!("序列化子代理运行概览失败：{error}"))
+    })
+    .await
+    .map_err(|error| format!("子代理运行概览任务异常退出：{error}"))?
 }
 
 pub async fn load_codey_config(state: &Arc<AppState>) -> Result<Value, String> {
@@ -1563,6 +1583,7 @@ async fn save_codey_config_locked(
         &fast_context_tools_status,
     );
     config.subagent_optimization = config_input.subagent_optimization;
+    config.scope_guard = config_input.scope_guard;
     let mut explicitly_configured_subagent_models = Vec::new();
     let default_role_supplied = subagent_roles_present
         && !config_input.subagent_roles.is_empty()
@@ -1860,6 +1881,7 @@ enum SubagentHotReloadStatus {
     Unchanged,
     Applied,
     Repaired,
+    PendingRestart,
     Superseded,
     Failed,
 }
@@ -1872,6 +1894,13 @@ pub(super) struct SubagentHotReloadOutcome {
 }
 
 impl SubagentHotReloadOutcome {
+    fn pending_restart() -> Self {
+        Self {
+            status: SubagentHotReloadStatus::PendingRestart,
+            ..Self::default()
+        }
+    }
+
     fn unchanged() -> Self {
         Self {
             status: SubagentHotReloadStatus::Unchanged,
@@ -1919,7 +1948,7 @@ impl SubagentHotReloadOutcome {
     }
 
     pub(super) fn requires_restart(&self) -> bool {
-        self.status == SubagentHotReloadStatus::Failed
+        self.status == SubagentHotReloadStatus::PendingRestart
     }
 
     pub(super) fn health(&self) -> &'static str {
@@ -1928,8 +1957,9 @@ impl SubagentHotReloadOutcome {
             SubagentHotReloadStatus::Unchanged => "healthy",
             SubagentHotReloadStatus::Applied => "applied",
             SubagentHotReloadStatus::Repaired => "repaired",
+            SubagentHotReloadStatus::PendingRestart => "pending_restart",
             SubagentHotReloadStatus::Superseded => "superseded",
-            SubagentHotReloadStatus::Failed => "restart_required",
+            SubagentHotReloadStatus::Failed => "failed",
         }
     }
 
@@ -2006,6 +2036,12 @@ async fn hot_reload_runtime_subagent_config_locked(
         );
     }
 
+    if runtime.subagent_registration_requires_restart(&current_config) {
+        runtime
+            .mark_subagent_config_requires_restart(&current_config)
+            .await;
+        return SubagentHotReloadOutcome::pending_restart();
+    }
     let runtime_config = current_config.clone();
     drop(_config_commit_guard);
     #[cfg(test)]
@@ -2046,10 +2082,10 @@ async fn hot_reload_runtime_subagent_config_locked(
                     "子代理热更新期间配置或运行时已变化；等待最新配置应用",
                 );
             }
+            runtime.mark_subagent_config_applied(&current_config).await;
             if !report.repaired && !applied_config_changed {
                 return SubagentHotReloadOutcome::unchanged();
             }
-            runtime.mark_subagent_config_applied(&current_config).await;
             SubagentHotReloadOutcome::applied(
                 report.repaired,
                 report
@@ -2144,26 +2180,18 @@ async fn account_usage_snapshot(state: &Arc<AppState>) -> Value {
 }
 
 #[cfg(test)]
-fn config_requires_restart(
-    applied: &CodeyConfig,
-    applied_models: &RuntimeModelConfig,
-    applied_subagent: &RuntimeSubagentConfig,
-    current: &CodeyConfig,
-) -> bool {
+fn config_requires_restart(applied: &CodeyConfig, current: &CodeyConfig) -> bool {
     config_requires_restart_with_route_status(
         provider_route_requires_restart(applied, current),
         applied,
-        applied_models,
-        applied_subagent,
         current,
     )
 }
 
+// 仅比较当前进程无法热更新的配置，热更新是否送达由应用结果处理。
 pub(super) fn config_requires_restart_with_route_status(
     provider_route_restart_required: bool,
     applied: &CodeyConfig,
-    applied_models: &RuntimeModelConfig,
-    applied_subagent: &RuntimeSubagentConfig,
     current: &CodeyConfig,
 ) -> bool {
     provider_route_restart_required
@@ -2179,9 +2207,7 @@ pub(super) fn config_requires_restart_with_route_status(
         || applied.codex_launch_proxy != current.codex_launch_proxy
         || applied.fast_context_tools != current.fast_context_tools
         || applied.subagent_optimization != current.subagent_optimization
-        || applied_models != &RuntimeModelConfig::from_config(current)
-        || ((applied.subagent_optimization || current.subagent_optimization)
-            && applied_subagent != &RuntimeSubagentConfig::from_config(current))
+        || applied.scope_guard != current.scope_guard
 }
 
 pub(super) fn provider_route_restart_required_for_runtime(
@@ -2205,22 +2231,27 @@ fn model_catalog_config_for_runtime<'a>(
         .unwrap_or(current)
 }
 
+fn runtime_requires_restart(
+    runtime: &CodeyRuntime,
+    pending_subagent: Option<&RuntimeSubagentConfig>,
+    current: &CodeyConfig,
+) -> bool {
+    config_requires_restart_with_route_status(
+        provider_route_restart_required_for_runtime(&runtime.applied_config, current),
+        &runtime.applied_config,
+        current,
+    ) || (current.subagent_optimization
+        && pending_subagent
+            .is_some_and(|pending| pending == &RuntimeSubagentConfig::from_config(current)))
+}
+
 async fn runtime_config_requires_restart(state: &Arc<AppState>, current: &CodeyConfig) -> bool {
     let runtime = state.runtime.lock().await.clone();
     let Some(runtime) = runtime else {
         return false;
     };
-    let applied_models = runtime.applied_model_config().await;
-    let applied_subagent = runtime.applied_subagent_config().await;
-    let provider_route_restart_required =
-        provider_route_restart_required_for_runtime(&runtime.applied_config, current);
-    config_requires_restart_with_route_status(
-        provider_route_restart_required,
-        &runtime.applied_config,
-        &applied_models,
-        &applied_subagent,
-        current,
-    )
+    let pending_subagent = runtime.subagent_restart_config().await;
+    runtime_requires_restart(&runtime, pending_subagent.as_ref(), current)
 }
 
 #[cfg(test)]

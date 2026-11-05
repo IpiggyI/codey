@@ -93,6 +93,21 @@ test("a late pending reply cannot reopen an application that already completed",
   assert.equal(h.timers.size, 0, "a completed application does not poll");
 });
 
+test("a pending runtime response waits for the final restart judgement", async context => {
+  const h = runtimeStatusHarness(context);
+  let refresh = h.current.refreshStatus();
+  h.requests.at(-1).resolve({ running: true, restartRequired: false });
+  await refresh; await flush(); h.render();
+  refresh = h.current.refreshStatus();
+  h.requests.at(-1).resolve({ running: true, restartRequired: true, configApply: { revision: 2, state: "pending" } });
+  await refresh; await flush(); h.render();
+  assert.equal(h.current.status.restartRequired, false);
+  refresh = h.current.refreshStatus();
+  h.requests.at(-1).resolve({ running: true, restartRequired: true, configApply: { revision: 2, state: "restart_required" } });
+  await refresh; await flush(); h.render();
+  assert.equal(h.current.status.restartRequired, true);
+});
+
 test("two saves in a row poll until the later save finishes and then stop", async context => {
   const h = runtimeStatusHarness(context);
   h.current.acceptConfigApply({ revision: 1, state: "pending" });

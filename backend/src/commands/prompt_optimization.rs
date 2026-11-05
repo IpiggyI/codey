@@ -115,6 +115,14 @@ fn resolve_current_provider_request(
     let sync =
         codex_provider::current_provider_model_sync_for_config_with_env(codex_home, config, env)
             .map_err(|error| format!("读取当前 provider 失败：{error:#}"))?;
+    resolve_current_provider_request_from_sync(optimization, codex_home, sync)
+}
+
+fn resolve_current_provider_request_from_sync(
+    optimization: &PromptOptimizationConfig,
+    codex_home: &Path,
+    sync: codex_provider::CurrentProviderModelSync,
+) -> Result<prompt_optimization::ResolvedPromptOptimizationConfig, String> {
     if sync.snapshot.uses_official_account_auth {
         let request_headers = read_official_auth_headers(codex_home).map_err(|error| {
             format!("官方账号登录不可用：{error}。当前 provider 使用官方账号鉴权，提示词优化不会改用环境变量或其他已保存密钥。")
@@ -237,15 +245,90 @@ pub async fn fetch_prompt_optimization_models_command(
     let config = state.config.read().await.clone();
     let mut optimization = draft.unwrap_or_else(|| config.prompt_optimization.clone());
     optimization.merge_redacted_secrets(&config.prompt_optimization);
-    optimization.validate()?;
-    let request_config = resolve_request_config(&optimization, &config).await?;
+    fetch_prompt_optimization_models_at(
+        &config,
+        &optimization,
+        codex_home(),
+        &crate::codex_config::codey_model_catalog_dir(),
+    )
+    .await
+}
+
+enum ModelListSource {
+    Catalog(Vec<String>),
+    Remote(Box<prompt_optimization::ResolvedPromptOptimizationConfig>),
+}
+
+fn resolve_model_list_source_at(
+    config: &crate::config::CodeyConfig,
+    optimization: &PromptOptimizationConfig,
+    home: &Path,
+    catalog_dir: &Path,
+) -> Result<ModelListSource, String> {
+    optimization.validate_connection()?;
+    let (request, official) = if optimization.uses_current_provider() {
+        let sync = codex_provider::current_provider_model_sync_for_config_with_env(
+            home,
+            config,
+            &|name| std::env::var(name).ok(),
+        )
+        .map_err(|error| format!("读取当前 provider 失败：{error:#}"))?;
+        let official = sync.snapshot.uses_official_account_auth;
+        (
+            resolve_current_provider_request_from_sync(optimization, home, sync)?,
+            official,
+        )
+    } else {
+        (
+            resolve_request_config_for_channel(optimization, home, config, &|name| {
+                std::env::var(name).ok()
+            })?,
+            optimization.uses_official_account(),
+        )
+    };
+    if !official {
+        return Ok(ModelListSource::Remote(Box::new(request)));
+    }
+    let user_catalog = crate::codex_config::configured_user_model_catalog_path(home, catalog_dir)
+        .map_err(|error| format!("读取官方模型目录失败：{error:#}"))?;
+    crate::model_catalog::available_official_models(
+        home,
+        catalog_dir,
+        user_catalog.as_deref(),
+        &config.codex_app_path,
+    )
+    .map(|models| ModelListSource::Catalog(models.into_iter().map(|model| model.slug).collect()))
+    .map_err(|error| format!("读取官方模型目录失败：{error:#}"))
+}
+
+async fn fetch_prompt_optimization_models_at(
+    config: &crate::config::CodeyConfig,
+    optimization: &PromptOptimizationConfig,
+    home: &Path,
+    catalog_dir: &Path,
+) -> Result<Value, String> {
+    let source = {
+        let config = config.clone();
+        let optimization = optimization.clone();
+        let home = home.to_path_buf();
+        let catalog_dir = catalog_dir.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            resolve_model_list_source_at(&config, &optimization, &home, &catalog_dir)
+        })
+        .await
+        .map_err(|_| "解析提示词优化配置任务失败".to_string())??
+    };
+    let request_config = match source {
+        ModelListSource::Catalog(models) => return Ok(json!({"models": models})),
+        ModelListSource::Remote(request) => *request,
+    };
     let client = optimizer_client(&request_config.base_url).await?;
     let models = prompt_optimization::fetch_models_resolved(&client, &request_config).await;
     match models {
         Ok(models) => Ok(json!({"models": models})),
         Err(error) => {
             let (error, context) =
-                prompt_optimization_failure_payload(&optimization, &request_config, error);
+                prompt_optimization_failure_payload(optimization, &request_config, error);
             error_log::record_failure(
                 "prompt_optimization_models_failed",
                 "fetch_prompt_optimization_models",
@@ -323,6 +406,26 @@ pub(super) fn apply_prompt_optimization_overlay(
     }
     public.credentials_ready =
         prompt_optimization_credentials_ready(public, overlay, official_login_available);
+    let mut mode_config = public.clone();
+    public.credentials_ready_by_mode = Some(
+        [
+            crate::config::PROMPT_OPTIMIZATION_MODE_OFFICIAL_ACCOUNT,
+            crate::config::PROMPT_OPTIMIZATION_MODE_CURRENT_PROVIDER,
+        ]
+        .into_iter()
+        .map(|mode| {
+            mode_config.mode = mode.to_string();
+            (
+                mode.to_string(),
+                prompt_optimization_credentials_ready(
+                    &mode_config,
+                    overlay,
+                    official_login_available,
+                ),
+            )
+        })
+        .collect(),
+    );
 }
 
 pub(super) fn official_login_available(codex_home: &Path) -> bool {
@@ -363,6 +466,272 @@ mod tests {
     use crate::config::{
         PROMPT_OPTIMIZATION_MODE_CURRENT_PROVIDER, PROMPT_OPTIMIZATION_MODE_OFFICIAL_ACCOUNT,
     };
+
+    #[tokio::test]
+    async fn fetch_prompt_optimization_models_uses_official_catalog_without_http() {
+        let home = tempfile::tempdir().unwrap();
+        let catalog = home.path().join("user-models.json");
+        fs::write(&catalog, r#"{"models":[{"slug":"catalog-z","display_name":"Z"},{"slug":"catalog-a","display_name":"A"}]}"#).unwrap();
+        write_user_config(
+            home.path(),
+            &format!(
+                "model_catalog_json = {:?}\nmodel_provider = 'openai'\n[model_providers.openai]\nbase_url = 'https://chatgpt.com/backend-api/codex'\nwire_api = 'responses'\n",
+                catalog.to_str().unwrap()
+            ),
+        );
+        fs::write(home.path().join("auth.json"), r#"{"auth_mode":"chatgpt","tokens":{"access_token":"fixture-token","account_id":"fixture-account"}}"#).unwrap();
+        let before_config = fs::read(home.path().join("config.toml")).unwrap();
+        let before_auth = fs::read(home.path().join("auth.json")).unwrap();
+        for mode in [
+            PROMPT_OPTIMIZATION_MODE_OFFICIAL_ACCOUNT,
+            PROMPT_OPTIMIZATION_MODE_CURRENT_PROVIDER,
+        ] {
+            for enabled in [true, false] {
+                let optimization = PromptOptimizationConfig {
+                    enabled,
+                    mode: mode.into(),
+                    ..PromptOptimizationConfig::default()
+                };
+                let source = resolve_model_list_source_at(
+                    &crate::config::CodeyConfig::default(),
+                    &optimization,
+                    home.path(),
+                    home.path(),
+                )
+                .unwrap();
+                match source {
+                    ModelListSource::Catalog(models) => {
+                        assert_eq!(models, ["catalog-z", "catalog-a"])
+                    }
+                    ModelListSource::Remote(_) => panic!("官方模型列表不应发出 HTTP 请求"),
+                }
+                let result = fetch_prompt_optimization_models_at(
+                    &crate::config::CodeyConfig::default(),
+                    &optimization,
+                    home.path(),
+                    home.path(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(result, json!({"models": ["catalog-z", "catalog-a"]}));
+                if enabled {
+                    assert_eq!(
+                        optimization.validate().unwrap_err(),
+                        "启用提示词优化前，请先选择或填写模型"
+                    );
+                    let state = Arc::new(AppState::default());
+                    assert_eq!(
+                        test_prompt_optimization_command(&state, Some(optimization))
+                            .await
+                            .unwrap_err(),
+                        "启用提示词优化前，请先选择或填写模型"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            fs::read(home.path().join("config.toml")).unwrap(),
+            before_config
+        );
+        assert_eq!(
+            fs::read(home.path().join("auth.json")).unwrap(),
+            before_auth
+        );
+        fs::remove_file(home.path().join("auth.json")).unwrap();
+        for mode in [
+            PROMPT_OPTIMIZATION_MODE_OFFICIAL_ACCOUNT,
+            PROMPT_OPTIMIZATION_MODE_CURRENT_PROVIDER,
+        ] {
+            let optimization = PromptOptimizationConfig {
+                enabled: true,
+                mode: mode.into(),
+                ..PromptOptimizationConfig::default()
+            };
+            let error = fetch_prompt_optimization_models_at(
+                &crate::config::CodeyConfig::default(),
+                &optimization,
+                home.path(),
+                home.path(),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.starts_with("官方账号登录不可用："));
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_prompt_optimization_models_accepts_empty_manual_and_third_party_models() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for _ in 0..4 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let mut buffer = [0; 1024];
+                    let read = socket.read(&mut buffer).await.unwrap();
+                    assert!(read > 0);
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                assert!(
+                    String::from_utf8(request)
+                        .unwrap()
+                        .starts_with("GET /v1/models HTTP/1.1\r\n")
+                );
+                let body = r#"{"data":[{"id":"fixture-model"}]}"#;
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+        });
+        let home = tempfile::tempdir().unwrap();
+        write_user_config(
+            home.path(),
+            &format!(
+                "model_provider = 'relay'\n[model_providers.relay]\nbase_url = '{base_url}'\nexperimental_bearer_token = 'fixture-token'\n"
+            ),
+        );
+        for mode in [
+            crate::config::PROMPT_OPTIMIZATION_MODE_MANUAL,
+            PROMPT_OPTIMIZATION_MODE_CURRENT_PROVIDER,
+        ] {
+            for enabled in [true, false] {
+                let optimization = PromptOptimizationConfig {
+                    enabled,
+                    mode: mode.into(),
+                    base_url: base_url.clone(),
+                    api_key: "fixture-token".into(),
+                    ..PromptOptimizationConfig::default()
+                };
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    fetch_prompt_optimization_models_at(
+                        &crate::config::CodeyConfig::default(),
+                        &optimization,
+                        home.path(),
+                        home.path(),
+                    ),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(result, json!({"models": ["fixture-model"]}));
+                if enabled {
+                    assert_eq!(
+                        optimization.validate().unwrap_err(),
+                        "启用提示词优化前，请先选择或填写模型"
+                    );
+                    assert_eq!(
+                        test_prompt_optimization_command(
+                            &Arc::new(AppState::default()),
+                            Some(optimization)
+                        )
+                        .await
+                        .unwrap_err(),
+                        "启用提示词优化前，请先选择或填写模型"
+                    );
+                }
+            }
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fetch_prompt_optimization_models_preserves_manual_connection_errors() {
+        let state = Arc::new(AppState::default());
+        for (base_url, api_key, expected) in [
+            (
+                "",
+                "fixture-key",
+                "启用提示词优化前，请先填写 API 地址".to_string(),
+            ),
+            (
+                "file:///tmp/models",
+                "fixture-key",
+                crate::config::validate_outbound_api_url(
+                    "file:///tmp/models",
+                    "提示词优化 API 地址",
+                )
+                .unwrap_err(),
+            ),
+            (
+                "https://fixture.example/v1",
+                "",
+                "启用提示词优化前，请先填写 API Key".to_string(),
+            ),
+        ] {
+            let optimization = PromptOptimizationConfig {
+                enabled: true,
+                base_url: base_url.into(),
+                api_key: api_key.into(),
+                ..PromptOptimizationConfig::default()
+            };
+            assert_eq!(
+                fetch_prompt_optimization_models_command(&state, Some(optimization))
+                    .await
+                    .unwrap_err(),
+                expected
+            );
+        }
+        for (base_url, api_key, expected) in [
+            (
+                "",
+                "fixture-key",
+                "请先配置 OpenAI 兼容 API 地址".to_string(),
+            ),
+            (
+                "file:///tmp/models",
+                "fixture-key",
+                crate::config::validate_outbound_api_url(
+                    "file:///tmp/models",
+                    "提示词优化 API 地址",
+                )
+                .unwrap_err(),
+            ),
+            (
+                "https://fixture.example/v1",
+                "",
+                "请先配置 API Key".to_string(),
+            ),
+        ] {
+            let optimization = PromptOptimizationConfig {
+                base_url: base_url.into(),
+                api_key: api_key.into(),
+                ..PromptOptimizationConfig::default()
+            };
+            assert_eq!(
+                fetch_prompt_optimization_models_command(&state, Some(optimization))
+                    .await
+                    .unwrap_err(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn prompt_optimization_mode_readiness_is_output_only() {
+        let mut optimization: PromptOptimizationConfig = serde_json::from_value(json!({
+            "credentialsReadyByMode": {"officialAccount": true, "currentProvider": true}
+        }))
+        .unwrap();
+        assert!(
+            serde_json::to_value(&optimization)
+                .unwrap()
+                .get("credentialsReadyByMode")
+                .is_none()
+        );
+        apply_prompt_optimization_overlay(&mut optimization, None, true);
+        assert_eq!(
+            serde_json::to_value(&optimization).unwrap()["credentialsReadyByMode"],
+            json!({"officialAccount": true, "currentProvider": false})
+        );
+        optimization.normalize();
+        assert!(
+            serde_json::to_value(&optimization)
+                .unwrap()
+                .get("credentialsReadyByMode")
+                .is_none()
+        );
+    }
 
     #[cfg(unix)]
     fn auth_retry_fixture(home: &Path) -> String {

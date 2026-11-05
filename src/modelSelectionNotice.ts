@@ -20,7 +20,8 @@ export function modelSelectionNotice(
   if (result.configApply) return configApplyNotice(result.configApply);
   const messages = [summary];
   if (result.modelHotReloadError) {
-    messages.push("Codex 模型列表刷新失败，重启 Codex 后生效");
+    messages.push("Codex 模型列表刷新失败，请重试同步");
+    if (result.restartRequired) messages.push("部分设置需重启 Codex 后生效");
   } else if (result.modelHotReloaded) {
     messages.push(result.modelHotReloadDeferred
       ? "Codex 模型列表将在打开模型选择器时更新"
@@ -30,7 +31,7 @@ export function modelSelectionNotice(
   }
 
   if (result.subagentConfigHotReloadError) {
-    messages.push("子代理配置暂未能更新，重启 Codex 后生效");
+    messages.push("子代理配置暂未能更新，请重新应用配置");
   } else if (result.subagentConfigRepaired) {
     messages.push("已校验并修复受影响的子代理运行配置");
   } else if (result.subagentConfigHotReloaded) {

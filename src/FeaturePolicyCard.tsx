@@ -23,6 +23,7 @@ import {
   Tooltip,
 } from "./components/ui";
 import { ModelCombobox } from "./components/ModelCombobox";
+import { SubagentRuntimeOverviewSection } from "./components/SubagentRuntimeOverview";
 import {
   resolveCurrentProviderModelOption,
   type SubagentModelOption,
@@ -316,10 +317,15 @@ export function SubagentPolicyCardComponent({
               </div>
               <div className="feature-disabled-text">
                 <strong>子代理角色与调度增强已关闭</strong>
-                <p>开启后仅在宽范围、可并行或需要专门证据时选择性委派，并提供五类专用角色与汇合门禁。</p>
+                <p>开启后仅在宽范围、可并行或需要专门证据时选择性派生子代理，并提供五类专用角色与汇合门禁。</p>
               </div>
             </div>
           )}
+          <SubagentRuntimeOverviewSection
+            draft={config}
+            roles={SUBAGENT_TASK_TYPES}
+            reasoningEffortLabels={REASONING_EFFORT_LABELS}
+          />
         </div>
       </Card>
     </section>
@@ -621,6 +627,29 @@ function FeaturePolicyCardComponent({
                     : config.fastContextTools
                       ? "下次启动加载 Codey 内置 FastCtx 文件工具"
                       : "保持 Codex 默认文件工具，不加载额外 MCP"}
+                </small>
+              </div>
+            </div>
+
+            <div
+              className={`feature-card ${config.scopeGuard ? "active" : ""}`}
+            >
+              <div className="feature-card-header">
+                <strong>防御性编程控制</strong>
+                <Switch
+                  checked={config.scopeGuard}
+                  disabled={isBusy}
+                  onCheckedChange={(checked) =>
+                    onConfigChange({ ...config, scopeGuard: checked })
+                  }
+                  aria-label="防御性编程控制"
+                />
+              </div>
+              <div className="feature-card-body">
+                <small>
+                  {config.scopeGuard
+                    ? "向新会话、压缩后的会话和子代理加入适度原则，减少不必要的兼容层、兜底代码和重复检查；已有会话在下次压缩后生效"
+                    : "不加入额外规则，保持 Codex 默认行为"}
                 </small>
               </div>
             </div>

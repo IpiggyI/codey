@@ -1,5 +1,22 @@
 use super::*;
 
+#[test]
+fn official_accounts_export_file_name_uses_bounded_safe_identity() {
+    for (identity, expected) in [
+        ("../acct/export", "codey-official-acct-export.json"),
+        ("中文", "codey-official-user-example-com.json"),
+    ] {
+        let mut account = Account::from_auth(auth(identity, "test-access")).unwrap();
+        account.email = Some("user@example.com".into());
+        assert_eq!(account.export_file_name(), expected);
+    }
+    let account = Account::from_auth(auth(&"a".repeat(200), "test-access")).unwrap();
+    assert_eq!(
+        account.export_file_name(),
+        format!("codey-official-{}.json", "a".repeat(96))
+    );
+}
+
 pub(super) fn auth(id: &str, token: &str) -> Value {
     json!({"auth_mode":"chatgpt", "tokens":{"account_id":id,"access_token":token,
         "refresh_token":format!("refresh-{token}"),"id_token":format!("id-{token}")},

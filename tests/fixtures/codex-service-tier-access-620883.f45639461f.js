@@ -1,0 +1,3 @@
+// Codex 26.1029: assets/async/620883.f45639461f.js
+// SHA-256: 49658cac67b3b7f880d6542f6015589d6d0e1d15a5b04036b05e32a44b5008c8
+function c(e){let t,a,c,u=(0,i.c)(10),d=(0,n.Ul)(r.Dc),p=e?.hostId??d,m=(0,l.tn)(p),h=m?.authMethod==="chatgpt"||m?.authMethod==="personalAccessToken"||m?.authMethod==="amazonBedrock",f=m?.authMethod??null;u[0]!==p||u[1]!==f?(t={authMethod:f,hostId:p},u[0]=p,u[1]=f,u[2]=t):t=u[2];let{data:g,isPending:v}=(0,n._U)(s.b9,t),y=!!m?.isLoading||h&&v;u[3]!==g||u[4]!==y||u[5]!==h?(a=h&&!y&&null!=g?(0,o.W6)(g):null,u[3]=g,u[4]=y,u[5]=h,u[6]=a):a=u[6];let w=a;return u[7]!==y||u[8]!==w?(c={serviceTierAccess:w,isLoading:y},u[7]=y,u[8]=w,u[9]=c):c=u[9],c}

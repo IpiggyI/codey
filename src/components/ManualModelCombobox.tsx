@@ -1,4 +1,4 @@
-import { useCallback, useId, useMemo } from "react";
+import { useCallback, useId, useMemo, useState } from "react";
 import { ComboBox, Input, InputGroup, ListBox } from "@heroui/react";
 import { UNSAFE_PortalProvider } from "react-aria";
 import { IconCirclePlus, IconRobot, IconX } from "@tabler/icons-react";
@@ -22,10 +22,15 @@ export type ManualModelComboboxProps = {
 
 type ManualOption = {
   custom?: boolean;
+  // 不可选的说明行，只用于提示列表尚未获取。
+  note?: boolean;
   id: string;
   label: string;
   textValue: string;
 };
+
+const NOT_FETCHED_ID = "\u0000not-fetched";
+const NOT_FETCHED_HINT = "暂无模型列表，可点击「获取列表」";
 
 export function ManualModelCombobox({
   ariaDescribedBy,
@@ -45,20 +50,26 @@ export function ManualModelCombobox({
   // 选择加入后，没有候选时不挂载下拉层，避免弹出空白列表；改为在输入框下方提示，仍可直接输入。
   const showPopup = options.length > 0 || emptyHint === undefined;
   const hintId = useId();
+  // 输入框的值同时是已保存的模型；只有用户在下拉层打开期间输入过，才按它过滤，否则已有值会把列表缩成一项。
+  const [typed, setTyped] = useState(false);
   const data = useMemo<ManualOption[]>(() => {
     const trimmed = value.trim();
     const query = trimmed.toLocaleLowerCase();
-    const matched = options.filter((option) => option.toLocaleLowerCase().includes(query));
+    const matched = typed ? options.filter((option) => option.toLocaleLowerCase().includes(query)) : options;
     const suggestions = (matched.length ? matched : options).map((option) => ({
       id: option,
       label: option,
       textValue: option,
     }));
     const hasExactMatch = options.some((option) => option.toLocaleLowerCase() === query);
-    return trimmed && !hasExactMatch
+    const rows: ManualOption[] = trimmed && !hasExactMatch
       ? [{ id: trimmed, custom: true, label: trimmed, textValue: trimmed }, ...suggestions]
       : suggestions;
-  }, [options, value]);
+    // 没有候选时只剩自定义行，补一行说明，否则用户看不出可以获取列表。
+    return options.length === 0 && trimmed
+      ? [...rows, { id: NOT_FETCHED_ID, note: true, label: NOT_FETCHED_HINT, textValue: NOT_FETCHED_HINT }]
+      : rows;
+  }, [options, typed, value]);
   const portalTarget = getPopupContainer?.();
   const getContainer = useCallback(
     () => getPopupContainer?.() ?? null,
@@ -69,6 +80,8 @@ export function ManualModelCombobox({
     <ComboBox
       aria-label={ariaLabel}
       allowsCustomValue
+      // 空集合默认会立刻关闭下拉层，导致空状态提示一闪而过；挂载下拉层时允许空集合保持打开。
+      allowsEmptyCollection={showPopup}
       fullWidth
       className="w-full min-w-0"
       // 只在有候选时传 items：传入空数组也会让组件允许打开空的下拉层。
@@ -77,6 +90,10 @@ export function ManualModelCombobox({
       isDisabled={disabled}
       isInvalid={ariaInvalid}
       menuTrigger="focus"
+      // 下拉层关闭后，下一次不输入直接打开要重新显示完整列表。
+      onOpenChange={(open) => {
+        if (!open) setTyped(false);
+      }}
       onInputChange={onChange}
       onSelectionChange={(key) => {
         if (key != null) onChange(String(key));
@@ -92,6 +109,11 @@ export function ManualModelCombobox({
           aria-describedby={[ariaDescribedBy, showPopup ? undefined : hintId].filter(Boolean).join(" ") || undefined}
           autoComplete="off"
           autoFocus={autoFocus}
+          // 用 DOM 输入事件判断“用户输入”：选择候选项时组件内部也会改写输入值，不能用 onInputChange。
+          // 没有下拉层时输入不会触发 onOpenChange，不记录，免得之后拉到列表首次打开就被过滤。
+          onInput={() => {
+            if (showPopup) setTyped(true);
+          }}
           spellCheck={false}
           className="min-h-8 md:min-h-8"
         />
@@ -129,8 +151,15 @@ export function ManualModelCombobox({
             )}
           >
             {(option: ManualOption) => (
-              <ListBox.Item id={option.id} textValue={option.textValue} className="mx-0.5 rounded-[7px] px-2.5 py-1.5 text-xs">
-                {option.custom ? (
+              <ListBox.Item
+                id={option.id}
+                isDisabled={option.note}
+                textValue={option.textValue}
+                className="mx-0.5 rounded-[7px] px-2.5 py-1.5 text-xs"
+              >
+                {option.note ? (
+                  <span className="min-w-0 flex-1 truncate text-[#8e8e93]">{option.label}</span>
+                ) : option.custom ? (
                   <div className="flex min-w-0 items-center gap-1.5 truncate">
                     <IconCirclePlus aria-hidden="true" className="shrink-0 text-blue-500" size={14} />
                     <span className="shrink-0 text-[#6e6e73]">使用自定义模型</span>

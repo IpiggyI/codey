@@ -678,6 +678,7 @@ async fn runtime_stop_preserves_resources_on_failure_and_allows_retry() {
         applied_model_config: RwLock::new(Arc::new(RuntimeModelConfig::from_config(&config))),
         applied_subagent_config: RwLock::new(Arc::new(RuntimeSubagentConfig::from_config(&config))),
         delivered_model_catalog: RwLock::new(None),
+        subagent_restart_config: RwLock::new(None),
         applied_config: config,
         injection_statuses: Arc::new(RwLock::new(Arc::from([]))),
         injection_scripts: cdp::prepare_injection_scripts(false, false, false, false, &[]),
@@ -777,4 +778,29 @@ async fn exit_watcher_returns_the_child_to_stop_on_shutdown() {
         .expect("watcher should return the child");
     process.kill().await.expect("kill child");
     process.wait().await.expect("reap child");
+}
+#[test]
+fn live_route_edits_preserve_subagent_hot_reload_support_within_the_current_provider() {
+    let initial = CodeyConfig {
+        subagent_optimization: true,
+        ..Default::default()
+    };
+    let runtime = CodeyRuntime::for_model_delivery_test(initial.clone(), "ws://unused");
+    let mut latest = initial.clone();
+    let mut profile = crate::config::ProviderProfile::new("新线路名称");
+    profile.base_url = "https://gateway.example/v1".into();
+    latest.profiles.push(profile);
+    assert!(runtime.supports_subagent_config_hot_reload(&latest));
+    latest.fast_context_tools = !initial.fast_context_tools;
+    assert!(!runtime.supports_subagent_config_hot_reload(&latest));
+    latest.fast_context_tools = initial.fast_context_tools;
+    latest.attach_current_provider_snapshot(
+        crate::model_ownership::CurrentProviderSnapshot::from_parts(
+            "other",
+            "https://other.example/v1",
+            "responses",
+            false,
+        ),
+    );
+    assert!(!runtime.supports_subagent_config_hot_reload(&latest));
 }

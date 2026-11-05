@@ -11,6 +11,7 @@ export const CODEY_API_COMMANDS = [
   "list_official_accounts",
   "import_current_codex_login",
   "import_official_account_credential",
+  "export_official_account_credential",
   "start_official_account_login",
   "poll_official_account_login",
   "submit_official_account_login_callback",
@@ -41,6 +42,7 @@ export const CODEY_API_COMMANDS = [
   "repair_plugin_marketplace",
   "prepare_computer_use",
   "codex_extensions",
+  "subagent_runtime_overview",
   "check_codex_config",
   "repair_codex_config",
 ] as const;

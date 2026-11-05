@@ -168,8 +168,8 @@ test("mounts weekly and five-hour usage before the sidebar footer's last child",
   assert.equal(env.footer.getAttribute("data-codey-usage-host"), "true");
   assert.match(usage.innerHTML, /周额度[\s\S]*?60%[\s\S]*?5 小时[\s\S]*?85%/);
   assert.match(usage.innerHTML, /class="codey-usage-plan-tag" data-pro-tier="200">Pro 200</);
-  assert.match(usage.innerHTML, /已用 40%/);
-  assert.match(usage.innerHTML, /剩余 60%/);
+  assert.match(usage.innerHTML, /周额度[\s\S]*?codey-usage-detail-percent">60%/);
+  assert.doesNotMatch(usage.innerHTML, /已用|detail-value">剩余/);
   assert.match(usage.innerHTML, /Credits 余额[\s\S]*?42/);
   assert.equal(usage.dataset.state, "ready");
   assert.equal(usage.dataset.windowCount, "2");
@@ -282,9 +282,8 @@ test("sidebar keeps a real 100 percent reading while quota unlock is installed",
   await env.window.__codeyRefreshAccountUsage();
   const usage = env.document.getElementById("codey-account-usage");
   assert.ok(usage);
-  assert.match(usage.innerHTML, /已用 100%/);
-  assert.match(usage.innerHTML, /剩余 0%/);
-  assert.doesNotMatch(usage.innerHTML, /已用 3%/);
+  assert.match(usage.innerHTML, /codey-usage-detail-percent">0%/);
+  assert.doesNotMatch(usage.innerHTML, /codey-usage-detail-percent">97%|已用/);
   assert.equal(usage.parentElement, env.footer);
   assert.equal(usage.nextElementSibling, env.anchor);
 });
@@ -335,7 +334,7 @@ test("app-server rateLimitsByLimitId keeps codex as the summary and lists other 
   const summary = usage.innerHTML.slice(0, usage.innerHTML.indexOf("codey-account-usage-details"));
   assert.doesNotMatch(summary, /GPT-5\.3-Codex-Spark/);
   // 其他额度组只出现在详情里，带名称和独立的小标题。
-  assert.match(usage.innerHTML, /其他额度组[\s\S]*?GPT-5\.3-Codex-Spark[\s\S]*?已用尽[\s\S]*?5 小时额度[\s\S]*?剩余 0%[\s\S]*?周额度[\s\S]*?剩余 75%/);
+  assert.match(usage.innerHTML, /其他额度组[\s\S]*?GPT-5\.3-Codex-Spark[\s\S]*?已用尽[\s\S]*?5 小时额度[\s\S]*?detail-percent">0%[\s\S]*?周额度[\s\S]*?detail-percent">75%/);
   assert.doesNotMatch(usage.innerHTML, /没有窗口/);
 });
 
@@ -364,7 +363,7 @@ test("app-server rateLimitsByLimitId falls back to rateLimits when codex is abse
   assert.ok(usage);
   assert.match(usage.innerHTML, /周额度[\s\S]*?55%[\s\S]*?5 小时[\s\S]*?80%/);
   // 没有 limitName 时用键名作为组名。
-  assert.match(usage.innerHTML, /其他额度组[\s\S]*?codex_other[\s\S]*?剩余 50%/);
+  assert.match(usage.innerHTML, /其他额度组[\s\S]*?codex_other[\s\S]*?detail-percent">50%/);
 });
 
 test("backend additionalLimits render in the details with names, blocked marker and escaping", async () => {
@@ -387,7 +386,7 @@ test("backend additionalLimits render in the details with names, blocked marker 
   const usage = env.document.getElementById("codey-account-usage");
   assert.ok(usage);
   assert.equal(usage.dataset.windowCount, "2");
-  assert.match(usage.innerHTML, /其他额度组[\s\S]*?Spark &lt;b&gt;[\s\S]*?已用尽[\s\S]*?5 小时额度[\s\S]*?Review[\s\S]*?周额度[\s\S]*?剩余 90%/);
+  assert.match(usage.innerHTML, /其他额度组[\s\S]*?Spark &lt;b&gt;[\s\S]*?已用尽[\s\S]*?5 小时额度[\s\S]*?Review[\s\S]*?周额度[\s\S]*?detail-percent">90%/);
   assert.doesNotMatch(usage.innerHTML, /Spark <b>/);
   assert.equal(usage.innerHTML.match(/已用尽/g).length, 1);
   const summary = usage.innerHTML.slice(0, usage.innerHTML.indexOf("codey-account-usage-details"));
@@ -456,9 +455,39 @@ test("no reset-credit row renders when the field is absent or malformed", async 
   }
 });
 
-test("a zero reset-credit count is rendered as zero", async () => {
-  const usage = await renderedUsage({ ...resetCreditsBase(), resetCredits: { availableCount: 0 } });
-  assert.match(usage.innerHTML, /剩余重置次数[\s\S]*?codey-usage-detail-value">0 次</);
+test("a zero reset-credit count renders no row and no expiry warning", async () => {
+  const usage = await renderedUsage({
+    ...resetCreditsBase(),
+    resetCredits: { availableCount: 0, nextExpiresAt: Math.floor(Date.now() / 1000) + 3600 },
+  });
+  assert.doesNotMatch(usage.innerHTML, /剩余重置次数|codey-usage-credit-dot/);
+  assert.equal(usage.dataset.creditExpiring, undefined);
+});
+
+test("reset credits expiring within 12 hours light the warning dot, the critical row and the aria hint", async () => {
+  const usage = await renderedUsage({
+    ...resetCreditsBase(),
+    resetCredits: { availableCount: 2, nextExpiresAt: Math.floor(Date.now() / 1000) + 6 * 3600 },
+  });
+  assert.equal(usage.dataset.creditExpiring, "true");
+  assert.match(usage.innerHTML, /codey-usage-credit-dot[\s\S]*?codey-usage-window-label/);
+  assert.match(usage.innerHTML, /data-tone="critical"[\s\S]*?剩余重置次数[\s\S]*?codey-usage-credit-dot[\s\S]*?is-expiring[\s\S]*?过期/);
+  assert.match(usage.getAttribute("aria-label"), /重置次数即将过期/);
+});
+
+test("a zero Credits balance renders no row", async () => {
+  const usage = await renderedUsage({ ...resetCreditsBase(), credits: { hasCredits: false, unlimited: false, balance: "0" } });
+  assert.doesNotMatch(usage.innerHTML, /Credits 余额/);
+});
+
+test("reset credits expiring after more than 12 hours show no warning", async () => {
+  const usage = await renderedUsage({
+    ...resetCreditsBase(),
+    resetCredits: { availableCount: 2, nextExpiresAt: Math.floor(Date.now() / 1000) + 13 * 3600 },
+  });
+  assert.equal(usage.dataset.creditExpiring, undefined);
+  assert.doesNotMatch(usage.innerHTML, /codey-usage-credit-dot|is-expiring/);
+  assert.doesNotMatch(usage.getAttribute("aria-label"), /即将过期/);
 });
 
 test("app-server reset credits keep the nearest unexpired, unredeemed expiry", async () => {

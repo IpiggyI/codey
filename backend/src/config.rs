@@ -319,6 +319,8 @@ pub struct PromptOptimizationConfig {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub credentials_ready: bool,
+    #[serde(default, skip_deserializing, skip_serializing_if = "Option::is_none")]
+    pub credentials_ready_by_mode: Option<BTreeMap<String, bool>>,
     #[serde(default, skip_deserializing, skip_serializing_if = "String::is_empty")]
     pub current_provider_key_status: String,
     #[serde(default, skip_deserializing, skip_serializing_if = "String::is_empty")]
@@ -342,6 +344,7 @@ impl Default for PromptOptimizationConfig {
             upstream_protocol: default_prompt_optimization_upstream_protocol(),
             instruction: String::new(),
             credentials_ready: false,
+            credentials_ready_by_mode: None,
             current_provider_key_status: String::new(),
             current_provider_key_message: String::new(),
             current_provider_env_key_name: String::new(),
@@ -362,6 +365,7 @@ impl PromptOptimizationConfig {
             normalize_prompt_optimization_upstream_protocol(&self.upstream_protocol);
         self.instruction = self.instruction.trim().to_string();
         self.credentials_ready = false;
+        self.credentials_ready_by_mode = None;
         self.current_provider_key_status.clear();
         self.current_provider_key_message.clear();
         self.current_provider_env_key_name.clear();
@@ -389,10 +393,15 @@ impl PromptOptimizationConfig {
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
+        self.validate_connection()?;
+        if self.enabled && self.model.trim().is_empty() {
+            return Err("启用提示词优化前，请先选择或填写模型".to_string());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_connection(&self) -> Result<(), String> {
         if self.uses_official_account() || self.uses_current_provider() {
-            if self.enabled && self.model.trim().is_empty() {
-                return Err("启用提示词优化前，请先选择或填写模型".to_string());
-            }
             return Ok(());
         }
         let base_url = self.base_url.trim();
@@ -406,9 +415,6 @@ impl PromptOptimizationConfig {
         validate_outbound_api_url(base_url, "提示词优化 API 地址")?;
         if self.enabled && self.api_key.trim().is_empty() {
             return Err("启用提示词优化前，请先填写 API Key".to_string());
-        }
-        if self.enabled && self.model.trim().is_empty() {
-            return Err("启用提示词优化前，请先选择或填写模型".to_string());
         }
         Ok(())
     }
@@ -721,6 +727,8 @@ pub struct CodeyConfig {
     /// the next runtime. Disabled by default and restored on shutdown.
     #[serde(default)]
     pub subagent_optimization: bool,
+    #[serde(default)]
+    pub scope_guard: bool,
     /// Default model used by newly spawned subagents while Codey's
     /// multi-agent optimization is enabled.
     #[serde(default = "default_subagent_model")]
@@ -841,6 +849,7 @@ impl Default for CodeyConfig {
             codex_launch_proxy: String::new(),
             fast_context_tools: false,
             subagent_optimization: false,
+            scope_guard: false,
             subagent_model: default_subagent_model(),
             subagent_reasoning_effort: default_subagent_reasoning_effort(),
             subagent_roles: default_subagent_roles(),

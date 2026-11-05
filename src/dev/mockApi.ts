@@ -30,6 +30,7 @@ const OFFICIAL_ACCOUNT_COMMANDS = new Set<string>([
   "list_official_accounts",
   "import_current_codex_login",
   "import_official_account_credential",
+  "export_official_account_credential",
   "start_official_account_login",
   "poll_official_account_login",
   "submit_official_account_login_callback",
@@ -195,6 +196,7 @@ if (import.meta.env.DEV) {
         model: "provider-fast-coder",
         upstreamProtocol: "openaiResponses",
         instruction: "",
+        credentialsReadyByMode: { officialAccount: true, currentProvider: true },
       },
       codexAppPath: "/Applications/ChatGPT.app",
       userScripts: [],
@@ -220,6 +222,7 @@ if (import.meta.env.DEV) {
       codexLaunchProxy: "",
       fastContextTools: false,
       subagentOptimization: false,
+      scopeGuard: false,
       subagentModel: "gpt-5.6-terra",
       subagentReasoningEffort: "medium",
       subagentRoles: {
@@ -495,6 +498,127 @@ if (import.meta.env.DEV) {
       await new Promise((resolve) => setTimeout(resolve, 300));
 
       if (command === "codex_extensions") return extensionsPreview(args?.request as Record<string, unknown>);
+
+      if (command === "subagent_runtime_overview") {
+        const constraints = "C:\\Users\\preview\\.codey\\codex-constraints";
+        const hookOverrides = [
+          { label: "开启 Codex 钩子功能", key: "features.hooks", value: "true" },
+          { label: "注册 Codey 钩子", key: "hooks", value: "内联定义，不写入 hooks.json" },
+        ];
+        const roleIds = ["codey_quick_scan", "codey_deep_research", "codey_visual_analysis", "codey_worker", "codey_visual_worker", "default"] as const;
+        return {
+          status: "ok",
+          platformSupported: true,
+          saved: {
+            subagentOptimization: previewConfig.subagentOptimization,
+            scopeGuard: previewConfig.scopeGuard,
+            roles: previewConfig.subagentRoles,
+          },
+          master: [
+            {
+              id: "root-guidance",
+              title: "主代理指导",
+              description: "告诉主代理何时派生子代理、如何写任务和如何验收。追加在 Codex 配置里已有的主代理指令之后。",
+              channel: "override",
+              destination: null,
+              template: { path: `${constraints}\\root-instructions.md`, exists: true },
+              overrides: [{ label: "主代理指令（追加）", key: "developer_instructions", value: null }],
+              events: [],
+              content: { format: "markdown", reader: "codex", text: "## 子代理使用\n\n- 范围宽、可并行或需要专门证据时才委派。\n" },
+              error: null,
+            },
+            {
+              id: "codex-agent-settings",
+              title: "Codex 子代理设置",
+              description: "打开 Codex 的子代理功能，并设定等待时长和派生方式。只在本次启动生效，不改写你的 Codex 配置文件。",
+              channel: "override",
+              destination: null,
+              template: null,
+              overrides: [
+                { label: "开启 Codex 子代理", key: "agents.enabled", value: "true" },
+                { label: "每个会话同时运行的子代理上限", key: "agents.max_concurrent_threads_per_session", value: "沿用 Codex 配置；未设置时为 3" },
+              ],
+              events: [],
+              content: null,
+              error: null,
+            },
+          ],
+          roles: roleIds.map((id) => {
+            const selection = previewConfig.subagentRoles[id];
+            const destination = id === "default" ? `${constraints}\\runtime\\default-agent.toml` : `${constraints}\\runtime\\agents\\${id}.toml`;
+            return {
+              id,
+              destination,
+              template: { path: id === "default" ? `${constraints}\\subagent.toml` : `${constraints}\\agents\\${id}.toml`, exists: id === "codey_worker" },
+              overrides: [
+                { label: "注册角色配置文件", key: `agents.${id}.config_file`, value: destination },
+                { label: "角色说明", key: `agents.${id}.description`, value: "预览用的角色说明" },
+              ],
+              model: selection?.model ?? previewConfig.subagentModel,
+              reasoningEffort: selection?.reasoningEffort ?? previewConfig.subagentReasoningEffort,
+              content: { format: "toml", reader: "codex", text: `name = "${id}"\nmodel = "${selection?.model ?? previewConfig.subagentModel}"\n` },
+              error: null,
+            };
+          }),
+          scopeGuard: [
+            {
+              id: "scope-guard-root",
+              title: "主会话规则",
+              description: "钩子把规则作为附加上下文交给主代理。",
+              channel: "hook",
+              destination: null,
+              template: null,
+              overrides: hookOverrides,
+              events: [{ event: "SessionStart", name: "会话开始时", purpose: "新建、清空和压缩后的主会话开始时注入完整规则。" }],
+              content: { format: "markdown", reader: "codex", text: "# 适度原则\n\n不为不会发生的情况添加兼容层、兜底代码或重复检查。\n" },
+              error: null,
+            },
+          ],
+          gate: {
+            items: [
+              {
+                id: "gate-hooks",
+                title: "门禁钩子",
+                description: "每个事件都调用 Codey 检查程序，按下方门禁规则放行或拦截。",
+                channel: "hook",
+                destination: null,
+                template: null,
+                overrides: hookOverrides,
+                events: [
+                  { event: "PreToolUse", name: "调用工具前", purpose: "检查子代理角色的权限和并发上限。" },
+                  { event: "SubagentStop", name: "子代理停止时", purpose: "结算子代理的活动状态，释放其占用。" },
+                ],
+                content: null,
+                error: null,
+              },
+              {
+                id: "runtime-policy",
+                title: "子代理身份记录",
+                description: "记录本次启动启用的角色、模型、思考强度和角色配置文件的校验值，门禁据此核对子代理身份。",
+                channel: "file",
+                destination: "C:\\Users\\preview\\.codex\\codey-subagent-gate-v3\\runtime-subagent-policy.json",
+                template: null,
+                overrides: [],
+                events: [],
+                content: { format: "json", reader: "codey", text: "{\n  \"schemaVersion\": 2\n}" },
+                error: null,
+              },
+            ],
+            concurrency: { readOnly: 3, writable: 2 },
+            rules: {
+              source: "builtin",
+              path: null,
+              items: [
+                {
+                  id: "join-before-answer",
+                  explanation: "主代理必须等所有子代理汇合后再给出最终答复。",
+                  definition: "{\n  \"id\": \"join-before-answer\"\n}",
+                },
+              ],
+            },
+          },
+        };
+      }
 
       if (command === "load_codey_config") {
         return {
@@ -774,6 +898,26 @@ if (import.meta.env.DEV) {
           }
           return upsertPreviewAccount({ id: `preview-${accountId}`, accountId, addedAt: Math.floor(Date.now() / 1000), invalid: false, isDefault: false, email: `${accountId}@example.invalid`, planType: "free" });
         }
+        if (command === "export_official_account_credential") {
+          const accountId = stringArgument("accountId");
+          if (!accountId) return failed("缺少参数：accountId");
+          const account = previewAccounts.find((item) => item.id === accountId);
+          if (!account) return failed("未找到要导出的官方账号");
+          const content = JSON.stringify({
+            email: account.email,
+            accountId: account.accountId,
+            planType: account.planType,
+            auth: {
+              auth_mode: "chatgpt",
+              tokens: {
+                access_token: `preview-access-${account.id}`,
+                refresh_token: `preview-refresh-${account.id}`,
+                account_id: account.accountId,
+              },
+            },
+          }, null, 2);
+          return { status: "ok", fileName: `codey-official-${account.id}.json`, content };
+        }
         if (command === "start_official_account_login") {
           // 与后端一致：开始新的登录会取消之前的登录会话。
           previewLogins.clear();
@@ -865,7 +1009,8 @@ if (import.meta.env.DEV) {
             secondary: { usedPercent: used / 2, windowMinutes: 10080, resetsAt: now + 3 * 86400 },
           };
           // 后端快照带官方重置次数；OfficialUsageSnapshot 暂不声明该字段，只在预览返回里附带。
-          const resetCredits = { availableCount: 2, nextExpiresAt: now + 5 * 86400 };
+          // plus 账号的最近过期时间落在 12 小时内，用来预览过期预警。
+          const resetCredits = { availableCount: 2, nextExpiresAt: now + (account.planType === "plus" ? 6 * 3600 : 5 * 86400) };
           return { ...snapshot, resetCredits, status: "ok", authGeneration: previewUsageGeneration };
         }
         if (command === "store_official_account_usage") {

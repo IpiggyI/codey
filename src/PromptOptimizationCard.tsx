@@ -113,10 +113,13 @@ function PromptOptimizationCardComponent({
     optimization.enabled && !optimization.model.trim()
       ? "请选择或填写模型"
       : "";
-  const credentialsReady = optimization.credentialsReady === true;
+  // credentialsReady 只对应已保存的模式；草稿里切换模式后要按各模式的就绪状态判断。
+  const credentialsReadyByMode = optimization.credentialsReadyByMode;
+  const officialCredentialsReady =
+    credentialsReadyByMode?.officialAccount === true;
   const connectionDraftValid = usesManual
     ? !baseUrlError && !apiKeyError
-    : credentialsReady;
+    : credentialsReadyByMode?.[mode] === true;
   const testDraftValid = connectionDraftValid && !modelError;
   const keyStatus = optimization.currentProviderKeyStatus;
   const canFillManually =
@@ -433,7 +436,7 @@ function PromptOptimizationCardComponent({
               {usesOfficialAccount ? (
                 <div className="prompt-form-group">
                   <p className="field-hint">
-                    {officialAccountAvailable || credentialsReady
+                    {officialAccountAvailable || officialCredentialsReady
                       ? "使用本机 ChatGPT 登录态，不另外保存密钥。"
                       : "官方账号登录不可用。请先完成 ChatGPT 登录；提示词优化不会改用环境变量或其他已保存密钥。"}
                   </p>

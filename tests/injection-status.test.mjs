@@ -194,22 +194,20 @@ test("injection issues explain each failure with cause, impact and remedy", asyn
   const { describeInjectionIssues } = await loadTypeScriptModule(
     new URL("src/runtimeStatusPresentation.ts", root),
   );
-  const tier = (error) => ({
-    id: "service-tier",
-    name: "服务档位兼容",
+  const component = (error) => ({
+    id: "model-whitelist",
+    name: "模型白名单",
     source: "builtin",
     visibility: "internal",
     status: "failed",
     error,
   });
   const issues = describeInjectionIssues([
-    tier("服务档位页面检查失败：Runtime.evaluate：Error: 未找到服务档位模块：调试器 10 秒内没有报告 app-initial 脚本"),
-    tier("服务档位页面检查失败：Runtime.evaluate：Error: 找到 2 个服务档位模块：a, b"),
-    tier("服务档位页面检查失败：Runtime.evaluate：Error: 服务档位权限形态不兼容"),
-    tier("服务档位补偿超时: deadline has elapsed"),
-    tier("服务档位页面检查失败：Runtime.evaluate：Error: 无法定位服务档位读取作用域"),
-    tier("服务档位调试连接已关闭"),
-    tier("服务档位模块绑定未生效"),
+    component("模型列表页面检查失败：Runtime.evaluate：Error: 模型列表权限形态不兼容"),
+    component("模型列表补偿超时: deadline has elapsed"),
+    component("模型列表页面检查失败：Runtime.evaluate：Error: 无法定位模型列表读取作用域"),
+    component("模型列表调试连接已关闭"),
+    component("模型列表模块绑定未生效"),
     {
       id: "renderer-controls",
       name: "渲染器控制",
@@ -234,12 +232,9 @@ test("injection issues explain each failure with cause, impact and remedy", asyn
     },
   ]);
 
-  assert.equal(issues.length, 9);
-  const [missing, multiple, shape, timeout, scope, connection, binding, unknown, user] =
+  assert.equal(issues.length, 7);
+  const [shape, timeout, scope, connection, binding, unknown, user] =
     issues;
-  assert.match(missing.cause, /没有在 Codex 页面中找到唯一的服务档位模块/);
-  assert.match(missing.remedy, /^请重启 Codex 一次。.*更新到最新版本/);
-  assert.equal(multiple.cause, missing.cause);
   assert.match(shape.cause, /页面代码与这个 Codey 版本的适配规则不一致/);
   assert.match(shape.remedy, /^重启 Codex 通常无法恢复/);
   for (const issue of [timeout, scope]) {
@@ -249,12 +244,12 @@ test("injection issues explain each failure with cause, impact and remedy", asyn
   assert.match(connection.cause, /调试连接中断/);
   assert.match(binding.cause, /^组件运行时出错/);
   assert.match(binding.remedy, /\.codex-session-delete\/codey-errors\.log。该日志跨日清空/);
-  for (const issue of [missing, shape, timeout, connection, binding]) {
+  for (const issue of [shape, timeout, connection, binding]) {
     assert.equal(issue.internal, true);
     assert.equal(issue.sourceLabel, "基础组件");
-    assert.match(issue.impact, /服务档位兼容未安装/);
+    assert.match(issue.impact, /模型列表不会按 Codey/);
   }
-  assert.equal(shape.error, "服务档位页面检查失败：Runtime.evaluate：Error: 服务档位权限形态不兼容");
+  assert.equal(shape.error, "模型列表页面检查失败：Runtime.evaluate：Error: 模型列表权限形态不兼容");
   assert.match(unknown.cause, /没有读到该组件的运行结果/);
   assert.match(unknown.impact, /侧栏会话工具/);
   assert.equal(unknown.error, undefined);
@@ -408,4 +403,25 @@ test("a timed-out status request cannot commit a late response", async () => {
     if (previousWindow === undefined) delete globalThis.window;
     else globalThis.window = previousWindow;
   }
+});
+
+
+test("renderer asset failure has Chinese cause, impact and remedy", async () => {
+  const { describeInjectionIssues, summarizeInjectionScripts } = await loadTypeScriptModule(
+    new URL("src/runtimeStatusPresentation.ts", root),
+  );
+  const component = {
+    id: "renderer-asset-patch", name: "页面资源补丁", source: "builtin",
+    visibility: "internal", status: "failed",
+    error: "页面资源补丁不兼容，缺少前置字面量或无法唯一匹配：service tier access",
+  };
+  const [issue] = describeInjectionIssues([component]);
+  assert.equal(issue.name, "页面资源补丁");
+  assert.match(issue.impact, /模型与速度档位/);
+  assert.match(issue.cause, /缺少补丁所需的代码/);
+  assert.match(issue.remedy, /请更新 Codey/);
+  assert.match(issue.error, /service tier access/);
+  assert.equal(summarizeInjectionScripts([component]).internalInjectionError, true);
+  assert.deepEqual(describeInjectionIssues([{ ...component, status: "executed" }]), []);
+  assert.deepEqual(describeInjectionIssues([{ ...component, status: "effective" }]), []);
 });

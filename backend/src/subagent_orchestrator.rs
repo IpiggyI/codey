@@ -32,8 +32,8 @@ const LEDGER_SCHEMA_VERSION: u32 = 15;
 const MIN_LEDGER_SCHEMA_VERSION: u32 = LEDGER_SCHEMA_VERSION;
 const LEDGER_FILE: &str = "orchestrator-ledger-v1.json";
 const LEDGER_LOCK_FILE: &str = "orchestrator-ledger-v1.lock";
-const READ_ONLY_CONCURRENCY_LIMIT: usize = 3;
-const WRITE_OR_MIXED_CONCURRENCY_LIMIT: usize = 2;
+pub(crate) const READ_ONLY_CONCURRENCY_LIMIT: usize = 3;
+pub(crate) const WRITE_OR_MIXED_CONCURRENCY_LIMIT: usize = 2;
 const MAX_RESERVATIONS_PER_LEDGER: usize = 1_024;
 const DUPLICATE_TASK_ID_ERROR_CODE: &str = "CODEY_SUBAGENT_DUPLICATE_TASK_ID";
 const LEDGER_CAPACITY_ERROR_CODE: &str = "CODEY_SUBAGENT_LEDGER_CAPACITY";
@@ -1629,9 +1629,7 @@ fn reconcile_pending_init_observations(
         let Some(reservation) = ledger.reservations.get_mut(&task_id) else {
             continue;
         };
-        let next_observed_at = if reservation.state.is_active()
-            && reservation.fenced_at_ms.is_none()
-            && state == AgentState::PendingInit
+        let next_observed_at = if reservation.state.is_active() && state == AgentState::PendingInit
         {
             Some(reservation.pending_init_observed_at_ms.unwrap_or(now_ms))
         } else {

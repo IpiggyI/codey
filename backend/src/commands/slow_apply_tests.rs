@@ -2,6 +2,88 @@ use super::*;
 
 const TEST_WATCHDOG: Duration = Duration::from_secs(15);
 
+#[tokio::test]
+async fn subagent_restart_requires_a_confirmed_registration_change() {
+    for registration_changed in [false, true] {
+        let initial = CodeyConfig {
+            subagent_optimization: true,
+            ..Default::default()
+        };
+        let mut latest = initial.clone();
+        latest.subagent_reasoning_effort = "high".into();
+        if registration_changed {
+            let role = latest.subagent_roles.get_mut("codey_quick_scan").unwrap();
+            role.enabled = !role.enabled;
+        }
+        let runtime = Arc::new(CodeyRuntime::for_model_delivery_test(
+            initial.clone(),
+            "ws://unused",
+        ));
+        let state = Arc::new(AppState {
+            config: RwLock::new(latest.clone()),
+            runtime: Mutex::new(Some(runtime.clone())),
+            slow_apply_test: TestHooks {
+                subagents: Some(Arc::new(|_| anyhow::bail!("test role file write failed"))),
+                ..Default::default()
+            },
+            ..AppState::default()
+        });
+        assert!(!runtime_config_requires_restart(&state, &latest).await);
+        let outcome = hot_reload_runtime_subagent_config(&state, &latest).await;
+        assert_eq!(outcome.requires_restart(), registration_changed);
+        assert_eq!(
+            outcome.health(),
+            if registration_changed {
+                "pending_restart"
+            } else {
+                "failed"
+            }
+        );
+        assert_eq!(
+            runtime_config_requires_restart(&state, &latest).await,
+            registration_changed
+        );
+        assert_eq!(
+            runtime_status(&state).await.unwrap()["restartRequired"],
+            registration_changed
+        );
+        *state.config.write().await = initial.clone();
+        assert!(!runtime_config_requires_restart(&state, &initial).await);
+        runtime.mark_subagent_config_applied(&latest).await;
+        assert!(!runtime_config_requires_restart(&state, &latest).await);
+    }
+}
+
+#[tokio::test]
+async fn unchanged_subagent_reconciliation_clears_an_earlier_restart_marker() {
+    let config = CodeyConfig {
+        subagent_optimization: true,
+        ..Default::default()
+    };
+    let runtime = Arc::new(CodeyRuntime::for_model_delivery_test(
+        config.clone(),
+        "ws://unused",
+    ));
+    runtime.mark_subagent_config_requires_restart(&config).await;
+    let state = Arc::new(AppState {
+        config: RwLock::new(config.clone()),
+        runtime: Mutex::new(Some(runtime.clone())),
+        slow_apply_test: TestHooks {
+            subagents: Some(Arc::new(|_| Ok(Default::default()))),
+            ..Default::default()
+        },
+        ..AppState::default()
+    });
+    assert!(runtime_config_requires_restart(&state, &config).await);
+    assert_eq!(
+        hot_reload_runtime_subagent_config(&state, &config)
+            .await
+            .health(),
+        "healthy"
+    );
+    assert!(!runtime_config_requires_restart(&state, &config).await);
+}
+
 type Reconcile = dyn Fn(&CodeyConfig) -> anyhow::Result<crate::codex_config::RuntimeSubagentReconcileReport>
     + Send
     + Sync;

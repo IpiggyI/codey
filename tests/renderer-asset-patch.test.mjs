@@ -16,12 +16,9 @@ async function loadRendererPatch(options) {
   return { patch: context.__codeyRendererPatchEntry, records, context };
 }
 
-const entitlementSource = [
-  "const signal=`Failed to read service tier for request`;",
-  "async function allowed(e,t){let n=await auth(e,t);",
-  "if(n!==`chatgpt`&&n!==`personalAccessToken`)return!1;",
-  "let r=await requirements(e,t);return r.requirements?.featureRequirements?.fast_mode!==!1}",
-].join("");
+const entitlementSource = await readFile(
+  new URL("./fixtures/codex-service-tier-shared.js", import.meta.url), "utf8",
+);
 
 const ultraQuerySource = await readFile(
   new URL("./fixtures/codex-ultra-model-query.js", import.meta.url), "utf8",
@@ -84,22 +81,12 @@ test("a mismatched Ultra anchor preserves the source, records failure and skips 
   assert.equal(patch("app://-/assets/app-initial-drifted.js", drifted), null);
   const patched = patch("app://-/assets/app-initial-other.js", drifted + ";" + entitlementSource);
   assert.ok(patched.startsWith(drifted + ";"));
-  assert.match(patched, /async function allowed\(e,t\)\{return!0\}/);
+  assert.match(patched, /if\(null==t\)return!0/);
   assert.equal(records.length, 2);
   assert.ok(records.every(({ operation, context }) =>
     operation === "renderer_patch:third-party Ultra reasoning" && context.matchCount === 0));
 });
 
-test("the Ultra patch leaves Ultrafast access and service tiers unchanged", async () => {
-  const { patch, records } = await loadRendererPatch();
-  const speed = "const supportsIndependentSpeedModes=true,ultrafast_mode=true;"
-    + "function speedAllowed(e,t){if(e==null)return!1;let n=kind(t);return t===`flex`||e[n??`fast`]}"
-    + "const settings={serviceTierAccess:access,isLoading:false};";
-  const patched = patch("app://-/assets/app-initial-ultra.js", ultraQuerySource + ";" + speed);
-  assert.ok(patched.endsWith(";" + speed));
-  assert.equal(patched, (ultraQuerySource + ";" + speed).replace("S=a&&d(Lg,`1186680773`)", "S=a&&(o||d(Lg,`1186680773`))"));
-  assert.deepEqual(records, []);
-});
 
 const nativeModelAccessSource = [
   "const includeUltraReasoningEffort=!0;",
@@ -163,7 +150,7 @@ test("the renderer patch loads without Node, Electron or a DOM", async () => {
   assert.equal(context.window, undefined);
   assert.equal(context.document, undefined);
   const patched = patch("app://-/assets/app-shared-current.js", entitlementSource);
-  assert.match(patched, /async function allowed\(e,t\)\{return!0\}/);
+  assert.match(patched, /if\(null==t\)return!0/);
   assert.deepEqual(records, []);
   assert.equal(patch(null, entitlementSource), null);
   assert.equal(patch("app://-/assets/app-shared-current.js", null), null);
@@ -196,11 +183,34 @@ test("a drifted gate skips only itself and repeated failures stay deduplicated",
   ]) {
     const patched = patch(url, source);
     assert.ok(patched.startsWith('const markers="useHiddenModels:'));
-    assert.match(patched, /async function allowed\(e,t\)\{return!0\}/);
+    assert.match(patched, /if\(null==t\)return!0/);
   }
   assert.deepEqual(records.map(({ operation }) => operation), [
     "renderer_patch:model allowlist",
     "renderer_patch:model visibility",
   ]);
   assert.ok(records.every(({ context }) => context.matchCount === 0));
+});
+
+
+test("every renderer patch label has anchors covered by the unchanged asset prefilter", async () => {
+  const source = await readFile(new URL("../backend/src/renderer_asset_patch.js", import.meta.url), "utf8");
+  const readTable = (name) => JSON.parse(source.split(`/*codey-renderer-patch-${name}*/`)[1]
+    .split(`/*end-codey-renderer-patch-${name}*/`)[0]);
+  const items = readTable("items");
+  const anchors = readTable("anchors");
+  const labels = [...source.split("const patchCodexRendererAsset =")[1].matchAll(/^\s*"([^"\n]+)",\n\s*\);/gm)]
+    .map((match) => match[1]);
+  assert.deepEqual([...new Set(items.map((item) => item.label))].sort(), [...new Set(labels)].sort());
+  assert.equal(new Set(items.map((item) => item.label)).size, items.length);
+  for (const item of items) {
+    assert.ok(item.alternatives.length > 0, item.label);
+    for (const alternative of item.alternatives) {
+      assert.ok(alternative.every((literal) => typeof literal === "string" && literal.length), item.label);
+      assert.ok(alternative.some((literal) => anchors.includes(literal)), item.label);
+    }
+  }
+  for (const anchor of anchors) {
+    assert.ok(items.some((item) => item.alternatives.some((alt) => alt.includes(anchor))), anchor);
+  }
 });
