@@ -30,6 +30,7 @@ const OFFICIAL_ACCOUNT_COMMANDS = new Set<string>([
   "list_official_accounts",
   "import_current_codex_login",
   "import_official_account_credential",
+  "export_official_account_credential",
   "start_official_account_login",
   "poll_official_account_login",
   "submit_official_account_login_callback",
@@ -857,6 +858,26 @@ if (import.meta.env.DEV) {
             return failed("刷新令牌格式无效");
           }
           return upsertPreviewAccount({ id: `preview-${accountId}`, accountId, addedAt: Math.floor(Date.now() / 1000), invalid: false, isDefault: false, email: `${accountId}@example.invalid`, planType: "free" });
+        }
+        if (command === "export_official_account_credential") {
+          const accountId = stringArgument("accountId");
+          if (!accountId) return failed("缺少参数：accountId");
+          const account = previewAccounts.find((item) => item.id === accountId);
+          if (!account) return failed("未找到要导出的官方账号");
+          const content = JSON.stringify({
+            email: account.email,
+            accountId: account.accountId,
+            planType: account.planType,
+            auth: {
+              auth_mode: "chatgpt",
+              tokens: {
+                access_token: `preview-access-${account.id}`,
+                refresh_token: `preview-refresh-${account.id}`,
+                account_id: account.accountId,
+              },
+            },
+          }, null, 2);
+          return { status: "ok", fileName: `codey-official-${account.id}.json`, content };
         }
         if (command === "start_official_account_login") {
           // 与后端一致：开始新的登录会取消之前的登录会话。

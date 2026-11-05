@@ -1,4 +1,4 @@
-import { memo, useEffect, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 
 import { invoke } from "./api";
 import { errorText } from "./appUtils";
@@ -10,12 +10,14 @@ import type {
   OfficialUsageWindow,
 } from "./App.types";
 import { Badge, Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "./components/ui";
+import { downloadResource } from "./features/codex-extensions/download";
 import { createLoginSession, type UsageView } from "./officialAccountsRequests";
 import { useOfficialAccountLoginPoll } from "./useOfficialAccountLoginPoll";
 import { useOfficialAccounts } from "./useOfficialAccounts";
 
 // 浏览器登录会话在后端 10 分钟后过期。
 const LOGIN_VALID_MS = 10 * 60_000;
+const MANUAL_CREDENTIAL_MAX_BYTES = 64 * 1024;
 
 export const SWITCH_TIP = "切换会把 Codex 的登录改写为该账号，并需要重启 Codex 后生效";
 export const SESSION_NOTICE =
@@ -29,6 +31,11 @@ type LoginStart = {
   callbackListening: boolean;
   callbackError: string | null;
   expiresAt: number;
+};
+
+type OfficialAccountCredentialExport = {
+  fileName: string;
+  content: string;
 };
 
 function loginDescription(login: LoginStart | null) {
@@ -163,6 +170,11 @@ function OfficialAccountsPanelComponent({
   const [manualOpen, setManualOpen] = useState(false);
   const [manualInput, setManualInput] = useState("");
   const [manualError, setManualError] = useState("");
+  const [manualFileReading, setManualFileReading] = useState(false);
+  const [manualFileName, setManualFileName] = useState("");
+  // 重新选择文件、编辑输入、关闭对话框或卸载面板时递增，使在途的文件读取作废。
+  const [manualFileRead] = useState(() => ({ current: 0 }));
+  const manualFileInput = useRef<HTMLInputElement | null>(null);
   const disabled = externallyDisabled || pending !== null;
   const switchDisabledReason = view?.switchDisabledReason ?? null;
 
@@ -187,7 +199,8 @@ function OfficialAccountsPanelComponent({
 
   useEffect(() => () => {
     loginAttempt.current += 1;
-  }, [loginAttempt]);
+    manualFileRead.current += 1;
+  }, [loginAttempt, manualFileRead]);
 
   async function cancelLogin(loginId: string) {
     try {
@@ -287,8 +300,54 @@ function OfficialAccountsPanelComponent({
     if (error) onNotice({ tone: "error", text: error });
   }
 
+  function cancelManualFileRead() {
+    manualFileRead.current += 1;
+    setManualFileReading(false);
+    setManualFileName("");
+  }
+
+  function openManual() {
+    cancelManualFileRead();
+    setManualError("");
+    setManualInput("");
+    setManualOpen(true);
+  }
+
+  function closeManual() {
+    if (pending === "manual") return;
+    cancelManualFileRead();
+    setManualOpen(false);
+  }
+
+  async function readManualFile(file: File) {
+    const request = ++manualFileRead.current;
+    setManualError("");
+    setManualFileName("");
+    setManualInput("");
+    setManualFileReading(true);
+    try {
+      if (!file.name.toLowerCase().endsWith(".json")) {
+        throw new Error("请选择 .json 格式的账号文件");
+      }
+      if (file.size > MANUAL_CREDENTIAL_MAX_BYTES) {
+        throw new Error("账号文件不能超过 64 KiB");
+      }
+      const content = await file.text();
+      if (request !== manualFileRead.current) return;
+      setManualInput(content);
+      setManualFileName(file.name);
+    } catch (error) {
+      if (request === manualFileRead.current) {
+        setManualError(error instanceof Error ? error.message : `无法读取账号文件：${errorText(error)}`);
+      }
+    } finally {
+      if (request === manualFileRead.current) setManualFileReading(false);
+    }
+  }
+
   async function submitManual() {
     const credential = manualInput.trim();
+    if (manualFileReading) return;
     if (!credential) {
       setManualError("请粘贴刷新令牌或 OAuth JSON");
       return;
@@ -299,8 +358,34 @@ function OfficialAccountsPanelComponent({
       setManualError(error);
       return;
     }
+    cancelManualFileRead();
     setManualOpen(false);
     setManualInput("");
+  }
+
+  // 导出内容含登录凭据：只在本函数内交给下载，不进入状态、日志或界面。
+  async function exportAccount(account: OfficialAccount) {
+    setPending(`export:${account.id}`);
+    try {
+      const result = await invoke<OfficialAccountCredentialExport>(
+        "export_official_account_credential",
+        { accountId: account.id },
+      );
+      if (
+        typeof result.fileName !== "string"
+        || result.fileName.trim() === ""
+        || typeof result.content !== "string"
+        || result.content.trim() === ""
+      ) {
+        throw new Error("账号文件内容无效，请重试");
+      }
+      downloadResource(result.fileName, result.content, "application/json;charset=utf-8");
+      onNotice({ tone: "success", text: "账号文件已导出，请妥善保管，不要分享给他人" });
+    } catch (error) {
+      onNotice({ tone: "error", text: errorText(error) });
+    } finally {
+      setPending(null);
+    }
   }
 
   function askRemove(account: OfficialAccount) {
@@ -360,11 +445,7 @@ function OfficialAccountsPanelComponent({
             variant="outline"
             size="xs"
             disabled={disabled}
-            onPress={() => {
-              setManualError("");
-              setManualInput("");
-              setManualOpen(true);
-            }}
+            onPress={openManual}
           >
             粘贴凭据
           </Button>
@@ -444,6 +525,16 @@ function OfficialAccountsPanelComponent({
                       刷新账号额度
                     </Button>
                   ) : null}
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    title="导出账号文件；文件含登录凭据，请妥善保管"
+                    disabled={disabled}
+                    loading={pending === `export:${account.id}`}
+                    onPress={() => void exportAccount(account)}
+                  >
+                    导出账号文件
+                  </Button>
                   <Button
                     variant="ghost"
                     color="danger"
@@ -526,15 +617,40 @@ function OfficialAccountsPanelComponent({
         </DialogContent>
       </Dialog>
 
-      <Dialog open={manualOpen} onOpenChange={(open) => { if (!open && pending !== "manual") setManualOpen(false); }}>
+      <Dialog open={manualOpen} onOpenChange={(open) => { if (!open) closeManual(); }}>
         <DialogContent container={popupContainer}>
           <DialogHeader>
             <DialogTitle>粘贴官方账号凭据</DialogTitle>
             <DialogDescription>
-              粘贴刷新令牌，或包含访问令牌与刷新令牌的 OAuth JSON。只有刷新令牌时，Codey 会向官方换取登录。
+              粘贴刷新令牌或 OAuth JSON，也可以选择其他 Codey 导出的账号文件。只有刷新令牌时，Codey 会向官方换取登录。
             </DialogDescription>
           </DialogHeader>
           <div className="grid gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={pending === "manual" || manualFileReading}
+                loading={manualFileReading}
+                onPress={() => manualFileInput.current?.click()}
+              >
+                {manualFileReading ? "正在读取" : "选择账号文件"}
+              </Button>
+              <small className="text-[11px] text-[#6e6e73]">仅支持 .json，最多 64 KiB</small>
+              <input
+                ref={manualFileInput}
+                type="file"
+                accept=".json,application/json"
+                className="sr-only"
+                aria-label="选择 Codey 导出的账号文件"
+                disabled={pending === "manual" || manualFileReading}
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  event.target.value = "";
+                  if (file) void readManualFile(file);
+                }}
+              />
+            </div>
             <textarea
               aria-label="刷新令牌或 OAuth JSON"
               autoComplete="off"
@@ -544,17 +660,24 @@ function OfficialAccountsPanelComponent({
               spellCheck={false}
               value={manualInput}
               onChange={(event) => {
+                if (manualFileReading) cancelManualFileRead();
+                setManualFileName("");
                 setManualInput(event.target.value);
                 if (manualError) setManualError("");
               }}
             />
+            {manualFileName ? (
+              <small role="status" className="break-all text-[11px] text-[#10a37f]">
+                已载入 {manualFileName}，请检查内容后添加
+              </small>
+            ) : null}
             {manualError ? <small role="alert" className="text-xs text-[#c4271c]">{manualError}</small> : null}
           </div>
           <DialogFooter>
-            <Button variant="outline" size="sm" disabled={pending === "manual"} onPress={() => setManualOpen(false)}>取消</Button>
+            <Button variant="outline" size="sm" disabled={pending === "manual"} onPress={closeManual}>取消</Button>
             <Button
               size="sm"
-              disabled={disabled || manualInput.trim() === ""}
+              disabled={disabled || manualFileReading || manualInput.trim() === ""}
               loading={pending === "manual"}
               onPress={() => void submitManual()}
             >
