@@ -23,6 +23,7 @@ import {
   Tooltip,
 } from "./components/ui";
 import { ModelCombobox } from "./components/ModelCombobox";
+import { SubagentRuntimeOverviewSection } from "./components/SubagentRuntimeOverview";
 import {
   resolveCurrentProviderModelOption,
   type SubagentModelOption,
@@ -320,6 +321,7 @@ export function SubagentPolicyCardComponent({
               </div>
             </div>
           )}
+          <SubagentRuntimeOverviewSection />
         </div>
       </Card>
     </section>
@@ -621,6 +623,29 @@ function FeaturePolicyCardComponent({
                     : config.fastContextTools
                       ? "下次启动加载 Codey 内置 FastCtx 文件工具"
                       : "保持 Codex 默认文件工具，不加载额外 MCP"}
+                </small>
+              </div>
+            </div>
+
+            <div
+              className={`feature-card ${config.scopeGuard ? "active" : ""}`}
+            >
+              <div className="feature-card-header">
+                <strong>防御性编程控制</strong>
+                <Switch
+                  checked={config.scopeGuard}
+                  disabled={isBusy}
+                  onCheckedChange={(checked) =>
+                    onConfigChange({ ...config, scopeGuard: checked })
+                  }
+                  aria-label="防御性编程控制"
+                />
+              </div>
+              <div className="feature-card-body">
+                <small>
+                  {config.scopeGuard
+                    ? "向新会话、压缩后的会话和子代理加入适度原则，减少不必要的兼容层、兜底代码和重复检查；已有会话在下次压缩后生效"
+                    : "不加入额外规则，保持 Codex 默认行为"}
                 </small>
               </div>
             </div>

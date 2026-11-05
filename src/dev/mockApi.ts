@@ -220,6 +220,7 @@ if (import.meta.env.DEV) {
       codexLaunchProxy: "",
       fastContextTools: false,
       subagentOptimization: false,
+      scopeGuard: false,
       subagentModel: "gpt-5.6-terra",
       subagentReasoningEffort: "medium",
       subagentRoles: {
@@ -495,6 +496,89 @@ if (import.meta.env.DEV) {
       await new Promise((resolve) => setTimeout(resolve, 300));
 
       if (command === "codex_extensions") return extensionsPreview(args?.request as Record<string, unknown>);
+
+      if (command === "subagent_runtime_overview") {
+        return {
+          status: "ok",
+          platformSupported: true,
+          enabled: previewConfig.subagentOptimization,
+          scopeGuardEnabled: previewConfig.scopeGuard,
+          concurrency: { readOnly: 4, writable: 1 },
+          hooks: [
+            { event: "SessionStart", purpose: "新会话开始时注入子代理调度指引。" },
+            { event: "PreToolUse", purpose: "派生子代理前检查角色、模型和写入权限。" },
+            { event: "SubagentStop", purpose: "子代理结束时核对汇合门禁，未满足时要求补充证据。" },
+          ],
+          documents: [
+            {
+              id: "root-guidance",
+              title: "主代理调度指引",
+              description: "新会话开始时作为附加指引交给主代理，说明何时委派、何时自行处理。",
+              source: "file",
+              path: "C:\\Users\\preview\\.codey\\subagent\\root-guidance.md",
+              format: "markdown",
+              content: "# 子代理调度\n\n- 范围宽、可并行或需要专门证据时才委派。\n- 精确位置和小改动由主代理自行完成。\n- 委派前写清目标、范围、完成标准和禁止事项。\n",
+            },
+            {
+              id: "collaboration-hint",
+              title: "协作提示",
+              description: "压缩会话后重新注入，提醒主代理保持原有的委派约定。",
+              source: "builtin",
+              path: null,
+              format: "text",
+              content: "委派前确认角色权限；汇合时逐条核对子代理给出的证据。",
+            },
+            {
+              id: "role:codey_worker",
+              title: "角色：代码实施",
+              description: "派生代码实施子代理时，作为该角色的配置文件写入 Codex。",
+              source: "file",
+              path: "C:\\Users\\preview\\.codex\\agents\\codey_worker.toml",
+              format: "toml",
+              content: "name = \"codey_worker\"\ndescription = \"边界清晰、可回滚、可测试的非视觉实现\"\nmodel = \"provider-fast-coder\"\nmodel_reasoning_effort = \"medium\"\ndeveloper_instructions = \"\"\"\n只修改任务范围内的文件，完成后列出改动与验证结果。\n\"\"\"\n",
+            },
+            {
+              id: "hooks-config",
+              title: "钩子注册",
+              description: "启动 Codex 时通过 -c 参数传入，用于注册上面的钩子事件。",
+              source: "override",
+              path: null,
+              format: "json",
+              content: "{\n  \"SessionStart\": [{ \"command\": \"codey hook session-start\" }],\n  \"SubagentStop\": [{ \"command\": \"codey hook subagent-stop\" }]\n}",
+            },
+            {
+              id: "scope-guard-root",
+              title: "防御性编程控制规则",
+              description: "开启防御性编程控制后，向新会话和压缩后的会话注入。",
+              source: "builtin",
+              path: null,
+              format: "markdown",
+              content: "# 适度原则\n\n不为不会发生的情况添加兼容层、兜底代码或重复检查。\n",
+            },
+          ],
+          rules: {
+            source: "builtin",
+            path: null,
+            items: [
+              {
+                id: "evidence-required",
+                explanation: "子代理必须给出文件位置或命令输出，才能算作完成。",
+                definition: "[[rule]]\nid = \"evidence-required\"\nrequire = [\"file_ref\", \"command_output\"]\nmode = \"any\"\n",
+              },
+              {
+                id: "writer-scope",
+                explanation: "可写子代理只能修改任务声明的文件范围。",
+                definition: "[[rule]]\nid = \"writer-scope\"\nrole = [\"codey_worker\", \"codey_visual_worker\"]\nenforce = \"declared_paths_only\"\n",
+              },
+              {
+                id: "join-before-answer",
+                explanation: "主代理必须等所有子代理汇合后再给出最终答复。",
+                definition: "[[rule]]\nid = \"join-before-answer\"\nenforce = \"all_children_joined\"\n",
+              },
+            ],
+          },
+        };
+      }
 
       if (command === "load_codey_config") {
         return {

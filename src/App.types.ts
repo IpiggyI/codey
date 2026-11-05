@@ -77,6 +77,7 @@ export type Config = {
   codexLaunchProxy: string;
   fastContextTools: boolean;
   subagentOptimization: boolean;
+  scopeGuard: boolean;
   subagentModel: string;
   subagentReasoningEffort: string;
   subagentRoles: Record<SubagentRoleId, SubagentRoleConfig>;
@@ -341,6 +342,33 @@ export type CrashpadCleanup = {
   limitApplied: boolean;
   stillOverLimit: boolean;
   errors: string[];
+};
+
+export type SubagentRuntimeDocumentSource = "file" | "builtin" | "override";
+
+export type SubagentRuntimeDocument = {
+  id: string;
+  title: string;
+  description: string;
+  source: SubagentRuntimeDocumentSource;
+  path: string | null;
+  format: "markdown" | "toml" | "json" | "text";
+  content: string;
+};
+
+export type SubagentRuntimeOverview = {
+  status: "ok";
+  platformSupported: boolean;
+  enabled: boolean;
+  scopeGuardEnabled: boolean;
+  concurrency: { readOnly: number; writable: number };
+  hooks: Array<{ event: string; purpose: string }>;
+  documents: SubagentRuntimeDocument[];
+  rules: {
+    source: "file" | "builtin";
+    path: string | null;
+    items: Array<{ id: string; explanation: string; definition: string }>;
+  };
 };
 
 export type AppProps = {
