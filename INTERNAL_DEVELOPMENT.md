@@ -126,7 +126,7 @@ provider、模型和上游格式分别识别。控制台展示当前 Codex provi
 - 会话索引及元数据读取已有 SQLite 和 rollout；启动期写入只在 Codex 停止后执行，且不改写历史会话的 provider。
 - 页面插件兼容替换 `electronBridge.sendMessageFromView` 后核对实际引用；Codex 冻结桥接时替换无效，注入状态报告未生效并停止重试，请求拦截路径不受影响。当前官方插件列表经原生管理器发送 `plugin/list`，不经过该桥接，本地插件尚未并入这条路径。
 - 插件市场修复使用随包快照及可回滚替换，读取状态不触发修改；桌面操作插件仅由 `prepare_computer_use` 显式准备，资源位于 Codey 数据目录的 `marketplaces/codey-local`。运行期通过既有 `-c` 覆盖注册 `codey-local`；准备不写用户配置、不安装或启用插件，不另注册重复 MCP 服务。新注册需重启 Codex，安装、更新和启停由 Codex 插件页管理。用户自定义同名来源会明确报错并保留。读取状态不写资源；损坏清单、载荷或符号链接不会被报告为就绪。禁用插件仍报告已安装，启用状态单列。
-- 提示词优化可走官方账号、当前 provider 或独立配置，后端校验地址、认证和模型。成功响应只保留最终提示词正文，丢弃推理过程；日志不保存提示词正文或凭据。
+- 提示词优化可走官方账号、当前 provider 或独立配置，后端校验地址、认证和模型。成功响应只保留最终提示词正文，丢弃推理过程；日志不保存提示词正文或凭据。获取模型列表不要求已选模型（上游 `6fe4144e`），连接参数仍会校验；测试连通和启用仍要求模型。鉴权为官方账号时（官方账号模式，或当前 provider 使用官方账号鉴权）模型列表读本机官方模型目录（`model_catalog::available_official_models`），不发网络请求，其余情况请求服务端的 `/models`。公开配置的只读字段 `credentialsReadyByMode`（只含 `officialAccount`、`currentProvider`，不反序列化，`normalize()` 清空）按模式给出凭据是否就绪，界面据此判断草稿里切换后的模式；`credentialsReady` 只对应已保存的模式；手动配置由界面按草稿里的地址和密钥判断。
 
 ## 子代理与 FastCtx
 
@@ -270,4 +270,5 @@ macOS 本地调试未签名安装包时，确认来源后可用 `xattr -dr com.a
 - 只有第三方 provider、没有 `models_cache.json` 的用户，升级后派生模型目录因来源校验被拒绝时没有可回退的目录，直到该文件出现；没有任何重新探测。
 - 官方账号切换的备份每次一份，含完整令牌，不会删除。Codex 可能在变更检查与写入之间刷新令牌，这一小段竞争无法消除；切换后重启 Codex 会缩短受影响的时间窗口。
 - 未验证：官方账号 B 是否接受官方账号 A 下开始的对话中的加密推理内容；Codex 凭据存储为 `keyring` 或 `auto` 时的行为（此时禁用账号切换并显示原因）。
-- 以下行为只在本机测试和 WSL 中验证，待 Windows 实机验收：桌面版内置 CLI 接受 `model_provider` 与 `model` 覆盖，切换渠道后新会话发往新渠道而旧会话仍用原 provider；官方账号浏览器登录、真实切换与切换后对话；第三方服务端接受 `ultra`；统计条在真实 Codex 中的位置、数值与动画（浅色和深色主题各一次）；第三方模型开启 Fast 后请求确实带出服务档位（目前只核对了模型目录与读取端校验）；宿主托管下的完成状态同步与消息删除；页面资源补丁报警在真实安装包上的表现。
+- 切换渠道后，其他 provider 下创建的会话不能继续：Codex 26.1029 起（openai/codex#57840 “Validate thread providers before resume and input”，2026-10-28 合并），会话属于创建它时的 provider，当前 provider 与之不同时拒绝恢复会话和发送输入，历史仍可读。当前 provider 包含启动参数覆盖，Codey 的渠道切换正是这样的覆盖，该 PR 的测试明确覆盖了启动参数不能绕过这项检查；切回原 provider 后恢复可用。2026-11-05 Windows 实机（Codex 26.1029、测试包 1.4.1-32）观察到：用户配置里 `model_provider = "openai"`，另有名为 `official` 的第三方 provider；切到 `official` 渠道后，打开官方账号渠道（provider 为 `openai`）下创建的会话，Codex 提示 “This chat uses openai, but your current provider is official. Switch to openai to continue.”。官方账号渠道的 provider 都是 `openai`，就这项 provider 检查而言，在官方账号之间切换不受影响；本条不涉及账号级校验，那部分见上一条未验证项。上游靠内置本机路由的交接跨 provider 继续会话，本分叉没有路由（ADR 0001），做不到。切换渠道后新会话是否发往新渠道，实机报告里没有涉及，仍待验收，见下一条。
+- 以下行为只在本机测试和 WSL 中验证，待 Windows 实机验收：桌面版内置 CLI 接受 `model_provider` 与 `model` 覆盖，切换渠道后新会话发往新渠道；官方账号浏览器登录、真实切换与切换后对话；第三方服务端接受 `ultra`；统计条在真实 Codex 中的位置、数值与动画（浅色和深色主题各一次）；第三方模型开启 Fast 后请求确实带出服务档位（目前只核对了模型目录与读取端校验）；宿主托管下的完成状态同步与消息删除；页面资源补丁报警在真实安装包上的表现。
