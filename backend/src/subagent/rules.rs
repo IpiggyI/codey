@@ -411,6 +411,21 @@ pub(crate) fn load(state_root: &Path) -> LoadedRuleSet {
     load_uncached(state_root)
 }
 
+pub(crate) fn load_read_only(state_root: &Path) -> Result<LoadedRuleSet> {
+    Ok(match load_file(&live_rule_path(state_root))? {
+        Some((rules, _)) => LoadedRuleSet {
+            rules,
+            source: RuleSource::Live,
+            warning: None,
+        },
+        None => LoadedRuleSet {
+            rules: embedded().clone(),
+            source: RuleSource::Embedded,
+            warning: None,
+        },
+    })
+}
+
 fn load_uncached(state_root: &Path) -> LoadedRuleSet {
     let live_path = live_rule_path(state_root);
     match load_file(&live_path) {

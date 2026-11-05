@@ -1,4 +1,134 @@
 use super::*;
+
+#[test]
+fn scope_guard_is_opt_in_and_serializes_for_the_console() {
+    let config: crate::config::CodeyConfig = serde_json::from_str("{}").unwrap();
+    assert!(!config.scope_guard);
+    assert!(!crate::config::CodeyConfig::default().scope_guard);
+    let mut enabled = config;
+    enabled.scope_guard = true;
+    assert_eq!(serde_json::to_value(&enabled).unwrap()["scopeGuard"], true);
+    assert!(
+        serde_json::from_value::<crate::config::CodeyConfig>(
+            serde_json::to_value(enabled).unwrap()
+        )
+        .unwrap()
+        .scope_guard
+    );
+}
+
+#[test]
+fn scope_guard_hooks_are_isolated_opt_in_and_coexist_with_subagents() {
+    for (scope_guard, subagents) in [(false, false), (true, false), (false, true), (true, true)] {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("codex");
+        fs::create_dir(&home).unwrap();
+        let original = b"# user-owned\nmodel = \"user-model\"\n";
+        fs::write(home.join("config.toml"), original).unwrap();
+        let marker = temp.path().join("codey/lease.json");
+        let applied = apply_isolated_runtime_router_config(
+            &home,
+            RouterApplyOptions {
+                model_catalog_path: None,
+                default_model: None,
+                fastctx_command: None,
+                subagent_optimization: subagents,
+                scope_guard,
+                subagent_model: DEFAULT_SUBAGENT_MODEL,
+                subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
+                subagent_roles: None,
+                subagent_catalog: Default::default(),
+                marker: &marker,
+                backup_root: &temp.path().join("backups"),
+            },
+        )
+        .unwrap();
+        let overrides = applied.runtime_config_overrides.join("\n");
+        assert_eq!(
+            overrides.contains(crate::scope_guard::HOOK_ARGUMENT),
+            scope_guard
+        );
+        if scope_guard {
+            assert!(overrides.contains("features.hooks=true"));
+            let hook_override = applied
+                .runtime_config_overrides
+                .iter()
+                .find(|entry| entry.starts_with("hooks="))
+                .unwrap();
+            let document = hook_override.parse::<DocumentMut>().unwrap();
+            let hooks = document["hooks"].as_inline_table().unwrap();
+            let start = hooks["SessionStart"].as_array().unwrap();
+            assert_eq!(start.len(), 1);
+            assert_eq!(
+                start.get(0).unwrap().as_inline_table().unwrap()["matcher"].as_str(),
+                Some(crate::scope_guard::SESSION_START_MATCHER)
+            );
+            assert_eq!(
+                hooks["SubagentStart"].as_array().unwrap().len(),
+                if subagents { 2 } else { 1 }
+            );
+            let state = hooks["state"].as_inline_table().unwrap();
+            assert!(state.contains_key("/<session-flags>/config.toml:session_start:0:0"));
+            assert!(state.contains_key(&format!(
+                "/<session-flags>/config.toml:subagent_start:{}:0",
+                usize::from(subagents)
+            )));
+        }
+        assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
+        assert!(!home.join("hooks.json").exists());
+        assert!(restore_runtime_config_at(&home, &marker, true).unwrap());
+        assert_eq!(fs::read(home.join("config.toml")).unwrap(), original);
+        assert!(!home.join("hooks.json").exists());
+    }
+}
+
+#[test]
+fn scope_guard_inline_commands_and_trust_match_both_platforms() {
+    let commands =
+        crate::subagent_gate::hook_commands_for(crate::scope_guard::HOOK_ARGUMENT).unwrap();
+    for windows in [false, true] {
+        let hooks = build_runtime_hooks_value(None, None, None, Some(&commands), windows);
+        let hooks = hooks.as_inline_table().unwrap();
+        let command = if windows {
+            &commands.command_windows
+        } else {
+            &commands.command
+        };
+        for spec in SCOPE_GUARD_HOOKS {
+            let group = hooks[spec.toml_event]
+                .as_array()
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .as_inline_table()
+                .unwrap();
+            let handler = group["hooks"]
+                .as_array()
+                .unwrap()
+                .get(0)
+                .unwrap()
+                .as_inline_table()
+                .unwrap();
+            assert_eq!(handler["command"].as_str(), Some(command.as_str()));
+            let state = hooks["state"].as_inline_table().unwrap();
+            let trust = state[&format!("/<session-flags>/config.toml:{}:0:0", spec.event_key)]
+                .as_inline_table()
+                .unwrap();
+            assert_eq!(
+                trust["trusted_hash"].as_str(),
+                Some(
+                    crate::subagent_gate::hook_trust_hash(
+                        spec.event_key,
+                        spec.matcher,
+                        command,
+                        spec.timeout_seconds
+                    )
+                    .as_str()
+                )
+            );
+        }
+    }
+}
 use crate::codex_config_guidance::{
     CODEY_FASTCTX_GUIDANCE, CODEY_FASTCTX_GUIDANCE_VERSIONS, codey_fastctx_guidance_for_namespace,
     remove_codey_fastctx_guidance,
@@ -518,6 +648,7 @@ fn isolated_runtime_preserves_computer_use_without_adding_an_mcp() {
         let applied = apply_isolated_runtime_router_config(
             &home,
             RouterApplyOptions {
+                scope_guard: false,
                 model_catalog_path: None,
                 default_model: None,
                 fastctx_command: None,
@@ -569,6 +700,7 @@ wire_api = "responses"
     apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
+            scope_guard: false,
             model_catalog_path: None,
             default_model: None,
             fastctx_command: None,
@@ -1433,6 +1565,7 @@ command = "echo preserve-user-hook"
     let result = patch_config_with_fastctx_mode(
         existing,
         RouterPatchOptions {
+            scope_guard: false,
             config_path: Path::new("/tmp/codey-codex/config.toml"),
             catalog_dir: Path::new("model-catalogs"),
             model_catalog_path: relative_model_catalog_path(),
@@ -1538,6 +1671,7 @@ default_subagent_reasoning_effort = "low"
     let result = patch_config_with_fastctx_mode(
         existing,
         RouterPatchOptions {
+            scope_guard: false,
             config_path: Path::new("/tmp/codey-codex/config.toml"),
             catalog_dir: Path::new("model-catalogs"),
             model_catalog_path: relative_model_catalog_path(),
@@ -1599,6 +1733,7 @@ tool_namespace = "agents"
     let result = patch_config_with_fastctx_mode(
         existing,
         RouterPatchOptions {
+            scope_guard: false,
             config_path: Path::new("/tmp/codey-codex/config.toml"),
             catalog_dir: Path::new("model-catalogs"),
             model_catalog_path: relative_model_catalog_path(),
@@ -1623,6 +1758,7 @@ fn subagent_optimization_keeps_a_standalone_explicit_lower_concurrency() {
     let result = patch_config_with_fastctx_mode(
         "[agents]\nmax_concurrent_threads_per_session = 2\n",
         RouterPatchOptions {
+            scope_guard: false,
             config_path: Path::new("/tmp/codey-codex/config.toml"),
             catalog_dir: Path::new("model-catalogs"),
             model_catalog_path: relative_model_catalog_path(),
@@ -1654,6 +1790,7 @@ fn subagent_optimization_defaults_concurrency_for_new_or_invalid_configs() {
         let result = patch_config_with_fastctx_mode(
             existing,
             RouterPatchOptions {
+                scope_guard: false,
                 config_path: Path::new("/tmp/codey-codex/config.toml"),
                 catalog_dir: Path::new("model-catalogs"),
                 model_catalog_path: relative_model_catalog_path(),
@@ -1679,6 +1816,7 @@ fn subagent_optimization_accepts_dynamic_model_ids_and_rejects_empty_values() {
     let patched = patch_config_with_fastctx_mode(
         "",
         RouterPatchOptions {
+            scope_guard: false,
             config_path: Path::new("/tmp/codey-codex/config.toml"),
             catalog_dir: Path::new("model-catalogs"),
             model_catalog_path: relative_model_catalog_path(),
@@ -1699,6 +1837,7 @@ fn subagent_optimization_accepts_dynamic_model_ids_and_rejects_empty_values() {
     let error = patch_config_with_fastctx_mode(
         "",
         RouterPatchOptions {
+            scope_guard: false,
             config_path: Path::new("/tmp/codey-codex/config.toml"),
             catalog_dir: Path::new("model-catalogs"),
             model_catalog_path: relative_model_catalog_path(),
@@ -1888,6 +2027,7 @@ experimental_bearer_token = "upstream-secret-token"
     let applied = apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
+            scope_guard: false,
             model_catalog_path: relative_model_catalog_path(),
             default_model: Some("provider-model"),
             fastctx_command: None,
@@ -1926,6 +2066,7 @@ fn channels_no_selection_keeps_the_exact_legacy_override_list() {
     let marker = state.path().join("lease.json");
     let backup_root = state.path().join("backups");
     let options = || RouterApplyOptions {
+        scope_guard: false,
         model_catalog_path: None,
         default_model: Some("legacy-model"),
         fastctx_command: None,
@@ -1972,6 +2113,7 @@ fn channels_switch_launch_restart_preserves_user_files() {
         let applied = apply_isolated_runtime_router_config_for_channels(
             home.path(),
             RouterApplyOptions {
+                scope_guard: false,
                 model_catalog_path: None,
                 default_model: Some("legacy-model"),
                 fastctx_command: None,
@@ -2127,6 +2269,7 @@ fn inline_hook_commands_and_trust_match_native_platforms() {
             subagent_commands.as_ref(),
             fastctx_commands.as_ref(),
             combined_commands.as_ref(),
+            None,
         );
         assert_eq!(overrides.len(), 1);
         assert!(overrides[0].starts_with("hooks="));
@@ -2140,6 +2283,7 @@ fn inline_hook_commands_and_trust_match_native_platforms() {
                 subagent_commands.as_ref(),
                 fastctx_commands.as_ref(),
                 combined_commands.as_ref(),
+                None,
                 windows,
             );
             let parsed = format!("hooks={hooks}").parse::<DocumentMut>().unwrap();

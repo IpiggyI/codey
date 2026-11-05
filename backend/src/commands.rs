@@ -996,6 +996,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         "select_channel" => channels::change_channel(state, &args, false).await,
         "set_channel_default_model" => channels::change_channel(state, &args, true).await,
         "load_codey_config" => load_codey_config(state).await,
+        "subagent_runtime_overview" => subagent_runtime_overview(state).await,
         "save_codey_config" => match codey_config_save_input(&args) {
             Ok(input) => save_codey_config_input(state, input).await,
             Err(error) => Err(error),
@@ -1235,6 +1236,24 @@ pub async fn clear_route_request_logs(state: &Arc<AppState>) -> Result<Value, St
         ),
     };
     serde_json::to_value(result).map_err(|error| format!("请求日志清理结果序列化失败：{error}"))
+}
+
+async fn subagent_runtime_overview(state: &Arc<AppState>) -> Result<Value, String> {
+    let config = state.config.read().await.clone();
+    tokio::task::spawn_blocking(move || {
+        let codey_home = crate::config::default_config_path();
+        let overview = crate::subagent_overview::build(
+            codey_home
+                .parent()
+                .ok_or_else(|| "Codey 配置路径缺少父目录".to_string())?,
+            codex_home(),
+            &config,
+        )
+        .map_err(|error| format!("读取子代理运行概览失败：{error:#}"))?;
+        serde_json::to_value(overview).map_err(|error| format!("序列化子代理运行概览失败：{error}"))
+    })
+    .await
+    .map_err(|error| format!("子代理运行概览任务异常退出：{error}"))?
 }
 
 pub async fn load_codey_config(state: &Arc<AppState>) -> Result<Value, String> {
@@ -1563,6 +1582,7 @@ async fn save_codey_config_locked(
         &fast_context_tools_status,
     );
     config.subagent_optimization = config_input.subagent_optimization;
+    config.scope_guard = config_input.scope_guard;
     let mut explicitly_configured_subagent_models = Vec::new();
     let default_role_supplied = subagent_roles_present
         && !config_input.subagent_roles.is_empty()
@@ -2179,6 +2199,7 @@ pub(super) fn config_requires_restart_with_route_status(
         || applied.codex_launch_proxy != current.codex_launch_proxy
         || applied.fast_context_tools != current.fast_context_tools
         || applied.subagent_optimization != current.subagent_optimization
+        || applied.scope_guard != current.scope_guard
         || applied_models != &RuntimeModelConfig::from_config(current)
         || ((applied.subagent_optimization || current.subagent_optimization)
             && applied_subagent != &RuntimeSubagentConfig::from_config(current))

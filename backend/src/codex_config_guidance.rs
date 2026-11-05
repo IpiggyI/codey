@@ -66,7 +66,10 @@ A catalog-listed collaboration tool is available even without a same-named direc
 wrappers or bypass lifecycle and permission checks. Dispatch up to the current concurrency limit from the \
 planned independent work before the first wait. While any attempt is active, use only the relevant \
 `agents.spawn_agent`, `agents.send_message`, `agents.followup_task`, `agents.interrupt_agent`, \
-`agents.list_agents`, or `agents.wait_agent`. After a terminal or successfully fenced update, recompute the \
+`agents.list_agents`, or `agents.wait_agent`. Only when the ledger and active markers prove all children \
+are bound and read-only may a trusted root use rule-approved read tools such as `read_file`, \
+`inspect_local_file`, `grep`, and `glob`; `view_image`, writes, commands, and Stop remain blocked. \
+After a terminal or successfully fenced update, recompute the \
 role-aware concurrency limit; if it exposes a slot, immediately use `agents.spawn_agent` with a new \
 `task_name` for the next planned, unspawned task; \
 otherwise return to `agents.wait_agent` with `timeout_ms: 30000`. `MESSAGE` and mailbox updates are not \
@@ -80,7 +83,7 @@ attempt's no-change claim or infer a transport stall from elapsed time alone. If
 lacks per-agent terminal details, call unfiltered `agents.list_agents` before waiting again. Continue until \
 all planned work has been spawned and every attempt is terminal or fenced. Then the root agent validates \
 the combined result and either continues the work or finishes. While an attempt is active, Codey's gate \
-blocks non-collaboration tools and Stop. If collaboration tools are unavailable, do not loop on an \
+blocks tools outside the read-only exception above and collaboration tools, and blocks Stop. If collaboration tools are unavailable, do not loop on an \
 unregistered tool.";
 
 pub(crate) const ROOT_AGENT_MULTI_AGENT_MODE_HINT: &str = "Proactive multi-agent delegation is \
@@ -142,6 +145,7 @@ sandbox_mode = "read-only"
 
 developer_instructions = """
 你是通用子代理，是主代理派出去的探子。你只做探索、检索、核验：不改动任何东西，不做方案取舍或者最终判断——那些是主代理的事。
+代码、日志和文档任务先读取相关文件；不执行本地命令或使用视觉工具。需要命令或用户图片、截图、页面、GUI、渲染证据时，将需求和已知证据交回主代理，由主代理选择具备权限的角色。
 不要派生、调用或者请求新的子代理；任务若是需要进一步拆分，把拆分的建议返回给主代理。
 
 你交回给主代理的东西：
@@ -168,6 +172,7 @@ sandbox_mode = "read-only"
 
 developer_instructions = """
 你是快速定位子代理。只做只读、范围明确、低风险的定位与事实检索，不修改任何文件，不做方案取舍，也不派生其他子代理。
+代码、日志和文档任务先读取相关文件；不执行本地命令或使用视觉工具。需要命令或用户图片、截图、页面、GUI、渲染证据时，将需求和已知证据交回主代理，由主代理选择具备权限的角色。
 优先返回最短可核验证据：确切路径、`file:line`、符号名、匹配数量和必要的关键原文。任务超出小范围快速检索时，明确说明应改派深度检索或视觉分析角色。
 你的回复直接供主代理使用：密而不水，区分事实与推断，不寒暄、不复述过程。
 首行写 `status: completed | partial | blocked`；最多保留 5 条会影响决策的关键证据，并明确未覆盖范围。
@@ -184,6 +189,7 @@ sandbox_mode = "read-only"
 
 developer_instructions = """
 你是深度检索子代理。负责跨文件、跨目录的代码、日志和文档检索、归纳与架构探索；不修改任何文件，不做最终方案取舍，也不派生其他子代理。
+代码、日志和文档任务先读取相关文件；不执行本地命令或使用视觉工具。需要命令或用户图片、截图、页面、GUI、渲染证据时，将需求和已知证据交回主代理，由主代理选择具备权限的角色。
 覆盖任务给定范围，返回符号关系、关键路径、`file:line` 和必要原文。把已确认事实、推断、缺口与矛盾分开，保留足够证据供主代理低成本抽查。
 你的输出直接喂给主代理：结构紧凑、信息密集，不写面向最终用户的包装文字。
 首行写 `status: completed | partial | blocked`；只返回会影响决策的结论、最多 5 条关键证据和明确 gaps。
@@ -452,6 +458,43 @@ fn remove_guidance_at(current: &str, guidance_start: usize, guidance_len: usize)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retrieval_roles_keep_read_only_nonvisual_boundaries() {
+        for template in [
+            DEFAULT_AGENT_CONFIG,
+            QUICK_SCAN_AGENT_CONFIG,
+            DEEP_RESEARCH_AGENT_CONFIG,
+        ] {
+            assert!(template.contains("代码、日志和文档任务先读取相关文件"));
+            assert!(template.contains("不执行本地命令或使用视觉工具"));
+            assert!(template.contains("由主代理选择具备权限的角色"));
+            assert!(template.contains("sandbox_mode = \"read-only\""));
+            assert!(!template.contains(r"\n"));
+        }
+        assert!(VISUAL_ANALYSIS_AGENT_CONFIG.contains("先读取或捕获必要视觉证据"));
+        assert!(VISUAL_WORKER_AGENT_CONFIG.contains("修改后通过已授权的渲染/截图工具核验"));
+    }
+
+    #[test]
+    fn root_hint_names_reads_without_relaxing_role_aware_gate() {
+        for tool in [
+            "read_file",
+            "inspect_local_file",
+            "grep",
+            "glob",
+            "view_image",
+        ] {
+            assert!(ROOT_AGENT_COLLABORATION_USAGE_HINT.contains(tool));
+        }
+        assert!(
+            ROOT_AGENT_COLLABORATION_USAGE_HINT.contains("all children are bound and read-only")
+        );
+        assert!(
+            ROOT_AGENT_COLLABORATION_USAGE_HINT
+                .contains("`view_image`, writes, commands, and Stop remain blocked")
+        );
+    }
 
     #[test]
     fn fastctx_guidance_encodes_the_direct_and_cost_efficient_tool_contract() {

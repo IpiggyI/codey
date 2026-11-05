@@ -347,7 +347,7 @@ struct PreparedCodexStartupState {
     runtime_config_overrides: Vec<String>,
 }
 
-fn runtime_subagent_model(
+pub(crate) fn runtime_subagent_model(
     model: &str,
     catalog: &subagent_policy::SubagentCatalogSnapshot,
 ) -> String {
@@ -657,6 +657,7 @@ async fn prepare_codex_startup_state(
                 default_model: runtime_default_model.as_deref(),
                 fast_context_tools,
                 subagent_optimization,
+                scope_guard: channel_config.scope_guard,
                 subagent_model: &subagent_model,
                 subagent_reasoning_effort: &subagent_reasoning_effort,
                 subagent_roles: Some(&subagent_roles),
@@ -1570,6 +1571,7 @@ async fn prepare_native_runtime_state(
                 default_model: None,
                 fast_context_tools,
                 subagent_optimization,
+                scope_guard: native_subagent_config.scope_guard,
                 subagent_model: &native_subagent_config.subagent_model,
                 subagent_reasoning_effort: &native_subagent_config.subagent_reasoning_effort,
                 subagent_roles: Some(&native_subagent_config.subagent_roles),

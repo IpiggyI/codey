@@ -70,6 +70,9 @@ const CODEY_SUBAGENT_SOURCES_DIR: &str = "agents";
 const CODEY_RUNTIME_AGENTS_DIR: &str = "runtime/agents";
 const CODEY_HOOKS_DESCRIPTION: &str = "Codey runtime routing and coordination hooks.";
 const CODEY_RUNTIME_CONFIG_LOCK_FILE: &str = "codex-runtime-config.lock";
+
+mod overview;
+pub(crate) use overview::{runtime_overview_documents, runtime_overview_hooks};
 const RUNTIME_CONFIG_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const RUNTIME_CONFIG_LOCK_RETRY: Duration = Duration::from_millis(10);
 const RUNTIME_AGENT_SCHEMA_VERSION: u32 = 1;
@@ -258,6 +261,7 @@ pub(crate) struct RuntimeRouterConfigOptions<'a> {
     pub default_model: Option<&'a str>,
     pub fast_context_tools: bool,
     pub subagent_optimization: bool,
+    pub scope_guard: bool,
     pub subagent_model: &'a str,
     pub subagent_reasoning_effort: &'a str,
     pub subagent_roles: Option<&'a BTreeMap<String, SubagentRoleConfig>>,
@@ -284,6 +288,7 @@ struct RouterApplyOptions<'a> {
     default_model: Option<&'a str>,
     fastctx_command: Option<&'a Path>,
     subagent_optimization: bool,
+    scope_guard: bool,
     subagent_model: &'a str,
     subagent_reasoning_effort: &'a str,
     subagent_roles: Option<&'a BTreeMap<String, SubagentRoleConfig>>,
@@ -293,17 +298,18 @@ struct RouterApplyOptions<'a> {
 }
 
 #[derive(Clone, Debug)]
-struct RuntimeAgentRegistration {
-    role: String,
+pub(crate) struct RuntimeAgentRegistration {
+    pub(crate) role: String,
     description: String,
     config_file: PathBuf,
     content_sha256: String,
 }
 
 #[derive(Clone, Debug)]
-struct RuntimeAgentPlan {
-    registration: RuntimeAgentRegistration,
-    contents: Vec<u8>,
+pub(crate) struct RuntimeAgentPlan {
+    pub(crate) registration: RuntimeAgentRegistration,
+    pub(crate) contents: Vec<u8>,
+    pub(crate) source_path: Option<PathBuf>,
 }
 
 pub(crate) fn apply_runtime_router_config(
@@ -331,6 +337,7 @@ pub(crate) fn apply_runtime_router_config(
             default_model,
             fastctx_command: fastctx_command.as_deref(),
             subagent_optimization: options.subagent_optimization,
+            scope_guard: options.scope_guard,
             subagent_model: options.subagent_model,
             subagent_reasoning_effort: options.subagent_reasoning_effort,
             subagent_roles: options.subagent_roles,
@@ -402,6 +409,7 @@ fn apply_isolated_runtime_router_config(
         default_model,
         fastctx_command,
         subagent_optimization,
+        scope_guard,
         subagent_model,
         subagent_reasoning_effort,
         subagent_roles,
@@ -428,6 +436,7 @@ fn apply_isolated_runtime_router_config(
             subagent_optimization,
             subagent_model,
             subagent_reasoning_effort,
+            scope_guard,
         },
     )?;
     let mut effective_document = parse_document(&effective).context("解析 Codey 运行时约束失败")?;
@@ -487,7 +496,7 @@ fn apply_isolated_runtime_router_config(
         collaboration_hint.as_deref(),
     )?;
 
-    let runtime_hooks_enabled = subagent_optimization || fastctx_namespace.is_some();
+    let runtime_hooks_enabled = subagent_optimization || fastctx_namespace.is_some() || scope_guard;
     let subagent_hook_commands = subagent_optimization
         .then(crate::subagent_gate::hook_commands)
         .transpose()?;
@@ -500,10 +509,14 @@ fn apply_isolated_runtime_router_config(
         .then(|| crate::subagent_gate::hook_commands_for(crate::fastctx_route_gate::HOOK_ARGUMENT))
         .transpose()?;
     let hook_overrides = if runtime_hooks_enabled {
+        let scope_guard_commands = scope_guard
+            .then(|| crate::subagent_gate::hook_commands_for(crate::scope_guard::HOOK_ARGUMENT))
+            .transpose()?;
         build_runtime_hooks_overrides(
             subagent_hook_commands.as_ref(),
             fastctx_hook_commands.as_ref(),
             combined_hook_commands.as_ref(),
+            scope_guard_commands.as_ref(),
         )
     } else {
         Vec::new()
@@ -617,6 +630,7 @@ fn apply_isolated_test_runtime_config(
             subagent_reasoning_effort,
             subagent_roles,
             subagent_catalog: Default::default(),
+            scope_guard: false,
             marker,
             backup_root,
         },
@@ -630,6 +644,20 @@ fn read_or_create_constraint_file(path: &Path, default_contents: &str) -> Result
     }
     write_private_file(path, default_contents.as_bytes())?;
     Ok(default_contents.to_string())
+}
+
+pub(crate) fn read_constraint_source(
+    path: &Path,
+    default_contents: &str,
+) -> Result<(String, bool)> {
+    match read_optional(path)? {
+        Some(bytes) => Ok((
+            String::from_utf8(bytes)
+                .with_context(|| format!("Codey 约束文件不是 UTF-8：{}", path.display()))?,
+            true,
+        )),
+        None => Ok((default_contents.to_string(), false)),
+    }
 }
 
 fn runtime_root_instructions_for_roles(
@@ -651,17 +679,25 @@ fn read_or_create_versioned_constraint_file(
     owned_versions: &[&str],
 ) -> Result<String> {
     let source = read_or_create_constraint_file(path, current)?;
+    Ok(versioned_constraint_contents(
+        source,
+        current,
+        owned_versions,
+    ))
+}
+
+fn versioned_constraint_contents(source: String, current: &str, owned_versions: &[&str]) -> String {
     if owned_versions
         .iter()
         .any(|version| source.trim() == version.trim())
     {
-        Ok(current.to_string())
+        current.to_string()
     } else {
-        Ok(source)
+        source
     }
 }
 
-fn runtime_subagent_roles(
+pub(crate) fn runtime_subagent_roles(
     configured: Option<&BTreeMap<String, SubagentRoleConfig>>,
     legacy_model: &str,
     legacy_reasoning_effort: &str,
@@ -687,6 +723,15 @@ fn prepare_runtime_agent_files(
     roles: &BTreeMap<String, SubagentRoleConfig>,
     fastctx_instructions: Option<&str>,
 ) -> Result<Vec<RuntimeAgentRegistration>> {
+    for role in roles.keys() {
+        let source_path = runtime_agent_source_path(constraints_dir, role);
+        let default_source = subagent_source_config(role)
+            .with_context(|| format!("缺少 Codey 子代理约束模板：{role}"))?;
+        if let Some(parent) = source_path.parent() {
+            create_private_dir_all(parent)?;
+        }
+        read_or_create_constraint_file(&source_path, default_source)?;
+    }
     let plans = plan_runtime_agent_files(constraints_dir, roles, fastctx_instructions)?;
     let mut registrations = Vec::with_capacity(plans.len());
     for plan in plans {
@@ -729,7 +774,7 @@ fn remove_unplanned_runtime_agent_files(
     Ok(())
 }
 
-fn plan_runtime_agent_files(
+pub(crate) fn plan_runtime_agent_files(
     constraints_dir: &Path,
     roles: &BTreeMap<String, SubagentRoleConfig>,
     fastctx_instructions: Option<&str>,
@@ -741,17 +786,8 @@ fn plan_runtime_agent_files(
         };
         let default_source = subagent_source_config(role)
             .with_context(|| format!("缺少 Codey 子代理约束模板：{role}"))?;
-        let source_path = if role == SUBAGENT_ROLE_DEFAULT {
-            constraints_dir.join(CODEY_SUBAGENT_SOURCE_FILE)
-        } else {
-            constraints_dir
-                .join(CODEY_SUBAGENT_SOURCES_DIR)
-                .join(format!("{role}.toml"))
-        };
-        if let Some(parent) = source_path.parent() {
-            create_private_dir_all(parent)?;
-        }
-        let source = read_or_create_constraint_file(&source_path, default_source)?;
+        let source_path = runtime_agent_source_path(constraints_dir, role);
+        let (source, from_file) = read_constraint_source(&source_path, default_source)?;
         let runtime_path = runtime_agent_path(constraints_dir, role);
         let (contents, description) =
             render_runtime_agent(&source, role, selection, fastctx_instructions)?;
@@ -764,9 +800,20 @@ fn plan_runtime_agent_files(
                 content_sha256,
             },
             contents,
+            source_path: from_file.then_some(source_path),
         });
     }
     Ok(plans)
+}
+
+fn runtime_agent_source_path(constraints_dir: &Path, role: &str) -> PathBuf {
+    if role == SUBAGENT_ROLE_DEFAULT {
+        constraints_dir.join(CODEY_SUBAGENT_SOURCE_FILE)
+    } else {
+        constraints_dir
+            .join(CODEY_SUBAGENT_SOURCES_DIR)
+            .join(format!("{role}.toml"))
+    }
 }
 
 fn runtime_agent_path(constraints_dir: &Path, role: &str) -> PathBuf {
@@ -1329,6 +1376,7 @@ fn patch_config_with_fastctx(
             subagent_optimization,
             subagent_model: DEFAULT_SUBAGENT_MODEL,
             subagent_reasoning_effort: DEFAULT_SUBAGENT_REASONING_EFFORT,
+            scope_guard: false,
         },
     )
 }
@@ -1340,6 +1388,7 @@ struct RouterPatchOptions<'a> {
     default_model: Option<&'a str>,
     fastctx_command: Option<&'a Path>,
     subagent_optimization: bool,
+    scope_guard: bool,
     subagent_model: &'a str,
     subagent_reasoning_effort: &'a str,
 }
@@ -1355,6 +1404,7 @@ fn patch_config_with_fastctx_mode(
         default_model,
         fastctx_command,
         subagent_optimization,
+        scope_guard,
         subagent_model,
         subagent_reasoning_effort,
     } = options;
@@ -1378,7 +1428,7 @@ fn patch_config_with_fastctx_mode(
             fastctx_namespace.as_deref(),
         )?;
     }
-    if fastctx_namespace.is_some() {
+    if fastctx_namespace.is_some() || scope_guard {
         // Hook 定义与信任项由单条运行期覆盖提供，此处只启用功能开关。
         enable_hooks_feature(&mut doc)?;
     }
@@ -1557,16 +1607,33 @@ const FASTCTX_ROUTE_HOOKS: [CodeyHookSpec; 1] = [CodeyHookSpec {
     timeout_seconds: crate::fastctx_route_gate::HOOK_TIMEOUT_SECONDS,
 }];
 
+const SCOPE_GUARD_HOOKS: [CodeyHookSpec; 2] = [
+    CodeyHookSpec {
+        toml_event: "SessionStart",
+        event_key: "session_start",
+        matcher: Some(crate::scope_guard::SESSION_START_MATCHER),
+        timeout_seconds: crate::scope_guard::HOOK_TIMEOUT_SECONDS,
+    },
+    CodeyHookSpec {
+        toml_event: "SubagentStart",
+        event_key: "subagent_start",
+        matcher: None,
+        timeout_seconds: crate::scope_guard::HOOK_TIMEOUT_SECONDS,
+    },
+];
+
 fn build_runtime_hooks_overrides(
     subagent_commands: Option<&crate::subagent_gate::HookCommands>,
     fastctx_commands: Option<&crate::subagent_gate::HookCommands>,
     combined_commands: Option<&crate::subagent_gate::HookCommands>,
+    scope_guard_commands: Option<&crate::subagent_gate::HookCommands>,
 ) -> Vec<String> {
     let mut overrides = Vec::new();
     let hooks = build_runtime_hooks_value(
         subagent_commands,
         fastctx_commands,
         combined_commands,
+        scope_guard_commands,
         cfg!(windows),
     );
     push_runtime_override_value(&mut overrides, "hooks", &hooks);
@@ -1577,6 +1644,7 @@ fn build_runtime_hooks_value(
     subagent_commands: Option<&crate::subagent_gate::HookCommands>,
     fastctx_commands: Option<&crate::subagent_gate::HookCommands>,
     combined_commands: Option<&crate::subagent_gate::HookCommands>,
+    scope_guard_commands: Option<&crate::subagent_gate::HookCommands>,
     windows: bool,
 ) -> Value {
     let mut hook_plans = Vec::with_capacity(3);
@@ -1590,6 +1658,9 @@ fn build_runtime_hooks_value(
     }
     if let Some(fastctx_commands) = fastctx_commands {
         hook_plans.push((&FASTCTX_ROUTE_HOOKS[..], fastctx_commands));
+    }
+    if let Some(scope_guard_commands) = scope_guard_commands {
+        hook_plans.push((&SCOPE_GUARD_HOOKS[..], scope_guard_commands));
     }
     let mut hooks = InlineTable::new();
     let mut state = InlineTable::new();
@@ -1938,6 +2009,7 @@ fn enable_hooks_feature(doc: &mut DocumentMut) -> Result<()> {
 
 fn hook_command_is_codey_owned(command: &str) -> bool {
     command.contains(crate::subagent_gate::HOOK_ARGUMENT)
+        || command.contains(crate::scope_guard::HOOK_ARGUMENT)
         || command.contains(crate::fastctx_route_gate::HOOK_ARGUMENT)
 }
 

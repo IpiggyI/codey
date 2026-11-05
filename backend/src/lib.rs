@@ -47,6 +47,7 @@ mod renderer_asset_patch;
 mod renderer_asset_scan;
 mod rollout_last_request;
 mod route_request_log;
+mod scope_guard;
 mod session_delete;
 mod session_index_cleanup;
 mod session_metadata;
@@ -55,6 +56,7 @@ mod sqlite_util;
 mod subagent;
 mod subagent_gate;
 mod subagent_orchestrator;
+mod subagent_overview;
 mod subagent_policy;
 mod system_proxy_client;
 mod target_prefetch;
@@ -215,6 +217,10 @@ pub fn record_process_failure_with_recoverability(
 
 pub fn run_subagent_gate_hook_if_requested() -> Result<bool> {
     subagent_gate::run_hook_if_requested()
+}
+
+pub fn run_scope_guard_hook_if_requested() -> Result<bool> {
+    scope_guard::run_hook_if_requested()
 }
 
 pub fn run_fastctx_route_hook_if_requested() -> Result<bool> {
