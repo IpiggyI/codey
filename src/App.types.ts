@@ -348,30 +348,66 @@ export type CrashpadCleanup = {
   errors: string[];
 };
 
-export type SubagentRuntimeDocumentSource = "file" | "builtin" | "override";
+export type SubagentRuntimeChannel = "file" | "override" | "hook";
 
-export type SubagentRuntimeDocument = {
+/** 可编辑模板的位置；exists 为 false 时，启动会先用内置内容创建它。 */
+export type SubagentRuntimeTemplate = { path: string; exists: boolean };
+
+export type SubagentRuntimeOverride = {
+  label: string;
+  key: string;
+  value: string | null;
+};
+
+export type SubagentRuntimeContent = {
+  format: "markdown" | "toml" | "json" | "text";
+  text: string;
+};
+
+export type SubagentRuntimeItem = {
   id: string;
   title: string;
   description: string;
-  source: SubagentRuntimeDocumentSource;
-  path: string | null;
-  format: "markdown" | "toml" | "json" | "text";
-  content: string;
+  channel: SubagentRuntimeChannel;
+  destination: string | null;
+  template: SubagentRuntimeTemplate | null;
+  overrides: SubagentRuntimeOverride[];
+  events: Array<{ event: string; name: string; purpose: string }>;
+  content: SubagentRuntimeContent | null;
+};
+
+/** 角色的交付计划不带标题，显示名称取自子代理角色列表。 */
+export type SubagentRuntimeRole = {
+  id: SubagentRoleId;
+  destination: string;
+  template: SubagentRuntimeTemplate;
+  overrides: SubagentRuntimeOverride[];
+  model: string;
+  reasoningEffort: string;
+  content: SubagentRuntimeContent | null;
+  error: string | null;
 };
 
 export type SubagentRuntimeOverview = {
   status: "ok";
   platformSupported: boolean;
-  enabled: boolean;
-  scopeGuardEnabled: boolean;
-  concurrency: { readOnly: number; writable: number };
-  hooks: Array<{ event: string; purpose: string }>;
-  documents: SubagentRuntimeDocument[];
-  rules: {
-    source: "file" | "builtin";
-    path: string | null;
-    items: Array<{ id: string; explanation: string; definition: string }>;
+  /** 生成概览所依据的已保存设置，用来和页面草稿比对。 */
+  saved: {
+    subagentOptimization: boolean;
+    scopeGuard: boolean;
+    roles: Partial<Record<SubagentRoleId, SubagentRoleConfig>>;
+  };
+  master: SubagentRuntimeItem[];
+  roles: SubagentRuntimeRole[];
+  scopeGuard: SubagentRuntimeItem[];
+  gate: {
+    items: SubagentRuntimeItem[];
+    concurrency: { readOnly: number; writable: number };
+    rules: {
+      source: "file" | "builtin";
+      path: string | null;
+      items: Array<{ id: string; explanation: string; definition: string }>;
+    };
   };
 };
 

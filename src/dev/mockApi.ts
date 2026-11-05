@@ -500,84 +500,106 @@ if (import.meta.env.DEV) {
       if (command === "codex_extensions") return extensionsPreview(args?.request as Record<string, unknown>);
 
       if (command === "subagent_runtime_overview") {
+        const constraints = "C:\\Users\\preview\\.codey\\codex-constraints";
+        const hookOverrides = [
+          { label: "开启 Codex 钩子功能", key: "features.hooks", value: "true" },
+          { label: "注册 Codey 钩子", key: "hooks", value: "内联定义，不写入 hooks.json" },
+        ];
+        const roleIds = ["codey_quick_scan", "codey_deep_research", "codey_visual_analysis", "codey_worker", "codey_visual_worker", "default"] as const;
         return {
           status: "ok",
           platformSupported: true,
-          enabled: previewConfig.subagentOptimization,
-          scopeGuardEnabled: previewConfig.scopeGuard,
-          concurrency: { readOnly: 4, writable: 1 },
-          hooks: [
-            { event: "SessionStart", purpose: "新会话开始时注入子代理调度指引。" },
-            { event: "PreToolUse", purpose: "派生子代理前检查角色、模型和写入权限。" },
-            { event: "SubagentStop", purpose: "子代理结束时核对汇合门禁，未满足时要求补充证据。" },
-          ],
-          documents: [
+          saved: {
+            subagentOptimization: previewConfig.subagentOptimization,
+            scopeGuard: previewConfig.scopeGuard,
+            roles: previewConfig.subagentRoles,
+          },
+          master: [
             {
               id: "root-guidance",
-              title: "主代理调度指引",
-              description: "新会话开始时作为附加指引交给主代理，说明何时委派、何时自行处理。",
-              source: "file",
-              path: "C:\\Users\\preview\\.codey\\subagent\\root-guidance.md",
-              format: "markdown",
-              content: "# 子代理调度\n\n- 范围宽、可并行或需要专门证据时才委派。\n- 精确位置和小改动由主代理自行完成。\n- 委派前写清目标、范围、完成标准和禁止事项。\n",
+              title: "主代理指导",
+              description: "告诉主代理何时派发子代理、如何写任务和如何验收。追加在 Codex 配置里已有的主代理指令之后。",
+              channel: "override",
+              destination: null,
+              template: { path: `${constraints}\\root-instructions.md`, exists: true },
+              overrides: [{ label: "主代理指令（追加）", key: "developer_instructions", value: null }],
+              events: [],
+              content: { format: "markdown", text: "## 子代理使用\n\n- 范围宽、可并行或需要专门证据时才委派。\n" },
             },
             {
-              id: "collaboration-hint",
-              title: "协作提示",
-              description: "压缩会话后重新注入，提醒主代理保持原有的委派约定。",
-              source: "builtin",
-              path: null,
-              format: "text",
-              content: "委派前确认角色权限；汇合时逐条核对子代理给出的证据。",
-            },
-            {
-              id: "role:codey_worker",
-              title: "角色：代码实施",
-              description: "派生代码实施子代理时，作为该角色的配置文件写入 Codex。",
-              source: "file",
-              path: "C:\\Users\\preview\\.codex\\agents\\codey_worker.toml",
-              format: "toml",
-              content: "name = \"codey_worker\"\ndescription = \"边界清晰、可回滚、可测试的非视觉实现\"\nmodel = \"provider-fast-coder\"\nmodel_reasoning_effort = \"medium\"\ndeveloper_instructions = \"\"\"\n只修改任务范围内的文件，完成后列出改动与验证结果。\n\"\"\"\n",
-            },
-            {
-              id: "hooks-config",
-              title: "钩子注册",
-              description: "启动 Codex 时通过 -c 参数传入，用于注册上面的钩子事件。",
-              source: "override",
-              path: null,
-              format: "json",
-              content: "{\n  \"SessionStart\": [{ \"command\": \"codey hook session-start\" }],\n  \"SubagentStop\": [{ \"command\": \"codey hook subagent-stop\" }]\n}",
-            },
-            {
-              id: "scope-guard-root",
-              title: "防御性编程控制规则",
-              description: "开启防御性编程控制后，向新会话和压缩后的会话注入。",
-              source: "builtin",
-              path: null,
-              format: "markdown",
-              content: "# 适度原则\n\n不为不会发生的情况添加兼容层、兜底代码或重复检查。\n",
+              id: "codex-agent-settings",
+              title: "Codex 子代理设置",
+              description: "打开 Codex 的子代理功能，并设定等待时长和派发方式。只在本次启动生效，不改写你的 Codex 配置文件。",
+              channel: "override",
+              destination: null,
+              template: null,
+              overrides: [
+                { label: "开启 Codex 子代理", key: "agents.enabled", value: "true" },
+                { label: "每个会话同时运行的子代理上限", key: "agents.max_concurrent_threads_per_session", value: "沿用 Codex 配置；未设置时为 3" },
+              ],
+              events: [],
+              content: null,
             },
           ],
-          rules: {
-            source: "builtin",
-            path: null,
+          roles: roleIds.map((id) => {
+            const selection = previewConfig.subagentRoles[id];
+            const destination = id === "default" ? `${constraints}\\runtime\\default-agent.toml` : `${constraints}\\runtime\\agents\\${id}.toml`;
+            return {
+              id,
+              destination,
+              template: { path: id === "default" ? `${constraints}\\subagent.toml` : `${constraints}\\agents\\${id}.toml`, exists: id === "codey_worker" },
+              overrides: [
+                { label: "注册角色配置文件", key: `agents.${id}.config_file`, value: destination },
+                { label: "角色说明", key: `agents.${id}.description`, value: "预览用的角色说明" },
+              ],
+              model: selection?.model ?? previewConfig.subagentModel,
+              reasoningEffort: selection?.reasoningEffort ?? previewConfig.subagentReasoningEffort,
+              content: { format: "toml", text: `name = "${id}"\nmodel = "${selection?.model ?? previewConfig.subagentModel}"\n` },
+              error: null,
+            };
+          }),
+          scopeGuard: [
+            {
+              id: "scope-guard-root",
+              title: "主会话规则",
+              description: "钩子把规则作为附加上下文交给主代理。",
+              channel: "hook",
+              destination: null,
+              template: null,
+              overrides: hookOverrides,
+              events: [{ event: "SessionStart", name: "会话开始时", purpose: "新建、清空和压缩后的主会话开始时注入完整规则。" }],
+              content: { format: "markdown", text: "# 适度原则\n\n不为不会发生的情况添加兼容层、兜底代码或重复检查。\n" },
+            },
+          ],
+          gate: {
             items: [
               {
-                id: "evidence-required",
-                explanation: "子代理必须给出文件位置或命令输出，才能算作完成。",
-                definition: "[[rule]]\nid = \"evidence-required\"\nrequire = [\"file_ref\", \"command_output\"]\nmode = \"any\"\n",
-              },
-              {
-                id: "writer-scope",
-                explanation: "可写子代理只能修改任务声明的文件范围。",
-                definition: "[[rule]]\nid = \"writer-scope\"\nrole = [\"codey_worker\", \"codey_visual_worker\"]\nenforce = \"declared_paths_only\"\n",
-              },
-              {
-                id: "join-before-answer",
-                explanation: "主代理必须等所有子代理汇合后再给出最终答复。",
-                definition: "[[rule]]\nid = \"join-before-answer\"\nenforce = \"all_children_joined\"\n",
+                id: "gate-hooks",
+                title: "门禁钩子",
+                description: "每个事件都调用 Codey 检查程序，按下方门禁规则放行或拦截。",
+                channel: "hook",
+                destination: null,
+                template: null,
+                overrides: hookOverrides,
+                events: [
+                  { event: "PreToolUse", name: "调用工具前", purpose: "检查子代理角色的权限和并发上限。" },
+                  { event: "SubagentStop", name: "子代理停止时", purpose: "结算子代理的活动状态，释放其占用。" },
+                ],
+                content: null,
               },
             ],
+            concurrency: { readOnly: 3, writable: 2 },
+            rules: {
+              source: "builtin",
+              path: null,
+              items: [
+                {
+                  id: "join-before-answer",
+                  explanation: "主代理必须等所有子代理汇合后再给出最终答复。",
+                  definition: "{\n  \"id\": \"join-before-answer\"\n}",
+                },
+              ],
+            },
           },
         };
       }

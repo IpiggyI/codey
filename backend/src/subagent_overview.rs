@@ -1,21 +1,40 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::config::CodeyConfig;
+use crate::config::{CodeyConfig, SubagentRoleConfig};
 use crate::subagent::rules::{self, RuleSource};
 
+/// 只读概览：按触发条件分组列出 Codey 启动 Codex 时为子代理交付的内容。
+/// 内容按已保存的设置生成；未启用的角色也按启用后的样子规划，由前端标明未生效。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Overview {
     status: &'static str,
     platform_supported: bool,
-    enabled: bool,
-    scope_guard_enabled: bool,
+    saved: Saved,
+    master: Vec<Item>,
+    roles: Vec<RoleEntry>,
+    scope_guard: Vec<Item>,
+    gate: Gate,
+}
+
+/// 生成概览所依据的已保存设置，供前端与页面草稿比对。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Saved {
+    subagent_optimization: bool,
+    scope_guard: bool,
+    roles: BTreeMap<String, SubagentRoleConfig>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Gate {
+    items: Vec<Item>,
     concurrency: Concurrency,
-    hooks: Vec<Hook>,
-    documents: Vec<Document>,
     rules: Rules,
 }
 
@@ -26,59 +45,211 @@ struct Concurrency {
     writable: usize,
 }
 
+pub(crate) struct TriggerItems {
+    pub(crate) master: Vec<Item>,
+    pub(crate) roles: Vec<RoleEntry>,
+    pub(crate) scope_guard: Vec<Item>,
+    pub(crate) gate: Vec<Item>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum Channel {
+    File,
+    Override,
+    Hook,
+}
+
+/// 可编辑模板的位置；`exists` 为 false 时启动用内置内容创建它。
 #[derive(Debug, Serialize)]
-pub(crate) struct Hook {
+pub(crate) struct Template {
+    pub(crate) path: PathBuf,
+    pub(crate) exists: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct Override {
+    pub(crate) label: &'static str,
+    pub(crate) key: String,
+    pub(crate) value: Option<String>,
+}
+
+impl Override {
+    pub(crate) fn new(label: &'static str, key: String, value: Option<String>) -> Self {
+        Self { label, key, value }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct HookEvent {
     pub(crate) event: &'static str,
+    pub(crate) name: &'static str,
     pub(crate) purpose: &'static str,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct Document {
-    pub(crate) id: String,
-    pub(crate) title: String,
-    pub(crate) description: String,
-    pub(crate) source: &'static str,
-    pub(crate) path: Option<PathBuf>,
+pub(crate) struct Content {
     pub(crate) format: &'static str,
-    pub(crate) content: String,
+    pub(crate) text: String,
 }
 
-impl Document {
-    pub(crate) fn builtin(
-        id: &str,
-        title: &str,
-        description: &str,
-        format: &'static str,
-        content: &str,
+#[derive(Debug, Serialize)]
+pub(crate) struct Item {
+    pub(crate) id: &'static str,
+    pub(crate) title: &'static str,
+    pub(crate) description: &'static str,
+    pub(crate) channel: Channel,
+    pub(crate) destination: Option<PathBuf>,
+    pub(crate) template: Option<Template>,
+    pub(crate) overrides: Vec<Override>,
+    pub(crate) events: Vec<HookEvent>,
+    pub(crate) content: Option<Content>,
+}
+
+impl Item {
+    pub(crate) fn new(
+        id: &'static str,
+        title: &'static str,
+        description: &'static str,
+        channel: Channel,
     ) -> Self {
         Self {
-            id: id.into(),
-            title: title.into(),
-            description: description.into(),
-            source: "builtin",
-            path: None,
-            format,
-            content: content.into(),
+            id,
+            title,
+            description,
+            channel,
+            destination: None,
+            template: None,
+            overrides: Vec::new(),
+            events: Vec::new(),
+            content: None,
         }
     }
+}
 
-    pub(crate) fn into_override(mut self) -> Self {
-        self.source = "override";
-        self
-    }
+/// 一个子代理角色的交付计划。不带标题：显示名称由前端角色列表提供。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RoleEntry {
+    pub(crate) id: String,
+    pub(crate) destination: PathBuf,
+    pub(crate) template: Template,
+    pub(crate) overrides: Vec<Override>,
+    pub(crate) model: String,
+    pub(crate) reasoning_effort: String,
+    pub(crate) content: Option<Content>,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct Rules {
+    source: &'static str,
+    path: Option<PathBuf>,
+    items: Vec<Rule>,
+}
+
+#[derive(Debug, Serialize)]
+struct Rule {
+    id: String,
+    explanation: String,
+    definition: String,
+}
+
+pub(crate) fn build(
+    codey_home: &Path,
+    codex_home: &Path,
+    config: &CodeyConfig,
+) -> Result<Overview> {
+    let codey_home = std::path::absolute(codey_home)?;
+    let codex_home = std::path::absolute(codex_home)?;
+    let state_root = codex_home.join(crate::subagent_gate::STATE_DIRECTORY);
+    let loaded = rules::load_read_only(&state_root)?;
+    let from_file = loaded.source == RuleSource::Live;
+    let items = loaded
+        .rules
+        .rules
+        .iter()
+        .map(|rule| {
+            Ok(Rule {
+                id: rule.id.clone(),
+                explanation: rule.explanation.clone(),
+                definition: serde_json::to_string_pretty(rule)?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let planned = crate::codex_config::runtime_overview_items(&codey_home, &codex_home, config)?;
+    Ok(Overview {
+        status: "ok",
+        platform_supported: cfg!(any(windows, target_os = "macos")),
+        saved: Saved {
+            subagent_optimization: config.subagent_optimization,
+            scope_guard: config.scope_guard,
+            roles: config.subagent_roles.clone(),
+        },
+        master: planned.master,
+        roles: planned.roles,
+        scope_guard: planned.scope_guard,
+        gate: Gate {
+            items: planned.gate,
+            concurrency: Concurrency {
+                read_only: crate::subagent_orchestrator::READ_ONLY_CONCURRENCY_LIMIT,
+                writable: crate::subagent_orchestrator::WRITE_OR_MIXED_CONCURRENCY_LIMIT,
+            },
+            rules: Rules {
+                source: if from_file { "file" } else { "builtin" },
+                path: from_file.then(|| rules::live_rule_path(&state_root)),
+                items,
+            },
+        },
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::codex_config::{plan_runtime_agent_files, runtime_subagent_roles};
+    use crate::config::{
+        SUBAGENT_ROLE_DEFAULT, SUBAGENT_ROLE_IDS, SUBAGENT_ROLE_VISUAL_WORKER, SUBAGENT_ROLE_WORKER,
+    };
 
-    fn document<'a>(overview: &'a Overview, id: &str) -> &'a Document {
-        overview
-            .documents
-            .iter()
-            .find(|document| document.id == id)
-            .unwrap()
+    fn item<'a>(items: &'a [Item], id: &str) -> &'a Item {
+        items.iter().find(|item| item.id == id).unwrap()
+    }
+
+    fn role<'a>(overview: &'a Overview, id: &str) -> &'a RoleEntry {
+        overview.roles.iter().find(|role| role.id == id).unwrap()
+    }
+
+    /// 递归记录目录下每个条目的路径与内容，用于确认概览前后完全一致。
+    fn snapshot(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+        let mut entries = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(&directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path.clone());
+                    entries.push((path, None));
+                } else {
+                    let contents = std::fs::read(&path).unwrap();
+                    entries.push((path, Some(contents)));
+                }
+            }
+        }
+        entries.sort();
+        entries
+    }
+
+    fn config_without_writable_roles() -> CodeyConfig {
+        let mut config = CodeyConfig {
+            subagent_optimization: true,
+            scope_guard: true,
+            ..Default::default()
+        };
+        for role in [SUBAGENT_ROLE_WORKER, SUBAGENT_ROLE_VISUAL_WORKER] {
+            config.subagent_roles.get_mut(role).unwrap().enabled = false;
+        }
+        config
     }
 
     #[test]
@@ -91,31 +262,147 @@ mod tests {
         assert!(!codey_home.exists());
         assert!(!codex_home.exists());
         assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
-        for document in &overview.documents {
-            let expected = if document.id.ends_with("-hint") {
-                "override"
-            } else {
-                "builtin"
-            };
-            assert_eq!(document.source, expected, "{}", document.id);
-            assert!(document.path.is_none());
+        let constraints = codey_home.join("codex-constraints");
+        for item in overview.master.iter().chain(&overview.scope_guard) {
+            if let Some(template) = &item.template {
+                assert!(!template.exists, "{}", item.id);
+                assert!(template.path.starts_with(&constraints), "{}", item.id);
+            }
+            // 没有正文的项必须把每个覆盖值直接写明。
+            assert!(
+                item.content.is_some() || item.overrides.iter().all(|entry| entry.value.is_some()),
+                "{}",
+                item.id
+            );
         }
-        assert_eq!(overview.rules.source, "builtin");
-        assert!(overview.rules.path.is_none());
-        assert_eq!(overview.rules.items.len(), rules::embedded().rules.len());
+        assert_eq!(overview.roles.len(), SUBAGENT_ROLE_IDS.len());
+        for entry in &overview.roles {
+            assert!(!entry.template.exists, "{}", entry.id);
+            assert!(entry.error.is_none(), "{}", entry.id);
+            assert!(entry.content.is_some(), "{}", entry.id);
+        }
+        assert_eq!(overview.gate.rules.source, "builtin");
+        assert!(overview.gate.rules.path.is_none());
+        assert_eq!(
+            overview.gate.rules.items.len(),
+            rules::embedded().rules.len()
+        );
+        assert_eq!(
+            item(&overview.gate.items, "runtime-policy").destination,
+            Some(crate::subagent_gate::runtime_subagent_policy_paths(&codex_home).0)
+        );
         assert_eq!(
             overview.platform_supported,
             cfg!(any(windows, target_os = "macos"))
         );
-        assert!(!overview.enabled);
-        assert!(!overview.scope_guard_enabled);
-        assert!(overview.hooks.is_empty());
-        assert_eq!(overview.concurrency.read_only, 3);
-        assert_eq!(overview.concurrency.writable, 2);
+        assert!(!overview.saved.subagent_optimization);
+        assert!(!overview.saved.scope_guard);
+        assert_eq!(overview.gate.concurrency.read_only, 3);
+        assert_eq!(overview.gate.concurrency.writable, 2);
     }
 
     #[test]
-    fn file_sources_and_role_documents_match_runtime_plans() {
+    fn every_role_appears_once_with_launch_destination_and_template() {
+        let temp = tempfile::tempdir().unwrap();
+        let constraints = temp.path().join("codex-constraints");
+        std::fs::create_dir_all(constraints.join("agents")).unwrap();
+        let worker_template = constraints.join("agents/codey_worker.toml");
+        let worker_source = crate::codex_config_guidance::WORKER_AGENT_CONFIG.replacen(
+            "description = \"",
+            "description = \"本项目：",
+            1,
+        );
+        std::fs::write(&worker_template, &worker_source).unwrap();
+        let config = config_without_writable_roles();
+        let overview = build(temp.path(), &temp.path().join("codex"), &config).unwrap();
+
+        let ids = overview
+            .roles
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, SUBAGENT_ROLE_IDS, "每个角色恰好一条，启用与否都在");
+        for entry in &overview.roles {
+            let selection = config.subagent_roles[&entry.id].clone();
+            let single = BTreeMap::from([(
+                entry.id.clone(),
+                SubagentRoleConfig {
+                    enabled: true,
+                    ..selection
+                },
+            )]);
+            let plan = plan_runtime_agent_files(&constraints, &single, None)
+                .unwrap()
+                .pop()
+                .unwrap();
+            assert_eq!(
+                entry.destination,
+                plan.registration.config_file(),
+                "{}",
+                entry.id
+            );
+            assert_eq!(
+                entry.content.as_ref().unwrap().text.as_bytes(),
+                plan.contents,
+                "{}",
+                entry.id
+            );
+            let expected_template = if entry.id == SUBAGENT_ROLE_DEFAULT {
+                constraints.join("subagent.toml")
+            } else {
+                constraints
+                    .join("agents")
+                    .join(format!("{}.toml", entry.id))
+            };
+            assert_eq!(entry.template.path, expected_template, "{}", entry.id);
+            assert_eq!(
+                entry.template.exists,
+                entry.id == SUBAGENT_ROLE_WORKER,
+                "{}",
+                entry.id
+            );
+            assert_eq!(
+                entry.overrides[0].key,
+                format!("agents.{}.config_file", entry.id)
+            );
+            assert_eq!(
+                entry.overrides[0].value.as_deref(),
+                Some(
+                    plan.registration
+                        .config_file()
+                        .display()
+                        .to_string()
+                        .as_str()
+                )
+            );
+            assert_eq!(
+                entry.overrides[1].value.as_deref(),
+                Some(plan.registration.description())
+            );
+        }
+        let worker = role(&overview, SUBAGENT_ROLE_WORKER);
+        assert!(!config.subagent_roles[SUBAGENT_ROLE_WORKER].enabled);
+        assert!(
+            worker.overrides[1]
+                .value
+                .as_deref()
+                .unwrap()
+                .starts_with("本项目：")
+        );
+        assert!(
+            worker
+                .destination
+                .ends_with("codex-constraints/runtime/agents/codey_worker.toml")
+        );
+        assert!(
+            role(&overview, SUBAGENT_ROLE_DEFAULT)
+                .destination
+                .ends_with("codex-constraints/runtime/default-agent.toml")
+        );
+    }
+
+    #[test]
+    fn root_guidance_follows_the_enabled_roles() {
         let temp = tempfile::tempdir().unwrap();
         let constraints = temp.path().join("codex-constraints");
         std::fs::create_dir(&constraints).unwrap();
@@ -123,95 +410,221 @@ mod tests {
         let root_text = "自定义主代理指导\r\n保留原始空白。\n\n";
         std::fs::write(&root_path, root_text).unwrap();
         std::fs::write(constraints.join("collaboration-hint.md"), "自定义协作提示").unwrap();
-        let role_source = crate::codex_config_guidance::DEFAULT_AGENT_CONFIG
-            .replace("你是通用子代理", "你是本项目的通用子代理");
-        std::fs::write(constraints.join("subagent.toml"), role_source).unwrap();
-        let mut config = CodeyConfig {
-            subagent_optimization: true,
-            scope_guard: true,
-            ..Default::default()
-        };
-        config
-            .subagent_roles
-            .get_mut(crate::config::SUBAGENT_ROLE_WORKER)
-            .unwrap()
-            .enabled = false;
-        config
-            .subagent_roles
-            .get_mut(crate::config::SUBAGENT_ROLE_VISUAL_WORKER)
-            .unwrap()
-            .enabled = false;
-        let overview = build(temp.path(), &temp.path().join("missing-codex"), &config).unwrap();
-        let root = document(&overview, "root-guidance");
-        assert_eq!(root.content, root_text);
-        assert_eq!(root.source, "file");
-        assert_eq!(root.path.as_deref(), Some(root_path.as_path()));
+        let config = config_without_writable_roles();
+        let overview = build(temp.path(), &temp.path().join("codex"), &config).unwrap();
+        let root = item(&overview.master, "root-guidance");
+        assert_eq!(root.channel, Channel::Override);
+        let template = root.template.as_ref().unwrap();
+        assert_eq!(template.path, root_path);
+        assert!(template.exists);
+        let text = &root.content.as_ref().unwrap().text;
+        assert!(text.starts_with("自定义主代理指导"));
+        assert!(text.ends_with(crate::codex_config_guidance::NO_WRITABLE_SUBAGENT_GUIDANCE.trim()));
+        assert_eq!(root.overrides[0].key, "developer_instructions");
         assert_eq!(
-            document(&overview, "collaboration-hint").content,
+            item(&overview.master, "collaboration-hint")
+                .content
+                .as_ref()
+                .unwrap()
+                .text,
             "自定义协作提示"
         );
+
+        let enabled = build(
+            temp.path(),
+            &temp.path().join("codex"),
+            &CodeyConfig {
+                subagent_optimization: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(
-            document(&overview, "no-writable-guidance").content,
-            crate::codex_config_guidance::NO_WRITABLE_SUBAGENT_GUIDANCE
+            item(&enabled.master, "root-guidance")
+                .content
+                .as_ref()
+                .unwrap()
+                .text,
+            root_text
         );
-        let roles = runtime_subagent_roles(
-            Some(&config.subagent_roles),
-            &config.subagent_model,
-            &config.subagent_reasoning_effort,
-        );
-        let plans = plan_runtime_agent_files(&constraints, &roles, None).unwrap();
-        assert_eq!(
-            overview
-                .documents
+    }
+
+    #[test]
+    fn codex_agent_settings_use_the_launch_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = CodeyConfig {
+            subagent_optimization: true,
+            ..Default::default()
+        };
+        let overview = build(
+            &temp.path().join("codey"),
+            &temp.path().join("codex"),
+            &config,
+        )
+        .unwrap();
+        let settings = item(&overview.master, "codex-agent-settings");
+        let value = |key: &str| {
+            settings
+                .overrides
                 .iter()
-                .filter(|document| document.id.starts_with("role:"))
-                .count(),
-            plans.len()
+                .find(|entry| entry.key == key)
+                .unwrap()
+                .value
+                .clone()
+                .unwrap()
+        };
+        assert_eq!(value("agents.enabled"), "true");
+        assert_eq!(
+            value("agents.max_concurrent_threads_per_session"),
+            "沿用 Codex 配置；未设置时为 3"
         );
-        for plan in plans {
-            let document = document(&overview, &format!("role:{}", plan.registration.role));
-            assert_eq!(document.content.as_bytes(), plan.contents);
-            assert_eq!(document.path, plan.source_path);
+        assert_eq!(
+            value("agents.default_subagent_model"),
+            format!("\"{}\"", config.subagent_model)
+        );
+        assert_eq!(
+            value("agents.default_subagent_reasoning_effort"),
+            format!("\"{}\"", config.subagent_reasoning_effort)
+        );
+        assert_eq!(
+            value("features.multi_agent_v2.default_wait_timeout_ms"),
+            "30000"
+        );
+        assert_eq!(
+            value("features.multi_agent_v2.expose_spawn_agent_model_overrides"),
+            "false"
+        );
+    }
+
+    #[test]
+    fn hooks_are_listed_per_trigger_regardless_of_saved_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let overview = build(
+            &temp.path().join("codey"),
+            &temp.path().join("codex"),
+            &CodeyConfig::default(),
+        )
+        .unwrap();
+        let gate = item(&overview.gate.items, "gate-hooks");
+        assert_eq!(
+            gate.events
+                .iter()
+                .map(|event| event.event)
+                .collect::<Vec<_>>(),
+            [
+                "PreToolUse",
+                "PostToolUse",
+                "UserPromptSubmit",
+                "SubagentStart",
+                "SubagentStop",
+                "Stop",
+                "SessionEnd"
+            ]
+        );
+        let scope_events = overview
+            .scope_guard
+            .iter()
+            .flat_map(|item| item.events.iter().map(|event| event.event))
+            .collect::<Vec<_>>();
+        assert_eq!(scope_events, ["SessionStart", "SubagentStart"]);
+        assert_eq!(
+            item(&overview.scope_guard, "scope-guard-root")
+                .content
+                .as_ref()
+                .unwrap()
+                .text,
+            crate::scope_guard::ROOT_GUIDANCE
+        );
+        for item in overview.scope_guard.iter().chain([gate]) {
+            assert_eq!(item.channel, Channel::Hook);
+            assert!(item.overrides.iter().any(|entry| entry.key == "hooks"));
         }
-        assert!(!constraints.join("agents").exists());
-        assert!(!constraints.join("runtime").exists());
-        assert!(!temp.path().join("missing-codex").exists());
-        assert_eq!(std::fs::read_dir(&constraints).unwrap().count(), 3);
-        assert_eq!(
-            overview
-                .hooks
-                .iter()
-                .filter(|hook| hook.event == "SubagentStart")
-                .count(),
-            1
+    }
+
+    #[test]
+    fn broken_template_only_marks_its_own_role() {
+        let temp = tempfile::tempdir().unwrap();
+        let agents = temp.path().join("codex-constraints/agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        std::fs::write(agents.join("codey_visual_worker.toml"), "name = [").unwrap();
+        let config = config_without_writable_roles();
+        let overview = build(temp.path(), &temp.path().join("codex"), &config).unwrap();
+        let broken = role(&overview, SUBAGENT_ROLE_VISUAL_WORKER);
+        assert!(broken.error.is_some());
+        assert!(broken.content.is_none());
+        assert!(broken.template.exists);
+        assert!(
+            broken
+                .destination
+                .ends_with("codex-constraints/runtime/agents/codey_visual_worker.toml")
         );
         assert!(
             overview
-                .hooks
+                .roles
                 .iter()
-                .any(|hook| hook.event == "SessionStart")
+                .filter(|entry| entry.id != SUBAGENT_ROLE_VISUAL_WORKER)
+                .all(|entry| entry.error.is_none() && entry.content.is_some())
         );
-        let json = serde_json::to_value(overview).unwrap();
-        let mut keys = json
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .collect::<Vec<_>>();
-        keys.sort();
-        assert_eq!(
-            keys,
-            [
-                "concurrency",
-                "documents",
-                "enabled",
-                "hooks",
-                "platformSupported",
-                "rules",
-                "scopeGuardEnabled",
-                "status"
-            ]
-        );
+    }
+
+    #[test]
+    fn titles_never_use_raw_role_ids() {
+        let temp = tempfile::tempdir().unwrap();
+        let overview = build(
+            &temp.path().join("codey"),
+            &temp.path().join("codex"),
+            &config_without_writable_roles(),
+        )
+        .unwrap();
+        let json = serde_json::to_value(&overview).unwrap();
+        let mut titles = Vec::new();
+        let mut pending = vec![&json];
+        while let Some(value) = pending.pop() {
+            match value {
+                serde_json::Value::Object(map) => {
+                    if let Some(title) = map.get("title").and_then(serde_json::Value::as_str) {
+                        titles.push(title.to_string());
+                    }
+                    pending.extend(map.values());
+                }
+                serde_json::Value::Array(values) => pending.extend(values),
+                _ => {}
+            }
+        }
+        assert!(!titles.is_empty());
+        for title in titles {
+            assert!(
+                SUBAGENT_ROLE_IDS.iter().all(|id| !title.contains(id)),
+                "{title}"
+            );
+            assert!(!title.contains("根代理"), "{title}");
+        }
+        assert!(json["roles"][0].get("title").is_none());
+    }
+
+    #[test]
+    fn overview_performs_no_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let codey_home = temp.path().join("codey");
+        let codex_home = temp.path().join("codex");
+        let constraints = codey_home.join("codex-constraints");
+        std::fs::create_dir_all(constraints.join("agents")).unwrap();
+        std::fs::write(constraints.join("root-instructions.md"), "主代理指导").unwrap();
+        std::fs::write(
+            constraints.join("agents/codey_quick_scan.toml"),
+            crate::codex_config_guidance::QUICK_SCAN_AGENT_CONFIG,
+        )
+        .unwrap();
+        let state_root = codex_home.join(crate::subagent_gate::STATE_DIRECTORY);
+        std::fs::create_dir_all(&state_root).unwrap();
+        std::fs::write(codex_home.join("config.toml"), "model = \"user-model\"\n").unwrap();
+        let before = snapshot(temp.path());
+        let mut config = config_without_writable_roles();
+        config.fast_context_tools = true;
+        let original = config.clone();
+        build(&codey_home, &codex_home, &config).unwrap();
+        assert_eq!(snapshot(temp.path()), before);
+        assert_eq!(config, original);
     }
 
     #[test]
@@ -229,14 +642,12 @@ mod tests {
             &CodeyConfig::default(),
         )
         .unwrap();
-        assert_eq!(overview.rules.source, "file");
-        assert_eq!(overview.rules.path, Some(path.clone()));
+        let loaded = &overview.gate.rules;
+        assert_eq!(loaded.source, "file");
+        assert_eq!(loaded.path, Some(path.clone()));
+        assert_eq!(loaded.items[0].explanation, live.rules[0].explanation);
         assert_eq!(
-            overview.rules.items[0].explanation,
-            live.rules[0].explanation
-        );
-        assert_eq!(
-            overview.rules.items[0].definition,
+            loaded.items[0].definition,
             serde_json::to_string_pretty(&live.rules[0]).unwrap()
         );
         assert_eq!(
@@ -283,7 +694,7 @@ mod tests {
             .insert(list_key, vec!["shared-model".into()]);
         config
             .subagent_roles
-            .get_mut(crate::config::SUBAGENT_ROLE_WORKER)
+            .get_mut(SUBAGENT_ROLE_WORKER)
             .unwrap()
             .enabled = false;
         let original = config.clone();
@@ -313,83 +724,29 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(plans.len(), crate::config::SUBAGENT_ROLE_IDS.len() - 1);
-        assert_eq!(
-            overview
-                .documents
-                .iter()
-                .filter(|document| document.id.starts_with("role:"))
-                .count(),
-            plans.len()
-        );
-        assert!(
-            !overview
-                .documents
-                .iter()
-                .any(|document| document.id == "role:codey_worker")
-        );
+        assert_eq!(plans.len(), SUBAGENT_ROLE_IDS.len() - 1);
         for plan in plans {
-            let contents =
-                &document(&overview, &format!("role:{}", plan.registration.role)).content;
-            assert_eq!(contents.as_bytes(), plan.contents);
-            let parsed: toml_edit::DocumentMut = contents.parse().unwrap();
-            assert_eq!(parsed["model"].as_str(), Some("shared-model"));
+            let entry = role(&overview, &plan.registration.role);
+            assert_eq!(
+                entry.content.as_ref().unwrap().text.as_bytes(),
+                plan.contents
+            );
+            assert_eq!(entry.model, "shared-model");
         }
+        let worker = role(&overview, SUBAGENT_ROLE_WORKER);
+        let parsed: toml_edit::DocumentMut = worker.content.as_ref().unwrap().text.parse().unwrap();
+        assert_eq!(parsed["model"].as_str(), Some("shared-model"));
+        assert_eq!(
+            item(&overview.master, "codex-agent-settings")
+                .overrides
+                .iter()
+                .find(|entry| entry.key == "agents.default_subagent_model")
+                .unwrap()
+                .value
+                .as_deref(),
+            Some("\"shared-model\"")
+        );
         assert_eq!(config, original);
         assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 0);
     }
-}
-
-#[derive(Debug, Serialize)]
-struct Rules {
-    source: &'static str,
-    path: Option<PathBuf>,
-    items: Vec<Rule>,
-}
-
-#[derive(Debug, Serialize)]
-struct Rule {
-    id: String,
-    explanation: String,
-    definition: String,
-}
-
-pub(crate) fn build(
-    codey_home: &Path,
-    codex_home: &Path,
-    config: &CodeyConfig,
-) -> Result<Overview> {
-    let codey_home = std::path::absolute(codey_home)?;
-    let state_root = std::path::absolute(codex_home)?.join(crate::subagent_gate::STATE_DIRECTORY);
-    let loaded = rules::load_read_only(&state_root)?;
-    let from_file = loaded.source == RuleSource::Live;
-    let items = loaded
-        .rules
-        .rules
-        .iter()
-        .map(|rule| {
-            Ok(Rule {
-                id: rule.id.clone(),
-                explanation: rule.explanation.clone(),
-                definition: serde_json::to_string_pretty(rule)?,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(Overview {
-        status: "ok",
-        platform_supported: cfg!(any(windows, target_os = "macos")),
-        enabled: config.subagent_optimization,
-        scope_guard_enabled: config.scope_guard,
-        concurrency: Concurrency {
-            read_only: crate::subagent_orchestrator::READ_ONLY_CONCURRENCY_LIMIT,
-            writable: crate::subagent_orchestrator::WRITE_OR_MIXED_CONCURRENCY_LIMIT,
-        },
-        hooks: crate::codex_config::runtime_overview_hooks(config),
-        documents: crate::codex_config::runtime_overview_documents(&codey_home, config)?,
-        rules: Rules {
-            source: if from_file { "file" } else { "builtin" },
-            path: from_file.then(|| rules::live_rule_path(&state_root)),
-            items,
-        },
-    })
 }

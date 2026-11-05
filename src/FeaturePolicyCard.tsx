@@ -321,7 +321,11 @@ export function SubagentPolicyCardComponent({
               </div>
             </div>
           )}
-          <SubagentRuntimeOverviewSection />
+          <SubagentRuntimeOverviewSection
+            draft={config}
+            roles={SUBAGENT_TASK_TYPES}
+            reasoningEffortLabels={REASONING_EFFORT_LABELS}
+          />
         </div>
       </Card>
     </section>

@@ -72,7 +72,7 @@ const CODEY_HOOKS_DESCRIPTION: &str = "Codey runtime routing and coordination ho
 const CODEY_RUNTIME_CONFIG_LOCK_FILE: &str = "codex-runtime-config.lock";
 
 mod overview;
-pub(crate) use overview::{runtime_overview_documents, runtime_overview_hooks};
+pub(crate) use overview::runtime_overview_items;
 const RUNTIME_CONFIG_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const RUNTIME_CONFIG_LOCK_RETRY: Duration = Duration::from_millis(10);
 const RUNTIME_AGENT_SCHEMA_VERSION: u32 = 1;
@@ -303,6 +303,16 @@ pub(crate) struct RuntimeAgentRegistration {
     description: String,
     config_file: PathBuf,
     content_sha256: String,
+}
+
+impl RuntimeAgentRegistration {
+    pub(crate) fn config_file(&self) -> &Path {
+        &self.config_file
+    }
+
+    pub(crate) fn description(&self) -> &str {
+        &self.description
+    }
 }
 
 #[derive(Clone, Debug)]
