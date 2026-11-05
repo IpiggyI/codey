@@ -2,6 +2,138 @@ use super::*;
 use crate::config::ProviderProfile;
 
 #[tokio::test]
+async fn official_account_export_rejects_a_missing_account() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        ..AppState::default()
+    });
+    let id = "0".repeat(64);
+    let result = official_accounts::invoke(
+        &state,
+        "export_official_account_credential",
+        &json!({"accountId":id}),
+        directory.path(),
+    )
+    .await;
+    assert_eq!(result.unwrap_err(), format!("找不到要导出的官方账号：{id}"));
+    let result = invoke_api(&state, "export_official_account_credential", json!({})).await;
+    assert_eq!(result["status"], "failed");
+    assert!(result["message"].as_str().unwrap().contains("accountId"));
+}
+
+#[tokio::test]
+async fn official_account_export_returns_only_the_requested_credential_and_round_trips() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        ..AppState::default()
+    });
+    let mut record = crate::official_accounts::Account::from_auth(json!({
+        "auth_mode":"chatgpt", "tokens":{"account_id":"acct_export","access_token":"test-access",
+        "refresh_token":"test-refresh"},"last_refresh":"2026-01-01T00:00:00Z"
+    }))
+    .unwrap();
+    record.email = Some("export@example.com".into());
+    record.plan_type = Some("pro".into());
+    let record = state.official_accounts().upsert(record).unwrap();
+    let mut other_auth = record.auth.clone();
+    other_auth["tokens"]["account_id"] = json!("other-account");
+    other_auth["tokens"]["access_token"] = json!("other-access");
+    let other = state
+        .official_accounts()
+        .upsert(crate::official_accounts::Account::from_auth(other_auth.clone()).unwrap())
+        .unwrap();
+    let home = directory.path().join("codex");
+    std::fs::create_dir(&home).unwrap();
+    let result = official_accounts::invoke(
+        &state,
+        "export_official_account_credential",
+        &json!({"accountId":format!(" {} ",record.id)}),
+        &home,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["fileName"], "codey-official-acct_export.json");
+    let content = result["content"].as_str().unwrap();
+    let credential: Value = serde_json::from_str(content).unwrap();
+    assert_eq!(content, serde_json::to_string_pretty(&credential).unwrap());
+    assert_eq!(
+        credential,
+        json!({"email":record.email,"accountId":"acct_export",
+        "planType":record.plan_type,"auth":record.auth})
+    );
+    assert!(!content.contains("other-access"));
+    assert_eq!(
+        state
+            .official_accounts()
+            .get(&other.id)
+            .unwrap()
+            .unwrap()
+            .auth,
+        other_auth
+    );
+    state.official_accounts().remove(&record.id).unwrap();
+    let imported = official_accounts::invoke(
+        &state,
+        "import_official_account_credential",
+        &json!({"credential":content}),
+        &home,
+    )
+    .await
+    .unwrap();
+    assert_eq!(imported["accountId"], record.id);
+    let imported = state.official_accounts().get(&record.id).unwrap().unwrap();
+    assert_eq!(imported.id, record.id);
+    assert_eq!(imported.email, record.email);
+    assert_eq!(imported.plan_type, record.plan_type);
+    assert_eq!(imported.auth, record.auth);
+    assert!(!home.join("auth.json").exists());
+}
+
+#[tokio::test]
+async fn official_account_export_syncs_default_and_rejects_oversized_content() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        ..AppState::default()
+    });
+    let auth = json!({"auth_mode":"chatgpt", "tokens":{"account_id":"default","access_token":"old"},
+        "last_refresh":"2026-01-01T00:00:00Z"});
+    let record = state
+        .official_accounts()
+        .upsert(crate::official_accounts::Account::from_auth(auth.clone()).unwrap())
+        .unwrap();
+    let home = directory.path().join("codex");
+    std::fs::create_dir(&home).unwrap();
+    let mut fresh = auth;
+    fresh["tokens"]["access_token"] = json!("refreshed");
+    fresh["last_refresh"] = json!("2026-02-01T00:00:00Z");
+    let bytes = serde_json::to_vec(&fresh).unwrap();
+    std::fs::write(home.join("auth.json"), &bytes).unwrap();
+    let args = json!({"accountId":record.id});
+    let result =
+        official_accounts::invoke(&state, "export_official_account_credential", &args, &home)
+            .await
+            .unwrap();
+    let credential: Value = serde_json::from_str(result["content"].as_str().unwrap()).unwrap();
+    assert_eq!(credential["auth"], fresh);
+    assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), bytes);
+    fresh["tokens"]["access_token"] =
+        json!("x".repeat(crate::official_accounts::MAX_MANUAL_CREDENTIAL_BYTES));
+    std::fs::write(home.join("auth.json"), serde_json::to_vec(&fresh).unwrap()).unwrap();
+    let error =
+        official_accounts::invoke(&state, "export_official_account_credential", &args, &home)
+            .await
+            .unwrap_err();
+    assert_eq!(
+        error,
+        "账号凭据超过现有手动导入的大小上限，无法生成可导入的 JSON"
+    );
+}
+
+#[tokio::test]
 async fn conversation_stats_bridge_returns_record_snapshot_envelope() {
     let directory = tempfile::tempdir().unwrap();
     let id = "00000000-0000-0000-0000-000000000034";

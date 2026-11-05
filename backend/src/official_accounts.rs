@@ -13,6 +13,7 @@ mod tests;
 pub(crate) mod usage;
 
 const MAX_DOCUMENT_BYTES: u64 = 1024 * 1024;
+pub(crate) const MAX_MANUAL_CREDENTIAL_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,6 +29,45 @@ pub(crate) struct Account {
 }
 
 impl Account {
+    pub fn export_credential(&self) -> Value {
+        let summary = self.summary(None);
+        let mut credential = json!({"auth":self.auth});
+        for key in ["email", "accountId", "planType"] {
+            if let Some(value) = summary.get(key) {
+                credential[key] = value.clone();
+            }
+        }
+        credential
+    }
+
+    pub fn export_file_name(&self) -> String {
+        let stem = [
+            self.auth["tokens"]["account_id"].as_str(),
+            self.email.as_deref(),
+            Some(&self.id),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|identity| {
+            identity
+                .chars()
+                .map(|character| {
+                    if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                        character
+                    } else {
+                        '-'
+                    }
+                })
+                .take(96)
+                .collect::<String>()
+                .trim_matches('-')
+                .to_string()
+        })
+        .find(|name| !name.is_empty())
+        .unwrap_or_else(|| "official-account".to_string());
+        format!("codey-official-{stem}.json")
+    }
+
     pub fn from_auth(auth: Value) -> Result<Self> {
         validate_auth(&auth)?;
         Ok(Self {

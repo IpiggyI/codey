@@ -456,7 +456,10 @@ pub(crate) async fn import_credential(client: &reqwest::Client, input: &str) -> 
 }
 
 async fn import_with(client: &dyn TokenExchange, input: &str) -> Result<Account> {
-    ensure!(input.len() <= 64 * 1024, "官方账号凭据输入过长");
+    ensure!(
+        input.len() <= super::MAX_MANUAL_CREDENTIAL_BYTES,
+        "官方账号凭据输入过长"
+    );
     let input = input.trim().trim_start_matches('\u{feff}');
     let input = input
         .strip_prefix("```json")
@@ -510,6 +513,8 @@ async fn import_with(client: &dyn TokenExchange, input: &str) -> Result<Account>
                 account.plan_type = source["plan_type"]
                     .as_str()
                     .or_else(|| source["planType"].as_str())
+                    .or_else(|| value["plan_type"].as_str())
+                    .or_else(|| value["planType"].as_str())
                     .map(str::to_owned);
                 return Ok(account);
             }

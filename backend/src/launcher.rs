@@ -169,6 +169,7 @@ pub struct CodeyRuntime {
     applied_model_config: RwLock<Arc<RuntimeModelConfig>>,
     delivered_model_catalog: RwLock<Option<Value>>,
     applied_subagent_config: RwLock<Arc<RuntimeSubagentConfig>>,
+    subagent_restart_config: RwLock<Option<RuntimeSubagentConfig>>,
     pub injection_statuses: Arc<RwLock<Arc<[cdp::InjectionScriptStatus]>>>,
     injection_scripts: cdp::PreparedInjectionScripts,
     injection_websocket_url: Arc<RwLock<Arc<str>>>,
@@ -1825,6 +1826,27 @@ impl CodeyRuntime {
     pub async fn mark_subagent_config_applied(&self, config: &CodeyConfig) {
         *self.applied_subagent_config.write().await =
             Arc::new(RuntimeSubagentConfig::from_config(config));
+        *self.subagent_restart_config.write().await = None;
+    }
+
+    pub(crate) async fn mark_subagent_config_requires_restart(&self, config: &CodeyConfig) {
+        *self.subagent_restart_config.write().await =
+            Some(RuntimeSubagentConfig::from_config(config));
+    }
+
+    pub(crate) async fn subagent_restart_config(&self) -> Option<RuntimeSubagentConfig> {
+        self.subagent_restart_config.read().await.clone()
+    }
+
+    pub(crate) fn subagent_registration_requires_restart(&self, config: &CodeyConfig) -> bool {
+        let roles = |config: &CodeyConfig| {
+            crate::codex_config::runtime_subagent_roles(
+                Some(&config.subagent_roles),
+                &config.subagent_model,
+                &config.subagent_reasoning_effort,
+            )
+        };
+        !roles(&self.applied_config).keys().eq(roles(config).keys())
     }
 
     pub fn supports_subagent_config_hot_reload(&self, config: &CodeyConfig) -> bool {
@@ -1989,6 +2011,7 @@ impl CodeyRuntime {
                     &runtime_config,
                 ))),
                 delivered_model_catalog: RwLock::new(delivered_catalog),
+                subagent_restart_config: RwLock::new(None),
                 applied_config: runtime_config,
                 injection_statuses,
                 injection_scripts,

@@ -6,6 +6,87 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 
+#[tokio::test]
+async fn background_model_delivery_only_waits_for_application_not_restart() {
+    use crate::commands::{config_apply, runtime_config_requires_restart, runtime_status};
+    for delivered in ["active", "deferred"] {
+        let mut renderer = Renderer::start().await;
+        let initial = config_with_models(&["old"]);
+        let latest = config_with_models(&["new"]);
+        let state = state_with_runtime(&initial, &renderer).await;
+        let lifecycle = state.runtime_operation.lock().await;
+        *state.config.write().await = latest.clone();
+        config_apply::enqueue(&state, false);
+        assert!(!runtime_config_requires_restart(&state, &latest).await);
+        assert_eq!(
+            runtime_status(&state).await.unwrap()["restartRequired"],
+            false
+        );
+        drop(lifecycle);
+        let attempt = renderer.next().await;
+        assert_models(&attempt.catalog, &["new"]);
+        attempt
+            .reply
+            .send(json!({"ok":true,"delivered":delivered}))
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while config_apply::status(&state)["state"] == "pending" {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(config_apply::status(&state)["state"], "applied");
+        assert!(!runtime_config_requires_restart(&state, &latest).await);
+        assert_eq!(
+            runtime_status(&state).await.unwrap()["restartRequired"],
+            false
+        );
+    }
+}
+
+#[tokio::test]
+async fn background_subagent_changes_apply_without_explicit_reconciliation() {
+    use crate::commands::{config_apply, slow_apply_tests::TestHooks};
+    let mut renderer = Renderer::start().await;
+    let mut initial = config_with_models(&["old"]);
+    initial.subagent_optimization = true;
+    let mut latest = initial.clone();
+    latest.subagent_reasoning_effort = "high".into();
+    let runtime = Arc::new(CodeyRuntime::for_model_delivery_test(
+        initial,
+        &renderer.url,
+    ));
+    let state = Arc::new(AppState {
+        config: tokio::sync::RwLock::new(latest.clone()),
+        runtime: tokio::sync::Mutex::new(Some(runtime.clone())),
+        slow_apply_test: TestHooks {
+            subagents: Some(Arc::new(|_| Ok(Default::default()))),
+            ..Default::default()
+        },
+        ..AppState::default()
+    });
+    config_apply::enqueue(&state, false);
+    renderer
+        .next()
+        .await
+        .reply
+        .send(json!({"ok":true,"delivered":"active"}))
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while config_apply::status(&state)["state"] == "pending" {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(config_apply::status(&state)["state"], "applied");
+    assert_eq!(
+        runtime.applied_subagent_config().await.as_ref(),
+        &crate::launcher::RuntimeSubagentConfig::from_config(&latest)
+    );
+}
+
 struct DeliveryAttempt {
     catalog: Value,
     reply: oneshot::Sender<Value>,
