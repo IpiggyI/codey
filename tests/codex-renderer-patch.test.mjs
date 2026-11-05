@@ -63,15 +63,8 @@ test("model failure excerpts select filter code ahead of unrelated Fast anchors 
   const { patched, records } = await captureRendererPatch(source);
   assert.deepEqual(records.map(({ operation }) => operation), [
     "renderer_patch:model allowlist", "renderer_patch:model visibility",
-    "renderer_patch:model-aware service tier control", "renderer_patch:model-aware Fast toggle",
   ], "each failed gate is recorded only once despite repeated requests");
-  for (const { context } of records.slice(2)) {
-    assert.match(context.excerpts.join("\n"), /composer\.toggleFastMode|selectedServiceTier/,
-      "other gates retain their general diagnostic anchors");
-  }
   assert.ok(patched.includes(driftedFilter), "unrecognized model rules remain unchanged");
-  assert.match(patched, /if\(settings\.availableOptions\.length<=1\)return null/,
-    "a failed model gate still permits an independent compatible patch");
   for (const { context } of records.slice(0, 2)) {
     assert.equal(context.matchCount, 0);
     assert.ok(context.excerpts.length > 0 && context.excerpts.length <= 2);
@@ -238,163 +231,12 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       "app://-/assets/app-initial-current-codex-build.js",
       currentRendererSource,
     );
-    assert.match(
-      patchedCurrentRendererSource,
-      /Ee=!w&&M\.availableOptions\.length>1/,
-    );
-    assert.match(patchedCurrentRendererSource, /Re=!w&&!K&&xe!=null/);
     assert.match(patchedCurrentRendererSource, /pe=!r/);
     assert.match(patchedCurrentRendererSource, /if\(Ze!=null\)/);
     assert.equal(
       patchErrors.length,
       2,
       "native-compatible model access and current Fast controls must not log skips",
-    );
-
-    const serviceTierControlGateOrderings = [
-      "settings.availableOptions.length>1&&!draft&&allowed",
-      "settings.availableOptions.length>1&&allowed&&!draft",
-      "!draft&&settings.availableOptions.length>1&&allowed",
-      "!draft&&allowed&&settings.availableOptions.length>1",
-      "allowed&&!draft&&settings.availableOptions.length>1",
-      "allowed&&settings.availableOptions.length>1&&!draft",
-    ];
-    for (const [index, gate] of serviceTierControlGateOrderings.entries()) {
-      const reorderedServiceTierControlSource = [
-        "const isServiceTierAllowed=!0;",
-        "function nextComposer(){",
-        "let draft=!1,allowed=!0,settings={availableOptions:[{value:`fast`},{value:`auto`}]};",
-        "let loading=!1,fastOption=`fast`;",
-        `let show=${gate};`,
-        "OQ(`composer.toggleFastMode`,()=>{},{enabled:allowed&&!loading&&fastOption!=null});",
-        "return show}",
-      ].join("");
-      const patchedReorderedServiceTierControlSource = patch(
-        `app://-/assets/app-initial-reordered-service-tier-control-${index}.js`,
-        reorderedServiceTierControlSource,
-      );
-      assert.match(
-        patchedReorderedServiceTierControlSource,
-        /show=(?:settings\.availableOptions\.length>1&&!draft|!draft&&settings\.availableOptions\.length>1)/,
-      );
-      assert.doesNotMatch(
-        patchedReorderedServiceTierControlSource,
-        /show=[^;]*allowed/,
-      );
-      assert.match(
-        patchedReorderedServiceTierControlSource,
-        /enabled:!loading&&fastOption!=null/,
-      );
-      assert.equal(
-        patchErrors.length,
-        2,
-        "reordered service-tier control gates must patch without compatibility errors",
-      );
-    }
-
-    // Electron 151 hoists the toggle gate into a memoized variable and can
-    // place over 2KB of memo-cache code between the `availableOptions`
-    // assignment and the `composer.toggleFastMode` registration.
-    const memoizedGap = "t[99]===e?t[100]:(d(e),t[99]=e,t[100]=1),".repeat(90);
-    const electron151ServiceTierSource = [
-      "const isServiceTierAllowed=!0;",
-      "let{isServiceTierAllowed:I}=G7o(F),N={availableOptions:[{value:`fast`}]};",
-      "let w=!1,q=!1,Se=`fast`,Re=()=>{};",
-      `let De=!w&&I&&N.availableOptions.length>1,${memoizedGap}`,
-      "let ze=!w&&I&&!q&&Se!=null,Be;",
-      "t[45]===ze?Be=t[46]:(Be={enabled:ze},t[45]=ze,t[46]=Be),",
-      "U$(`composer.toggleFastMode`,Re,Be);",
-    ].join("");
-    const patchedElectron151Source = patch(
-      "app://-/assets/app-initial-electron151-service-tier.js",
-      electron151ServiceTierSource,
-    );
-    assert.match(
-      patchedElectron151Source,
-      /De=!w&&N\.availableOptions\.length>1/,
-    );
-    assert.doesNotMatch(
-      patchedElectron151Source,
-      /De=[^,]*&&I&&/,
-      "the entitlement flag must be dropped from the model-aware gate",
-    );
-    assert.match(patchedElectron151Source, /ze=!w&&!q&&Se!=null/);
-    assert.match(patchedElectron151Source, /\{enabled:ze\}/);
-    assert.equal(
-      patchErrors.length,
-      2,
-      "Electron 151 memoized service-tier gates must patch without compatibility errors",
-    );
-
-    // The wider Electron 151 window can also contain an unrelated, earlier
-    // assignment with the same minified shape. Only the gate nearest the unique
-    // toggle registration belongs to that control.
-    const scopedMemoizedGap =
-      "cache[99]===model?cache[100]:(touch(model),cache[99]=model,cache[100]=1);"
-        .repeat(48);
-    assert.ok(scopedMemoizedGap.length > 2048);
-    const scopedServiceTierSource = [
-      "const isServiceTierAllowed=!1;",
-      "function unrelatedComposer(){",
-      "let draft=!1,allowed=!1,settings={availableOptions:[1,2]};",
-      "let unrelated=!draft&&allowed&&settings.availableOptions.length>1;",
-      "return unrelated}",
-      "function scopedComposer(OQ){",
-      "let draft=!1,allowed=isServiceTierAllowed,settings={availableOptions:[1,2]};",
-      "let show=!draft&&allowed&&settings.availableOptions.length>1;",
-      "const cache=[],model={},touch=()=>{};",
-      scopedMemoizedGap,
-      "OQ(`composer.toggleFastMode`,()=>{},{enabled:show});return show}",
-    ].join("");
-    const patchedScopedServiceTierSource = patch(
-      "app://-/assets/app-initial-scoped-service-tier.js",
-      scopedServiceTierSource,
-    );
-    assert.match(
-      patchedScopedServiceTierSource,
-      /unrelated=!draft&&allowed&&settings\.availableOptions\.length>1/,
-    );
-    assert.match(
-      patchedScopedServiceTierSource,
-      /show=!draft&&settings\.availableOptions\.length>1/,
-    );
-    assert.doesNotThrow(() => Function(patchedScopedServiceTierSource));
-    const scopedServiceTierResults = Function(
-      `${patchedScopedServiceTierSource};return [` +
-        "unrelatedComposer(),scopedComposer(()=>{})]",
-    )();
-    assert.deepEqual(scopedServiceTierResults, [false, true]);
-    assert.equal(
-      patchErrors.length,
-      2,
-      "an earlier same-shaped gate must not make the scoped Fast patch ambiguous",
-    );
-
-    // Electron 151 minifies `return!1` without a space and interleaves the
-    // entitlement cache write between the chatgpt check and the fast_mode
-    // requirement lookup.
-    const electron151EntitlementSource = [
-      "zp.error(`Failed to read service tier for request`,{safe:{},sensitive:{}});",
-      "async function YHr(e,t){",
-      "let n=await KHr(e,t);",
-      "if(n!==`chatgpt`)return!1;",
-      "let r=await N2t(e,t,{priority:`critical`});",
-      "return e.query.setData(rx,{authMethod:n,hostId:t},r),",
-      "r.requirements?.featureRequirements?.fast_mode!==!1}",
-    ].join("");
-    const patchedEntitlementSource = patch(
-      "app://-/assets/app-initial-electron151-entitlement.js",
-      electron151EntitlementSource,
-    );
-    assert.match(
-      patchedEntitlementSource,
-      /async function YHr\(e,t\)\{return!0\}/,
-    );
-    assert.doesNotMatch(patchedEntitlementSource, /chatgpt/);
-    assert.equal(
-      patchErrors.length,
-      2,
-      "the minified entitlement probe must patch without compatibility errors",
     );
 
     const routeBridgeSource = [
@@ -1113,4 +955,20 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
       globalThis.__codeyPatchLog = nativePatchLog;
     }
   }
+});
+
+test("checkout webviews load on demand instead of prewarming hidden pages", async () => {
+  delete globalThis.__codeyRendererPatchInstalled;
+  (0, eval)(await loadStartupPatchTemplate({ disablePet: false }));
+  const url = "app://-/assets/webview-page-71976c9e9730.js";
+  const pricing = "function ue(a,s,c,h,l,p,_,C){let O;e[9]!==a?(O=!re()&&a===`chatgpt`&&!s&&c!=null&&!h&&l?.structure===`personal`&&ee(p,He,{disableExposureLog:!0}).get(`use_embedded_checkout`,!1)?_e({currentPlan:ye(l.plan_type),url:_()}):null,e[9]=a,e[16]=O):O=e[16];let A=C??O;return(0,X.jsx)(me,{forcePricingRefreshInBackground:!0,search:A})}";
+  const credit = "function U(y,eligible){let T,E,Y={useLayoutEffect(){}},re=()=>!eligible,ee=()=>({get:()=>eligible}),d,He;if((0,Y.useLayoutEffect)(T,E),!y&&(re()||!ee(d,He,{disableExposureLog:!0}).get(`use_embedded_credit_checkout`,!1)))return null;let N=!y;return{isPrewarm:N}}";
+  const patched = globalThis.__codeyRendererPatchEntry(url, `${pricing}${credit}`);
+  assert.match(patched, /\(O=null,e\[9\]=a,e\[16\]=O\)/, "no background pricing search without a pricing route");
+  assert.match(patched, /let A=C\?\?O;/, "an opened pricing route still drives the native webview");
+  const creditGate = Function(`${patched.slice(patched.indexOf("function U("))};return U`)();
+  assert.equal(creditGate(false, true), null, "an eligible account no longer mounts the hidden credit page");
+  assert.deepEqual({ ...creditGate(true, true) }, { isPrewarm: false }, "a presented credit page still loads");
+  assert.deepEqual({ ...creditGate(true, false) }, { isPrewarm: false });
+  assert.equal(globalThis.__codeyRendererPatchEntry(url, patched), null, "the patch is idempotent");
 });

@@ -1682,7 +1682,14 @@ async fn spawn_and_inject_runtime(
     let spawn_inject_started = Instant::now();
     with_launch_proxy(&config.codex_launch_proxy, |launch_proxy| async move {
         // 浏览器级补丁服务先于 Codex 启动；目标枚举与 CLI 包装器握手并行。
-        crate::renderer_asset_patch::start_service(patch.debug_port, config.slim_codex_pet);
+        crate::renderer_asset_patch::start_service(
+            patch.debug_port,
+            config.slim_codex_pet,
+            Some(crate::renderer_asset_patch::CodexPaths {
+                app_dir: storage.app_dir.clone(),
+                codex_home: home.to_path_buf(),
+            }),
+        );
         let target_prefetch = cdp::spawn_injectable_target_prefetch(patch.debug_port);
         let mut spawned = match spawn_codex(
             &mut storage.app_dir,

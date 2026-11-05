@@ -44,6 +44,7 @@ mod process_tree;
 mod prompt_optimization;
 mod provider_models;
 mod renderer_asset_patch;
+mod renderer_asset_scan;
 mod rollout_last_request;
 mod route_request_log;
 mod session_delete;

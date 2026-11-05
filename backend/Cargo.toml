@@ -21,6 +21,7 @@ name = "codey-fastctx"
 path = "src/bin/codey-fastctx.rs"
 
 [dependencies]
+aho-corasick = "1"
 anyhow = "1"
 arc-swap.workspace = true
 async-trait = "0.1"

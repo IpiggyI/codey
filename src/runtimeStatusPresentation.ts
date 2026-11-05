@@ -49,8 +49,6 @@ const ERROR_LOG_HINT =
 const INTERNAL_COMPONENT_IMPACTS: Record<string, string> = {
   "bridge-helpers": "Codey 无法与 Codex 页面通信，依赖页面桥接的功能都不可用。",
   "model-whitelist": "Codex 模型列表不会按 Codey 的模型设置过滤和补充。",
-  "service-tier":
-    "Codey 的服务档位兼容未安装。在非 ChatGPT 账号渠道下，模型选择器中选择的 Fast 档位可能不会带入请求。",
   "settings-overlay-loader": "Codex 设置中的 Codey 配置面板可能无法打开。",
   "renderer-controls": "侧栏会话工具、默认中文界面等页面增强可能不可用。",
   "plugin-marketplace-compatibility": "插件市场可能无法显示和管理 Codey 内置市场的插件。",
@@ -61,12 +59,6 @@ const ISSUE_RULES: Array<{
   cause: string;
   remedy: string;
 }> = [
-  {
-    pattern: /未找到服务档位模块|\d+ 个服务档位模块|无法唯一定位服务档位模块/,
-    cause: "Codey 没有在 Codex 页面中找到唯一的服务档位模块。页面可能尚未加载该模块，也可能当前 Codex 版本改了模块文件名。",
-    remedy:
-      "请重启 Codex 一次。重启后仍然出现时，说明当前 Codex 版本与这个 Codey 版本不兼容：请把 Codey 更新到最新版本；已是最新版本时，请把错误详情和 Codey 错误日志提交给维护者。",
-  },
   {
     pattern: /形态不兼容|源码已变化|无法唯一定位|补偿匹配次数异常/,
     cause: "当前 Codex 版本的页面代码与这个 Codey 版本的适配规则不一致。",

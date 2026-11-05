@@ -95,7 +95,6 @@
   let nextFullReactDiscoveryAt = 0;
   const modelListRequestIds = new Set();
   const knownModelQueryClients = new Set();
-  const nativeFastPermissions = new Map();
   let originalDispatchEvent = null;
   let patchedDispatchEvent = null;
   let groupedMenuTimer = 0;
@@ -1820,56 +1819,6 @@
   const reactFiberKeys = (element) =>
     window.__codeySharedRuntime.reactInternalKeys(element, { includeContainer: true });
 
-  const restoreNativeFastPermissions = () => {
-    for (const [permission, allowed] of nativeFastPermissions) {
-      try { permission.isServiceTierAllowed = allowed; } catch {}
-    }
-    nativeFastPermissions.clear();
-  };
-
-  const repairNativeFastControls = (target) => {
-    if (!catalog.loaded || disposed) return;
-    let fiber;
-    for (let node = target, hops = 0; node && !fiber && hops < 8; node = node.parentElement, hops += 1) {
-      fiber = reactFiberKeys(node).map((key) => node[key]).find(Boolean);
-    }
-    let picker;
-    const permissions = new Set();
-    for (let hops = 0; fiber && hops < 80; fiber = fiber.return, hops += 1) {
-      const props = fiber.memoizedProps;
-      if (!picker && typeof props?.model === "string"
-        && Array.isArray(props.models) && Object.hasOwn(props, "onSelectServiceTier")) {
-        picker = props;
-      }
-      if (!picker) continue;
-      for (const node of [fiber, fiber.alternate]) {
-        for (const cells of node?.updateQueue?.memoCache?.data || []) {
-          if (!Array.isArray(cells)) continue;
-          for (const value of cells) {
-            if (value && typeof value.isServiceTierAllowed === "boolean"
-              && typeof value.isLoading === "boolean") permissions.add(value);
-          }
-        }
-      }
-      if (props && Object.hasOwn(props, "conversationId") && Object.hasOwn(props, "hideLabel")) break;
-    }
-    if (!picker) return;
-    // Windows builds can disable the main-process Inspector. Repair only the
-    // native picker's cached permission results, before its own opening/selection
-    // event renders again. Both the UI and its serviceTierForRequest resolver then
-    // consume the same permission for every route and model. Keep loading state.
-    restoreNativeFastPermissions();
-    for (const permission of permissions) {
-      if (permission.isServiceTierAllowed || nativeFastPermissions.size >= 64) continue;
-      try {
-        permission.isServiceTierAllowed = true;
-        if (permission.isServiceTierAllowed) nativeFastPermissions.set(permission, false);
-      } catch {
-        // An incompatible immutable renderer result must not break the menu.
-      }
-    }
-  };
-
   const reactModelStateNodes = (forceScan = false) => {
     const nodes = [
       document.body,
@@ -3100,7 +3049,6 @@
     );
     if (event?.type === "keydown"
       && (!pickerInteraction || !["Enter", " ", "ArrowDown"].includes(event.key))) return;
-    if (pickerInteraction) repairNativeFastControls(event.target);
     installGroupedModelMenuObserver();
     if (nativeSelectionOnly && !pickerInteraction) return;
     if (!nativeSelectionOnly) {
@@ -3171,7 +3119,6 @@
       disposed = true;
       disposeGptPrefixGate();
       excludedNativeDescriptors.clear();
-      restoreNativeFastPermissions();
       window.clearTimeout(refreshTimer);
       refreshTimer = 0;
       window.clearTimeout(groupedMenuTimer);
