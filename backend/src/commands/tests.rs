@@ -477,6 +477,32 @@ fn renderer_settings_keep_editable_credentials_and_clear_notification_secrets() 
 }
 
 #[test]
+fn renderer_prompt_optimization_reports_unsaved_mode_credentials() {
+    let home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        home.path().join("auth.json"),
+        r#"{"auth_mode":"chatgpt","tokens":{"access_token":"fixture-token","account_id":"fixture-account"}}"#,
+    )
+    .unwrap();
+    let config = CodeyConfig::default();
+    let public = serde_json::to_value(redacted_config_at(&config, home.path(), &|_| None)).unwrap();
+    assert_eq!(public["promptOptimization"]["mode"], "manual");
+    assert_eq!(public["promptOptimization"]["apiKeyConfigured"], false);
+    assert_ne!(public["promptOptimization"]["credentialsReady"], true);
+    assert_eq!(
+        public["promptOptimization"]["credentialsReadyByMode"],
+        json!({"officialAccount": true, "currentProvider": true})
+    );
+
+    std::fs::remove_file(home.path().join("auth.json")).unwrap();
+    let public = serde_json::to_value(redacted_config_at(&config, home.path(), &|_| None)).unwrap();
+    assert_eq!(
+        public["promptOptimization"]["credentialsReadyByMode"],
+        json!({"officialAccount": false, "currentProvider": false})
+    );
+}
+
+#[test]
 fn renderer_prompt_optimization_response_omits_current_provider_env_key() {
     let home = tempfile::tempdir().unwrap();
     std::fs::write(
@@ -514,6 +540,10 @@ env_key = "CODEY_PROMPT_OPT_RESPONSE"
         "ready"
     );
     assert_eq!(public["promptOptimization"]["credentialsReady"], true);
+    assert_eq!(
+        public["promptOptimization"]["credentialsReadyByMode"],
+        json!({"officialAccount": false, "currentProvider": true})
+    );
     assert_eq!(
         public["promptOptimization"]["currentProviderEnvKeyName"],
         "CODEY_PROMPT_OPT_RESPONSE"
