@@ -24,7 +24,7 @@
 
 | 侧 | 标签 | 提交 | 日期 |
 |---|---|---|---|
-| 本分叉 | `v1.4.1` | `release: v1.4.1` 提交 | 2026-11-03 |
+| 本分叉 | `v1.4.2` | `release: v1.4.2` 提交 | 2026-11-05 |
 | 上游 | [`v1.5.1`](https://github.com/SuperGness/codey/releases/tag/v1.5.1) | [`34ab9a0b`](https://github.com/SuperGness/codey/commit/34ab9a0b) | 2026-11-05 对照的固定目标，见 [2026-11-05-plan.md](../upstream-sync/2026-11-05-plan.md) |
 | 早期内容锚点 | 上游 `v0.10.7` | `bd03e13` | 上次整段同步 |
 | vendor | 上游 `v1.3.8` | `530796a2` | 2026-10-26 整目录替换，保留本地改动；上游到 `34ab9a0b` 未再改 vendor |
