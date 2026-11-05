@@ -196,6 +196,7 @@ if (import.meta.env.DEV) {
         model: "provider-fast-coder",
         upstreamProtocol: "openaiResponses",
         instruction: "",
+        credentialsReadyByMode: { officialAccount: true, currentProvider: true },
       },
       codexAppPath: "/Applications/ChatGPT.app",
       userScripts: [],

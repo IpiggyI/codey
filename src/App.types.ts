@@ -21,6 +21,10 @@ export type PromptOptimizationConfig = {
     | "anthropicMessages";
   instruction: string;
   credentialsReady?: boolean;
+  credentialsReadyByMode?: {
+    officialAccount: boolean;
+    currentProvider: boolean;
+  };
   currentProviderKeyStatus?:
     | "ready"
     | "missing"
