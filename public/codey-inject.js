@@ -738,8 +738,8 @@
   );
 
   const addStyle = () => {
-    if (document.getElementById(styleId)) return;
-    const style = document.createElement("style");
+    // 重新注入时沿用同一节点但刷新规则，新增的样式不必等页面重载。
+    const style = document.getElementById(styleId) || document.createElement("style");
     style.id = styleId;
     style.textContent = `
       #${toolbarId} { -webkit-app-region: no-drag !important; position: fixed; right: 18px; top: 60px; z-index: 2147483644; display: flex; align-items: center; gap: 7px; padding: 6px 8px; border: 1px solid rgba(124, 140, 255, .44); border-radius: 999px; background: rgba(20, 24, 36, .68); color: rgba(238, 242, 255, .94); box-shadow: 0 8px 24px rgba(0,0,0,.18); backdrop-filter: blur(10px); font: 12px/1 system-ui, sans-serif; }
@@ -762,6 +762,7 @@
       [data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title],
       [data-app-action-sidebar-project-row][data-app-action-sidebar-project-id] { position: relative; }
       :where([data-codey-message-row]) { position: relative; }
+      [data-codey-hard-deleted="true"] { display: none !important; }
       [data-app-action-sidebar-thread-row] [${threadUpdatedAtAttribute}] { display: block; flex: 0 0 auto; min-width: 26px; margin-inline-start: auto; color: inherit; font: 400 12px/16px system-ui, sans-serif; font-variant-numeric: tabular-nums; letter-spacing: 0; text-align: end; opacity: .52; pointer-events: none; white-space: nowrap; }
       [data-app-action-sidebar-thread-row]:hover [${threadUpdatedAtAttribute}],
       [data-app-action-sidebar-thread-row]:has(:focus-visible) [${threadUpdatedAtAttribute}] { opacity: 0; }
@@ -791,7 +792,7 @@
       #${sessionDeletePopoverId} button:disabled { cursor: wait; opacity: .62; }
       [data-codey-pet-control-blocked="true"] { display: none !important; pointer-events: none !important; }
     `;
-    document.documentElement.appendChild(style);
+    if (!style.isConnected) document.documentElement.appendChild(style);
   };
 
   const logicalAnchorForMessageRow = (row) => messageLogicalAnchorByRow.get(row) || row;
@@ -2136,13 +2137,12 @@
   };
   window.__codeyCodexAssetReferencesFromSource = codexAssetReferencesFromSource;
 
+  const numericCodexChunkUrl = (url) => (
+    /\/assets\/(?:async\/)?\d{1,10}\.[a-f0-9]{8,32}\.js(?:[?#]|$)/i.test(String(url || ""))
+  );
+
   const discoverCodexAppAssetUrls = async () => {
-    // Codex 26.1027 loads app-initial through a dynamic import chain that leaves no
-    // page tag or resource timing; the service-tier installer records the URL the
-    // debugger reported.
-    const debuggerUrl = typeof window.__codeyServiceTierModuleUrl === "string"
-      ? window.__codeyServiceTierModuleUrl : "";
-    const loadedUrls = [...new Set([...codexAppAssetUrls(), debuggerUrl].filter(Boolean))];
+    const loadedUrls = codexAppAssetUrls();
     const discoveredUrls = loadedUrls.filter((url) => (
       url.includes("app-server-manager-signals-")
       || url.includes("app-initial-")
@@ -2153,6 +2153,8 @@
       : (typeof fetch === "function" ? fetch : null);
     if (!fetchAsset) return discoveredUrls;
 
+    // rspack 构建的数字 chunk 只导出模块工厂表，不含按名引用，导入后也拿不到
+    // 模块实例，抓取它们只会白白读取大文件。
     const scriptUrls = [...new Set([
       ...Array.from(document.scripts || []).map((script) => script.src),
       ...loadedUrls,
@@ -2161,6 +2163,7 @@
       && !url.includes("app-server-manager-signals-")
       && !url.includes("app-initial-")
       && !url.includes("app-shared-")
+      && !numericCodexChunkUrl(url)
     )).slice(0, 6);
     for (const scriptUrl of scriptUrls) {
       try {
@@ -2394,9 +2397,21 @@
   };
   window.__codeyAppServerManagerRegistryResolverFromModule = appServerManagerRegistryResolverFromModule;
 
+  // Codex 26.1027 起页面只在宿主连接信号里持有管理器的 RPC 存根：
+  // {status:"ready", client:{hostId, rpc}}。存根本身就是会话控制器的 manager，
+  // 与统计条订阅用量时比较、订阅的是同一个对象。
+  const hostedAppServerStub = (state, hostId) => (
+    state?.status === "ready"
+    && state.client?.hostId === hostId
+    && isAppServerRpcStub(state.client.rpc)
+    && !brokenHostedManagers.has(state.client.rpc)
+      ? state.client.rpc : null
+  );
+
   const cachedAppServerManagerFromScope = (scope, hostId) => {
     if (hostId !== "local") return null;
     const managers = new Set();
+    const stubs = new Set();
     const seenFamilies = new Set();
     const nodes = new Set([scope.node, ...scope.chain?.values?.() || []]);
     for (const node of nodes) {
@@ -2408,6 +2423,11 @@
         seenFamilies.add(family);
         try {
           const manager = scope.get(family, hostId);
+          const stub = hostedAppServerStub(manager, hostId);
+          if (stub) {
+            stubs.add(stub);
+            continue;
+          }
           const client = manager && Object.getOwnPropertyDescriptor(manager, "requestClient")?.value;
           if (client?.hostId !== hostId || !declaredMethod(manager, "sendRequest")
             || !["enqueueRequest", "createRequest", "onResult"].every((method) => declaredMethod(client, method))) continue;
@@ -2417,7 +2437,8 @@
         }
       }
     }
-    return managers.size === 1 ? managers.values().next().value : null;
+    if (managers.size) return managers.size === 1 ? managers.values().next().value : null;
+    return stubs.size === 1 ? stubs.values().next().value : null;
   };
 
   const importCodexAsset = (url) => (typeof window.__codeyImportCodexAsset === "function"
@@ -2667,16 +2688,72 @@
   // A broken stub stays callable but every call rejects; drop the cached
   // controller so the next operation discovers the reconnected stub.
   const watchedHostedManagers = new WeakSet();
+  // 登记表里断开的存根不会被移除，记下后发现时跳过。
+  const brokenHostedManagers = new WeakSet();
   const watchHostedManager = (manager) => {
     if (watchedHostedManagers.has(manager)) return;
     watchedHostedManagers.add(manager);
     try {
       manager.onRpcBroken(() => {
+        brokenHostedManagers.add(manager);
         if (window.__codeyCodexSessionController?.manager === manager) {
           window.__codeyCodexSessionController = null;
         }
       });
     } catch {}
+  };
+
+  // 与资源补丁里的 codeyReconcileCompletedConversation 同一判定：原生 app-server
+  // 两次确认已结束、其间没有新提交，才退订并按重连恢复的方式重新载入。宿主不暴露
+  // 流修订号，改为比对进行中的轮次；尚未确认的提交没有轮次 ID，不会被当作卡住。
+  const reconcileHostedConversation = async (manager, params) => {
+    const conversationId = params?.conversationId;
+    if (conversationId == null) return false;
+    const runningTurnId = async () => {
+      const [state, role] = await Promise.all([
+        callHostedAppServer(() => manager.getThreadExecutionState(conversationId)),
+        callHostedAppServer(() => manager.getStreamRole(conversationId)),
+      ]);
+      return state?.inProgress === true && state.activeTurnId != null && role?.role !== "follower"
+        ? state.activeTurnId : null;
+    };
+    const readStatus = async () => {
+      const response = await callHostedAppServer(() => manager.sendRequest("thread/read", {
+        threadId: conversationId,
+        includeTurns: false,
+      }));
+      const status = response?.thread?.status;
+      return typeof status === "string" ? status : status?.type;
+    };
+    const turnId = await runningTurnId();
+    if (turnId == null) return false;
+    const status = await readStatus();
+    if (status !== "idle" && status !== "systemError" && status !== "error") return false;
+    await new Promise((resolve) => window.setTimeout(resolve, 250));
+    if (await readStatus() !== status || await runningTurnId() !== turnId) return false;
+    const cwd = await callHostedAppServer(() => manager.getConversationCwd(conversationId));
+    // 宿主只在本窗口持有该会话的历史流时退订，退订后标记 needs_resume 并释放流。
+    await callHostedAppServer(() => manager.unsubscribeInactiveConversation(conversationId));
+    if (await runningTurnId() === turnId) return false;
+    await callHostedAppServer(() => manager.resumeConversation({
+      ...params,
+      workspaceRoots: params.workspaceRoots?.length ? params.workspaceRoots : cwd ? [cwd] : ["/"],
+    }));
+    const state = await callHostedAppServer(() => manager.getThreadExecutionState(conversationId));
+    return state != null && state.inProgress !== true;
+  };
+
+  // 宿主托管时页面读不到轮次顺序，删除一律按中间轮次处理：改写记录后重启 Codex，
+  // 启动维护重放墓碑。退订不会卸载 app-server 里已加载的会话，这里只做宿主侧检查，
+  // 不退订也不丢弃缓存，以免重启前按旧历史重新载入。
+  const prepareHostedMessageDeletion = async (manager, conversationId) => {
+    const [state, role] = await Promise.all([
+      callHostedAppServer(() => manager.getThreadExecutionState(conversationId)),
+      callHostedAppServer(() => manager.getStreamRole(conversationId)),
+    ]);
+    if (state == null) throw new Error("当前会话尚未加载，请打开该对话后再删除");
+    if (state.inProgress === true) throw new Error("当前任务仍在运行，请等待任务结束后再删除");
+    if (role?.role === "follower") throw new Error("请在拥有当前会话的窗口中删除消息");
   };
 
   const hostedSessionController = (manager) => {
@@ -2689,12 +2766,15 @@
       // already evicted the conversation and its summary; re-list from the app
       // server so the deleted thread is not restored from a stale list.
       notifyConversationDeleted: () => callHostedAppServer(() => manager.refreshRecentConversations()),
-      prepareMessageDeletion: null,
-      planMessageDeletion: null,
-      revertMessageDeletion: null,
-      finishMessageDeletion: null,
+      prepareMessageDeletion: (sessionId) => prepareHostedMessageDeletion(manager, sessionId),
+      planMessageDeletion: () => ({ kind: "middle" }),
+      revertMessageDeletion: async () => {
+        throw new Error("Codex 的会话管理运行在桌面宿主进程，无法原生撤回末尾轮次");
+      },
+      // 重启已由后端安排，页面隐藏已删轮次即可，不再改动宿主状态。
+      finishMessageDeletion: async () => {},
       refreshRecentConversations: () => callHostedAppServer(() => manager.refreshRecentConversations()),
-      reconcileCompletedConversation: null,
+      reconcileCompletedConversation: (payload) => reconcileHostedConversation(manager, payload),
     };
   };
 
@@ -2720,12 +2800,17 @@
     };
   };
 
-  const registeredMessageDeletionController = (feature) => {
-    if (feature !== "deleteMessages") return null;
+  // 渲染补丁在原生管理器被读取时登记本机实例，宿主托管时登记的是 RPC 存根。
+  // 登记后各项会话能力都直接复用它，不必遍历 React 或按文件名导入资源
+  // （Codex 26.1029 起资源全是数字 chunk）。
+  const registeredSessionController = (feature) => {
     try {
       const registry = globalThis.__codeyAppServerManagers;
       const manager = registry instanceof Map ? registry.get("local") : null;
-      return isLocalMessageDeletionManager(manager) ? managerSessionController(manager) : null;
+      if (!manager || brokenHostedManagers.has(manager)) return null;
+      if (!isAppServerRpcStub(manager) && manager.disposed === true) return null;
+      const controller = managerSessionController(manager);
+      return sessionControllerLooksUsable(controller, feature) ? controller : null;
     } catch {
       return null;
     }
@@ -2770,7 +2855,7 @@
 
   const discoverCodexSessionController = async (feature) => {
     if (disposed) throw unavailableCapability(feature);
-    const registered = registeredMessageDeletionController(feature);
+    const registered = registeredSessionController(feature);
     if (registered) {
       window.__codeyCodexSessionController = registered;
       return registered;
@@ -2811,7 +2896,7 @@
         const module = await importCodexAsset(url);
         // Late discovery from a disposed installation cannot replace the current interface.
         if (disposed) throw unavailableCapability(feature);
-        const registered = registeredMessageDeletionController(feature);
+        const registered = registeredSessionController(feature);
         if (registered) {
           window.__codeyCodexSessionController = registered;
           return registered;
@@ -2855,7 +2940,7 @@
     if (disposed) throw unavailableCapability(feature);
     const cached = window.__codeyCodexSessionController;
     // A manager registered after an earlier failed probe must win over the cache and the retry backoff.
-    const current = registeredMessageDeletionController(feature)
+    const current = registeredSessionController(feature)
       || (cached?.manager ? managerSessionController(cached.manager) : cached);
     if (sessionControllerLooksUsable(current, feature)) {
       window.__codeyCodexSessionController = current;
@@ -2874,14 +2959,14 @@
       ? Promise.resolve().then(discover)
       : waitForNativeSessionOperation(discover)).then((controller) => {
       if (disposed) throw unavailableCapability(feature);
-      controller = registeredMessageDeletionController(feature) || controller;
+      controller = registeredSessionController(feature) || controller;
       window.__codeyCodexSessionController = controller;
       state.failures = 0;
       state.retryAt = 0;
       publishCapability(feature, true);
       return controller;
     }, (error) => {
-      const registered = !disposed && registeredMessageDeletionController(feature);
+      const registered = !disposed && registeredSessionController(feature);
       if (registered) {
         window.__codeyCodexSessionController = registered;
         state.failures = 0;
@@ -2926,7 +3011,10 @@
     }
     // Managed ChatGPT authentication, token refresh, credential-store access,
     // and request serialization stay inside Codex's own AppServerManager.
-    return controller.manager.sendRequest("account/rateLimits/read");
+    const manager = controller.manager;
+    return isAppServerRpcStub(manager)
+      ? callHostedAppServer(() => manager.sendRequest("account/rateLimits/read"))
+      : manager.sendRequest("account/rateLimits/read");
   };
   window.__codeyReadAccountRateLimits = readAccountRateLimits;
 
@@ -2945,7 +3033,11 @@
     capabilityProbes.delete("mcpReload");
     const sendReload = async (target) => {
       // The protocol requires object params; Codex applies the config on the next turn.
-      await target.sendRequest("config/mcpServer/reload", {});
+      if (isAppServerRpcStub(target)) {
+        await callHostedAppServer(() => target.sendRequest("config/mcpServer/reload", {}));
+      } else {
+        await target.sendRequest("config/mcpServer/reload", {});
+      }
       publishCapability("mcpReload", true);
       return { ok: true };
     };
@@ -3828,7 +3920,7 @@
         if (restartCodex) {
           await controller.prepareMessageDeletion(sessionId);
           if (disposed) return;
-          if (controller.manager) {
+          if (controller.manager && !isAppServerRpcStub(controller.manager)) {
             messageDeletionMethods.validate.call(controller.manager, sessionId);
             messageDeletionMethods.validateWindow.call(controller.manager);
           }
@@ -3878,6 +3970,10 @@
         : messageIds;
       const deletedIds = [...new Set([...messageIds, ...resolvedMessageIds])];
       try {
+        // 宿主托管时页面状态要等 Codex 重启才更新，先隐藏已删除的轮次。
+        if (isAppServerRpcStub(controller.manager)) {
+          physicalRows.forEach((row) => { row.dataset.codeyHardDeleted = "true"; });
+        }
         if (!nativeDeletion) await controller.finishMessageDeletion(sessionId, deletedIds);
         if (disposed) return;
       } catch (error) {

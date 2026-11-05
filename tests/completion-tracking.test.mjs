@@ -3193,3 +3193,336 @@ test("imports from the tasks header using the project stored in the file", async
   });
   assert.equal(button.disabled, false);
 });
+
+test("a registered local manager serves every session capability without asset discovery", async () => {
+  const client = { hostId: "local", enqueueRequest() {}, createRequest() {}, onResult() {} };
+  const manager = createLocalDeletionManager({
+    requestClient: client,
+    async refreshRecentConversations() {},
+    async codeyReconcileCompletedConversation() { return true; },
+  });
+  const runtime = loadInjection({ initialSessionId: "" });
+  // The renderer patch creates the registry inside the page realm.
+  runtime.context.__codeyAppServerManagers = vm.runInContext("new Map()", runtime.context).set("local", manager);
+  runtime.document.scripts.push({ src: "app://-/assets/782259.9dd29a0a62.js" });
+  let fetches = 0;
+  runtime.window.fetch = async () => { fetches += 1; return { ok: false }; };
+  for (const feature of ["session", "usage", "mcpReload", "reconcile", "refresh", "deleteMessages"]) {
+    runtime.window.__codeyCodexSessionController = null;
+    assert.equal((await runtime.window.__codeyLoadCodexSessionController({ feature })).manager, manager, feature);
+    assert.equal(runtime.window.__codeyPageCapabilities[feature].status, "available", feature);
+  }
+  assert.equal(fetches, 0, "registered managers need no asset discovery");
+});
+
+test("numeric rspack chunks are not fetched during asset discovery", async () => {
+  const runtime = loadInjection({ initialSessionId: "" });
+  runtime.document.scripts.push(
+    { src: "app://-/assets/782259.9dd29a0a62.js" },
+    { src: "app://-/assets/async/24191.589dcc9878.js?v=1" },
+  );
+  let fetches = 0;
+  runtime.window.fetch = async () => { fetches += 1; return { ok: false }; };
+  runtime.window.__codeyImportCodexAsset = async () => assert.fail("numeric chunks expose no module instances");
+  await assert.rejects(runtime.window.__codeyLoadCodexSessionController({ feature: "refresh" }));
+  assert.equal(fetches, 0);
+});
+
+// Codex 26.1027+ keeps AppServerManager in the desktop host. Its RPC stub is a
+// callable proxy: every property looks callable, only the prototype is real.
+function fakeRpcStub(handlers) {
+  const brokenCallbacks = [];
+  const proto = Object.create(Function.prototype, {
+    dup: { value() { return this; } },
+    onRpcBroken: { value(callback) { brokenCallbacks.push(callback); } },
+  });
+  const target = Object.setPrototypeOf(function stub() {}, proto);
+  const stub = new Proxy(target, {
+    get: (stubTarget, key) => (Object.hasOwn(handlers, key) ? handlers[key] : Reflect.get(stubTarget, key)),
+  });
+  return { stub, breakConnection: () => brokenCallbacks.splice(0).forEach((callback) => callback()) };
+}
+
+function recordedRpcHandlers(handlers, calls, disposals = []) {
+  return Object.fromEntries(Object.entries(handlers).map(([name, handler]) => [name, (...args) => {
+    calls.push([name, ...args]);
+    const pending = Promise.resolve().then(() => handler(...args));
+    pending[Symbol.dispose] = () => disposals.push(name);
+    return pending;
+  }]));
+}
+
+function loadHostedManagerInjection(handlers, options = {}) {
+  const runtime = loadInjection({ initialSessionId: "", ...options });
+  const connection = { kind: "signal-family" };
+  const account = { kind: "signal-family" };
+  const calls = [];
+  const disposals = [];
+  let rpc = fakeRpcStub(recordedRpcHandlers(handlers, calls, disposals));
+  let current = { status: "ready", client: { hostId: "local", rpc: rpc.stub } };
+  let connectionReads = 0;
+  const scope = {
+    query: null,
+    node: { familyBindings: new Map([[account, new Map([["local", {}]])], [connection, new Map([["local", {}]])]]) },
+    chain: new Map(),
+    get(family, hostId) {
+      assert.equal(hostId, "local");
+      if (family === account) return { hostId, rpc: fakeRpcStub({}).stub };
+      assert.equal(family, connection);
+      connectionReads += 1;
+      return current;
+    },
+    set() { throw Error("discovery must not change signals"); },
+    watch() { throw Error("discovery must not create RPC watchers"); },
+    when() {},
+  };
+  runtime.document.body.__reactFiber$hosted = { memoizedState: { scope }, return: null };
+  runtime.document.scripts.push({ src: "app://-/assets/app-initial-hosted.js" });
+  let imports = 0;
+  runtime.window.__codeyImportCodexAsset = async () => {
+    imports += 1;
+    return {};
+  };
+  return {
+    ...runtime,
+    calls,
+    disposals,
+    connectionReads: () => connectionReads,
+    imports: () => imports,
+    stub: () => rpc.stub,
+    // A host reconnect breaks the old stub before the signal holds the new one.
+    setConnection: (value, replacement = null) => {
+      rpc.breakConnection();
+      if (replacement) rpc = replacement;
+      current = value;
+    },
+  };
+}
+
+test("hosted AppServerManager serves MCP reload, usage, and refresh through its RPC stub", async () => {
+  const runtime = loadHostedManagerInjection({
+    sendRequest: (method) => ({ method }),
+    refreshRecentConversations: () => undefined,
+  });
+  assert.equal((await runtime.window.__codeyReloadMcpServers()).ok, true);
+  assert.deepEqual(await runtime.window.__codeyReadAccountRateLimits(), { method: "account/rateLimits/read" });
+  const refresh = await runtime.window.__codeyLoadCodexSessionController({ feature: "refresh" });
+  // The stats bar compares and subscribes to this same object.
+  assert.equal(refresh.manager, runtime.stub());
+  await refresh.refreshRecentConversations();
+  assert.deepEqual(JSON.parse(JSON.stringify(runtime.calls)), [
+    ["sendRequest", "config/mcpServer/reload", {}],
+    ["sendRequest", "account/rateLimits/read"],
+    ["refreshRecentConversations"],
+  ]);
+  // Each host RPC result is released after use.
+  assert.deepEqual(runtime.disposals, ["sendRequest", "sendRequest", "refreshRecentConversations"]);
+  assert.equal(runtime.window.__codeyPageCapabilities.mcpReload.status, "available");
+  assert.equal(runtime.imports(), 0, "a hosted manager needs no asset imports");
+
+  // A host reconnect replaces the stub; calls follow the current connection.
+  const replaced = [];
+  const replacement = fakeRpcStub({ sendRequest: (method) => replaced.push(method) });
+  runtime.setConnection({ status: "ready", client: { hostId: "local", rpc: replacement.stub } }, replacement);
+  await runtime.window.__codeyReloadMcpServers();
+  assert.deepEqual(replaced, ["config/mcpServer/reload"]);
+  runtime.setConnection({ status: "disconnected", client: null });
+  await assert.rejects(runtime.window.__codeyReloadMcpServers(), { code: "codey_capability_unavailable" });
+});
+
+function hostedReconcileHandlers(overrides = {}) {
+  const state = { execution: { inProgress: true, activeTurnId: "turn-1" }, role: { role: "owner" }, status: "idle", unsubscribed: false };
+  const handlers = {
+    getThreadExecutionState: () => state.execution,
+    getStreamRole: () => state.role,
+    sendRequest: (method, params) => {
+      assert.equal(method, "thread/read");
+      assert.deepEqual({ ...params }, { threadId: "thread-1", includeTurns: false });
+      return { thread: { status: typeof state.status === "function" ? state.status() : { type: state.status } } };
+    },
+    getConversationCwd: () => "/repo",
+    unsubscribeInactiveConversation: () => {
+      state.unsubscribed = true;
+      state.execution = { inProgress: false, activeTurnId: "turn-1" };
+    },
+    resumeConversation: () => {},
+    ...overrides,
+  };
+  return { state, handlers };
+}
+
+async function runHostedReconcile(runtime) {
+  const controller = await runtime.window.__codeyLoadCodexSessionController({ feature: "reconcile" });
+  const pending = controller.reconcileCompletedConversation({
+    conversationId: "thread-1",
+    model: null,
+    workspaceRoots: [],
+  });
+  for (let round = 0; round < 4; round += 1) {
+    await flushMicrotasks();
+    runtime.flushTimers();
+  }
+  return pending;
+}
+
+test("hosted completion reconcile confirms idle twice, then unsubscribes and resumes the thread", async () => {
+  const { handlers } = hostedReconcileHandlers();
+  const runtime = loadHostedManagerInjection(handlers);
+  assert.equal(await runHostedReconcile(runtime), true);
+  const names = runtime.calls.map(([name]) => name);
+  assert.ok(names.indexOf("unsubscribeInactiveConversation") < names.indexOf("resumeConversation"));
+  assert.equal(names.at(-1), "getThreadExecutionState", "the result reflects the resumed state");
+  assert.equal(names.filter((name) => name === "sendRequest").length, 2, "native status is read twice");
+  const resume = runtime.calls.find(([name]) => name === "resumeConversation")[1];
+  assert.deepEqual({ ...resume, workspaceRoots: [...resume.workspaceRoots] }, {
+    conversationId: "thread-1",
+    model: null,
+    workspaceRoots: ["/repo"],
+  });
+  assert.equal(runtime.window.__codeyPageCapabilities.reconcile.status, "available");
+});
+
+test("hosted completion reconcile leaves live, pending, follower, changing, and unowned threads alone", async () => {
+  let reads = 0;
+  for (const [label, setup] of [
+    ["still running", ({ state }) => { state.status = "active"; }],
+    ["pending submission has no turn id", ({ state }) => { state.execution = { inProgress: true, activeTurnId: null }; }],
+    ["follower window", ({ state }) => { state.role = { role: "follower" }; }],
+    ["status changes between reads", ({ state }) => {
+      state.status = () => ({ type: reads++ === 0 ? "idle" : "active" });
+    }],
+    ["new turn between reads", ({ state, handlers }) => {
+      let executions = 0;
+      handlers.getThreadExecutionState = () => ({ inProgress: true, activeTurnId: executions++ === 0 ? "turn-1" : "turn-2" });
+      void state;
+    }],
+    ["host skips the unsubscribe", ({ handlers }) => {
+      handlers.unsubscribeInactiveConversation = () => {};
+    }],
+  ]) {
+    reads = 0;
+    const fixture = hostedReconcileHandlers();
+    setup(fixture);
+    const runtime = loadHostedManagerInjection(fixture.handlers);
+    assert.equal(await runHostedReconcile(runtime), false, label);
+    const names = runtime.calls.map(([name]) => name);
+    assert.ok(!names.includes("resumeConversation"), `${label}: no resume`);
+    if (label !== "host skips the unsubscribe") {
+      assert.ok(!names.includes("unsubscribeInactiveConversation"), `${label}: no unsubscribe`);
+    }
+  }
+});
+
+function hostedDeletionHandlers(overrides = {}) {
+  const state = { execution: { inProgress: false, activeTurnId: null }, role: { role: "owner" } };
+  const handlers = {
+    getThreadExecutionState: () => state.execution,
+    getStreamRole: () => state.role,
+    // A real stub exposes every method; discovery looks for these two.
+    sendRequest: () => assert.fail("hosted deletion sends no app-server request"),
+    refreshRecentConversations: () => {},
+    ...overrides,
+  };
+  return { state, handlers };
+}
+
+// Unsubscribing leaves the thread loaded in app-server, so a hosted deletion
+// takes the middle-turn path: rewrite, restart Codex, replay the tombstone.
+test("hosted message deletion checks the thread through the host and leaves it loaded for the restart", async () => {
+  const { handlers } = hostedDeletionHandlers();
+  const runtime = loadHostedManagerInjection(handlers);
+  const controller = await runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" });
+  assert.equal(controller.manager, runtime.stub());
+  assert.equal(controller.planMessageDeletion("thread-1", ["turn-1"]).kind, "middle");
+  await controller.prepareMessageDeletion("thread-1");
+  await controller.finishMessageDeletion("thread-1", ["turn-1"]);
+  assert.deepEqual(runtime.calls.map(([name, arg]) => [name, arg]), [
+    ["getThreadExecutionState", "thread-1"], ["getStreamRole", "thread-1"],
+  ]);
+  await assert.rejects(controller.revertMessageDeletion("thread-1", ["turn-1"]), /桌面宿主进程/);
+  assert.equal(runtime.window.__codeyPageCapabilities.deleteMessages.status, "available");
+});
+
+test("hosted message deletion leaves running, unloaded, and follower threads untouched", async () => {
+  for (const [label, setup, pattern] of [
+    ["running", ({ state }) => { state.execution = { inProgress: true, activeTurnId: "turn-1" }; }, /仍在运行/],
+    ["follower", ({ state }) => { state.role = { role: "follower" }; }, /拥有当前会话的窗口/],
+    ["not loaded", ({ state }) => { state.execution = null; }, /尚未加载/],
+  ]) {
+    const fixture = hostedDeletionHandlers();
+    setup(fixture);
+    const runtime = loadHostedManagerInjection(fixture.handlers, { selectedTurnIds: ["turn-1"] });
+    runtime.setSessionId("thread-1");
+    await runtime.window.__codeyDeleteSelectedMessages();
+    assert.match(runtime.alerts.join("\n"), pattern, label);
+    assert.equal(runtime.bridgeCalls.some(({ path }) => path === "/session/delete-messages"), false, label);
+  }
+});
+
+// Host mode as the renderer patch leaves it: the registry holds the RPC stub.
+function loadRegisteredHostStubInjection(handlers, options = {}) {
+  const runtime = loadInjection({ initialSessionId: "", ...options });
+  const calls = [];
+  const rpc = fakeRpcStub(recordedRpcHandlers(handlers, calls));
+  runtime.context.__codeyAppServerManagerHosted = true;
+  runtime.context.__codeyAppServerManagers = vm.runInContext("new Map()", runtime.context).set("local", rpc.stub);
+  let imports = 0;
+  runtime.window.__codeyImportCodexAsset = async () => { imports += 1; return {}; };
+  return { ...runtime, calls, imports: () => imports, stub: rpc.stub, breakConnection: rpc.breakConnection };
+}
+
+test("a registered host stub reconciles a completed thread through host RPC", async () => {
+  const { handlers } = hostedReconcileHandlers();
+  const runtime = loadRegisteredHostStubInjection(handlers);
+  const controller = await runtime.window.__codeyLoadCodexSessionController({ feature: "reconcile" });
+  assert.equal(controller.manager, runtime.stub);
+  assert.equal(await runHostedReconcile(runtime), true);
+  const names = runtime.calls.map(([name]) => name);
+  assert.ok(names.includes("unsubscribeInactiveConversation") && names.includes("resumeConversation"));
+  assert.equal(runtime.imports(), 0);
+});
+
+test("a registered host stub deletes turns by rewriting the record and restarting Codex", async () => {
+  const { handlers } = hostedDeletionHandlers();
+  const runtime = loadRegisteredHostStubInjection(handlers, {
+    turnIds: ["turn-1", "turn-2"],
+    selectedTurnIds: ["turn-1"],
+    bridgeHandler: async (path) => (path === "/session/delete-messages" ? { status: "ok", deleted: 1 } : { status: "ok" }),
+  });
+  runtime.setSessionId("session-1");
+  await runtime.window.__codeyDeleteSelectedMessages();
+  assert.deepEqual(runtime.alerts, []);
+  assert.match(runtime.confirmations.at(-1), /Codex 将重启/);
+  const persist = runtime.bridgeCalls.find(({ path }) => path === "/session/delete-messages");
+  assert.deepEqual({ ...persist.payload, messageIds: [...persist.payload.messageIds] }, {
+    sessionId: "session-1", messageIds: ["turn-1"], restartCodex: true,
+  });
+  // No unsubscribe, eviction or resume: the restart reloads the rewritten record.
+  assert.deepEqual(runtime.calls.map(([name]) => name), ["getThreadExecutionState", "getStreamRole"]);
+  assert.equal(runtime.getTurnRow(0).classList.contains("codey-message-selected"), false);
+  // Until Codex restarts, the deleted row stays hidden instead of reappearing.
+  assert.equal(runtime.getTurnRow(0).dataset.codeyHardDeleted, "true");
+  assert.equal(runtime.getTurnRow(1).dataset.codeyHardDeleted, undefined);
+  assert.equal(runtime.getReloadCount(), 0);
+});
+
+test("a reinjected script rebuilds a cached host controller that lacks deletion", async () => {
+  const { handlers } = hostedDeletionHandlers();
+  const runtime = loadRegisteredHostStubInjection(handlers);
+  runtime.context.__codeyAppServerManagers.clear();
+  runtime.window.__codeyCodexSessionController = { kind: "manager", manager: runtime.stub, prepareMessageDeletion: null };
+  const controller = await runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" });
+  assert.equal(controller.manager, runtime.stub);
+  assert.equal(typeof controller.prepareMessageDeletion, "function");
+});
+
+test("a broken registered host stub is not reused", async () => {
+  const runtime = loadRegisteredHostStubInjection({ refreshRecentConversations: () => {} });
+  assert.equal((await runtime.window.__codeyLoadCodexSessionController({ feature: "refresh" })).manager, runtime.stub);
+  runtime.breakConnection();
+  assert.equal(runtime.window.__codeyCodexSessionController, null);
+  await assert.rejects(
+    runtime.window.__codeyLoadCodexSessionController({ feature: "refresh" }),
+    { code: "codey_capability_unavailable" },
+  );
+});
