@@ -17,6 +17,7 @@ use tokio::process::Child;
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock, oneshot};
 
+use crate::account_partition_patch;
 use crate::cdp;
 use crate::codex_config::{
     ConfiguredModelCatalog, RuntimeRouterConfigOptions, apply_runtime_router_config, codex_home,
@@ -794,6 +795,38 @@ type PetSlimTaskResult =
 async fn configure_startup_pet(home: &std::path::Path, slim_codex_pet: bool) -> PetSlimTaskResult {
     let pet_home = home.to_path_buf();
     tokio::task::spawn_blocking(move || pet_slim_patch::configure(&pet_home, slim_codex_pet)).await
+}
+
+/// 旧 Codex 已在存储准备阶段停止，这里改写全局状态不会被它退出时的写入覆盖。
+async fn merge_startup_account_partition(home: &std::path::Path) {
+    let codex_home = home.to_path_buf();
+    let backup_dir = codey_runtime_core::paths::default_app_state_dir();
+    let result = tokio::task::spawn_blocking(move || {
+        account_partition_patch::merge(&codex_home, &backup_dir)
+    })
+    .await;
+    let failure = match result {
+        Ok(Ok(account_partition_patch::PartitionMerge::Absent)) => return,
+        Ok(Ok(outcome)) => {
+            let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                "startup.account_partition_merged",
+                serde_json::json!({ "outcome": format!("{outcome:?}") }),
+            );
+            return;
+        }
+        Ok(Err(error)) => format!("{error:#}"),
+        Err(error) => format!("收回 Codex 账号分区的任务异常退出：{error}"),
+    };
+    error_log::record_failure_with_metadata(
+        "patch_failed",
+        "merge_codex_account_partition",
+        failure,
+        error_log::FailureMetadata {
+            stage: Some("startup.account_partition".to_string()),
+            recoverable: Some(true),
+        },
+        serde_json::json!({ "fallback": "continue_startup" }),
+    );
 }
 
 async fn stop_runtime_watcher(
@@ -1625,6 +1658,7 @@ async fn prepare_startup_patches_with_port_selector(
 ) -> Result<StartupPatchState> {
     let debug_port = select_debug_port().context("无法为 Codex 分配本地调试端口")?;
     anyhow::ensure!(debug_port != 0, "无法为 Codex 分配有效的本地调试端口");
+    merge_startup_account_partition(home).await;
     let slim_codex_pet = config.slim_codex_pet;
     let pet_result = configure_startup_pet(home, slim_codex_pet).await;
     match pet_result {

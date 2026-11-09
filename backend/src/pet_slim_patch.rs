@@ -6,7 +6,7 @@ use std::time::SystemTime;
 use anyhow::{Context, Result};
 use serde_json::value::{RawValue, to_raw_value};
 
-const GLOBAL_STATE_FILE: &str = ".codex-global-state.json";
+pub(crate) const GLOBAL_STATE_FILE: &str = ".codex-global-state.json";
 const PET_OPEN_KEY: &str = "electron-avatar-overlay-open";
 /// Codex 设置注册表里的当前宠物，与其他设置一同存放在全局状态中。
 const SELECTED_AVATAR_KEY: &str = "selected-avatar-id";
@@ -87,7 +87,7 @@ fn file_stamp(path: &Path) -> Option<StateFileStamp> {
     })
 }
 
-fn read_state(primary: &Path, backup: &Path) -> Result<BTreeMap<String, Box<RawValue>>> {
+pub(crate) fn read_state(primary: &Path, backup: &Path) -> Result<BTreeMap<String, Box<RawValue>>> {
     match read_state_file(primary) {
         Ok(Some(state)) => Ok(state),
         Ok(None) => read_state_file(backup).map(|state| state.unwrap_or_default()),
