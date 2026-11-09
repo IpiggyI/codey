@@ -212,6 +212,36 @@ test("real request reader clears a stale Fast tier after changing models", async
   assert.equal(await read(scope, "local", "standard-model"), null);
 });
 
+test("Codex 26.1103 inline request reader clears a stale Fast tier after changing models", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const { runInNewContext } = await import("node:vm");
+  const { patch, logs } = await installPatch();
+  const request = await readFile(new URL("./fixtures/codex-service-tier-26.1103.js", import.meta.url), "utf8");
+  const shared = await readFile(new URL("./fixtures/codex-service-tier-shared.js", import.meta.url), "utf8");
+  const native = runInNewContext(`${shared};({DS:p,Pd:d,E_:m,W6:i,uw:s})`);
+  const models = [
+    { model: "fast-model", serviceTiers: [{ id: "priority", name: "Fast" }] },
+    { model: "standard-model", serviceTiers: [] },
+  ];
+  const scope = { get: () => ({ type: "fromConfig" }), query: { setData() {} } };
+  const patched = patch(request);
+  assert.equal(typeof patched, "string");
+  const read = runInNewContext(patched, {
+    u: { ...native, qh: (selection) => selection.serviceTier }, r: native,
+    i: { V: () => ({ sendRequest: async () => ({ data: models }) }) },
+    a: { QN: "selection" }, l: { s: async () => "chatgpt" },
+    s: { Wr: async () => ({ requirements: { featureRequirements: { fast_mode: true } } }), b9: "requirements" },
+    o: { ig: async () => ({ config: { model: "standard-model", service_tier: "priority" } }), Y$: (value) => value },
+    d: { v: { error: (message) => { throw Error(message); } } },
+  });
+  assert.equal(await read(scope, "local", "fast-model", "priority"), "priority");
+  assert.equal(await read(scope, "local", "standard-model", "priority"), null);
+  assert.equal(await read(scope, "local", "standard-model"), null);
+  scope.get = () => ({ type: "custom", serviceTier: "priority" });
+  assert.equal(await read(scope, "local", "standard-model"), null);
+  assert.deepEqual(logs, []);
+});
+
 test("real shared permissions grant null access and preserve explicit account denial", async () => {
   const { readFile } = await import("node:fs/promises");
   const { runInNewContext } = await import("node:vm");

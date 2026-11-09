@@ -335,7 +335,7 @@
     {"label": "completed thread reconciliation", "alternatives": [["getHasInProgressLocalConversation(", "inactiveThreadUnsubscriber.clearConversationStreamOwnership", "getConversationStreamRevision("]]},
     {"label": "model allowlist", "alternatives": [["\"amazonBedrock\"!==", "availableAccessPrograms?.cyber", "useHiddenModels:"], ["useHiddenModels:", "availableModels:", "includeUltraReasoningEffort", "amazonBedrock"]]},
     {"label": "model visibility", "alternatives": [["\"amazonBedrock\"!==", "availableAccessPrograms?.cyber", "useHiddenModels:"], ["useHiddenModels:", "includeUltraReasoningEffort", "amazonBedrock"]]},
-    {"label": "third-party Ultra reasoning", "alternatives": [["includeUltraReasoningEffort:", "isCustomModelProvider:", "modelCatalogPath:", "1186680773"]]},
+    {"label": "third-party Ultra reasoning", "alternatives": [["includeUltraReasoningEffort:", "isCustomModelProvider:", "modelCatalogPath:", "1186680773"], ["includeUltraReasoningEffort:", "isCustomModelProvider:", "teamCatalog:", "1186680773"]]},
     {"label": "service tier access", "alternatives": [["supportsIndependentSpeedModes", "ultrafast_mode"]]},
     {"label": "service tier access state", "alternatives": [["serviceTierAccess:", "isLoading:"]]},
     {"label": "service tier request model validation", "alternatives": [["Failed to read service tier for request"]]},
@@ -651,16 +651,24 @@
     if (
       source.includes("includeUltraReasoningEffort:") &&
       source.includes("isCustomModelProvider:") &&
-      source.includes("modelCatalogPath:") &&
+      (source.includes("modelCatalogPath:") || source.includes("teamCatalog:")) &&
       source.includes("1186680773")
     ) {
       // 第三方 provider 按模型目录显示 Ultra，保留调用方和用户的思考强度设置。
       // 宿主服务资源模块只把同一开关作为参数传入，没有模型目录查询，不在此改写。
       patched = replaceUniqueRendererGate(
         patched,
-        /(\(\{[^{}]*\bincludeUltraReasoningEffort\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\bisCustomModelProvider\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\s*,\s*\{[^{}]*\bget\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\)\s*=>\s*\{[^{}]*\b[$A-Z_a-z][$\w]*\s*=\s*\2\s*&&\s*)(\4\(\s*[$A-Z_a-z][$\w]*(?:\.[$A-Z_a-z][$\w]*)?\s*,\s*(["'`])1186680773\6\s*\))/g,
-        (_match, prefix, _includeUltra, customProvider, _get, gate) =>
-          `${prefix}(${customProvider}||${gate})`,
+        [{
+          pattern: /(\(\{[^{}]*\bincludeUltraReasoningEffort\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\bisCustomModelProvider\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\s*,\s*\{[^{}]*\bget\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\)\s*=>\s*\{[^{}]*\b[$A-Z_a-z][$\w]*\s*=\s*\2\s*&&\s*)(\4\(\s*[$A-Z_a-z][$\w]*(?:\.[$A-Z_a-z][$\w]*)?\s*,\s*(["'`])1186680773\6\s*\))/g,
+          replacement: (_match, prefix, _includeUltra, customProvider, _get, gate) =>
+            `${prefix}(${customProvider}||${gate})`,
+        }, {
+          // Codex 26.1103 从配置推导自定义提供方，并在门控之前声明；只认传给 select 的同一变量。
+          pattern: /(\(\{[^{}]*\bincludeUltraReasoningEffort\s*:\s*([$A-Z_a-z][$\w]*)(?:\s*=\s*![01])?[^{}]*\}\s*,\s*\{[^{}]*\bget\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\)\s*=>\s*\{[\s\S]{0,1500}?[,;{]\s*([$A-Z_a-z][$\w]*)\s*=(?!=)[\s\S]{0,1500}?[,;{]\s*([$A-Z_a-z][$\w]*)\s*=\s*\2\s*&&\s*)(\3\(\s*[$A-Z_a-z][$\w]*(?:\.[$A-Z_a-z][$\w]*)?\s*,\s*(["'`])1186680773\7\s*\))(?=[\s\S]{0,2000}?\bincludeUltraReasoningEffort\s*:\s*\5\s*,\s*isCustomModelProvider\s*:\s*\4\b)/g,
+          replacement: (_match, prefix, _includeUltra, _get, customProvider, _result, gate) =>
+            `${prefix}(${customProvider}||${gate})`,
+        }],
+        undefined,
         "third-party Ultra reasoning",
       );
     }
@@ -689,12 +697,15 @@
       // 原生请求解析器不校验显式档位；复用同一模块的模型查询和原生档位解析。
       patched = replaceUniqueRendererGate(
         patched,
-        /async function ([$A-Z_a-z][$\w]*)\(([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*)\)\{try\{(?<body>[^}]{0,500}[\s\S]{0,1000}?return\(0,(?<tiers>[$A-Z_a-z][$\w]*)\.E_\)\(await (?<models>[$A-Z_a-z][$\w]*)\(\2,\3,\4\?\?(?<config>[$A-Z_a-z][$\w]*)\.model\),\k<config>\.service_tier,[$A-Z_a-z][$\w]*\))\}catch\(([$A-Z_a-z][$\w]*)\)\{return ([\s\S]{0,180}?"Failed to read service tier for request"[\s\S]{0,100}?),null\}\}/g,
+        /async function(?: ([$A-Z_a-z][$\w]*))?\(([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*)\)\{try\{(?<body>[^}]{0,500}[\s\S]{0,1000}?return\(0,(?<tiers>[$A-Z_a-z][$\w]*)\.E_\)\(await (?:(?<models>[$A-Z_a-z][$\w]*)|(?<inlineModels>async function\([$A-Z_a-z][$\w]*,[$A-Z_a-z][$\w]*,[$A-Z_a-z][$\w]*\)\{try\{[\s\S]{0,600}?"Failed to read service tier model"[\s\S]{0,120}?,null\}\}))\(\2,\3,\4\?\?(?<config>[$A-Z_a-z][$\w]*)\.model\),\k<config>\.service_tier,[$A-Z_a-z][$\w]*\))\}catch\(([$A-Z_a-z][$\w]*)\)\{return ([\s\S]{0,180}?"Failed to read service tier for request"[\s\S]{0,100}?),null\}\}/g,
         (match, name, scope, host, model, tier, ...rest) => {
-          const { body, tiers, models, config } = rest.at(-1);
-          const checked = body.replaceAll(`return(0,${tiers}.E_)(`, "return await __codeyRequestTier(")
-            .replace(`__codeyRequestTier(null,${config}.service_tier,`, `__codeyRequestTier(await ${models}(${scope},${host},${model}??${config}.model),${config}.service_tier,`);
-          const validate = `const __codeyRequestTier=async(m,t,a)=>{let v=(0,${tiers}.E_)(m,t,a);return v==null?null:(0,${tiers}.DS)(m??await ${models}(${scope},${host},${model}),v)};`;
+          const { body, tiers, models, inlineModels, config } = rest.at(-1);
+          // Codex 26.1103 把模型查询内联成立即调用的函数；提到同一 try 块开头以便复用。
+          const lookup = models ?? "__codeyModels";
+          const checked = (inlineModels ? body.replace(inlineModels, lookup) : body)
+            .replaceAll(`return(0,${tiers}.E_)(`, "return await __codeyRequestTier(")
+            .replace(`__codeyRequestTier(null,${config}.service_tier,`, `__codeyRequestTier(await ${lookup}(${scope},${host},${model}??${config}.model),${config}.service_tier,`);
+          const validate = `${inlineModels ? `const __codeyModels=${inlineModels};` : ""}const __codeyRequestTier=async(m,t,a)=>{let v=(0,${tiers}.E_)(m,t,a);return v==null?null:(0,${tiers}.DS)(m??await ${lookup}(${scope},${host},${model}),v)};`;
           return match.replace(body, validate + checked);
         },
         "service tier request model validation",

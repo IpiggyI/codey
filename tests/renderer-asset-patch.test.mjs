@@ -88,6 +88,57 @@ test("a mismatched Ultra anchor preserves the source, records failure and skips 
 });
 
 
+const ultraQuery1103Source = await readFile(
+  new URL("./fixtures/codex-ultra-model-query-26.1103.js", import.meta.url), "utf8",
+);
+
+// Codex 26.1103 derives the custom provider flag from the host config instead of an argument.
+function ultraQuery1103(source, { custom, caller, gate, efforts }) {
+  const calls = [];
+  const query = runInNewContext(source, {
+    a: { bo: () => false }, c: { Dj: "hosts" }, C: { o: () => [] },
+    d: { Y$: (config) => config, cc: (config) => config?.custom === true },
+    f: {}, g: { fI: "local" }, i: { a: (options) => options }, j: { pN: "efforts" },
+    m: { dK: "daybreak" }, p: { i: "daybreakSession" }, s: { V: () => ({}) },
+    v: { JW: "gate" }, w: { D: { FIVE_MINUTES: 300000 } }, x: { t: "models" }, y: { I2: "config" },
+  });
+  const result = query({
+    additionalAvailableModels: [], authMethod: "apikey", enabledReasoningEfforts: efforts,
+    hostId: "local", includeUltraReasoningEffort: caller,
+  }, {
+    get: (key, id) => {
+      calls.push([key, id]);
+      if (key === "gate") return gate;
+      if (key === "config") return { data: { config: { custom, model_provider: "provider" } } };
+      if (key === "efforts") return new Set(["high"]);
+      if (key === "hosts") return ["local"];
+      return { availableModels: new Set(), useHiddenModels: false };
+    },
+  });
+  return { selected: result.select({ data: [] }), calls };
+}
+
+test("Codex 26.1103 custom provider Ultra bypasses the official gate", async () => {
+  const { patch, records } = await loadRendererPatch();
+  const patched = patch("app://-/assets/async/870918.5e1155e232.js", ultraQuery1103Source);
+  assert.equal(typeof patched, "string");
+  assert.deepEqual(records, []);
+  for (const caller of [false, true]) {
+    for (const gate of [false, true]) {
+      for (const efforts of [undefined, ["low", "ultra"]]) {
+        const { selected, calls } = ultraQuery1103(patched, { custom: true, caller, gate, efforts });
+        assert.equal(selected.includeUltraReasoningEffort, caller);
+        assert.equal(selected.isCustomModelProvider, true);
+        assert.deepEqual([...selected.enabledReasoningEfforts], efforts ? [...efforts, "persistent"] : ["high"]);
+        assert.equal(calls.some(([key]) => key === "gate"), false);
+      }
+      const options = { custom: false, caller, gate };
+      assert.equal(ultraQuery1103(patched, options).selected.includeUltraReasoningEffort, caller && gate);
+      assert.deepEqual(ultraQuery1103(patched, options).calls, ultraQuery1103(ultraQuery1103Source, options).calls);
+    }
+  }
+});
+
 const nativeModelAccessSource = [
   "const includeUltraReasoningEffort=!0;",
   "function visible({additionalAvailableModels:e,apiKeyDaybreakSupported:t,authMethod:n,availableModels:r,hasConfiguredModelCatalog:i,isCustomModelProvider:a,model:o,useHiddenModels:s}){",
