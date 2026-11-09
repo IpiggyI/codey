@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::value::{RawValue, to_raw_value};
 
-const GLOBAL_STATE_FILE: &str = ".codex-global-state.json";
+pub(crate) const GLOBAL_STATE_FILE: &str = ".codex-global-state.json";
 const PET_OPEN_KEY: &str = "electron-avatar-overlay-open";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,7 +43,7 @@ pub fn configure(codex_home: &Path, slim_enabled: bool) -> Result<PetSlimReport>
     })
 }
 
-fn read_state(primary: &Path, backup: &Path) -> Result<BTreeMap<String, Box<RawValue>>> {
+pub(crate) fn read_state(primary: &Path, backup: &Path) -> Result<BTreeMap<String, Box<RawValue>>> {
     match read_state_file(primary) {
         Ok(Some(state)) => Ok(state),
         Ok(None) => read_state_file(backup).map(|state| state.unwrap_or_default()),
