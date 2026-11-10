@@ -173,6 +173,8 @@ const createEnvironment = (options = {}) => {
     return { status: "ok" };
   };
 
+  const animationFrames = new Map();
+  let nextAnimationFrame = 1;
   const window = {
     __codexSessionDeleteBridge: options.bridgeReady === false ? undefined : bridge,
     innerHeight: 800,
@@ -182,13 +184,19 @@ const createEnvironment = (options = {}) => {
     addEventListener: FakeElementCore.prototype.addEventListener,
     removeEventListener: FakeElementCore.prototype.removeEventListener,
     dispatchEvent: FakeElementCore.prototype.dispatchEvent,
+    requestAnimationFrame: (callback) => {
+      const id = nextAnimationFrame++;
+      animationFrames.set(id, callback);
+      return id;
+    },
+    cancelAnimationFrame: (id) => animationFrames.delete(id),
   };
   if (options.loadSessionController) {
     window.__codeyLoadCodexSessionController = options.loadSessionController;
   }
 
   const testSetTimeout = (callback, delay, ...args) => {
-    options.onTimer?.(delay);
+    options.onTimer?.(delay, () => callback(...args));
     // 缓存锚点重读间隔为 500 ms；fastRetry 让重读立即发生。
     const timer = setTimeout(callback, options.fastRetry && delay === 500 ? 0 : delay, ...args);
     timer.unref?.();
@@ -259,6 +267,12 @@ const createEnvironment = (options = {}) => {
     rerun: () => vm.runInContext(source, context),
     dispose: () => context.window.__codeyConversationStats.dispose(),
     markPreviousVersion: () => { context.window.__codeyConversationStats.version = 0; },
+    animationFrames,
+    runAnimationFrames: () => {
+      const callbacks = [...animationFrames.values()];
+      animationFrames.clear();
+      callbacks.forEach((callback) => callback(0));
+    },
     window,
   };
 };
@@ -332,7 +346,11 @@ const fieldColor = (bar, name) => bar.__codeyCs.fields[name].style.color;
 const rowHidden = (bar, name) => bar.__codeyCs.rows[name].hidden === true;
 const summary = (env, kind = "activity") => env.bar().__codeyCs.buttons[kind];
 const panel = (env, kind = "activity") => env.document.getElementById(`codey-conversation-stats-${kind}`);
-const click = (element) => element.dispatchEvent({ type: "click" });
+const click = (element) => {
+  const event = { type: "click", defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
+  element.dispatchEvent(event);
+  return event;
+};
 const buttonText = (env, kind) => {
   const parts = [];
   const visit = (node) => {
@@ -345,7 +363,9 @@ const buttonText = (env, kind) => {
   return parts.join(" ").replace(/\s+/g, " ").trim();
 };
 const assertExpanded = (env, expanded, kind = "activity") => {
-  assert.equal(summary(env, kind).getAttribute("aria-expanded"), String(expanded));
+  assert.equal(summary(env, kind).getAttribute("data-codey-expanded"), String(expanded));
+  // Codex 的 :has([aria-expanded="true"]) 规则会让该属性每次变化都整页重算样式。
+  assert.equal(summary(env, kind).getAttribute("aria-expanded"), null);
   assert.equal(panel(env, kind).hidden, !expanded);
 };
 // 卡片结构：按显示顺序的行名，不含隐藏行；卡片里没有分节标题。
@@ -461,7 +481,7 @@ test("an unchanged render does not write text, titles, labels, dataset or visibi
       trap(element, "title", `${name}.title`);
     }
     trap(refs.speed, "title", "speed.title");
-    for (const key of ["status", "running", "state"]) trap(bar.dataset, key, `dataset.${key}`);
+    for (const key of ["status", "running", "codeyState"]) trap(bar.dataset, key, `dataset.${key}`);
     trap(bar, "hidden", "bar.hidden");
     for (const [kind, button] of Object.entries(refs.buttons)) {
       const setAttribute = button.setAttribute.bind(button);
@@ -1027,6 +1047,66 @@ test("pointerdown inside details keeps them open, outside closes them", async ()
   }
 });
 
+test("coalesces scroll and resize repositioning into one measurement per frame", async () => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    let entry = { left: 200, top: 700, width: 400, height: 28 };
+    let measurements = 0;
+    summary(env).getBoundingClientRect = () => { measurements += 1; return entry; };
+    panel(env).getBoundingClientRect = () => ({ width: 420, height: 300 });
+    click(summary(env));
+    assert.equal(panel(env).style.left, "190px");
+
+    measurements = 0;
+    entry = { ...entry, left: 300 };
+    for (let index = 0; index < 5; index += 1) {
+      env.document.dispatchEvent({ type: "scroll", target: env.document });
+      env.window.dispatchEvent({ type: "resize" });
+    }
+    assert.equal(measurements, 0, "滚动和缩放事件里不得同步测量布局");
+    assert.equal(env.animationFrames.size, 1);
+    env.runAnimationFrames();
+    assert.equal(measurements, 1);
+    assert.equal(panel(env).style.left, "290px");
+
+    env.document.dispatchEvent({ type: "scroll", target: panel(env) });
+    assert.equal(env.animationFrames.size, 0, "浮层内部滚动不移动入口");
+
+    env.document.dispatchEvent({ type: "scroll", target: env.document });
+    click(summary(env));
+    assertExpanded(env, false);
+    assert.equal(env.animationFrames.size, 0, "收起时取消排队的定位");
+    env.document.dispatchEvent({ type: "scroll", target: env.document });
+    assert.equal(env.animationFrames.size, 0, "收起后滚动不再排队");
+  } finally {
+    env.dispose();
+  }
+});
+
+test("updates an existing single text node in place instead of replacing it", async () => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    const element = env.bar().__codeyCs.speed;
+    const before = element.textContent;
+    const node = { nodeType: 3, nextSibling: null, nodeValue: before };
+    let replacements = 0;
+    Object.defineProperties(element, {
+      firstChild: { configurable: true, get: () => node },
+      textContent: { configurable: true, get: () => node.nodeValue, set: () => { replacements += 1; } },
+    });
+    env.setStats("conversation-1", { ...STATS, lastTurn: { ...LAST_TURN, averageOutputTokensPerSecond: 50 } });
+    env.refresh();
+    await flushTimers(30);
+    assert.notEqual(node.nodeValue, before);
+    assert.match(node.nodeValue, /^50\.0 /u);
+    assert.equal(replacements, 0);
+  } finally {
+    env.dispose();
+  }
+});
+
 test("Escape closes the card and restores focus only when focus was inside the stats bar", async () => {
   const env = createEnvironment();
   try {
@@ -1079,7 +1159,9 @@ test("native popovers switch and close together with their triggers", async () =
   const env = createEnvironment({ popover: true });
   try {
     await flushTimers(30);
-    click(summary(env));
+    // 关联只供无障碍树推导展开状态；原生点击切换必须被阻止，否则会与 setExpanded 互相抵消。
+    assert.equal(summary(env).popoverTargetElement, panel(env));
+    assert.equal(click(summary(env)).defaultPrevented, true);
     assert.equal(panel(env).popoverOpen, true);
     click(summary(env, "tokens"));
     assert.equal(panel(env).popoverOpen, false);
@@ -1953,7 +2035,7 @@ test("uses only the reported session turn count and preserves zero", async () =>
     env.refresh();
     await flushTimers(30);
     assert.equal(metric(env.bar(), "activity"), "0 轮 · — 步");
-    assert.notEqual(env.bar().dataset.state, "empty");
+    assert.notEqual(env.bar().dataset.codeyState, "empty");
   } finally {
     env.dispose();
   }
@@ -2106,6 +2188,72 @@ test("version replacement disposes previous ownership before installing one new 
     assert.equal(env.document.listeners.get("pointerdown").length, 1);
     click(summary(env));
     assertExpanded(env, true);
+  } finally {
+    env.dispose();
+  }
+});
+
+const pollTimers = () => {
+  const timers = [];
+  return {
+    timers,
+    onTimer: (delay, run) => { if (delay >= 1_000) timers.push({ delay, run }); },
+    // 直接触发最近一次排定的轮询，避免测试真实等待数秒。
+    async fireLatest() {
+      const timer = timers.at(-1);
+      timers.length = 0;
+      timer.run();
+      await flushTimers(30);
+      return timers.at(-1)?.delay;
+    },
+  };
+};
+
+test("backs off idle polling while results stay unchanged and resets on change or activity", async () => {
+  const polls = pollTimers();
+  const env = createEnvironment({ onTimer: polls.onTimer, statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    assert.equal(polls.timers.at(-1).delay, 3_000);
+    assert.equal(await polls.fireLatest(), 6_000);
+    assert.equal(await polls.fireLatest(), 12_000);
+    assert.equal(await polls.fireLatest(), 12_000, "idle backoff is capped");
+    env.setStats("conversation-1", { ...STATS, totalTokens: 140_000 });
+    assert.equal(await polls.fireLatest(), 3_000, "changed stats reset the backoff");
+    env.setStats("conversation-1", { ...STATS, lastTurn: { ...LAST_TURN, status: "running" } });
+    assert.equal(await polls.fireLatest(), 1_100);
+    assert.equal(await polls.fireLatest(), 1_100, "a running turn never backs off");
+  } finally {
+    env.dispose();
+  }
+});
+
+test("polls soon after the composer submits and keeps fast polling while the turn starts", async () => {
+  const delays = [];
+  const env = createEnvironment({ onTimer: delay => delays.push(delay), statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    const fetches = () => env.calls.filter(call => call.path === "/session/stats").length;
+    const before = fetches();
+    env.document.dispatchEvent({ type: "keydown", key: "Enter", shiftKey: true, target: env.textarea });
+    env.document.dispatchEvent({ type: "keydown", key: "Enter", isComposing: true, target: env.textarea });
+    env.document.dispatchEvent({ type: "keydown", key: "Enter", target: env.document.body });
+    assert.equal(delays.includes(300), false, "newlines, IME input and keys outside the composer do not poll");
+
+    delays.length = 0;
+    env.document.dispatchEvent({ type: "keydown", key: "Enter", target: env.textarea });
+    assert.deepEqual(delays, [300]);
+    await flushTimers(330);
+    assert.equal(fetches(), before + 1);
+    assert.equal(delays.at(-1), 1_100, "the submit watch window polls at the active rate");
+
+    delays.length = 0;
+    const send = env.scope.appendChild(env.document.createElement("button"));
+    env.document.dispatchEvent({ type: "click", target: send });
+    assert.deepEqual(delays, [300]);
+    delays.length = 0;
+    env.document.dispatchEvent({ type: "click", target: env.bar().querySelector(".codey-cs-tokens-summary") });
+    assert.equal(delays.includes(300), false, "the stats buttons themselves do not count as a submit");
   } finally {
     env.dispose();
   }
