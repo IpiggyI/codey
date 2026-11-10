@@ -52,7 +52,7 @@ function layoutHarness() {
     }, []);
     return jsx("page-probe", { id, active, instance, draft, edit, expanded, expand, result, complete });
   }
-  function render(hidden = false) {
+  function render(hidden = false, active = true) {
     const seen = new Set();
     const cleanup = fiber => { fiber.mounted = false; fiber.hooks.forEach(hook => hook?.cleanup?.()); };
     function visit(node, path) {
@@ -71,9 +71,9 @@ function layoutHarness() {
     }
     // 每次父级更新都生成新的内容元素和 render callback，模拟 App 的实际调用。
     const sections = Object.fromEntries(pages.map(id => [id, ["models", "prompt"].includes(id)
-      ? active => { callbacks.push({ id, active }); return jsx(Page, { id, active }); }
+      ? pageActive => { callbacks.push({ id, active: pageActive }); return jsx(Page, { id, active: pageActive }); }
       : jsx(Page, { id })]));
-    tree = visit(jsx(exports.SettingsLayout, { sections, hidden }), "root");
+    tree = visit(jsx(exports.SettingsLayout, { sections, hidden, active }), "root");
     for (const [address, fiber] of fibers) if (!seen.has(address)) { cleanup(fiber); fibers.delete(address); }
     for (const fiber of fibers.values()) for (const effect of fiber.effects.splice(0)) effect();
   }
@@ -175,4 +175,26 @@ test("sidebar lists this fork's core pages in order with glossary-safe titles", 
     ["skills", "Skill 管理"],
   ]);
   assert.doesNotMatch(source, /线路|Codey 插件/);
+});
+
+test("inactive layouts stop page work without unmounting their children", () => {
+  // 只验证布局仍挂载时的活动状态；整个设置弹窗的关闭与草稿处理由 App 负责。
+  const harness = layoutHarness();
+  harness.select("models");
+  const models = harness.page("models");
+  models.edit("unsaved-route");
+  harness.render(false, false);
+  assert.equal(harness.page("models").active, false);
+  assert.equal(harness.page("models").instance, models.instance);
+  assert.equal(harness.page("models").draft, "unsaved-route");
+  assert.ok(harness.find("section").every(node => node.props.hidden === true));
+  harness.render();
+  assert.equal(harness.page("models").active, true);
+  assert.equal(harness.page("models").instance, models.instance);
+  assert.deepEqual(harness.unmounts, []);
+});
+
+test("App keeps retained pages inactive while the embedded settings modal is hidden", async () => {
+  const app = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+  assert.match(app, /<SettingsLayout\s+active=\{!embedded \|\| modalVisible\}/);
 });

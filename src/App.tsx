@@ -131,6 +131,53 @@ function currentProviderModelState(
   };
 }
 
+function isDraftObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function draftValuesEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => draftValuesEqual(value, right[index]));
+  }
+  if (!isDraftObject(left) || !isDraftObject(right)) return false;
+  const leftKeys = Object.keys(left);
+  return leftKeys.length === Object.keys(right).length &&
+    leftKeys.every((key) => (
+      Object.prototype.hasOwnProperty.call(right, key) && draftValuesEqual(left[key], right[key])
+    ));
+}
+
+// 比较草稿与已保存配置时忽略 settingsRevision 和对象键顺序。
+function configsHaveSameDraftValues(left: Config | null, right: Config | null) {
+  if (!left || !right) return left === right;
+  const { settingsRevision: _leftRevision, ...leftValues } = left;
+  const { settingsRevision: _rightRevision, ...rightValues } = right;
+  return draftValuesEqual(leftValues, rightValues);
+}
+
+// 三方合并：提交之后被改动的字段保留草稿值，其余采用保存结果；数组按整体比较。
+function mergeDraftValue(submitted: unknown, draft: unknown, saved: unknown): unknown {
+  if (draftValuesEqual(submitted, draft)) return saved;
+  if (!isDraftObject(submitted) || !isDraftObject(draft) || !isDraftObject(saved)) return draft;
+  const merged: Record<string, unknown> = {};
+  for (const key of new Set([...Object.keys(submitted), ...Object.keys(draft), ...Object.keys(saved)])) {
+    const value = mergeDraftValue(submitted[key], draft[key], saved[key]);
+    if (value !== undefined) merged[key] = value;
+  }
+  return merged;
+}
+
+function reconcileSavedDraft(submitted: Config, draft: Config | null, saved: Config) {
+  const config = draft
+    ? { ...mergeDraftValue(submitted, draft, saved) as Config, settingsRevision: saved.settingsRevision }
+    : saved;
+  return { config, dirty: !configsHaveSameDraftValues(config, saved) };
+}
+
 export function App({
   embedded = false,
   modalContainer,
@@ -141,6 +188,9 @@ export function App({
   const [config, setConfig] = useState<Config | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const persistedConfigRef = useRef<Config | null>(null);
+  // 最新草稿，供异步结果与函数式更新读取，不受渲染闭包滞后影响。
+  const draftConfigRef = useRef<Config | null>(config);
+  draftConfigRef.current = config;
   const loadGenerationRef = useRef(0);
   // 渠道控制器在运行状态 hook 之后创建，经稳定事件转交。
   const handleStatusResponse = useStableEvent(
@@ -174,6 +224,7 @@ export function App({
     useState<FastContextToolsStatus>(UNKNOWN_FAST_CONTEXT_TOOLS_STATUS);
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const saveInFlightRef = useRef(false);
   const [portalContainer, setPortalContainer] = useState<HTMLElement | null>(
     null,
   );
@@ -198,14 +249,21 @@ export function App({
   const isBusy = busy !== null;
   const setPersistedConfig = useCallback((next: Config) => {
     persistedConfigRef.current = next;
+    draftConfigRef.current = next;
     setConfig(next);
   }, []);
-  const setSubagentOptimization = useCallback((enabled: boolean) => {
-    setConfig((current) =>
-      current ? { ...current, subagentOptimization: enabled } : current,
-    );
-    setDirty(true);
+  const editConfig = useCallback((next: Config) => {
+    draftConfigRef.current = next;
+    setConfig(next);
+    setDirty(!configsHaveSameDraftValues(next, persistedConfigRef.current));
   }, []);
+  const updateDraft = useCallback((update: (current: Config) => Config) => {
+    const current = draftConfigRef.current;
+    if (current) editConfig(update(current));
+  }, [editConfig]);
+  const setSubagentOptimization = useCallback((enabled: boolean) => {
+    updateDraft((current) => ({ ...current, subagentOptimization: enabled }));
+  }, [updateDraft]);
   const runOperation = useCallback(
     async (name: string, action: () => Promise<void>) => {
       if (isBusy) return;
@@ -508,12 +566,8 @@ export function App({
     }
   }
 
-  function editConfig(next: Config) {
-    setConfig(next);
-    setDirty(true);
-  }
-
-  async function persist(next: Config) {
+  // submittedDraft 是发起保存时的草稿；保存期间新增的修改按它为基准保留。
+  async function persist(next: Config, submittedDraft: Config | null = config) {
     const result = await invoke<{
       config: Config;
       providerStatus?: ProviderStatus;
@@ -530,7 +584,7 @@ export function App({
       subagentConfigHotReloadError?: string;
       fastContextToolsStatus?: FastContextToolsStatus;
     }>("save_codey_config", { config: next });
-    if (!applyCommandResult(result)) return null;
+    if (!applyCommandResult(result, (incoming) => adoptCommandConfig(incoming, submittedDraft))) return null;
     setFastContextToolsStatus(
       result.fastContextToolsStatus ?? UNKNOWN_FAST_CONTEXT_TOOLS_STATUS,
     );
@@ -647,17 +701,25 @@ export function App({
     });
   }
 
-  function adoptCommandConfig(incoming: Config) {
+  function adoptCommandConfig(incoming: Config, submittedDraft: Config | null = null) {
     if (isStaleConfig(persistedConfigRef.current, incoming)) return null;
-    setPersistedConfig(incoming);
-    return { dirty: false };
+    if (!submittedDraft) {
+      setPersistedConfig(incoming);
+      return { dirty: false };
+    }
+    const merged = reconcileSavedDraft(submittedDraft, draftConfigRef.current, incoming);
+    persistedConfigRef.current = incoming;
+    draftConfigRef.current = merged.config;
+    setConfig(merged.config);
+    return merged;
   }
 
   function applyCommandResult(
     result: ConfigCommandResult & { currentProviderSnapshot?: CurrentProviderSnapshot | null },
+    adoptConfig: (incoming: Config) => { dirty: boolean } | null = adoptCommandConfig,
   ) {
     if (!applyConfigCommandResult(result, {
-      adoptConfig: adoptCommandConfig, acceptConfigApply, setDirty, setProviderStatus, setModelState, setStatus,
+      adoptConfig, acceptConfigApply, setDirty, setProviderStatus, setModelState, setStatus,
     })) return false;
     if (result.currentProviderSnapshot !== undefined) {
       setCurrentProviderSnapshot(result.currentProviderSnapshot);
@@ -820,39 +882,46 @@ export function App({
   }
 
   async function saveCurrent() {
-    if (!config) return;
-    await runOperation("save", async () => {
-      const result = await persist(config);
-      if (!result) return;
-      if (result.configApply) {
-        setNotice(configApplyNotice(result.configApply));
-        return;
-      }
-      const subagentHotReloaded = Boolean(result.subagentConfigHotReloaded);
-      const subagentHotReloadFailed = Boolean(result.subagentConfigHotReloadError);
-      const subagentConfigRepaired = Boolean(result.subagentConfigRepaired);
-      setNotice({
-        tone:
-          result.restartRequired || subagentHotReloadFailed
-            ? "info"
-            : "success",
-        text: subagentConfigRepaired
-          ? "Codey 设置已保存；已校验并修复子代理运行配置，下一次派生将使用当前角色映射"
-          : subagentHotReloaded
-            ? "Codey 设置已保存；子代理模型和思考强度已实时更新"
-          : subagentHotReloadFailed
-            ? "Codey 设置已保存；子代理配置暂未能热更新，重启 Codex 后生效"
-            : result.restartRequired
-              ? "Codey 设置已保存，启动参数将在重启 Codex 后生效"
-              : "Codey 设置已保存",
+    if (!config || !dirty || saveInFlightRef.current) return;
+    saveInFlightRef.current = true;
+    const submitted = config;
+    try {
+      await runOperation("save", async () => {
+        const result = await persist(submitted);
+        if (!result) return;
+        if (result.configApply) {
+          setNotice(configApplyNotice(result.configApply));
+          return;
+        }
+        const subagentHotReloaded = Boolean(result.subagentConfigHotReloaded);
+        const subagentHotReloadFailed = Boolean(result.subagentConfigHotReloadError);
+        const subagentConfigRepaired = Boolean(result.subagentConfigRepaired);
+        setNotice({
+          tone:
+            result.restartRequired || subagentHotReloadFailed
+              ? "info"
+              : "success",
+          text: subagentConfigRepaired
+            ? "Codey 设置已保存；已校验并修复子代理运行配置，下一次派生将使用当前角色映射"
+            : subagentHotReloaded
+              ? "Codey 设置已保存；子代理模型和思考强度已实时更新"
+            : subagentHotReloadFailed
+              ? "Codey 设置已保存；子代理配置暂未能热更新，重启 Codex 后生效"
+              : result.restartRequired
+                ? "Codey 设置已保存，启动参数将在重启 Codex 后生效"
+                : "Codey 设置已保存",
+        });
       });
-    });
+    } finally {
+      saveInFlightRef.current = false;
+    }
   }
 
   // 恢复上次保存的设置；close 为 false 时控制台保持打开。
   function discardSettings(close = true) {
     if (isBusy) return;
     if (persistedConfigRef.current) {
+      draftConfigRef.current = persistedConfigRef.current;
       setConfig(persistedConfigRef.current);
     }
     setDirty(false);
@@ -1262,6 +1331,8 @@ export function App({
   const waitingForRestart = !restartStatusError && status.running
     && !status.restartInProgress && busy !== "restart" && status.restartRequired === true;
 
+  const saving = busy === "save";
+  const saveButtonText = saving ? "保存中" : dirty ? "保存更改" : "已保存";
   const configHeaderContent = (
     <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-5 max-[760px]:grid-cols-[minmax(0,1fr)_auto_auto] max-[760px]:gap-2.5">
       <div className="flex min-w-0 items-center gap-3 justify-self-start max-[760px]:gap-2">
@@ -1343,22 +1414,21 @@ export function App({
             </Button>
           )}
           <Button
-            aria-label={dirty ? "保存更改" : "已保存"}
+            aria-label={saving ? "正在保存设置" : saveButtonText}
             className="h-8 min-w-[88px] px-3.5 text-xs max-[520px]:min-w-8! max-[520px]:w-8! max-[520px]:px-0!"
             disabled={!dirty || isBusy}
+            loading={saving}
             onPress={handleSaveCurrent}
             size="sm"
             variant={dirty ? "default" : "secondary"}
           >
-            {busy === "save" ? (
-              <LoaderCircle className="animate-spin" aria-hidden="true" />
-            ) : dirty ? (
+            {!saving && (dirty ? (
               <Save aria-hidden="true" />
             ) : (
               <Check aria-hidden="true" />
-            )}
+            ))}
             <span className="max-[520px]:hidden">
-              {dirty ? "保存更改" : "已保存"}
+              {saveButtonText}
             </span>
           </Button>
           {embedded && (
@@ -1458,6 +1528,7 @@ export function App({
       )}
 
       <SettingsLayout
+        active={!embedded || modalVisible}
         sections={{
           overview: (
             <>
@@ -1484,7 +1555,7 @@ export function App({
                   isWindowsClient={status.clientPlatform === "windows"}
                   popupContainer={popupContainer}
                   tooltipContainer={portalContainer}
-                  isBusy={isBusy}
+                  configEditingDisabled={isBusy && busy !== "save"}
                   onConfigChange={handleConfigChange}
                 />
               </div>

@@ -302,7 +302,7 @@ type FeaturePolicyCardProps = {
   isWindowsClient: boolean;
   popupContainer: HTMLElement | null;
   tooltipContainer: HTMLElement | null;
-  isBusy: boolean;
+  configEditingDisabled: boolean;
   onConfigChange: (config: Config) => void;
 };
 
@@ -349,7 +349,7 @@ function FeaturePolicyCardComponent({
   fastContextToolsStatus,
   isMacClient,
   isWindowsClient,
-  isBusy,
+  configEditingDisabled,
   onConfigChange,
 }: FeaturePolicyCardProps) {
   const launchProxy = config.codexLaunchProxy ?? "";
@@ -380,7 +380,7 @@ function FeaturePolicyCardComponent({
   const fastContextToolsSwitch = (
     <Switch
       checked={fastContextToolsEnabled}
-      disabled={isBusy || fastctxStatusBlocksEmbedded}
+      disabled={configEditingDisabled || fastctxStatusBlocksEmbedded}
       onCheckedChange={(checked) =>
         onConfigChange({ ...config, fastContextTools: checked })
       }
@@ -427,7 +427,7 @@ function FeaturePolicyCardComponent({
                   : undefined
             }
             value={launchProxy}
-            disabled={isBusy}
+            disabled={configEditingDisabled}
             placeholder="留空时 Codey 不修改代理设置，例如 http://127.0.0.1:7890"
             spellCheck={false}
             rightSection={
@@ -435,7 +435,7 @@ function FeaturePolicyCardComponent({
                 <button
                   type="button"
                   className="flex h-5 w-5 cursor-pointer items-center justify-center rounded-full text-[var(--codey-muted,#8e8e93)] hover:bg-[rgb(var(--codey-ink-rgb,0,0,0))]/5 hover:text-[var(--codey-text,#1d1d1f)] transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled={isBusy}
+                  disabled={configEditingDisabled}
                   onClick={() => onConfigChange({ ...config, codexLaunchProxy: "" })}
                   aria-label="清空代理设置"
                   title="清空代理设置"
@@ -492,7 +492,7 @@ function FeaturePolicyCardComponent({
                 <div className="feature-card-body gpu-mode-card-body">
                   <fieldset
                     className="gpu-mode-fieldset"
-                    disabled={isBusy}
+                    disabled={configEditingDisabled}
                     aria-describedby="gpu-launch-mode-description"
                   >
                     <legend className="sr-only">Codex GPU 启动模式</legend>
@@ -538,7 +538,7 @@ function FeaturePolicyCardComponent({
                 <strong>精简 Codex 宠物模块</strong>
                 <Switch
                   checked={config.slimCodexPet}
-                  disabled={isBusy}
+                  disabled={configEditingDisabled}
                   onCheckedChange={(checked) =>
                     onConfigChange({ ...config, slimCodexPet: checked })
                   }
@@ -599,7 +599,7 @@ function FeaturePolicyCardComponent({
                 <strong>防御性编程控制</strong>
                 <Switch
                   checked={config.scopeGuard}
-                  disabled={isBusy}
+                  disabled={configEditingDisabled}
                   onCheckedChange={(checked) =>
                     onConfigChange({ ...config, scopeGuard: checked })
                   }
@@ -622,7 +622,7 @@ function FeaturePolicyCardComponent({
                 <strong>Trace 日志写盘保护</strong>
                 <Switch
                   checked={config.disableTraceLogWrites}
-                  disabled={isBusy}
+                  disabled={configEditingDisabled}
                   onCheckedChange={(checked) =>
                     onConfigChange({
                       ...config,
@@ -645,7 +645,7 @@ function FeaturePolicyCardComponent({
                   <strong>Crashpad 磁盘保护</strong>
                   <Switch
                     checked={config.protectCrashpadPending}
-                    disabled={isBusy}
+                    disabled={configEditingDisabled}
                     onCheckedChange={(checked) =>
                       onConfigChange({
                         ...config,
@@ -671,7 +671,7 @@ function FeaturePolicyCardComponent({
                 <strong>屏蔽完全访问安全提示</strong>
                 <Switch
                   checked={config.hideFullAccessWarning}
-                  disabled={isBusy}
+                  disabled={configEditingDisabled}
                   onCheckedChange={(checked) =>
                     onConfigChange({ ...config, hideFullAccessWarning: checked })
                   }
@@ -694,7 +694,7 @@ function FeaturePolicyCardComponent({
                 <strong>额度用尽后仍可发送</strong>
                 <Switch
                   checked={config.quotaUnlockEnabled}
-                  disabled={isBusy}
+                  disabled={configEditingDisabled}
                   onCheckedChange={(checked) =>
                     onConfigChange({ ...config, quotaUnlockEnabled: checked })
                   }

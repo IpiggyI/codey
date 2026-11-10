@@ -31,7 +31,7 @@ function renderFeaturePolicy(config, onConfigChange = () => {}) {
     isWindowsClient: true,
     popupContainer: null,
     tooltipContainer: null,
-    isBusy: false,
+    configEditingDisabled: false,
     onConfigChange,
   });
 }
