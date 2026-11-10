@@ -1084,6 +1084,29 @@ test("coalesces scroll and resize repositioning into one measurement per frame",
   }
 });
 
+test("measures the panel after lifting a stale height limit", async () => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    summary(env).getBoundingClientRect = () => ({ left: 200, top: 300, width: 400, height: 28 });
+    // 浮层实际高度受 max-height 限制：内容 500px，上限多少就渲染多高。
+    panel(env).getBoundingClientRect = () => {
+      const limit = Number.parseFloat(panel(env).style.maxHeight);
+      return { width: 420, height: Number.isFinite(limit) ? Math.min(500, limit) : 500 };
+    };
+    click(summary(env));
+    assert.equal(panel(env).style.top, "12px");
+
+    summary(env).getBoundingClientRect = () => ({ left: 200, top: 700, width: 400, height: 28 });
+    env.window.dispatchEvent({ type: "resize" });
+    env.runAnimationFrames();
+    assert.equal(panel(env).style.maxHeight, "680px");
+    assert.equal(panel(env).style.top, "192px", "应按新上限下的高度贴近入口");
+  } finally {
+    env.dispose();
+  }
+});
+
 test("updates an existing single text node in place instead of replacing it", async () => {
   const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
   try {

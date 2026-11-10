@@ -411,11 +411,12 @@
     const placement = [refs.active, rect.left, rect.top, rect.width, rect.height, width, height].join(":");
     if (onlyIfMoved && refs.placement === placement) return;
     refs.placement = placement;
-    const panelRect = panel.getBoundingClientRect();
     // 气泡贴近入口，鼠标可以直接移入；只覆盖编辑器，不推动页面布局。
     const available = Math.max(80, rect.top - 20);
-    panel.style.left = `${Math.max(12, Math.min(rect.left + (rect.width - panelRect.width) / 2, width - panelRect.width - 12))}px`;
+    // 先更新高度上限再测量：窗口变高时沿用旧上限会把浮层推到入口下方。
     panel.style.maxHeight = `${Math.min(height - 24, available)}px`;
+    const panelRect = panel.getBoundingClientRect();
+    panel.style.left = `${Math.max(12, Math.min(rect.left + (rect.width - panelRect.width) / 2, width - panelRect.width - 12))}px`;
     panel.style.top = `${Math.max(12, rect.top - Math.min(panelRect.height, available) - 8)}px`;
   };
 
