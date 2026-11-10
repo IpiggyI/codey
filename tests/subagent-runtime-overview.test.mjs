@@ -196,7 +196,7 @@ test("运行方式按触发条件分为四组，顺序固定", () => {
     "门禁、钩子与并发",
   ]);
   const text = textContent(tree);
-  for (const needle of ["内容依据：已保存的设置", "保存并重启 Codex 后生效", "下一次派生子代理起生效", "思考强度：这里显示已保存的值", "「低」"]) {
+  for (const needle of ["内容依据：已保存的设置", "两个开关保存并重启 Codex 后生效", "角色启停以及已启用角色的模型和思考强度", "下一次派生子代理起生效", "直接编辑磁盘上的文件不会保留", "思考强度：这里显示已保存的值", "「低」"]) {
     assert.ok(text.includes(needle), needle);
   }
   assert.equal(collectElements(tree, (node) => ["textarea", "input", "select"].includes(node.type)).length, 0, "没有编辑控件");
@@ -227,7 +227,7 @@ test("角色条目分开写明写入位置、模板、启动参数和可折叠�
     const text = textContent(card);
     assert.ok(text.includes(`写入位置：${plan.destination}`), id);
     assert.ok(text.includes(plan.template.path), id);
-    assert.ok(text.includes(plan.template.exists ? "（可编辑）" : "生效后首次启动 Codex 时写到"), id);
+    assert.ok(text.includes(plan.template.exists ? "（每次启动按内置定义重写）" : "生效后首次启动 Codex 时写到"), id);
     assert.ok(text.includes(`agents.${id}.config_file`), id);
     assert.ok(text.includes("启动时可能按模型目录调整"), id);
     if (plan.content) {

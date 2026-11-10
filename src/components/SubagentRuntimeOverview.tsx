@@ -127,14 +127,14 @@ function renderTemplate(template: SubagentRuntimeTemplate | null, channel: Subag
       "模板",
       <>
         <span className={PATH_CLASS}>{template.path}</span>
-        <span className="text-muted">（可编辑）</span>
+        <span className="text-muted">（每次启动按内置定义重写）</span>
       </>,
     );
   }
   return renderField(
     "模板",
     <>
-      <span>内置。生效后首次启动 Codex 时写到下面的位置，之后可在那里编辑：</span>
+      <span>内置。生效后首次启动 Codex 时写到下面的位置，之后每次启动按内置定义重写：</span>
       <span className={`block ${PATH_CLASS}`}>{template.path}</span>
     </>,
   );
@@ -309,7 +309,7 @@ function renderBasis(overview: SubagentRuntimeOverview, context: OverviewContext
           : "内容依据：已保存的设置，与页面当前的设置一致。"}
       </p>
       <p className="m-0">
-        {`生效时机：「${MASTER_SWITCH}」「${SCOPE_GUARD_SWITCH}」两个开关和角色的启用状态，保存并重启 Codex 后生效。已启用角色的模型和思考强度保存后，从下一次派生子代理起生效；Codex 未运行时在下次启动时生效。直接编辑模板文件后，下次启动 Codex 时生效。`}
+        {`生效时机：「${MASTER_SWITCH}」「${SCOPE_GUARD_SWITCH}」两个开关保存并重启 Codex 后生效。角色启停以及已启用角色的模型和思考强度，保存后从下一次派生子代理起生效；Codex 未运行时在下次启动时生效。约束文件每次启动都按内置定义重写，直接编辑磁盘上的文件不会保留。`}
       </p>
       <p className="m-0">
         {`思考强度：这里显示已保存的值。启动时 Codey 会按当时的模型目录再核对一次；所选模型不支持这一档时，改用「${low}」或该模型的默认档位，所以实际值可能不同。`}

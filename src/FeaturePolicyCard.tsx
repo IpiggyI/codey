@@ -267,7 +267,7 @@ export function SubagentPolicyCardComponent({
                 <div className="subagent-callout-text">
                   {subagentModelOptions.length === 0
                     ? "请先在模型管理中为当前 provider 启用模型。"
-                    : "各角色工具权限一致，检索与复核的只读或独立核验边界仅由提示词引导，不强制约束。可从当前 provider 清单中选择模型；失效绑定会标记为待重选，重新选择前不会派生该角色。角色启用状态变更需重启 Codex，模型和思考强度保存后对下次派生生效，正在运行的子代理沿用原配置；实际操作仍受 Codex 原生权限约束。"}
+                    : "各角色工具权限一致，检索与复核的只读或独立核验边界仅由提示词引导，不强制约束。可从当前 provider 清单中选择模型；失效绑定会标记为待重选，重新选择前不会派生该角色。角色启停、模型和思考强度保存后对下次派生生效，正在运行的子代理沿用原配置；实际操作仍受 Codex 原生权限约束。"}
                 </div>
               </div>
             </>
