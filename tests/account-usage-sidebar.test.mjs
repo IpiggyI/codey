@@ -176,7 +176,7 @@ test("mounts weekly and five-hour usage before the sidebar footer's last child",
   assert.doesNotMatch(summaryHtml, /重置|codey-usage-meter|codey-usage-border-progress|余额|>42</);
   assert.doesNotMatch(usage.innerHTML, /已用|detail-value">剩余/);
   assert.match(usage.innerHTML, /Credits 余额[\s\S]*?42/);
-  assert.equal(usage.dataset.state, "ready");
+  assert.equal(usage.dataset.codeyState, "ready");
   assert.equal(usage.dataset.windowCount, "2");
   assert.ok(env.delays.includes(250));
   assert.ok(env.delays.includes(8_000));
@@ -185,7 +185,7 @@ test("mounts weekly and five-hour usage before the sidebar footer's last child",
 
   env.setUsage({ status: "error", message: "官方额度接口返回 401" });
   await env.window.__codeyRefreshAccountUsage();
-  assert.equal(usage.dataset.state, "stale");
+  assert.equal(usage.dataset.codeyState, "stale");
   assert.match(usage.innerHTML, /周额度/);
 
   env.setUsage({ status: "disabled" });
@@ -300,7 +300,7 @@ test("shows the error state when the first quota read fails", async () => {
   await env.window.__codeyRefreshAccountUsage();
   const usage = env.document.getElementById("codey-account-usage");
   assert.ok(usage);
-  assert.equal(usage.dataset.state, "error");
+  assert.equal(usage.dataset.codeyState, "error");
   assert.equal(usage.textContent, "额度暂不可用");
 });
 

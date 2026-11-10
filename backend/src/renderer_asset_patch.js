@@ -343,7 +343,8 @@
     {"label": "fast model trigger fallback", "alternatives": [["composer.intelligenceDropdown.model.title", "modelPickerTriggerConfig:", "selectedServiceTierIconKind:"]], "legacy": "旧版模型入口的 Fast 标识；新版入口原生检查配置。"},
     {"label": "app state heartbeat snapshot", "alternatives": [["electron-app-state-snapshot-request"]]},
     {"label": "interaction CPU sampling", "alternatives": [["activeInteractions=new Map", "beginCpuSampling"]]},
-    {"label": "interaction heartbeat", "alternatives": [["activeInteractions=new Map", "beginCpuSampling"]]}
+    {"label": "interaction heartbeat", "alternatives": [["activeInteractions=new Map", "beginCpuSampling"]]},
+    {"label": "stylesheet open state", "alternatives": [[":has([data-state=open])"], [":has(:is(button[data-state=open]))"], [":has([aria-expanded=true],[data-state=open])"]]}
   ]/*end-codey-renderer-patch-items*/;
   const rendererPatchAnchors = /*codey-renderer-patch-anchors*/[
     "inactiveThreadUnsubscriber.clearConversationStreamOwnership",
@@ -366,14 +367,27 @@
     "useHiddenModels:",
     "modelPickerTriggerConfig:",
     "Failed to read service tier for request",
-    "maybe_resume_owner_discovery_failed"
+    "maybe_resume_owner_discovery_failed",
+    ":has([data-state=open])",
+    ":has(:is(button[data-state=open]))",
+    ":has([aria-expanded=true],[data-state=open])"
   ]/*end-codey-renderer-patch-anchors*/;
   if (rendererPatchItems.some((item) => item.alternatives.some((literals) =>
     !literals.some((literal) => rendererPatchAnchors.includes(literal))))) {
     throw new Error("页面资源补丁逐项定义与预筛字面量不一致");
   }
+  const petOnlyPatchAnchors = new Set([
+    "codex-avatar",
+    "codex-pet-assets",
+    "avatar-mascot-button",
+    "use-avatar-options",
+    "shouldPrewarmAvatarOverlay:",
+  ]);
+  const activeRendererPatchAnchors = disablePet
+    ? rendererPatchAnchors
+    : rendererPatchAnchors.filter((anchor) => !petOnlyPatchAnchors.has(anchor));
   const patchCodexRendererAsset = (source) => {
-    if (!rendererPatchAnchors.some((anchor) => source.includes(anchor))) return source;
+    if (!activeRendererPatchAnchors.some((anchor) => source.includes(anchor))) return source;
     let patched = source;
     let nativeCustomProviderModelAccess = false;
     if (!source.includes("/*codey-app-server-manager-registry*/")
@@ -763,6 +777,53 @@
     }
     return patched;
   };
+  // Codex 样式表中的 :has([data-state=open]) 等规则会让 data-state 进入 Blink
+  // RuleFeatureSet 的 :has() 失效集，悬停侧栏行切换提示气泡 data-state 时触发
+  // 整页样式重算。改写为普通属性选择器 [data-codey-open-within]，由注入脚本仅在
+  // 出现 data-state="open" 时同步到容器。
+  const openStateCssPatchedMarker = "--codey-css-open-state-has-patched";
+  const openStateCssAriaAndDataStateHasPattern =
+    /:has\(\s*\[\s*aria-expanded\s*=\s*(?:"true"|'true'|true)\s*\]\s*,\s*\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\]\s*\)/g;
+  const openStateCssDataStateHasPattern =
+    /:has\(\s*(?::is\(\s*)?(?:>\s*)?(?:button)?\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\]\s*\)?\s*\)/g;
+  const patchCodexRendererCssAsset = (source) => {
+    if (
+      source.includes(openStateCssPatchedMarker) ||
+      (
+        !source.includes(":has([data-state=open])") &&
+        !source.includes(":has(:is(button[data-state=open]))") &&
+        !source.includes(":has([aria-expanded=true],[data-state=open])") &&
+        !source.includes("data-state")
+      )
+    ) {
+      return source;
+    }
+    const patched = source
+      .replace(
+        openStateCssAriaAndDataStateHasPattern,
+        ":is(:has([aria-expanded=true]),[data-codey-open-within])",
+      )
+      .replace(openStateCssDataStateHasPattern, "[data-codey-open-within]");
+    if (patched === source) return source;
+    return `${patched}\n:root{${openStateCssPatchedMarker}:1}\n`;
+  };
+  const isCodexRendererCssAssetUrl = (requestUrl) => {
+    try {
+      const url = new URL(requestUrl);
+      if (url.protocol !== "app:") return false;
+      const match = /^\/assets\/(?:async\/)?([a-z0-9_~.-]+)\.css$/i.exec(
+        url.pathname,
+      );
+      if (!match) return false;
+      const stem = match[1];
+      if (!stem || stem.startsWith(".")) return false;
+      return stem
+        .split(/[-~.]/)
+        .some((segment) => /^[a-f0-9]{8,32}$/i.test(segment));
+    } catch {
+      return false;
+    }
+  };
   const isCodexRendererAssetUrl = (requestUrl) => {
     try {
       const url = new URL(requestUrl);
@@ -774,6 +835,7 @@
             url.pathname,
           ) ||
           /^\/assets\/(?:async\/)?\d{1,10}\.[a-f0-9]{8,32}\.js$/i.test(url.pathname) ||
+          isCodexRendererCssAssetUrl(requestUrl) ||
           (
             disablePet &&
             /\/(?:(?:appearance-settings|pet-settings|pets-settings|app-runtime)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
@@ -797,7 +859,9 @@
       const previousRendererPatchFailures = activeRendererPatchFailures;
       activeRendererPatchFailures = rendererPatchFailuresForSource(source);
       try {
-        patched = patchCodexRendererAsset(source);
+        patched = isCodexRendererCssAssetUrl(requestUrl)
+          ? patchCodexRendererCssAsset(source)
+          : patchCodexRendererAsset(source);
       } catch (error) {
         // 渲染器压缩代码会随版本变化。可选界面补丁失败时放行原响应，
         // 避免模块请求失败导致启动页停留。

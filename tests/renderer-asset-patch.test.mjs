@@ -201,6 +201,8 @@ test("every renderer patch label has anchors covered by the unchanged asset pref
   const anchors = readTable("anchors");
   const labels = [...source.split("const patchCodexRendererAsset =")[1].matchAll(/^\s*"([^"\n]+)",\n\s*\);/gm)]
     .map((match) => match[1]);
+  labels.push("stylesheet open state");
+  assert.match(source, /const patchCodexRendererCssAsset =/);
   assert.deepEqual([...new Set(items.map((item) => item.label))].sort(), [...new Set(labels)].sort());
   assert.equal(new Set(items.map((item) => item.label)).size, items.length);
   for (const item of items) {
