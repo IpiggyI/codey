@@ -21,7 +21,7 @@ import { Badge, Button } from "./ui";
 const MASTER_SWITCH = "Codey 子代理角色与调度增强";
 const SCOPE_GUARD_SWITCH = "防御性编程控制";
 // 内部兼容角色，角色列表里没有它；README 称之为「通用」角色。
-const GENERAL_ROLE: SubagentRuntimeRoleLabel = { id: "default", name: "通用子代理", access: "readOnly" };
+const GENERAL_ROLE: SubagentRuntimeRoleLabel = { id: "default", name: "通用子代理" };
 
 const CHANNEL_LABELS: Record<SubagentRuntimeChannel, string> = {
   file: "写入文件",
@@ -38,7 +38,6 @@ const FORMAT_LABELS: Record<SubagentRuntimeContent["format"], string> = {
 export type SubagentRuntimeRoleLabel = {
   id: SubagentRoleId;
   name: string;
-  access: "readOnly" | "write";
 };
 
 /** 页面上的草稿设置；概览内容来自已保存的设置，两者不同时要标出来。 */
@@ -251,11 +250,6 @@ function renderRole(
     <div key={label.id} className={CARD_CLASS}>
       <div className="flex flex-wrap items-center gap-1.5">
         <strong className="text-xs">{label.name}</strong>
-        {general ? null : (
-          <Badge variant={label.access === "write" ? "warning" : "secondary"}>
-            {label.access === "write" ? "可写" : "只读"}
-          </Badge>
-        )}
         {renderStateBadges(enabled, unsaved, ["已启用", "未启用"])}
         {context.draft.subagentOptimization ? null : <Badge variant="secondary">未生效</Badge>}
         <Badge variant="outline">{CHANNEL_LABELS.file}</Badge>
@@ -330,13 +324,13 @@ function renderGate(overview: SubagentRuntimeOverview, context: OverviewContext,
   return renderGroup(
     "门禁、钩子与并发",
     renderStateBadges(context.draft.subagentOptimization, context.draft.subagentOptimization !== context.saved.subagentOptimization, ["已开启", "未开启"]),
-    `随「${MASTER_SWITCH}」一起开启。子代理工作期间，Codey 用钩子检查每次工具调用和子代理的启动与停止，按门禁规则限制子代理的权限、并发和汇合。`,
+    `随「${MASTER_SWITCH}」一起开启。子代理工作期间，Codey 用钩子检查每次工具调用和子代理的启动与停止，按门禁规则限制子代理的派生、并发和汇合。`,
     <>
       {gate.items.map((item) => renderItem(item, trigger, sharedNote))}
       <div className={CARD_CLASS}>
         <strong className="text-xs">门禁并发上限</strong>
         <p className="m-0 leading-relaxed">
-          {`只有只读子代理时最多同时 ${gate.concurrency.readOnly} 个；有可写子代理时最多同时 ${gate.concurrency.writable} 个。由调用工具前的钩子检查，和「Codex 子代理设置」里每个会话同时运行的子代理上限是两项不同的限制。`}
+          {`子代理最多同时 ${gate.concurrency.limit} 个。由调用工具前的钩子检查，和「Codex 子代理设置」里每个会话同时运行的子代理上限是两项不同的限制。`}
         </p>
       </div>
       <div className={CARD_CLASS}>

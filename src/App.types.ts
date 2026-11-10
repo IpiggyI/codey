@@ -41,11 +41,9 @@ export type PromptOptimizationConfig = {
 };
 
 export type SubagentRoleId =
-  | "codey_quick_scan"
-  | "codey_deep_research"
-  | "codey_visual_analysis"
+  | "codey_explorer"
   | "codey_worker"
-  | "codey_visual_worker"
+  | "codey_reviewer"
   | "default";
 
 export type SubagentRoleConfig = {
@@ -405,7 +403,7 @@ export type SubagentRuntimeOverview = {
   scopeGuard: SubagentRuntimeItem[];
   gate: {
     items: SubagentRuntimeItem[];
-    concurrency: { readOnly: number; writable: number };
+    concurrency: { limit: number };
     rules: {
       source: "file" | "builtin";
       path: string | null;
