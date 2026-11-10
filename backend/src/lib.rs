@@ -277,6 +277,18 @@ fn build_async_runtime() -> Result<tokio::runtime::Runtime> {
 async fn run(lifecycle: Arc<DesktopLifecycle>) -> Result<()> {
     error_log::initialize();
     let state = Arc::new(AppState::default());
+    // 系统证书加载与应用发现、会话维护并行；首次使用共用同一初始化任务。
+    let http_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        if let Err(error) = http_state.http_client().await {
+            error_log::record_failure(
+                "http_client_initialization_failed",
+                "prewarm_shared_http_client",
+                error,
+                serde_json::json!({}),
+            );
+        }
+    });
     if let Err(error) = state.sync_official_accounts_at_startup(codex_config::codex_home()) {
         eprintln!("启动时同步官方账号失败：{error:#}");
     }

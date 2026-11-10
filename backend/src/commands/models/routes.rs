@@ -42,7 +42,7 @@ pub async fn fetch_route_models(
     if sync.snapshot.uses_official_account_auth {
         return Err("官方账号使用官方模型目录，无需同步第三方模型".to_string());
     }
-    let fetched_models = provider_models::fetch(&sync.request, &state.http_client)
+    let fetched_models = provider_models::fetch(&sync.request, state.http_client().await?)
         .await
         .map_err(|error| error.to_string())?;
     let visible_fetched_models = regular_route_models(fetched_models.clone());

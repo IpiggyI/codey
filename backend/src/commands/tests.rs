@@ -2,6 +2,18 @@ use super::*;
 use crate::config::ProviderProfile;
 
 #[tokio::test]
+async fn shared_http_client_is_lazy_and_reused_by_concurrent_callers() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = AppState::with_store(ConfigStore::new(directory.path().join("config.json")));
+    assert!(state.http_client.get().is_none());
+
+    let (first, second) = tokio::join!(state.http_client(), state.http_client());
+    let first = first.unwrap();
+    assert!(std::ptr::eq(first, second.unwrap()));
+    assert!(std::ptr::eq(first, state.http_client().await.unwrap()));
+}
+
+#[tokio::test]
 async fn official_account_export_rejects_a_missing_account() {
     let directory = tempfile::tempdir().unwrap();
     let state = Arc::new(AppState {
