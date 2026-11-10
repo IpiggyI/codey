@@ -26,31 +26,39 @@ pub(super) struct HookStateLock(File);
 
 impl HookStateLock {
     pub(super) fn acquire(state_root: &Path) -> Result<Self> {
-        fs::create_dir_all(state_root)?;
         let path = state_root.join(HOOK_STATE_LOCK_FILE);
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&path)?;
         let started = Instant::now();
+        // 空闲会话目录会被后台清理；锁到已删除的文件时重新创建目录和锁文件。
         loop {
-            match file.try_lock_exclusive() {
-                Ok(()) => return Ok(Self(file)),
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::WouldBlock
-                        || (cfg!(windows) && error.raw_os_error() == Some(33)) =>
-                {
-                    anyhow::ensure!(
-                        started.elapsed() < Duration::from_secs(2),
-                        "获取 Codex 子代理 Hook 状态锁超时：{}",
-                        path.display()
-                    );
-                    thread::sleep(Duration::from_millis(5));
+            fs::create_dir_all(state_root)?;
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(&path)?;
+            loop {
+                match file.try_lock_exclusive() {
+                    Ok(()) => break,
+                    Err(error) if crate::fs_util::file_lock_is_contended(&error) => {
+                        anyhow::ensure!(
+                            started.elapsed() < Duration::from_secs(2),
+                            "获取 Codex 子代理 Hook 状态锁超时：{}",
+                            path.display()
+                        );
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => return Err(error.into()),
                 }
-                Err(error) => return Err(error.into()),
             }
+            if crate::fs_util::locked_file_matches_path(&file, &path) {
+                return Ok(Self(file));
+            }
+            anyhow::ensure!(
+                started.elapsed() < Duration::from_secs(2),
+                "获取 Codex 子代理 Hook 状态锁超时：{}",
+                path.display()
+            );
         }
     }
 }
@@ -522,8 +530,8 @@ pub(super) fn active_agent_count_for_runtime(
     runtime_id: &str,
     session_id: &str,
 ) -> Result<usize> {
-    let marker_hashes = active_marker_hashes_for_runtime(state_root, runtime_id, session_id)?;
-    if let Some((active, bound_agent_hashes)) =
+    let mut marker_hashes = active_marker_hashes_for_runtime(state_root, runtime_id, session_id)?;
+    if let Some((active, bound_agent_hashes, settled_agent_hashes)) =
         crate::subagent_orchestrator::active_reservation_projection(
             state_root,
             runtime_id,
@@ -531,6 +539,12 @@ pub(super) fn active_agent_count_for_runtime(
             current_timestamp_millis(),
         )?
     {
+        for settled_hash in settled_agent_hashes {
+            if marker_hashes.remove(&settled_hash) {
+                let _ =
+                    remove_active_marker_by_hash(state_root, runtime_id, session_id, &settled_hash);
+            }
+        }
         return Ok(active + marker_hashes.difference(&bound_agent_hashes).count());
     }
     Ok(marker_hashes.len())
@@ -643,9 +657,7 @@ pub(super) fn runtime_file_has_prefix(path: &Path, prefix: &str) -> bool {
         .is_some_and(|name| name.starts_with(prefix))
 }
 
-pub(super) fn hash_component(value: &str) -> String {
-    crate::fs_util::sha256_hex(value.as_bytes())
-}
+pub(super) use crate::fs_util::sha256_hex_str as hash_component;
 
 pub(super) fn canonical_json(value: &Value) -> Value {
     match value {

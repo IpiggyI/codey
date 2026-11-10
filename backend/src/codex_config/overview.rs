@@ -12,58 +12,38 @@ pub(crate) fn runtime_overview_items(
     let constraints = codey_home.join(CODEY_CONSTRAINTS_DIR);
     let catalog = crate::subagent_policy::catalog_snapshot_for_config(config);
     let canonical = |model: &str| crate::launcher::runtime_subagent_model(model, &catalog);
-    let enabled_roles = runtime_subagent_roles(
+    let mut enabled_roles = runtime_subagent_roles(
         Some(&config.subagent_roles),
         &config.subagent_model,
         &config.subagent_reasoning_effort,
     );
-    // 未启用的角色也按启用后的样子规划；回退规则与 runtime_subagent_roles 相同。
-    let mut every_role = config.subagent_roles.clone();
-    for selection in every_role.values_mut() {
-        selection.enabled = true;
-    }
-    let mut every_role = runtime_subagent_roles(
-        Some(&every_role),
-        &config.subagent_model,
-        &config.subagent_reasoning_effort,
-    );
-    for selection in every_role.values_mut() {
+    for selection in enabled_roles.values_mut() {
         selection.model = canonical(&selection.model);
     }
-    let fastctx = if config.fast_context_tools && fastctx_server_command().is_ok() {
-        let (source, _) = read_constraint_source(
-            &constraints.join(CODEY_FASTCTX_INSTRUCTIONS_FILE),
-            CODEY_FASTCTX_GUIDANCE,
-        )?;
-        Some(versioned_constraint_contents(
-            source,
-            CODEY_FASTCTX_GUIDANCE,
-            CODEY_FASTCTX_GUIDANCE_VERSIONS,
-        ))
-    } else {
-        None
-    };
+    let registered_roles = SUBAGENT_ROLE_IDS.map(str::to_string);
+    let registration_roles = runtime_registration_roles(
+        &enabled_roles,
+        &registered_roles,
+        &canonical(&config.subagent_model),
+        &config.subagent_reasoning_effort,
+    )?;
+    let fastctx = (config.fast_context_tools && fastctx_server_command().is_ok())
+        .then_some(CODEY_FASTCTX_GUIDANCE);
     let roles = SUBAGENT_ROLE_IDS
         .into_iter()
-        .map(|role| role_entry(&constraints, role, &every_role[role], fastctx.as_deref()))
+        .map(|role| role_entry(&constraints, role, &registration_roles[role], fastctx))
         .collect::<Result<Vec<_>>>()?;
-    // 与启动时提交的策略相同：只含启用的角色，模型已换成运行时名称。
-    let launch_roles = every_role
-        .iter()
-        .filter(|(role, _)| enabled_roles.contains_key(*role))
-        .map(|(role, selection)| (role.clone(), selection.clone()))
-        .collect::<BTreeMap<_, _>>();
     let policy = runtime_policy_item(
         codex_home,
         &constraints,
-        &launch_roles,
-        fastctx.as_deref(),
+        &enabled_roles,
+        &registration_roles,
+        fastctx,
         &catalog,
     );
     Ok(TriggerItems {
         master: master_items(
             &constraints,
-            &enabled_roles,
             &canonical(&config.subagent_model),
             &config.subagent_reasoning_effort,
         )?,
@@ -79,7 +59,6 @@ fn role_entry(
     selection: &SubagentRoleConfig,
     fastctx: Option<&str>,
 ) -> Result<RoleEntry> {
-    // 逐个角色规划：某个角色的模板损坏只影响它自己的条目。
     let single = BTreeMap::from([(role.to_string(), selection.clone())]);
     let source_path = runtime_agent_source_path(constraints, role);
     let mut entry = RoleEntry {
@@ -102,7 +81,12 @@ fn role_entry(
             return Ok(entry);
         }
     };
-    entry.template.exists = plan.source_path.is_some();
+    if let Some(source_path) = plan.source_path {
+        entry.template = Template {
+            exists: source_path.exists(),
+            path: source_path,
+        };
+    }
     entry.destination = plan.registration.config_file().to_path_buf();
     entry.overrides = vec![
         Override::new(
@@ -126,36 +110,12 @@ fn role_entry(
 
 fn master_items(
     constraints: &Path,
-    enabled_roles: &BTreeMap<String, SubagentRoleConfig>,
     default_model: &str,
     default_reasoning_effort: &str,
 ) -> Result<Vec<Item>> {
-    let root_path = constraints.join(CODEY_ROOT_INSTRUCTIONS_FILE);
-    let (root, root_exists) = read_constraint_source(&root_path, SUBAGENT_GUIDANCE)?;
     let collaboration_path = constraints.join(CODEY_COLLABORATION_HINT_FILE);
-    let (collaboration, collaboration_exists) =
-        read_constraint_source(&collaboration_path, ROOT_AGENT_COLLABORATION_USAGE_HINT)?;
-    let mut root_item = Item::new(
-        "root-guidance",
-        "主代理指导",
-        "告诉主代理何时派生子代理、如何写任务和如何验收。追加在 Codex 配置里已有的主代理指令之后；没有启用可写角色时，末尾再追加一段「无可写子代理」提示，下方内容已按已保存的角色计算。",
-        Channel::Override,
-    );
-    root_item.template = Some(Template {
-        path: root_path,
-        exists: root_exists,
-    });
-    root_item.overrides = vec![Override::new(
-        "主代理指令（追加）",
-        "developer_instructions".into(),
-        None,
-    )];
-    root_item.content = Some(Content {
-        reader: Reader::Codex,
-        format: "markdown",
-        text: runtime_root_instructions_for_roles(&root, enabled_roles),
-    });
-
+    let collaboration_exists = collaboration_path.exists();
+    let collaboration = root_agent_collaboration_usage_hint();
     let mut collaboration_item = Item::new(
         "collaboration-hint",
         "协作工具提示",
@@ -201,12 +161,7 @@ fn master_items(
         Channel::Override,
     );
     settings_item.overrides = codex_agent_settings(default_model, default_reasoning_effort)?;
-    Ok(vec![
-        root_item,
-        collaboration_item,
-        mode_item,
-        settings_item,
-    ])
+    Ok(vec![collaboration_item, mode_item, settings_item])
 }
 
 /// 取值来自启动时同一个 `enable_subagent_optimization`，概览不另抄一份常量。
@@ -390,6 +345,7 @@ fn runtime_policy_item(
     codex_home: &Path,
     constraints: &Path,
     roles: &BTreeMap<String, SubagentRoleConfig>,
+    registration_roles: &BTreeMap<String, SubagentRoleConfig>,
     fastctx: Option<&str>,
     catalog: &crate::subagent_policy::SubagentCatalogSnapshot,
 ) -> Item {
@@ -400,13 +356,14 @@ fn runtime_policy_item(
         Channel::File,
     );
     policy.destination = Some(crate::subagent_gate::runtime_subagent_policy_paths(codex_home).0);
-    let contents = plan_runtime_agent_files(constraints, roles, fastctx).and_then(|plans| {
-        crate::subagent_gate::runtime_subagent_policy_bytes(
-            roles,
-            &runtime_agent_plan_hashes(&plans),
-            catalog,
-        )
-    });
+    let contents =
+        plan_runtime_agent_files(constraints, registration_roles, fastctx).and_then(|plans| {
+            crate::subagent_gate::runtime_subagent_policy_bytes(
+                roles,
+                &runtime_agent_plan_hashes(&plans),
+                catalog,
+            )
+        });
     match contents.and_then(|bytes| String::from_utf8(bytes).context("子代理身份记录不是 UTF-8"))
     {
         Ok(text) => {
@@ -424,6 +381,7 @@ fn runtime_policy_item(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::SUBAGENT_ROLE_WORKER;
 
     #[test]
     fn runtime_policy_content_is_the_file_launch_writes() {
@@ -442,14 +400,14 @@ mod tests {
             .unwrap()
             .enabled = false;
         // 与启动器相同：目录快照取自当前设置，而不是测试辅助函数的空快照。
-        apply_isolated_runtime_router_config(
+        let applied = apply_isolated_runtime_router_config(
             &home,
             RouterApplyOptions {
                 model_catalog_path: None,
                 default_model: None,
                 fastctx_command: None,
                 subagent_optimization: true,
-                scope_guard: false,
+                scope_guard: true,
                 subagent_model: &config.subagent_model,
                 subagent_reasoning_effort: &config.subagent_reasoning_effort,
                 subagent_roles: Some(&config.subagent_roles),
@@ -473,6 +431,57 @@ mod tests {
         let content = policy.content.as_ref().unwrap();
         assert_eq!(content.reader, Reader::Codey);
         assert_eq!(content.text.as_bytes(), written);
-        assert!(!content.text.contains(SUBAGENT_ROLE_WORKER));
+        let policy: serde_json::Value = serde_json::from_slice(&written).unwrap();
+        assert!(policy["roles"].get(SUBAGENT_ROLE_WORKER).is_none());
+        for role in &items.roles {
+            assert_eq!(
+                role.content.as_ref().unwrap().text.as_bytes(),
+                fs::read(&role.destination).unwrap()
+            );
+        }
+        for master in &items.master {
+            if let Some(content) = &master.content {
+                let key = &master.overrides[0].key;
+                let entry = applied
+                    .runtime_config_overrides
+                    .iter()
+                    .find(|entry| entry.starts_with(&format!("{key}=")))
+                    .unwrap();
+                let document: DocumentMut = format!("text={}", entry.split_once('=').unwrap().1)
+                    .parse()
+                    .unwrap();
+                assert_eq!(
+                    document["text"].as_str().unwrap().as_bytes(),
+                    content.text.as_bytes()
+                );
+                if let Some(template) = &master.template {
+                    assert_eq!(fs::read(&template.path).unwrap(), content.text.as_bytes());
+                }
+            }
+        }
+        let hooks = applied
+            .runtime_config_overrides
+            .iter()
+            .find(|entry| entry.starts_with("hooks="))
+            .unwrap();
+        assert!(hooks.contains(crate::scope_guard::HOOK_ARGUMENT));
+        assert_eq!(
+            items.scope_guard[0]
+                .content
+                .as_ref()
+                .unwrap()
+                .text
+                .as_bytes(),
+            crate::scope_guard::ROOT_GUIDANCE.as_bytes()
+        );
+        assert_eq!(
+            items.scope_guard[1]
+                .content
+                .as_ref()
+                .unwrap()
+                .text
+                .as_bytes(),
+            crate::scope_guard::CHILD_GUIDANCE.as_bytes()
+        );
     }
 }

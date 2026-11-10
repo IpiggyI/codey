@@ -1894,9 +1894,10 @@ pub(super) struct SubagentHotReloadOutcome {
 }
 
 impl SubagentHotReloadOutcome {
-    fn pending_restart() -> Self {
+    fn pending_restart(error: impl Into<String>) -> Self {
         Self {
             status: SubagentHotReloadStatus::PendingRestart,
+            error: Some(error.into()),
             ..Self::default()
         }
     }
@@ -2036,12 +2037,6 @@ async fn hot_reload_runtime_subagent_config_locked(
         );
     }
 
-    if runtime.subagent_registration_requires_restart(&current_config) {
-        runtime
-            .mark_subagent_config_requires_restart(&current_config)
-            .await;
-        return SubagentHotReloadOutcome::pending_restart();
-    }
     let runtime_config = current_config.clone();
     drop(_config_commit_guard);
     #[cfg(test)]
@@ -2049,12 +2044,12 @@ async fn hot_reload_runtime_subagent_config_locked(
     let result = tokio::task::spawn_blocking(move || {
         #[cfg(test)]
         if let Some(reconcile) = reconcile {
-            return reconcile(&runtime_config).map_err(|error| format!("{error:#}"));
+            return reconcile(&runtime_config);
         }
-        reconcile_runtime_subagent_roles(&runtime_config).map_err(|error| format!("{error:#}"))
+        reconcile_runtime_subagent_roles(&runtime_config)
     })
     .await
-    .map_err(|error| format!("子代理运行时文件更新任务异常退出：{error}"))
+    .map_err(|error| anyhow::anyhow!("子代理运行时文件更新任务异常退出：{error}"))
     .and_then(std::convert::identity);
     match result {
         Ok(report) => {
@@ -2096,6 +2091,12 @@ async fn hot_reload_runtime_subagent_config_locked(
             )
         }
         Err(error) => {
+            if error.is::<crate::codex_config::SubagentRoleRegistrationChanged>() {
+                runtime
+                    .mark_subagent_config_requires_restart(&current_config)
+                    .await;
+                return SubagentHotReloadOutcome::pending_restart(error.to_string());
+            }
             let error = format!("{error:#}");
             error_log::record_failure(
                 "patch_verification_failed",

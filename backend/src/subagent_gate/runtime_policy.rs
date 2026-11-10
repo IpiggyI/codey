@@ -93,16 +93,6 @@ pub(crate) fn commit_runtime_subagent_policy(
     remove_optional_runtime_policy_file(&pending_path)
 }
 
-#[allow(dead_code)]
-pub(crate) fn write_runtime_subagent_policy(
-    home: &Path,
-    roles: &BTreeMap<String, crate::config::SubagentRoleConfig>,
-    runtime_agent_hashes: &BTreeMap<String, String>,
-    catalog: &SubagentCatalogSnapshot,
-) -> Result<()> {
-    commit_runtime_subagent_policy(home, roles, runtime_agent_hashes, catalog)
-}
-
 pub(crate) fn runtime_subagent_policy_matches(
     home: &Path,
     roles: &BTreeMap<String, crate::config::SubagentRoleConfig>,
@@ -136,16 +126,12 @@ pub(super) fn read_optional_runtime_policy_file(path: &Path) -> Result<Option<Ve
         "Codey 子代理运行时策略状态不是可信普通文件：{}",
         path.display()
     );
-    fs::read(path)
+    crate::fs_util::read_bounded(path, 256 * 1024)
         .map(Some)
         .with_context(|| format!("读取 Codey 子代理运行时策略状态失败：{}", path.display()))
 }
 
 fn remove_optional_runtime_policy_file(path: &Path) -> Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error)
-            .with_context(|| format!("清理 Codey 子代理运行时策略状态失败：{}", path.display())),
-    }
+    crate::fs_util::remove_file_if_exists(path)
+        .with_context(|| format!("清理 Codey 子代理运行时策略状态失败：{}", path.display()))
 }

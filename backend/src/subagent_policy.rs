@@ -9,7 +9,7 @@ use crate::config::{
 use crate::model_catalog;
 use crate::model_id;
 #[cfg(test)]
-use crate::subagent::rules::{RoleAccess, RolePolicy};
+use crate::subagent::rules::RolePolicy;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct SubagentCatalogSnapshot {
@@ -266,28 +266,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn role_policies_keep_access_and_visual_capabilities_explicit() {
-        assert_eq!(
-            role_policy(crate::config::SUBAGENT_ROLE_QUICK_SCAN),
-            Some(RolePolicy {
-                access: RoleAccess::ReadOnly,
-                visual: false,
-            })
-        );
-        assert_eq!(
-            role_policy(crate::config::SUBAGENT_ROLE_WORKER),
-            Some(RolePolicy {
-                access: RoleAccess::Write,
-                visual: false,
-            })
-        );
-        assert_eq!(
-            role_policy(crate::config::SUBAGENT_ROLE_VISUAL_WORKER),
-            Some(RolePolicy {
-                access: RoleAccess::Write,
-                visual: true,
-            })
-        );
+    fn all_role_policies_share_workspace_write_and_visual_capabilities() {
+        for role in SUBAGENT_ROLE_IDS {
+            assert_eq!(
+                role_policy(role),
+                Some(RolePolicy {
+                    access: "write".into(),
+                    visual: true,
+                })
+            );
+        }
         assert_eq!(role_policy("unknown"), None);
     }
 
@@ -592,22 +580,22 @@ mod tests {
         config.subagent_model = DEFAULT_SUBAGENT_MODEL.into();
         config.subagent_reasoning_effort = "low".into();
         config.subagent_roles.insert(
-            crate::config::SUBAGENT_ROLE_QUICK_SCAN.into(),
+            crate::config::SUBAGENT_ROLE_EXPLORER.into(),
             crate::config::SubagentRoleConfig::new("gpt-5.6-luna", "low"),
         );
         config.subagent_roles.insert(
-            crate::config::SUBAGENT_ROLE_DEEP_RESEARCH.into(),
+            crate::config::SUBAGENT_ROLE_REVIEWER.into(),
             crate::config::SubagentRoleConfig::new(DEFAULT_SUBAGENT_MODEL, "high"),
         );
 
         reconcile_with_model_state(&mut config, Some(&model_state()));
 
         assert_eq!(
-            config.subagent_roles[crate::config::SUBAGENT_ROLE_QUICK_SCAN],
+            config.subagent_roles[crate::config::SUBAGENT_ROLE_EXPLORER],
             crate::config::SubagentRoleConfig::new("gpt-5.6-luna", "low")
         );
         assert_eq!(
-            config.subagent_roles[crate::config::SUBAGENT_ROLE_DEEP_RESEARCH],
+            config.subagent_roles[crate::config::SUBAGENT_ROLE_REVIEWER],
             crate::config::SubagentRoleConfig::new(DEFAULT_SUBAGENT_MODEL, "high")
         );
         assert_eq!(config.subagent_model, DEFAULT_SUBAGENT_MODEL);
