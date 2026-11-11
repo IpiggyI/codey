@@ -24,7 +24,7 @@
 
 | 侧 | 标签 | 提交 | 日期 |
 |---|---|---|---|
-| 本分叉 | `v1.4.2` | `release: v1.4.2` 提交 | 2026-11-05 |
+| 本分叉 | `v1.4.3` | `release: v1.4.3` 提交 | 2026-11-11 |
 | 上游 | [`v1.5.5`](https://github.com/SuperGness/codey/releases/tag/v1.5.5) | [`2e9f08b8`](https://github.com/SuperGness/codey/commit/2e9f08b8) | 2026-11-10 对照的固定目标，见 [2026-11-10-plan.md](../upstream-sync/2026-11-10-plan.md) |
 | 早期内容锚点 | 上游 `v0.10.7` | `bd03e13` | 上次整段同步 |
 | vendor | 上游 `v1.5.5` | `2e9f08b8` | 2026-11-10 整目录替换，保留本地改动；带入上游 `fbb86cc0`（并行探测 CDP 回环地址）和 `04963a90` 的两行 vendor 改动 |
