@@ -17,6 +17,7 @@ use tokio::process::Child;
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock, oneshot};
 
+use crate::account_partition_patch;
 use crate::cdp;
 use crate::codex_config::{
     ConfiguredModelCatalog, RuntimeRouterConfigOptions, apply_runtime_router_config, codex_home,
@@ -796,6 +797,38 @@ async fn configure_startup_pet(home: &std::path::Path, slim_codex_pet: bool) -> 
     tokio::task::spawn_blocking(move || pet_slim_patch::configure(&pet_home, slim_codex_pet)).await
 }
 
+/// 旧 Codex 已在存储准备阶段停止，这里改写全局状态不会被它退出时的写入覆盖。
+async fn merge_startup_account_partition(home: &std::path::Path) {
+    let codex_home = home.to_path_buf();
+    let backup_dir = codey_runtime_core::paths::default_app_state_dir();
+    let result = tokio::task::spawn_blocking(move || {
+        account_partition_patch::merge(&codex_home, &backup_dir)
+    })
+    .await;
+    let failure = match result {
+        Ok(Ok(account_partition_patch::PartitionMerge::Absent)) => return,
+        Ok(Ok(outcome)) => {
+            let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                "startup.account_partition_merged",
+                serde_json::json!({ "outcome": format!("{outcome:?}") }),
+            );
+            return;
+        }
+        Ok(Err(error)) => format!("{error:#}"),
+        Err(error) => format!("收回 Codex 账号分区的任务异常退出：{error}"),
+    };
+    error_log::record_failure_with_metadata(
+        "patch_failed",
+        "merge_codex_account_partition",
+        failure,
+        error_log::FailureMetadata {
+            stage: Some("startup.account_partition".to_string()),
+            recoverable: Some(true),
+        },
+        serde_json::json!({ "fallback": "continue_startup" }),
+    );
+}
+
 async fn stop_runtime_watcher(
     shutdown: &Mutex<Option<oneshot::Sender<()>>>,
     task: &Mutex<Option<tokio::task::JoinHandle<()>>>,
@@ -1382,12 +1415,14 @@ async fn prepare_startup_storage(
     stage_timings: &mut StartupStageTimings,
 ) -> Result<(StartupStorageState, Option<StartupModelCatalog>)> {
     let started = Instant::now();
+    let mut app_resolved_done = None;
     let mut stop_codex_done = None;
     let mut session_maintenance_done = None;
     let mut model_catalog_done = None;
     let mut storage_guards_done = None;
     let preparation = async {
         let app_dir = resolve_configured_codex_app_dir(config).await?;
+        app_resolved_done = Some(started.elapsed());
         // Session repair must never race a live Codex writer. Stopping the old
         // runtime first also gives SQLite and rollout buffers a chance to flush
         // before any permanent maintenance is applied.
@@ -1435,6 +1470,7 @@ async fn prepare_startup_storage(
     let (preparation, storage_guards) = tokio::join!(preparation, storage_guards);
     // Offsets from the stage start: the branches overlap.
     for (stage, done) in [
+        ("storage.appResolvedMs", app_resolved_done),
         ("storage.stopCodexDoneMs", stop_codex_done),
         ("storage.sessionMaintenanceDoneMs", session_maintenance_done),
         ("storage.modelCatalogDoneMs", model_catalog_done),
@@ -1529,11 +1565,13 @@ fn native_subagent_runtime_config(config: &CodeyConfig) -> CodeyConfig {
 
 #[allow(dead_code)]
 fn reconciled_native_subagent_runtime_config(
-    config: &CodeyConfig,
+    saved_config: &CodeyConfig,
     home: &std::path::Path,
 ) -> CodeyConfig {
-    let mut runtime_config = native_subagent_runtime_config(config);
-    if let Ok(model_state) = crate::commands::native_subagent_model_state(&runtime_config, home) {
+    let mut runtime_config = native_subagent_runtime_config(saved_config);
+    // Read selection state from the original selectors. The runtime copy has
+    // already expanded them once, and its raw ids can also look like aliases.
+    if let Ok(model_state) = crate::commands::native_subagent_model_state(saved_config, home) {
         subagent_policy::reconcile_with_model_state(&mut runtime_config, Some(&model_state));
     }
     runtime_config
@@ -1587,7 +1625,7 @@ async fn prepare_native_runtime_state(
     .map_err(|error| {
         anyhow::Error::new(error).context("应用原生 Provider 运行配置任务异常退出")
     })??;
-    let mut runtime_config = config.clone();
+    let mut runtime_config = reconciled_native_subagent_runtime_config(config, home);
     runtime_config.fast_context_tools = applied.fast_context_tools_active;
     Ok(PreparedProviderState {
         runtime_config,
@@ -1620,6 +1658,7 @@ async fn prepare_startup_patches_with_port_selector(
 ) -> Result<StartupPatchState> {
     let debug_port = select_debug_port().context("无法为 Codex 分配本地调试端口")?;
     anyhow::ensure!(debug_port != 0, "无法为 Codex 分配有效的本地调试端口");
+    merge_startup_account_partition(home).await;
     let slim_codex_pet = config.slim_codex_pet;
     let pet_result = configure_startup_pet(home, slim_codex_pet).await;
     match pet_result {
@@ -1836,17 +1875,6 @@ impl CodeyRuntime {
 
     pub(crate) async fn subagent_restart_config(&self) -> Option<RuntimeSubagentConfig> {
         self.subagent_restart_config.read().await.clone()
-    }
-
-    pub(crate) fn subagent_registration_requires_restart(&self, config: &CodeyConfig) -> bool {
-        let roles = |config: &CodeyConfig| {
-            crate::codex_config::runtime_subagent_roles(
-                Some(&config.subagent_roles),
-                &config.subagent_model,
-                &config.subagent_reasoning_effort,
-            )
-        };
-        !roles(&self.applied_config).keys().eq(roles(config).keys())
     }
 
     pub fn supports_subagent_config_hot_reload(&self, config: &CodeyConfig) -> bool {

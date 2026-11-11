@@ -2,14 +2,14 @@ use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::api::{TokenUsage, TraceContext};
@@ -33,6 +33,7 @@ pub(crate) enum TraceEventKind {
     Completed,
     Failed,
     Recovered,
+    Resumed,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -54,6 +55,12 @@ pub(crate) struct SubagentTraceEvent {
     pub span_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_turn_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_hash: Option<String>,
     pub event: TraceEventKind,
     pub status: ExecutionStatus,
     pub runtime_id_hash: String,
@@ -94,6 +101,9 @@ impl SubagentTraceEvent {
             trace_id: trace.trace_id.clone(),
             span_id: format!("{:016x}", Uuid::new_v4().as_u128() as u64),
             parent_id: trace.parent_id.clone(),
+            root_turn_hash: None,
+            attempt_hash: None,
+            turn_hash: None,
             event,
             status,
             runtime_id_hash: hash_identifier(runtime_id),
@@ -165,31 +175,20 @@ impl<'a> TraceRecorder<'a> {
 }
 
 fn acquire_trace_lock(lock: &std::fs::File, lock_path: &Path, timeout: Duration) -> Result<()> {
-    let started = Instant::now();
-    loop {
-        match lock.try_lock_exclusive() {
-            Ok(()) => return Ok(()),
-            Err(error) if trace_lock_is_contended(&error) => {
-                if started.elapsed() >= timeout {
-                    anyhow::bail!(
-                        "获取子代理 trace 锁超时（{} ms，遥测已丢弃）：{}",
-                        timeout.as_millis(),
-                        lock_path.display()
-                    );
-                }
-                thread::sleep(Duration::from_millis(TRACE_LOCK_RETRY_MILLIS));
-            }
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("锁定子代理 trace 失败：{}", lock_path.display()));
-            }
-        }
-    }
-}
-
-fn trace_lock_is_contended(error: &std::io::Error) -> bool {
-    error.kind() == std::io::ErrorKind::WouldBlock
-        || (cfg!(windows) && error.raw_os_error() == Some(33))
+    crate::fs_util::acquire_exclusive_lock_with_timeout(
+        lock,
+        lock_path,
+        timeout,
+        Duration::from_millis(TRACE_LOCK_RETRY_MILLIS),
+        || {
+            format!(
+                "获取子代理 trace 锁超时（{} ms，遥测已丢弃）：{}",
+                timeout.as_millis(),
+                lock_path.display()
+            )
+        },
+        || format!("锁定子代理 trace 失败：{}", lock_path.display()),
+    )
 }
 
 fn rotate_if_needed(state_root: &Path, path: &Path, incoming_bytes: u64) -> Result<()> {
@@ -240,91 +239,21 @@ fn replace_trace_archive(state_root: &Path, path: &Path, archive: &Path) -> Resu
 }
 
 fn remove_if_present(path: &Path, context: &str) -> Result<()> {
-    match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error).with_context(|| format!("{context}：{}", path.display())),
-    }
+    crate::fs_util::remove_file_if_exists(path)
+        .with_context(|| format!("{context}：{}", path.display()))
 }
 
 pub(crate) fn trace_file(state_root: &Path) -> PathBuf {
     state_root.join(TRACE_FILE)
 }
 
-pub(crate) fn extract_token_usage(value: Option<&Value>) -> Option<TokenUsage> {
-    let value = value?;
-    let mut stack = vec![value];
-    while let Some(value) = stack.pop() {
-        match value {
-            Value::Object(values) => {
-                let input = unsigned_field(
-                    values,
-                    &[
-                        "input_tokens",
-                        "inputTokens",
-                        "prompt_tokens",
-                        "promptTokens",
-                    ],
-                );
-                let output = unsigned_field(
-                    values,
-                    &[
-                        "output_tokens",
-                        "outputTokens",
-                        "completion_tokens",
-                        "completionTokens",
-                    ],
-                );
-                let cached = unsigned_field(values, &["cached_tokens", "cachedTokens"]);
-                let reasoning = unsigned_field(values, &["reasoning_tokens", "reasoningTokens"]);
-                if input.is_some() || output.is_some() || cached.is_some() || reasoning.is_some() {
-                    return Some(TokenUsage {
-                        input_tokens: input.unwrap_or(0),
-                        output_tokens: output.unwrap_or(0),
-                        cached_tokens: cached.unwrap_or(0),
-                        reasoning_tokens: reasoning.unwrap_or(0),
-                    });
-                }
-                stack.extend(values.values());
-            }
-            Value::Array(values) => stack.extend(values),
-            _ => {}
-        }
-    }
-    None
-}
-
-fn unsigned_field(values: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<u64> {
-    keys.iter()
-        .find_map(|key| values.get(*key).and_then(Value::as_u64))
-}
-
 fn hash_identifier(value: &str) -> String {
-    format!("{:x}", Sha256::digest(value.as_bytes()))
+    crate::fs_util::sha256_hex_str(value)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn token_usage_accepts_common_provider_shapes_without_payload_capture() {
-        let usage = extract_token_usage(Some(&json!({
-            "result": {
-                "usage": {
-                    "prompt_tokens": 12,
-                    "completion_tokens": 5,
-                    "cached_tokens": 3,
-                    "reasoning_tokens": 2
-                }
-            }
-        })))
-        .unwrap();
-        assert_eq!(usage.input_tokens, 12);
-        assert_eq!(usage.output_tokens, 5);
-        assert_eq!(usage.input_tokens + usage.output_tokens, 17);
-    }
 
     #[test]
     fn trace_records_only_hashed_runtime_session_task_and_agent_ids() {

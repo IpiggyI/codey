@@ -31,7 +31,7 @@ function renderFeaturePolicy(config, onConfigChange = () => {}) {
     isWindowsClient: true,
     popupContainer: null,
     tooltipContainer: null,
-    isBusy: false,
+    configEditingDisabled: false,
     onConfigChange,
   });
 }
@@ -57,7 +57,7 @@ test("防御性编程控制开关绑定 scopeGuard，并以整份配置保存", 
   }
 });
 
-const ROLE_IDS = ["codey_quick_scan", "codey_deep_research", "codey_visual_analysis", "codey_worker", "codey_visual_worker"];
+const ROLE_IDS = ["codey_explorer", "codey_reviewer", "codey_worker"];
 const ALL_ROLE_IDS = [...ROLE_IDS, "default"];
 const roleConfig = (enabled, model = "gpt-test", reasoningEffort = "high") => ({ enabled, model, reasoningEffort });
 const SAVED_ROLES = Object.fromEntries(ALL_ROLE_IDS.map((id) => [id, roleConfig(id !== "codey_worker")]));
@@ -102,7 +102,7 @@ const OVERVIEW = {
     model: "gpt-test",
     reasoningEffort: "high",
     content: { format: "toml", reader: "codex", text: `name = "${id}"` },
-    error: id === "codey_visual_worker" ? "解析模板失败" : null,
+    error: id === "codey_reviewer" ? "解析模板失败" : null,
   })),
   scopeGuard: [
     item({
@@ -143,7 +143,7 @@ const OVERVIEW = {
         content: { format: "json", reader: "codey", text: "{\n  \"schemaVersion\": 2\n}" },
       }),
     ],
-    concurrency: { readOnly: 4, writable: 1 },
+    concurrency: { limit: 2 },
     rules: {
       source: "builtin",
       path: null,
@@ -196,7 +196,7 @@ test("运行方式按触发条件分为四组，顺序固定", () => {
     "门禁、钩子与并发",
   ]);
   const text = textContent(tree);
-  for (const needle of ["内容依据：已保存的设置", "保存并重启 Codex 后生效", "下一次派生子代理起生效", "思考强度：这里显示已保存的值", "「低」"]) {
+  for (const needle of ["内容依据：已保存的设置", "两个开关保存并重启 Codex 后生效", "角色启停以及已启用角色的模型和思考强度", "下一次派生子代理起生效", "直接编辑磁盘上的文件不会保留", "思考强度：这里显示已保存的值", "「低」"]) {
     assert.ok(text.includes(needle), needle);
   }
   assert.equal(collectElements(tree, (node) => ["textarea", "input", "select"].includes(node.type)).length, 0, "没有编辑控件");
@@ -209,13 +209,13 @@ test("角色列表里的每个角色恰好一条，名称与角色列表一致�
   for (const { name } of [...roles, { name: "通用子代理" }]) {
     assert.equal(roleCard(tree, name).length, 1, name);
   }
-  const worker = roleCard(tree, "代码实施")[0];
+  const worker = roleCard(tree, "开发")[0];
   assert.ok(cardBadges(worker).includes("未启用"));
   assert.ok(textContent(worker).includes("下方是启用后会写入的内容"));
-  const quickScan = roleCard(tree, "快速定位")[0];
-  assert.ok(cardBadges(quickScan).includes("已启用"));
-  assert.ok(!cardBadges(quickScan).includes("未保存"));
-  assert.ok(textContent(roleCard(tree, "视觉实施")[0]).includes("无法生成角色配置：解析模板失败"));
+  const explorer = roleCard(tree, "检索")[0];
+  assert.ok(cardBadges(explorer).includes("已启用"));
+  assert.ok(!cardBadges(explorer).includes("未保存"));
+  assert.ok(textContent(roleCard(tree, "复核")[0]).includes("无法生成角色配置：解析模板失败"));
 });
 
 test("角色条目分开写明写入位置、模板、启动参数和可折叠的内容", () => {
@@ -227,7 +227,7 @@ test("角色条目分开写明写入位置、模板、启动参数和可折叠�
     const text = textContent(card);
     assert.ok(text.includes(`写入位置：${plan.destination}`), id);
     assert.ok(text.includes(plan.template.path), id);
-    assert.ok(text.includes(plan.template.exists ? "（可编辑）" : "生效后首次启动 Codex 时写到"), id);
+    assert.ok(text.includes(plan.template.exists ? "（每次启动按内置定义重写）" : "生效后首次启动 Codex 时写到"), id);
     assert.ok(text.includes(`agents.${id}.config_file`), id);
     assert.ok(text.includes("启动时可能按模型目录调整"), id);
     if (plan.content) {
@@ -258,11 +258,11 @@ test("页面草稿与已保存设置不同时标出未保存，且说明内容�
   const text = textContent(tree);
   assert.ok(text.includes("有未保存的修改"));
   assert.ok(text.includes("标有「未保存」的部分，下方内容仍按已保存的设置显示"));
-  const worker = roleCard(tree, "代码实施")[0];
+  const worker = roleCard(tree, "开发")[0];
   assert.ok(cardBadges(worker).includes("已启用"), "状态取自页面草稿");
   assert.ok(cardBadges(worker).includes("未保存"));
   assert.ok(textContent(worker).includes("下方内容按已保存的设置生成"));
-  assert.ok(!cardBadges(roleCard(tree, "快速定位")[0]).includes("未保存"));
+  assert.ok(!cardBadges(roleCard(tree, "检索")[0]).includes("未保存"));
 
   const synced = textContent(renderPanel({ status: "ready", overview: OVERVIEW }));
   assert.ok(!synced.includes("有未保存的修改"));
@@ -272,13 +272,13 @@ test("页面草稿与已保存设置不同时标出未保存，且说明内容�
 test("总开关未开启时，角色条目说明不会写入", () => {
   const draft = { ...structuredClone(DRAFT), subagentOptimization: false };
   const tree = renderPanel({ status: "ready", overview: OVERVIEW }, { draft });
-  const quickScan = roleCard(tree, "快速定位")[0];
-  assert.ok(cardBadges(quickScan).includes("已启用"), "角色自身状态仍取自草稿");
-  assert.ok(cardBadges(quickScan).includes("未生效"));
-  assert.ok(textContent(quickScan).includes("未开启，启动时不写入任何角色"));
-  const worker = roleCard(tree, "代码实施")[0];
+  const explorer = roleCard(tree, "检索")[0];
+  assert.ok(cardBadges(explorer).includes("已启用"), "角色自身状态仍取自草稿");
+  assert.ok(cardBadges(explorer).includes("未生效"));
+  assert.ok(textContent(explorer).includes("未开启，启动时不写入任何角色"));
+  const worker = roleCard(tree, "开发")[0];
   assert.ok(cardBadges(worker).includes("未启用") && cardBadges(worker).includes("未生效"));
-  assert.ok(!cardBadges(roleCard(renderPanel({ status: "ready", overview: OVERVIEW }), "快速定位")[0]).includes("未生效"));
+  assert.ok(!cardBadges(roleCard(renderPanel({ status: "ready", overview: OVERVIEW }), "检索")[0]).includes("未生效"));
 });
 
 test("整个区块的开关只用页面上的名称", () => {
@@ -289,7 +289,7 @@ test("整个区块的开关只用页面上的名称", () => {
   assert.ok(text.includes("「Codey 子代理角色与调度增强」"));
 });
 
-test("每项写明触发条件和交付方式，门禁区分两种并发上限", () => {
+test("每项写明触发条件和交付方式，门禁显示单一并发上限", () => {
   const tree = renderPanel({ status: "ready", overview: OVERVIEW });
   const byTitle = (title) => cards(tree).find((card) => cardTitle(card) === title);
   const root = byTitle("主代理指导");
@@ -304,9 +304,21 @@ test("每项写明触发条件和交付方式，门禁区分两种并发上限",
   assert.ok(cardBadges(policy).includes("写入文件"));
   assert.ok(textContent(policy).includes("写入位置：/home/u/.codex/codey-subagent-gate-v3/runtime-subagent-policy.json"));
   const limits = textContent(byTitle("门禁并发上限"));
-  assert.ok(limits.includes("最多同时 4 个") && limits.includes("最多同时 1 个"));
+  assert.ok(limits.includes("子代理最多同时 2 个"));
+  assert.ok(!/只读|可写|只有.*子代理时|有可写/.test(limits), "并发上限不再按只读与可写区分");
   assert.ok(limits.includes("每个会话同时运行的子代理上限"));
   assert.ok(textContent(byTitle("门禁规则")).includes("子代理必须给出证据"));
+});
+
+test("运行方式不再出现按角色区分的只读或可写、视觉禁令", () => {
+  const { roles } = overviewSectionProps();
+  const tree = renderPanel({ status: "ready", overview: OVERVIEW });
+  const text = textContent(tree);
+  for (const stray of ["只读", "可写", "视觉"]) {
+    assert.ok(!text.includes(stray), stray);
+  }
+  assert.ok(roles.every((role) => !("access" in role)), "角色标签不带读写属性");
+  assert.equal(cardBadges(roleCard(tree, "检索")[0]).filter((badge) => badge === "只读" || badge === "可写").length, 0);
 });
 
 test("平台不支持时给出提示", () => {
@@ -382,8 +394,8 @@ test("每段原文上方都标明这是按原样显示的原文", () => {
   const root = cards(tree).find((card) => cardTitle(card) === "主代理指导");
   assert.ok(textContent(root).includes("查看发送给 Codex 的原文（Markdown）"));
   assert.ok(textContent(root).includes("以下为通过启动参数发送给 Codex 的原文，按原样显示；其中的用词和角色标识属于原文，不是本页的命名。"));
-  const quickScan = roleCard(tree, "快速定位")[0];
-  assert.ok(textContent(quickScan).includes("以下为写入该文件、由 Codex 读取的原文"));
+  const explorer = roleCard(tree, "检索")[0];
+  assert.ok(textContent(explorer).includes("以下为写入该文件、由 Codex 读取的原文"));
   const scope = cards(tree).find((card) => cardTitle(card) === "主会话规则");
   assert.ok(textContent(scope).includes("以下为钩子发送给 Codex 的原文"));
 });

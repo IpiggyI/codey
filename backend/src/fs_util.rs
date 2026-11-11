@@ -3,16 +3,70 @@ use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use anyhow::Context;
 use sha2::{Digest, Sha256};
 
-#[cfg(any(windows, test))]
 pub(crate) fn remove_file_if_exists(path: &Path) -> std::io::Result<()> {
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
+    }
+}
+
+/// `try_lock_*` 失败是否表示锁被其他进程占用（Windows 的 LockFileEx 以
+/// ERROR_LOCK_VIOLATION 报告，fs2 已按平台封装）。
+pub(crate) fn file_lock_is_contended(error: &std::io::Error) -> bool {
+    error.kind() == std::io::ErrorKind::WouldBlock
+        || error.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+}
+
+/// 在超时范围内重试独占锁，最后一次等待不超过剩余时间。
+pub(crate) fn acquire_exclusive_lock_with_timeout(
+    file: &File,
+    _lock_path: &Path,
+    timeout: Duration,
+    retry: Duration,
+    timeout_msg: impl Fn() -> String,
+    lock_err_msg: impl Fn() -> String,
+) -> anyhow::Result<()> {
+    let started = Instant::now();
+    loop {
+        match fs2::FileExt::try_lock_exclusive(file) {
+            Ok(()) => return Ok(()),
+            Err(error) if file_lock_is_contended(&error) => {
+                let elapsed = started.elapsed();
+                if elapsed >= timeout {
+                    anyhow::bail!(timeout_msg());
+                }
+                std::thread::sleep(retry.min(timeout.saturating_sub(elapsed)));
+            }
+            Err(error) => return Err(error).with_context(&lock_err_msg),
+        }
+    }
+}
+
+/// 加锁后确认路径仍指向被锁的那个文件。空闲状态清理会删除锁文件；若删除发生在
+/// 本进程打开之后、拿到锁之前，锁住的是已脱离目录的旧文件，其他进程会在新建的
+/// 同名文件上同时持锁。返回 false 时调用方应丢弃句柄并重新打开。
+pub(crate) fn locked_file_matches_path(file: &File, path: &Path) -> bool {
+    let Ok(current) = fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        file.metadata()
+            .is_ok_and(|locked| locked.dev() == current.dev() && locked.ino() == current.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows 上已删除但仍被打开的文件处于删除挂起状态，按路径取元数据会失败，
+        // 上面的检查已覆盖该情况。
+        let _ = (file, current);
+        true
     }
 }
 
@@ -64,6 +118,10 @@ pub(crate) fn prune_dirs(root: &Path, keep: usize, sort_key: impl Fn(&Path) -> O
 
 /// 小写十六进制 SHA-256。此前 subagent_gate、subagent_orchestrator、
 /// session_index_cleanup 各有一份逐字节相同的实现。
+pub(crate) fn sha256_hex_str(value: &str) -> String {
+    sha256_hex(value.as_bytes())
+}
+
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }

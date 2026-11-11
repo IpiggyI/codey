@@ -57,7 +57,8 @@ pub(super) async fn invoke(
             let input = string_argument(args, "credential")?;
             let account = oauth::import_credential(
                 &state
-                    .http_client
+                    .http_client()
+                    .await?
                     .current("https://auth.openai.com/oauth/token")
                     .await,
                 &input,
@@ -134,7 +135,8 @@ async fn start_login(state: &Arc<AppState>) -> Result<Value, String> {
     logins.cancel_all().await;
     let session = oauth::start_login(
         state
-            .http_client
+            .http_client()
+            .await?
             .current("https://auth.openai.com/oauth/token")
             .await,
     )
@@ -253,10 +255,10 @@ pub(super) async fn switch_account(
 }
 
 async fn query_usage(state: &Arc<AppState>, args: &Value, home: &Path) -> Result<Value, String> {
+    let client = state.http_client().await?;
     query_usage_with(state, args, home, |auth| async move {
         account_usage::fetch_usage_for_auth(
-            &state
-                .http_client
+            &client
                 .current("https://chatgpt.com/backend-api/wham/usage")
                 .await,
             auth,

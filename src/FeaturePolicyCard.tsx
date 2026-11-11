@@ -50,46 +50,25 @@ const REASONING_EFFORT_LABELS: Record<string, string> = {
 };
 const SUBAGENT_TASK_TYPES = [
   {
-    id: "codey_quick_scan",
-    name: "快速定位",
-    access: "readOnly",
-    description: "默认只读；用于精确位置、重复性检查、低风险事实查找和小范围快速检索。",
+    id: "codey_explorer",
+    name: "检索",
+    description: "只读检索代码、日志和文档，从快速定位到跨目录归纳，深浅由任务决定。",
   },
   {
-    id: "codey_deep_research",
-    name: "深度检索",
-    access: "readOnly",
-    description: "默认只读；用于跨文件、日志、代码和文档的宽范围检索、归纳与架构探索。",
-  },
-  {
-    id: "codey_visual_analysis",
-    name: "视觉分析",
-    access: "readOnly",
-    description: "默认只读；仅用于必须读取截图、页面、GUI、PDF 或渲染结果的视觉证据分析。",
+    id: "codey_reviewer",
+    name: "复核",
+    description: "独立核验已完成的改动，包括差异、针对性测试和界面渲染效果；可按任务运行构建、测试和渲染检查。",
   },
   {
     id: "codey_worker",
-    name: "代码实施",
-    access: "write",
-    description: "默认可写；用于边界清晰、可回滚、可测试的低到中等复杂度非视觉实现。",
-  },
-  {
-    id: "codey_visual_worker",
-    name: "视觉实施",
-    access: "write",
-    description: "默认可写；用于页面、GUI、PDF 或其他依赖视觉证据和渲染验证的实现。",
+    name: "开发",
+    description: "负责前端、后端、数据和脚本等各类实现，改动界面时附渲染核验。",
   },
 ] as const satisfies ReadonlyArray<{
   id: SubagentRoleId;
   name: string;
-  access: "readOnly" | "write";
   description: string;
 }>;
-
-const WRITABLE_SUBAGENT_ROLE_IDS = [
-  "codey_worker",
-  "codey_visual_worker",
-] as const satisfies ReadonlyArray<SubagentRoleId>;
 
 export type SubagentPolicyCardProps = {
   config: Config;
@@ -113,17 +92,6 @@ export function SubagentPolicyCardComponent({
   const enabledRoleCount = SUBAGENT_TASK_TYPES.filter(
     ({ id }) => config.subagentRoles[id]?.enabled !== false,
   ).length;
-  const writableRolesDisabled = WRITABLE_SUBAGENT_ROLE_IDS.every(
-    (role) => config.subagentRoles[role]?.enabled === false,
-  );
-  const enabledReadOnlyRoleNames = SUBAGENT_TASK_TYPES.filter(
-    ({ id, access }) =>
-      access === "readOnly" && config.subagentRoles[id]?.enabled !== false,
-  ).map(({ name }) => name);
-  const writableRolesDisabledMessage =
-    enabledReadOnlyRoleNames.length > 0
-      ? `可写子代理已全部关闭；${enabledReadOnlyRoleNames.join("、")}仍可使用。`
-      : "可写子代理已全部关闭；请先启用至少一个只读角色。";
 
   return (
     <section className="secondary-section subagent-section" aria-labelledby="subagent-title">
@@ -210,11 +178,6 @@ export function SubagentPolicyCardComponent({
                           <Table.Cell>
                             <div className="subagent-role-name">
                               <span>{task.name}</span>
-                              <Badge
-                                variant={task.access === "write" ? "warning" : "secondary"}
-                              >
-                                {task.access === "write" ? "可写" : "只读"}
-                              </Badge>
                               <Tooltip
                                 content={task.description}
                                 position="top"
@@ -304,9 +267,7 @@ export function SubagentPolicyCardComponent({
                 <div className="subagent-callout-text">
                   {subagentModelOptions.length === 0
                     ? "请先在模型管理中为当前 provider 启用模型。"
-                    : writableRolesDisabled
-                      ? `${writableRolesDisabledMessage}角色启用状态变更需重启 Codex，模型和思考强度保存后对下次派生生效。`
-                      : "可从当前 provider 清单中选择模型；失效绑定会标记为待重选，重新选择前不会派生该角色。角色启用状态变更需重启 Codex，模型和思考强度保存后对下次派生生效。角色权限仍受父任务权限模式约束。"}
+                    : "各角色工具权限一致，检索与复核的只读或独立核验边界仅由提示词引导，不强制约束。可从当前 provider 清单中选择模型；失效绑定会标记为待重选，重新选择前不会派生该角色。角色启停、模型和思考强度保存后对下次派生生效，正在运行的子代理沿用原配置；实际操作仍受 Codex 原生权限约束。"}
                 </div>
               </div>
             </>
@@ -317,7 +278,7 @@ export function SubagentPolicyCardComponent({
               </div>
               <div className="feature-disabled-text">
                 <strong>子代理角色与调度增强已关闭</strong>
-                <p>开启后仅在宽范围、可并行或需要专门证据时选择性派生子代理，并提供五类专用角色与汇合门禁。</p>
+                <p>开启后仅在宽范围、可并行或需要专门证据时选择性派生子代理，并提供三类专用角色与汇合门禁。</p>
               </div>
             </div>
           )}
@@ -341,7 +302,7 @@ type FeaturePolicyCardProps = {
   isWindowsClient: boolean;
   popupContainer: HTMLElement | null;
   tooltipContainer: HTMLElement | null;
-  isBusy: boolean;
+  configEditingDisabled: boolean;
   onConfigChange: (config: Config) => void;
 };
 
@@ -388,7 +349,7 @@ function FeaturePolicyCardComponent({
   fastContextToolsStatus,
   isMacClient,
   isWindowsClient,
-  isBusy,
+  configEditingDisabled,
   onConfigChange,
 }: FeaturePolicyCardProps) {
   const launchProxy = config.codexLaunchProxy ?? "";
@@ -419,7 +380,7 @@ function FeaturePolicyCardComponent({
   const fastContextToolsSwitch = (
     <Switch
       checked={fastContextToolsEnabled}
-      disabled={isBusy || fastctxStatusBlocksEmbedded}
+      disabled={configEditingDisabled || fastctxStatusBlocksEmbedded}
       onCheckedChange={(checked) =>
         onConfigChange({ ...config, fastContextTools: checked })
       }
@@ -466,7 +427,7 @@ function FeaturePolicyCardComponent({
                   : undefined
             }
             value={launchProxy}
-            disabled={isBusy}
+            disabled={configEditingDisabled}
             placeholder="留空时 Codey 不修改代理设置，例如 http://127.0.0.1:7890"
             spellCheck={false}
             rightSection={
@@ -474,7 +435,7 @@ function FeaturePolicyCardComponent({
                 <button
                   type="button"
                   className="flex h-5 w-5 cursor-pointer items-center justify-center rounded-full text-[var(--codey-muted,#8e8e93)] hover:bg-[rgb(var(--codey-ink-rgb,0,0,0))]/5 hover:text-[var(--codey-text,#1d1d1f)] transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled={isBusy}
+                  disabled={configEditingDisabled}
                   onClick={() => onConfigChange({ ...config, codexLaunchProxy: "" })}
                   aria-label="清空代理设置"
                   title="清空代理设置"
@@ -531,7 +492,7 @@ function FeaturePolicyCardComponent({
                 <div className="feature-card-body gpu-mode-card-body">
                   <fieldset
                     className="gpu-mode-fieldset"
-                    disabled={isBusy}
+                    disabled={configEditingDisabled}
                     aria-describedby="gpu-launch-mode-description"
                   >
                     <legend className="sr-only">Codex GPU 启动模式</legend>
@@ -577,7 +538,7 @@ function FeaturePolicyCardComponent({
                 <strong>精简 Codex 宠物模块</strong>
                 <Switch
                   checked={config.slimCodexPet}
-                  disabled={isBusy}
+                  disabled={configEditingDisabled}
                   onCheckedChange={(checked) =>
                     onConfigChange({ ...config, slimCodexPet: checked })
                   }
@@ -638,7 +599,7 @@ function FeaturePolicyCardComponent({
                 <strong>防御性编程控制</strong>
                 <Switch
                   checked={config.scopeGuard}
-                  disabled={isBusy}
+                  disabled={configEditingDisabled}
                   onCheckedChange={(checked) =>
                     onConfigChange({ ...config, scopeGuard: checked })
                   }
@@ -661,7 +622,7 @@ function FeaturePolicyCardComponent({
                 <strong>Trace 日志写盘保护</strong>
                 <Switch
                   checked={config.disableTraceLogWrites}
-                  disabled={isBusy}
+                  disabled={configEditingDisabled}
                   onCheckedChange={(checked) =>
                     onConfigChange({
                       ...config,
@@ -684,7 +645,7 @@ function FeaturePolicyCardComponent({
                   <strong>Crashpad 磁盘保护</strong>
                   <Switch
                     checked={config.protectCrashpadPending}
-                    disabled={isBusy}
+                    disabled={configEditingDisabled}
                     onCheckedChange={(checked) =>
                       onConfigChange({
                         ...config,
@@ -710,7 +671,7 @@ function FeaturePolicyCardComponent({
                 <strong>屏蔽完全访问安全提示</strong>
                 <Switch
                   checked={config.hideFullAccessWarning}
-                  disabled={isBusy}
+                  disabled={configEditingDisabled}
                   onCheckedChange={(checked) =>
                     onConfigChange({ ...config, hideFullAccessWarning: checked })
                   }
@@ -733,7 +694,7 @@ function FeaturePolicyCardComponent({
                 <strong>额度用尽后仍可发送</strong>
                 <Switch
                   checked={config.quotaUnlockEnabled}
-                  disabled={isBusy}
+                  disabled={configEditingDisabled}
                   onCheckedChange={(checked) =>
                     onConfigChange({ ...config, quotaUnlockEnabled: checked })
                   }

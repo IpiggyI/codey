@@ -1,14 +1,27 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use serde_json::value::{RawValue, to_raw_value};
 
-const GLOBAL_STATE_FILE: &str = ".codex-global-state.json";
+pub(crate) const GLOBAL_STATE_FILE: &str = ".codex-global-state.json";
 const PET_OPEN_KEY: &str = "electron-avatar-overlay-open";
 /// Codex 设置注册表里的当前宠物，与其他设置一同存放在全局状态中。
 const SELECTED_AVATAR_KEY: &str = "selected-avatar-id";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateFileStamp {
+    len: u64,
+    modified: Option<SystemTime>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalStateStamp {
+    primary: Option<StateFileStamp>,
+    backup: Option<StateFileStamp>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PetSlimReport {
@@ -58,7 +71,23 @@ pub fn selected_avatar_id(codex_home: &Path) -> Result<Option<String>> {
         .filter(|id| !id.is_empty()))
 }
 
-fn read_state(primary: &Path, backup: &Path) -> Result<BTreeMap<String, Box<RawValue>>> {
+/// 全局状态主文件与备份文件的元数据摘要，用于判断选中宠物缓存是否有效。
+pub fn global_state_stamp(codex_home: &Path) -> GlobalStateStamp {
+    GlobalStateStamp {
+        primary: file_stamp(&codex_home.join(GLOBAL_STATE_FILE)),
+        backup: file_stamp(&codex_home.join(format!("{GLOBAL_STATE_FILE}.bak"))),
+    }
+}
+
+fn file_stamp(path: &Path) -> Option<StateFileStamp> {
+    let metadata = fs::metadata(path).ok()?;
+    Some(StateFileStamp {
+        len: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
+pub(crate) fn read_state(primary: &Path, backup: &Path) -> Result<BTreeMap<String, Box<RawValue>>> {
     match read_state_file(primary) {
         Ok(Some(state)) => Ok(state),
         Ok(None) => read_state_file(backup).map(|state| state.unwrap_or_default()),

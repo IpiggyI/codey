@@ -41,11 +41,9 @@ export type PromptOptimizationConfig = {
 };
 
 export type SubagentRoleId =
-  | "codey_quick_scan"
-  | "codey_deep_research"
-  | "codey_visual_analysis"
+  | "codey_explorer"
   | "codey_worker"
-  | "codey_visual_worker"
+  | "codey_reviewer"
   | "default";
 
 export type SubagentRoleConfig = {
@@ -350,7 +348,7 @@ export type CrashpadCleanup = {
 
 export type SubagentRuntimeChannel = "file" | "override" | "hook";
 
-/** 可编辑模板的位置；exists 为 false 时，启动会先用内置内容创建它。 */
+/** 内置模板的写入位置；exists 为 false 时，启动会先用内置内容创建它，之后每次启动按内置定义重写。 */
 export type SubagentRuntimeTemplate = { path: string; exists: boolean };
 
 export type SubagentRuntimeOverride = {
@@ -405,7 +403,7 @@ export type SubagentRuntimeOverview = {
   scopeGuard: SubagentRuntimeItem[];
   gate: {
     items: SubagentRuntimeItem[];
-    concurrency: { readOnly: number; writable: number };
+    concurrency: { limit: number };
     rules: {
       source: "file" | "builtin";
       path: string | null;

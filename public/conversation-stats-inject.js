@@ -4,7 +4,7 @@
 // stats.lastModelRequest 中与通知对上的请求时间为锚点。会话 id 取自可见 composer。
 (() => {
   const PROBE_KEY = "__codeyConversationStats";
-  const VERSION = 2;
+  const VERSION = 3;
   const previous = window[PROBE_KEY];
   if (previous?.installed && (previous.version === VERSION || !previous.dispose)) return;
   previous?.dispose?.();
@@ -36,8 +36,13 @@
     "hidden",
     "aria-hidden",
   ];
+  // 空闲时结果连续不变就逐步放慢（3s → 6s → 12s）；发送消息后立即恢复快速
+  // 轮询一段时间，所以新一轮的开始不依赖空闲间隔。
   const POLL_IDLE_MS = 3_000;
+  const POLL_IDLE_MAX_MS = 12_000;
   const POLL_ACTIVE_MS = 1_100;
+  const SUBMIT_POLL_DELAY_MS = 300;
+  const SUBMIT_WATCH_MS = 15_000;
   const RESCAN_DEBOUNCE_MS = 120;
   const settingsPath = "/settings/get";
   const accountIdentityPath = "/account/identity";
@@ -65,12 +70,16 @@
   let stats = null;
   let pollTimer = 0;
   let rescanTimer = 0;
+  let positionFrame = 0;
   let cacheTimer = 0;
   let fetchInFlight = false;
   let lastFetchOk = false;
   let lastResult = null;
   let sessionGeneration = 0;
   let fetchAttempted = false;
+  let idleStreak = 0;
+  let lastStatsKey = "";
+  let watchUntil = 0;
   let disposed = false;
   let providerId = "";
   // 设置返回前保持 undefined；身份接口带回同名字段时以身份接口为准。
@@ -191,7 +200,7 @@
       ${styleScope} .codey-cs-groups { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 2px 10px; }
       ${styleScope} button { font: inherit; color: inherit; cursor: pointer; }
       ${styleScope} .codey-cs-summary { display: inline-flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px; min-width: 0; max-width: 100%; padding: 4px 9px; border: 0; border-radius: 999px; background: transparent; color: var(--cs-muted); text-align: center; }
-      ${styleScope} .codey-cs-summary:hover, ${styleScope} .codey-cs-summary[aria-expanded="true"] { background: color-mix(in srgb, var(--cs-text) 5%, transparent); color: color-mix(in srgb, var(--cs-text) 72%, transparent); }
+      ${styleScope} .codey-cs-summary:hover, ${styleScope} .codey-cs-summary[data-codey-expanded="true"] { background: color-mix(in srgb, var(--cs-text) 5%, transparent); color: color-mix(in srgb, var(--cs-text) 72%, transparent); }
       ${styleScope} button:focus-visible { outline: 2px solid var(--cs-text); outline-offset: 2px; }
       ${styleScope} .codey-cs-icon { display: inline-block; width: 15px; height: 15px; flex: 0 0 15px; background: currentColor; mask: var(--cs-icon) center / contain no-repeat; }
       ${styleScope} .codey-cs-metric { white-space: nowrap; }
@@ -271,7 +280,9 @@
       for (const [kind, title, fields] of cards) {
         const button = make("button", `codey-cs-summary codey-cs-${kind}-summary`, "", groups);
         button.type = "button";
-        button.setAttribute("aria-expanded", "false");
+        // 展开状态不写 aria-expanded：Codex 的 :has([aria-expanded="true"]) 规则会让
+        // 每次切换触发整页样式重算。读屏的展开状态改由下方 popovertarget 关联推导。
+        button.setAttribute("data-codey-expanded", "false");
         button.setAttribute("aria-controls", `${barId}-${kind}`);
         icon(kind, button);
         if (kind === "activity") {
@@ -295,7 +306,11 @@
         const panel = make("section", "codey-cs-details", "", overlay);
         panel.id = `${barId}-${kind}`;
         panel.hidden = true;
-        if (typeof panel.showPopover === "function") panel.setAttribute("popover", "manual");
+        if (typeof panel.showPopover === "function") {
+          panel.setAttribute("popover", "manual");
+          // 只建立关联让无障碍树随浮层开合报告展开状态；点击的默认切换在下方阻止，开合仍由 setExpanded 控制。
+          button.popoverTargetElement = panel;
+        }
         panel.setAttribute("aria-label", title);
         const heading = make("div", "codey-cs-heading", "", panel);
         icon(kind, heading);
@@ -323,7 +338,8 @@
         button.addEventListener("blur", (event) => { if (!panel.contains(event.relatedTarget)) leave(); });
         panel.addEventListener("pointerenter", () => clearTimeout(refs.closeTimer));
         panel.addEventListener("pointerleave", leave);
-        button.addEventListener("click", () => {
+        button.addEventListener("click", (event) => {
+          event.preventDefault();
           const close = refs.active === kind && refs.pinned;
           setExpanded(!close, false, kind);
           refs.pinned = !close;
@@ -395,15 +411,29 @@
     const placement = [refs.active, rect.left, rect.top, rect.width, rect.height, width, height].join(":");
     if (onlyIfMoved && refs.placement === placement) return;
     refs.placement = placement;
-    const panelRect = panel.getBoundingClientRect();
     // 气泡贴近入口，鼠标可以直接移入；只覆盖编辑器，不推动页面布局。
     const available = Math.max(80, rect.top - 20);
-    panel.style.left = `${Math.max(12, Math.min(rect.left + (rect.width - panelRect.width) / 2, width - panelRect.width - 12))}px`;
+    // 先更新高度上限再测量：窗口变高时沿用旧上限会把浮层推到入口下方。
     panel.style.maxHeight = `${Math.min(height - 24, available)}px`;
+    const panelRect = panel.getBoundingClientRect();
+    panel.style.left = `${Math.max(12, Math.min(rect.left + (rect.width - panelRect.width) / 2, width - panelRect.width - 12))}px`;
     panel.style.top = `${Math.max(12, rect.top - Math.min(panelRect.height, available) - 8)}px`;
   };
 
+  // 滚动和缩放事件可能一帧多次，合并到下一帧测量一次。
+  const schedulePanelPosition = (event) => {
+    if (disposed || !statsElement?.__codeyCs?.active || positionFrame) return;
+    // 浮层内部滚动不会移动入口。
+    if (event?.type === "scroll" && containsStats(event.target)) return;
+    positionFrame = window.requestAnimationFrame(() => {
+      positionFrame = 0;
+      if (!disposed) positionPanel();
+    });
+  };
+
   const setExpanded = (expanded, restoreFocus = false, kind = null) => {
+    if (positionFrame) window.cancelAnimationFrame(positionFrame);
+    positionFrame = 0;
     const refs = statsElement?.__codeyCs;
     if (!refs) return;
     const active = kind || refs.active || "activity";
@@ -418,7 +448,7 @@
       if (visible && panel.hasAttribute("popover") && !panel.matches(":popover-open")) {
         try { panel.showPopover(); } catch { panel.removeAttribute("popover"); }
       }
-      setAttribute(refs.buttons[key], "aria-expanded", String(visible));
+      setAttribute(refs.buttons[key], "data-codey-expanded", String(visible));
     }
     if (expanded) positionPanel();
     else if (restoreFocus) {
@@ -435,6 +465,8 @@
     lastResult = null;
     lastFetchOk = false;
     fetchAttempted = false;
+    idleStreak = 0;
+    lastStatsKey = "";
     setExpanded(false);
   };
 
@@ -522,7 +554,10 @@
   const setText = (element, value) => {
     // 相同 textContent 仍会替换文本节点，触发其他页面观察器。
     if (element.textContent === value) return false;
-    element.textContent = value;
+    // 输入框所在区域内替换文本节点会引发样式重算，只改已有文本节点则不会。
+    const node = element.firstChild;
+    if (node?.nodeType === 3 && !node.nextSibling) node.nodeValue = value;
+    else element.textContent = value;
     contentRevision += 1;
     return true;
   };
@@ -708,7 +743,7 @@
     setAttribute(refs.buttons.tokens, "aria-label", `Token 用量，${scopeLabel} ${refs.total.textContent}，缓存命中 ${rate}，${status}。查看统计详情`);
     setAttribute(refs.buttons.session, "aria-label", `会话，${session.cost ? `费用估算 ${session.cost}，` : ""}${session.contextLabel}。查看会话详情`);
     setValue(bar.dataset, "running", running ? "true" : "false");
-    setValue(bar.dataset, "state", state);
+    setValue(bar.dataset, "codeyState", state);
     // 入口仍可能因侧栏或输入框布局变化而移动；位置和数据都不变时才跳过浮层测量。
     positionPanel(anchor, contentRevision === revision);
   };
@@ -872,8 +907,20 @@
     pollTimer = setTimeout(poll, delay);
   };
 
-  const pollInterval = () => anchorAttempts.has(currentSessionId) ? cacheAnchorRetryMs
-    : stats?.lastTurn?.status === "running" || stats?.inFlight > 0 ? POLL_ACTIVE_MS : POLL_IDLE_MS;
+  const pollInterval = () => {
+    if (anchorAttempts.has(currentSessionId)) return cacheAnchorRetryMs;
+    if (stats?.lastTurn?.status === "running" || stats?.inFlight > 0 || Date.now() < watchUntil) {
+      return POLL_ACTIVE_MS;
+    }
+    return Math.min(POLL_IDLE_MAX_MS, POLL_IDLE_MS * 2 ** Math.min(idleStreak, 2));
+  };
+
+  // 页面重新可见、获得焦点或用户发送消息时，空闲退避作废并尽快刷新。
+  const wake = (delay = 0, watch = false) => {
+    idleStreak = 0;
+    if (watch) watchUntil = Date.now() + SUBMIT_WATCH_MS;
+    schedulePoll(delay);
+  };
 
   const applyTokenUsage = (message) => {
     if (disposed) return false;
@@ -1229,8 +1276,12 @@
         if (result?.status === "ok") {
           lastFetchOk = true;
           stats = result.stats ?? null;
+          const statsKey = JSON.stringify(stats);
+          idleStreak = statsKey === lastStatsKey ? idleStreak + 1 : 0;
+          lastStatsKey = statsKey;
         } else {
           lastFetchOk = false;
+          idleStreak = 0;
         }
         resolveCacheAnchor(requestSessionId, result);
       } catch (error) {
@@ -1238,6 +1289,7 @@
         if (!disposed && requestGeneration === sessionGeneration && completedContext.sessionId === requestSessionId) {
           fetchAttempted = true;
           lastFetchOk = false;
+          idleStreak = 0;
           resolveCacheAnchor(requestSessionId, { status: "failed", message: String(error?.message || error) });
         }
       } finally {
@@ -1360,14 +1412,14 @@
         return;
       }
       renderCacheRemaining();
-      schedulePoll(0);
+      wake();
     });
     listen(window, "focus", () => {
       if (usageError) usageSelection = null;
-      schedulePoll(0);
+      wake();
       void loadAccountIdentity();
     });
-    listen(window, "pageshow", () => schedulePoll(0));
+    listen(window, "pageshow", () => wake());
     listen(window, configChangedEvent, (event) => {
       const nextMinutes = event?.detail?.config?.cacheValidMinutes;
       if (nextMinutes !== undefined) cacheValidMinutes = normalizeCacheValidMinutes(nextMinutes);
@@ -1376,8 +1428,19 @@
       void loadSettings();
       void loadAccountIdentity();
     });
-    listen(window, "resize", () => positionPanel());
-    listen(document, "scroll", () => positionPanel(), true);
+    // 发送入口只看当前输入卡片：Enter 提交或点击卡片内按钮。误判只多一次轮询。
+    const composerHost = () => statsElement?.isConnected ? statsElement.parentElement : null;
+    const inComposer = (target) => Boolean(target && !containsStats(target) && composerHost()?.contains(target));
+    listen(document, "keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing && inComposer(event.target)) {
+        wake(SUBMIT_POLL_DELAY_MS, true);
+      }
+    }, true);
+    listen(document, "click", (event) => {
+      if (inComposer(event.target) && event.target.closest?.("button")) wake(SUBMIT_POLL_DELAY_MS, true);
+    }, true);
+    listen(window, "resize", schedulePanelPosition);
+    listen(document, "scroll", schedulePanelPosition, true);
     listen(document, "pointerdown", (event) => {
       if (statsElement && !containsStats(event.target)) setExpanded(false);
     });
@@ -1410,7 +1473,7 @@
           cacheAnchor: !anchor ? "" : anchor.status === "ok" ? "ok" : `unknown:${anchor.reason}`,
         };
       },
-      refresh: () => schedulePoll(0),
+      refresh: () => wake(),
       applyNotification: (message) => applyTokenUsage(message),
       dispose: () => {
         if (disposed) return;
@@ -1419,6 +1482,8 @@
         clearTimeout(pollTimer);
         clearTimeout(rescanTimer);
         clearTimeout(cacheTimer);
+        if (positionFrame) window.cancelAnimationFrame(positionFrame);
+        positionFrame = 0;
         setExpanded(false);
         releaseNotifications();
         window.__codeyConversationStatsObserver?.disconnect?.();

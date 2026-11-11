@@ -8,6 +8,8 @@ use std::collections::BTreeSet;
 
 use serde_json::{Map, Value};
 
+use super::api::TokenUsage;
+
 const MAX_JSON_ENCODED_RESPONSE_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,12 +32,27 @@ pub(crate) enum TerminalOutcome {
 pub(crate) struct TerminalObservation {
     pub identifier: String,
     pub outcome: TerminalOutcome,
+    pub turn_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct AgentStatusObservation {
     pub identifiers: Vec<String>,
     pub state: AgentState,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct NativeUsageObservation {
+    pub identifier: String,
+    pub turn_id: String,
+    pub state: AgentState,
+    pub usage: TokenUsage,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NativeUsageScope {
+    AgentEntry,
+    ProviderCollection,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -87,6 +104,11 @@ pub(crate) fn object_has_terminal_status(values: &Map<String, Value>) -> bool {
     values
         .iter()
         .any(|(key, value)| is_terminal_field(key) && value_reports_terminal(value))
+        || wait_status_map_entries(values).is_some_and(|entries| {
+            entries
+                .values()
+                .any(|status| terminal_outcome_from_value(status).is_some())
+        })
 }
 
 pub(crate) fn object_reports_terminal(values: &Map<String, Value>) -> bool {
@@ -122,6 +144,127 @@ pub(crate) fn collect_agent_status_observations(
     let decoded = decode_json_encoded_response(value);
     let value = decoded.as_ref().unwrap_or(value);
     collect_agent_status_observations_in_envelope(value, target, 0, true);
+}
+
+/// Reads usage only from a provider-owned agent entry. The entry must carry a
+/// task/agent identity and an explicit turn identifier; arbitrary task output
+/// and batch-level totals are never candidates for child attribution.
+pub(crate) fn collect_native_usage_observations(
+    value: &Value,
+    target: &mut Vec<NativeUsageObservation>,
+) {
+    let decoded = decode_json_encoded_response(value);
+    let value = decoded.as_ref().unwrap_or(value);
+    collect_native_usage_observations_in_envelope(
+        value,
+        target,
+        0,
+        NativeUsageScope::ProviderCollection,
+    );
+}
+
+fn collect_native_usage_observations_in_envelope(
+    value: &Value,
+    target: &mut Vec<NativeUsageObservation>,
+    depth: usize,
+    scope: NativeUsageScope,
+) {
+    if depth > 8 {
+        return;
+    }
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_native_usage_observations_in_envelope(value, target, depth + 1, scope);
+            }
+        }
+        Value::Object(values) => {
+            if scope == NativeUsageScope::AgentEntry {
+                let identifier = values.iter().find_map(|(key, value)| {
+                    matches!(
+                        normalize_identifier(key).as_str(),
+                        "taskname" | "agentname" | "agentpath" | "agentid" | "subagentid"
+                    )
+                    .then(|| value.as_str().map(str::trim))
+                    .flatten()
+                    .filter(|value| !value.is_empty())
+                });
+                let mut turn_ids = values.iter().filter_map(|(key, value)| {
+                    matches!(normalize_identifier(key).as_str(), "turnid" | "childturnid")
+                        .then(|| value.as_str().map(str::trim))
+                        .flatten()
+                        .filter(|value| !value.is_empty())
+                });
+                let turn_id = turn_ids.next();
+                let turn_id = turn_id.filter(|first| turn_ids.all(|next| next == *first));
+                let usage = values
+                    .iter()
+                    .find(|(key, _)| normalize_identifier(key) == "usage")
+                    .and_then(|(_, usage)| usage.as_object())
+                    .and_then(token_usage_from_object);
+                let state = agent_entry_state(value, values).unwrap_or(AgentState::Unknown);
+                if let (Some(identifier), Some(turn_id), Some(usage)) = (identifier, turn_id, usage)
+                {
+                    target.push(NativeUsageObservation {
+                        identifier: identifier.to_string(),
+                        turn_id: turn_id.to_string(),
+                        state,
+                        usage,
+                    });
+                }
+            }
+            for (key, value) in values {
+                if is_agent_collection_field(key) {
+                    collect_native_usage_observations_in_envelope(
+                        value,
+                        target,
+                        depth + 1,
+                        NativeUsageScope::AgentEntry,
+                    );
+                } else if is_provider_envelope_field(key) {
+                    collect_native_usage_observations_in_envelope(value, target, depth + 1, scope);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn token_usage_from_object(values: &Map<String, Value>) -> Option<TokenUsage> {
+    let input = unsigned_field(values, &["input_tokens", "inputTokens"]);
+    let output = unsigned_field(values, &["output_tokens", "outputTokens"]);
+    let cached = unsigned_field(
+        values,
+        &[
+            "cached_tokens",
+            "cachedTokens",
+            "cached_input_tokens",
+            "cachedInputTokens",
+        ],
+    );
+    let reasoning = unsigned_field(
+        values,
+        &[
+            "reasoning_tokens",
+            "reasoningTokens",
+            "reasoning_output_tokens",
+            "reasoningOutputTokens",
+        ],
+    );
+    if input.is_none() && output.is_none() && cached.is_none() && reasoning.is_none() {
+        return None;
+    }
+    Some(TokenUsage {
+        input_tokens: input.unwrap_or(0),
+        output_tokens: output.unwrap_or(0),
+        cached_tokens: cached.unwrap_or(0),
+        reasoning_tokens: reasoning.unwrap_or(0),
+    })
+}
+
+fn unsigned_field(values: &Map<String, Value>, keys: &[&str]) -> Option<u64> {
+    keys.iter()
+        .find_map(|key| values.get(*key).and_then(Value::as_u64))
 }
 
 /// Detects a provider-owned collaboration update emitted when a child could
@@ -252,24 +395,150 @@ fn collect_terminal_observations_in_envelope(
             }
         }
         Value::Object(values) => {
+            if entry_allowed && let Some(status_map) = wait_status_map_entries(values) {
+                let Ok(turn_id) = terminal_turn_id(values) else {
+                    return;
+                };
+                for (agent_id, status_value) in status_map {
+                    if let Some(outcome) = terminal_outcome_from_value(status_value) {
+                        target.push(TerminalObservation {
+                            identifier: agent_id.trim().to_owned(),
+                            outcome,
+                            turn_id: turn_id.clone(),
+                        });
+                    }
+                }
+            }
             if entry_allowed && let Some(outcome) = object_terminal_outcome(values) {
-                target.extend(values.iter().filter_map(|(key, value)| {
+                let Ok(turn_id) = terminal_turn_id(values) else {
+                    return;
+                };
+                let identifiers = values.iter().filter_map(|(key, value)| {
                     matches!(
                         normalize_identifier(key).as_str(),
-                        "taskname" | "agentname" | "agentid" | "subagentid"
+                        "taskname" | "agentname" | "agentpath" | "agentid" | "subagentid"
                     )
                     .then(|| value.as_str().map(str::trim))
                     .flatten()
                     .filter(|value| !value.is_empty())
-                    .map(|identifier| TerminalObservation {
-                        identifier: identifier.to_owned(),
-                        outcome,
-                    })
-                }));
+                    .map(ToOwned::to_owned)
+                });
+                target.extend(
+                    identifiers
+                        .into_iter()
+                        .map(|identifier| TerminalObservation {
+                            identifier,
+                            outcome,
+                            turn_id: turn_id.clone(),
+                        }),
+                );
             }
             for (key, value) in values {
                 if is_agent_collection_field(key) || is_provider_envelope_field(key) {
                     collect_terminal_observations_in_envelope(value, target, depth + 1, true);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn terminal_turn_id(values: &Map<String, Value>) -> std::result::Result<Option<String>, ()> {
+    let mut turn_id = None;
+    for (key, value) in values {
+        if !matches!(normalize_identifier(key).as_str(), "turnid" | "childturnid") {
+            continue;
+        }
+        let value = value
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let Some(value) = value else {
+            return Err(());
+        };
+        if turn_id.is_some_and(|current| current != value) {
+            return Err(());
+        }
+        turn_id = Some(value);
+    }
+    Ok(turn_id.map(ToOwned::to_owned))
+}
+
+/// Usage may arrive before status classification. Keep the same identity and
+/// turn requirements as attribution, while allowing live running entries.
+pub(crate) fn collect_native_status_usage_observations(
+    value: &Value,
+    target: &mut Vec<NativeUsageObservation>,
+) {
+    let decoded = decode_json_encoded_response(value);
+    let value = decoded.as_ref().unwrap_or(value);
+    collect_native_status_usage_observations_in_envelope(value, target, 0, true);
+}
+
+fn collect_native_status_usage_observations_in_envelope(
+    value: &Value,
+    target: &mut Vec<NativeUsageObservation>,
+    depth: usize,
+    entry_allowed: bool,
+) {
+    if depth > 8 {
+        return;
+    }
+    match value {
+        Value::Array(values) if entry_allowed => {
+            for value in values {
+                collect_native_status_usage_observations_in_envelope(
+                    value,
+                    target,
+                    depth + 1,
+                    true,
+                );
+            }
+        }
+        Value::Object(values) => {
+            if entry_allowed
+                && agent_entry_state(value, values).is_some()
+                && let Some(usage) = values
+                    .iter()
+                    .find(|(key, _)| normalize_identifier(key) == "usage")
+                    .and_then(|(_, usage)| usage.as_object())
+                    .and_then(token_usage_from_object)
+            {
+                let identifier = values.iter().find_map(|(key, value)| {
+                    matches!(
+                        normalize_identifier(key).as_str(),
+                        "taskname" | "agentname" | "agentpath" | "agentid" | "subagentid"
+                    )
+                    .then(|| value.as_str().map(str::trim))
+                    .flatten()
+                    .filter(|value| !value.is_empty())
+                });
+                let mut turn_ids = values.iter().filter_map(|(key, value)| {
+                    matches!(normalize_identifier(key).as_str(), "turnid" | "childturnid")
+                        .then(|| value.as_str().map(str::trim))
+                        .flatten()
+                        .filter(|value| !value.is_empty())
+                });
+                let turn_id = turn_ids.next();
+                let turn_id = turn_id.filter(|first| turn_ids.all(|next| next == *first));
+                if let (Some(identifier), Some(turn_id)) = (identifier, turn_id) {
+                    let state = agent_entry_state(value, values).unwrap_or(AgentState::Unknown);
+                    target.push(NativeUsageObservation {
+                        identifier: identifier.to_string(),
+                        turn_id: turn_id.to_string(),
+                        state,
+                        usage,
+                    });
+                }
+            }
+            for (key, value) in values {
+                if is_agent_collection_field(key) || is_provider_envelope_field(key) {
+                    collect_native_status_usage_observations_in_envelope(
+                        value,
+                        target,
+                        depth + 1,
+                        true,
+                    );
                 }
             }
         }
@@ -293,13 +562,24 @@ fn collect_agent_status_observations_in_envelope(
             }
         }
         Value::Object(values) => {
+            if entry_allowed && let Some(status_map) = wait_status_map_entries(values) {
+                for (agent_id, status_value) in status_map {
+                    let state = classify_agent_status(status_value);
+                    if state != AgentState::Unknown {
+                        target.push(AgentStatusObservation {
+                            identifiers: vec![agent_id.trim().to_owned()],
+                            state,
+                        });
+                    }
+                }
+            }
             if entry_allowed && let Some(state) = agent_entry_state(value, values) {
                 let identifiers = values
                     .iter()
                     .filter_map(|(key, value)| {
                         matches!(
                             normalize_identifier(key).as_str(),
-                            "taskname" | "agentname" | "agentid" | "subagentid"
+                            "taskname" | "agentname" | "agentpath" | "agentid" | "subagentid"
                         )
                         .then(|| value.as_str().map(str::trim))
                         .flatten()
@@ -364,6 +644,13 @@ fn collect_terminal_identifiers_with(
             }
         }
         Value::Object(values) => {
+            if entry_allowed && let Some(status_map) = wait_status_map_entries(values) {
+                target.extend(status_map.iter().filter_map(|(agent_id, status_value)| {
+                    terminal_outcome_from_value(status_value)
+                        .map(|_| agent_id.trim().to_owned())
+                        .filter(|id| !id.is_empty())
+                }));
+            }
             if entry_allowed && object_has_terminal_status(values) {
                 target.extend(values.iter().filter_map(|(key, value)| {
                     (is_identifier(key))
@@ -490,7 +777,7 @@ fn collect_interrupt_acknowledgement(
                 for (key, value) in values {
                     let key = normalize_identifier(key);
                     match key.as_str() {
-                        "taskname" | "agentname" | "agentid" | "subagentid" => {
+                        "taskname" | "agentname" | "agentpath" | "agentid" | "subagentid" => {
                             let Some(identifier) = value
                                 .as_str()
                                 .map(str::trim)
@@ -621,7 +908,7 @@ fn collect_interrupt_identities(
                 for (key, value) in values {
                     if !matches!(
                         normalize_identifier(key).as_str(),
-                        "taskname" | "agentname" | "agentid" | "subagentid"
+                        "taskname" | "agentname" | "agentpath" | "agentid" | "subagentid"
                     ) {
                         continue;
                     }
@@ -728,6 +1015,36 @@ fn response_has_textual_spawn_failure(value: &Value) -> bool {
     }
 }
 
+fn wait_status_map_entries(values: &Map<String, Value>) -> Option<&Map<String, Value>> {
+    let has_timed_out = values
+        .iter()
+        .any(|(key, value)| normalize_identifier(key) == "timedout" && value.is_boolean());
+    if !has_timed_out {
+        return None;
+    }
+    let status_map = values.iter().find_map(|(key, value)| {
+        matches!(
+            normalize_identifier(key).as_str(),
+            "status" | "statuses" | "agentstatus"
+        )
+        .then(|| value.as_object())
+        .flatten()
+    })?;
+    if status_map.is_empty() || object_reports_terminal(status_map) {
+        return None;
+    }
+    status_map
+        .iter()
+        .all(|(agent_id, status)| {
+            let normalized = normalize_identifier(agent_id);
+            !agent_id.trim().is_empty()
+                && !is_terminal_field(agent_id)
+                && !is_terminal_marker_field(&normalized)
+                && classify_agent_status(status) != AgentState::Unknown
+        })
+        .then_some(status_map)
+}
+
 fn object_terminal_outcome(values: &Map<String, Value>) -> Option<TerminalOutcome> {
     values
         .iter()
@@ -735,7 +1052,8 @@ fn object_terminal_outcome(values: &Map<String, Value>) -> Option<TerminalOutcom
             let normalized_key = normalize_identifier(key);
             if is_terminal_marker_field(&normalized_key)
                 && let Some(outcome) = terminal_outcome_from_identifier(&normalized_key)
-                && !matches!(value, Value::Bool(false) | Value::Null)
+                && !matches!(value, Value::Bool(false))
+                && (!value.is_null() || values.len() == 1)
             {
                 return Some(outcome);
             }
@@ -974,14 +1292,17 @@ mod tests {
                 TerminalObservation {
                     identifier: "ok".to_string(),
                     outcome: TerminalOutcome::Succeeded,
+                    turn_id: None,
                 },
                 TerminalObservation {
                     identifier: "bad".to_string(),
                     outcome: TerminalOutcome::Failed,
+                    turn_id: None,
                 },
                 TerminalObservation {
                     identifier: "gone".to_string(),
                     outcome: TerminalOutcome::Lost,
+                    turn_id: None,
                 },
             ]
         );
@@ -1038,6 +1359,74 @@ mod tests {
     }
 
     #[test]
+    fn child_usage_requires_identity_and_turn_and_ignores_batch_or_business_output() {
+        let value = json!({
+            "usage": {"input_tokens": 90, "output_tokens": 90},
+            "agents": [{
+                "agent_id": "reader-a",
+                "status": "completed",
+                "turn_id": "turn-a",
+                "usage": {"input_tokens": 11, "output_tokens": 4},
+                "output": {
+                    "usage": {"input_tokens": 80, "output_tokens": 80}
+                }
+            }, {
+                "agent_id": "reader-b",
+                "status": "completed",
+                "usage": {"input_tokens": 12, "output_tokens": 5}
+            }]
+        });
+        let mut observations = Vec::new();
+        collect_native_usage_observations(&value, &mut observations);
+        assert_eq!(
+            observations,
+            [NativeUsageObservation {
+                identifier: "reader-a".into(),
+                turn_id: "turn-a".into(),
+                state: AgentState::Terminal,
+                usage: TokenUsage {
+                    input_tokens: 11,
+                    output_tokens: 4,
+                    cached_tokens: 0,
+                    reasoning_tokens: 0,
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn terminal_observation_preserves_only_a_consistent_turn() {
+        let mut observations = Vec::new();
+        collect_terminal_observations(
+            &json!({
+                "agents": [
+                    {"agent_id": "done", "status": "completed", "turn_id": "turn-b"},
+                    {"agent_id": "no-turn", "status": "completed"},
+                    {"agent_id": "conflict", "status": "completed",
+                     "turn_id": "turn-b", "child_turn_id": "turn-a"},
+                    {"agent_id": "empty", "status": "completed", "turn_id": " "}
+                ]
+            }),
+            &mut observations,
+        );
+        assert_eq!(
+            observations,
+            [
+                TerminalObservation {
+                    identifier: "done".into(),
+                    outcome: TerminalOutcome::Succeeded,
+                    turn_id: Some("turn-b".into()),
+                },
+                TerminalObservation {
+                    identifier: "no-turn".into(),
+                    outcome: TerminalOutcome::Succeeded,
+                    turn_id: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn terminal_identifiers_are_collected_without_false_positive() {
         let value = json!({"updates": [
             {"agentId": "done", "agentStatus": "completed"},
@@ -1067,10 +1456,12 @@ mod tests {
                 TerminalObservation {
                     identifier: "done".to_string(),
                     outcome: TerminalOutcome::Succeeded,
+                    turn_id: None,
                 },
                 TerminalObservation {
                     identifier: "bad".to_string(),
                     outcome: TerminalOutcome::Failed,
+                    turn_id: None,
                 }
             ]
         );
@@ -1212,5 +1603,85 @@ mod tests {
                 .as_object()
                 .unwrap()
         ));
+    }
+
+    #[test]
+    fn codex_null_completed_variant_and_wait_status_maps_are_recognized_as_terminal() {
+        assert_eq!(
+            classify_agent_status(&json!({"completed": null})),
+            AgentState::Terminal
+        );
+        let list_response = json!({
+            "agents": [
+                {
+                    "agent_name": "/root/explorer_a",
+                    "agent_status": {"completed": null}
+                },
+                {
+                    "agent_path": "/root/worker_b",
+                    "agent_status": {"completed": "done"}
+                }
+            ]
+        });
+        let mut list_terminal = Vec::new();
+        collect_terminal_observations(&list_response, &mut list_terminal);
+        assert_eq!(
+            list_terminal,
+            [
+                TerminalObservation {
+                    identifier: "/root/explorer_a".into(),
+                    outcome: TerminalOutcome::Succeeded,
+                    turn_id: None,
+                },
+                TerminalObservation {
+                    identifier: "/root/worker_b".into(),
+                    outcome: TerminalOutcome::Succeeded,
+                    turn_id: None,
+                },
+            ]
+        );
+
+        let wait_map_response = json!({
+            "status": {
+                "agent-uuid-a": {"completed": null},
+                "agent-uuid-b": {"errored": "boom"},
+                "agent-uuid-live": "running"
+            },
+            "timed_out": false
+        });
+        assert!(object_has_terminal_status(
+            wait_map_response.as_object().unwrap()
+        ));
+        let mut wait_terminal = Vec::new();
+        collect_terminal_observations(&wait_map_response, &mut wait_terminal);
+        assert_eq!(
+            wait_terminal,
+            [
+                TerminalObservation {
+                    identifier: "agent-uuid-a".into(),
+                    outcome: TerminalOutcome::Succeeded,
+                    turn_id: None,
+                },
+                TerminalObservation {
+                    identifier: "agent-uuid-b".into(),
+                    outcome: TerminalOutcome::Failed,
+                    turn_id: None,
+                },
+            ]
+        );
+        let mut wait_ids = Vec::new();
+        collect_terminal_agent_ids(&wait_map_response, &mut wait_ids);
+        assert_eq!(wait_ids, ["agent-uuid-a", "agent-uuid-b"]);
+
+        assert_eq!(
+            interrupt_acknowledgement(&json!({
+                "agent_path": "/root/explorer_a",
+                "previous_status": {"completed": null}
+            })),
+            Some(InterruptAcknowledgement {
+                prior_outcome: Some(TerminalOutcome::Succeeded),
+                identifiers: vec!["/root/explorer_a".into()],
+            })
+        );
     }
 }

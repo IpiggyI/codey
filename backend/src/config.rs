@@ -2161,28 +2161,34 @@ pub const AUTH_MODE_OFFICIAL_ACCOUNT: &str = "officialAccount";
 pub const AUTH_MODE_API_KEY: &str = "apiKey";
 pub const SUBAGENT_REASONING_EFFORTS: [&str; 6] =
     ["low", "medium", "high", "xhigh", "max", "ultra"];
-pub const SUBAGENT_ROLE_QUICK_SCAN: &str = "codey_quick_scan";
-pub const SUBAGENT_ROLE_DEEP_RESEARCH: &str = "codey_deep_research";
-pub const SUBAGENT_ROLE_VISUAL_ANALYSIS: &str = "codey_visual_analysis";
+pub const SUBAGENT_ROLE_EXPLORER: &str = "codey_explorer";
 pub const SUBAGENT_ROLE_WORKER: &str = "codey_worker";
-pub const SUBAGENT_ROLE_VISUAL_WORKER: &str = "codey_visual_worker";
+pub const SUBAGENT_ROLE_REVIEWER: &str = "codey_reviewer";
 pub const SUBAGENT_ROLE_DEFAULT: &str = "default";
-pub const SUBAGENT_ROLE_IDS: [&str; 6] = [
-    SUBAGENT_ROLE_QUICK_SCAN,
-    SUBAGENT_ROLE_DEEP_RESEARCH,
-    SUBAGENT_ROLE_VISUAL_ANALYSIS,
+pub const SUBAGENT_ROLE_IDS: [&str; 4] = [
+    SUBAGENT_ROLE_EXPLORER,
     SUBAGENT_ROLE_WORKER,
-    SUBAGENT_ROLE_VISUAL_WORKER,
+    SUBAGENT_ROLE_REVIEWER,
     SUBAGENT_ROLE_DEFAULT,
 ];
+pub const LEGACY_SUBAGENT_ROLES: [(&str, &str); 4] = [
+    ("codey_deep_research", SUBAGENT_ROLE_EXPLORER),
+    ("codey_quick_scan", SUBAGENT_ROLE_EXPLORER),
+    ("codey_visual_worker", SUBAGENT_ROLE_WORKER),
+    ("codey_visual_analysis", SUBAGENT_ROLE_REVIEWER),
+];
+
+pub fn owned_subagent_role_ids() -> impl Iterator<Item = &'static str> {
+    SUBAGENT_ROLE_IDS
+        .into_iter()
+        .chain(LEGACY_SUBAGENT_ROLES.into_iter().map(|(legacy, _)| legacy))
+}
 
 pub fn default_subagent_roles() -> BTreeMap<String, SubagentRoleConfig> {
     [
-        (SUBAGENT_ROLE_QUICK_SCAN, "low"),
-        (SUBAGENT_ROLE_DEEP_RESEARCH, "high"),
-        (SUBAGENT_ROLE_VISUAL_ANALYSIS, "high"),
+        (SUBAGENT_ROLE_EXPLORER, "medium"),
         (SUBAGENT_ROLE_WORKER, "medium"),
-        (SUBAGENT_ROLE_VISUAL_WORKER, "high"),
+        (SUBAGENT_ROLE_REVIEWER, "high"),
         (SUBAGENT_ROLE_DEFAULT, DEFAULT_SUBAGENT_REASONING_EFFORT),
     ]
     .into_iter()
@@ -2253,12 +2259,34 @@ fn normalize_auth_mode(value: &str, official: bool) -> String {
     .to_string()
 }
 
+fn migrate_legacy_subagent_roles(roles: &mut BTreeMap<String, SubagentRoleConfig>) {
+    for successor in SUBAGENT_ROLE_IDS {
+        if roles.contains_key(successor) {
+            continue;
+        }
+        let candidates = LEGACY_SUBAGENT_ROLES
+            .iter()
+            .filter(|(_, next)| *next == successor)
+            .filter_map(|(legacy, _)| roles.get(*legacy))
+            .collect::<Vec<_>>();
+        let selected = candidates
+            .iter()
+            .find(|selection| selection.enabled)
+            .or_else(|| candidates.first())
+            .map(|selection| (*selection).clone());
+        if let Some(selection) = selected {
+            roles.insert(successor.to_string(), selection);
+        }
+    }
+}
+
 fn normalize_subagent_config(
     model: &mut String,
     reasoning_effort: &mut String,
     roles: &mut BTreeMap<String, SubagentRoleConfig>,
 ) {
     normalize_subagent_selection(model, reasoning_effort);
+    migrate_legacy_subagent_roles(roles);
     roles.retain(|role, _| SUBAGENT_ROLE_IDS.contains(&role.as_str()));
     if roles.is_empty() {
         *roles = uniform_subagent_roles(model, reasoning_effort);
@@ -4080,7 +4108,7 @@ mod tests {
             "medium"
         );
         assert_eq!(
-            config.subagent_roles[SUBAGENT_ROLE_VISUAL_WORKER].reasoning_effort,
+            config.subagent_roles[SUBAGENT_ROLE_REVIEWER].reasoning_effort,
             "high"
         );
     }
@@ -4101,7 +4129,7 @@ mod tests {
         .normalize();
 
         assert!(!config.subagent_roles[SUBAGENT_ROLE_WORKER].enabled);
-        assert!(config.subagent_roles[SUBAGENT_ROLE_QUICK_SCAN].enabled);
+        assert!(config.subagent_roles[SUBAGENT_ROLE_EXPLORER].enabled);
         assert!(config.subagent_roles[SUBAGENT_ROLE_DEFAULT].enabled);
     }
 
@@ -4199,7 +4227,7 @@ mod tests {
                 "subagentModel":"legacy-model",
                 "subagentReasoningEffort":"low",
                 "subagentRoles":{
-                    "codey_quick_scan":{"model":" quick-model ","reasoningEffort":"MEDIUM"},
+                    "codey_explorer":{"model":" quick-model ","reasoningEffort":"MEDIUM"},
                     "default":{"model":" fallback-model ","reasoningEffort":"high"},
                     "unknown":{"model":"ignored","reasoningEffort":"low"}
                 }
@@ -4211,7 +4239,7 @@ mod tests {
         assert_eq!(config.subagent_roles.len(), SUBAGENT_ROLE_IDS.len());
         assert!(!config.subagent_roles.contains_key("unknown"));
         assert_eq!(
-            config.subagent_roles[SUBAGENT_ROLE_QUICK_SCAN],
+            config.subagent_roles[SUBAGENT_ROLE_EXPLORER],
             SubagentRoleConfig::new("quick-model", "medium")
         );
         assert_eq!(config.subagent_model, "fallback-model");
@@ -4220,6 +4248,140 @@ mod tests {
             config.subagent_roles[SUBAGENT_ROLE_WORKER],
             SubagentRoleConfig::new("fallback-model", "high")
         );
+    }
+
+    #[test]
+    fn all_saved_fork_subagent_roles_migrate_without_losing_their_selection() {
+        for (legacy, successor) in [
+            ("default", SUBAGENT_ROLE_DEFAULT),
+            ("codey_quick_scan", SUBAGENT_ROLE_EXPLORER),
+            ("codey_deep_research", SUBAGENT_ROLE_EXPLORER),
+            ("codey_visual_analysis", SUBAGENT_ROLE_REVIEWER),
+            ("codey_worker", SUBAGENT_ROLE_WORKER),
+            ("codey_visual_worker", SUBAGENT_ROLE_WORKER),
+        ] {
+            for enabled in [false, true] {
+                let config = serde_json::from_value::<CodeyConfig>(serde_json::json!({
+                    "subagentRoles": {
+                        (legacy): {
+                            "enabled": enabled,
+                            "model": format!(" {legacy}-model "),
+                            "reasoningEffort": "XHIGH"
+                        },
+                        "unknown": {"model": "ignored", "reasoningEffort": "low"}
+                    }
+                }))
+                .unwrap()
+                .normalize();
+                let selection = &config.subagent_roles[successor];
+                assert_eq!(selection.model, format!("{legacy}-model"), "{legacy}");
+                assert_eq!(selection.reasoning_effort, "xhigh", "{legacy}");
+                assert_eq!(
+                    selection.enabled,
+                    enabled || successor == SUBAGENT_ROLE_DEFAULT,
+                    "{legacy}"
+                );
+                assert_eq!(config.subagent_roles.len(), SUBAGENT_ROLE_IDS.len());
+                assert!(!config.subagent_roles.contains_key("unknown"));
+                for (retired, _) in LEGACY_SUBAGENT_ROLES {
+                    assert!(!config.subagent_roles.contains_key(retired), "{retired}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn saved_six_role_config_loads_with_upstream_merge_precedence() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.json");
+        let saved = serde_json::json!({
+            "subagentRoles": {
+                "default": {"enabled": false, "model": "fallback", "reasoningEffort": "max"},
+                "codey_quick_scan": {"enabled": true, "model": "quick", "reasoningEffort": "low"},
+                "codey_deep_research": {"enabled": false, "model": "deep", "reasoningEffort": "xhigh"},
+                "codey_visual_analysis": {"enabled": false, "model": "review", "reasoningEffort": "high"},
+                "codey_worker": {"enabled": false, "model": "worker", "reasoningEffort": "medium"},
+                "codey_visual_worker": {"enabled": true, "model": "visual", "reasoningEffort": "ultra"},
+                "unknown": {"enabled": true, "model": "ignored", "reasoningEffort": "high"}
+            }
+        });
+        fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+        let migrated = ConfigStore::new(path).load().unwrap();
+        assert_eq!(
+            migrated.subagent_roles,
+            BTreeMap::from([
+                (
+                    SUBAGENT_ROLE_DEFAULT.into(),
+                    SubagentRoleConfig::new("fallback", "max")
+                ),
+                (
+                    SUBAGENT_ROLE_EXPLORER.into(),
+                    SubagentRoleConfig::new("quick", "low")
+                ),
+                (
+                    SUBAGENT_ROLE_REVIEWER.into(),
+                    SubagentRoleConfig {
+                        enabled: false,
+                        ..SubagentRoleConfig::new("review", "high")
+                    }
+                ),
+                (
+                    SUBAGENT_ROLE_WORKER.into(),
+                    SubagentRoleConfig {
+                        enabled: false,
+                        ..SubagentRoleConfig::new("worker", "medium")
+                    }
+                ),
+            ])
+        );
+        assert_eq!(migrated.subagent_model, "fallback");
+        assert_eq!(migrated.subagent_reasoning_effort, "max");
+    }
+
+    #[test]
+    fn legacy_role_merge_prefers_enabled_selections_and_preserves_saved_successors() {
+        for (deep_enabled, quick_enabled, expected) in [
+            (false, false, "deep"),
+            (false, true, "quick"),
+            (true, false, "deep"),
+            (true, true, "deep"),
+        ] {
+            let config = serde_json::from_value::<CodeyConfig>(serde_json::json!({
+                "subagentRoles": {
+                    "codey_deep_research": {
+                        "enabled": deep_enabled, "model": "deep", "reasoningEffort": "high"
+                    },
+                    "codey_quick_scan": {
+                        "enabled": quick_enabled, "model": "quick", "reasoningEffort": "low"
+                    },
+                    "codey_worker": {
+                        "enabled": false, "model": "worker", "reasoningEffort": "medium"
+                    },
+                    "codey_visual_worker": {
+                        "enabled": true, "model": "visual", "reasoningEffort": "ultra"
+                    },
+                    "default": {
+                        "enabled": false, "model": "fallback", "reasoningEffort": "max"
+                    }
+                }
+            }))
+            .unwrap()
+            .normalize();
+            let explorer = &config.subagent_roles[SUBAGENT_ROLE_EXPLORER];
+            assert_eq!(explorer.model, expected);
+            assert_eq!(explorer.enabled, deep_enabled || quick_enabled);
+            assert_eq!(
+                explorer.reasoning_effort,
+                if expected == "deep" { "high" } else { "low" }
+            );
+            let worker = &config.subagent_roles[SUBAGENT_ROLE_WORKER];
+            assert!(!worker.enabled);
+            assert_eq!(worker.model, "worker");
+            assert_eq!(worker.reasoning_effort, "medium");
+            assert!(config.subagent_roles[SUBAGENT_ROLE_DEFAULT].enabled);
+            assert_eq!(config.subagent_model, "fallback");
+            assert_eq!(config.subagent_reasoning_effort, "max");
+        }
     }
 
     #[test]

@@ -226,15 +226,13 @@ if (import.meta.env.DEV) {
       subagentModel: "gpt-5.6-terra",
       subagentReasoningEffort: "medium",
       subagentRoles: {
-        codey_quick_scan: { enabled: true, model: "gpt-5.6-sol", reasoningEffort: "low" },
-        codey_deep_research: { enabled: true, model: "gpt-5.6-sol", reasoningEffort: "high" },
-        codey_visual_analysis: {
+        codey_explorer: { enabled: true, model: "gpt-5.6-sol", reasoningEffort: "medium" },
+        codey_worker: { enabled: true, model: "provider-fast-coder", reasoningEffort: "medium" },
+        codey_reviewer: {
           enabled: true,
           model: "claude-sonnet-4-5",
           reasoningEffort: "high",
         },
-        codey_worker: { enabled: true, model: "provider-fast-coder", reasoningEffort: "medium" },
-        codey_visual_worker: { enabled: true, model: "gpt-5.6-sol", reasoningEffort: "high" },
         default: { enabled: true, model: "gpt-5.6-sol", reasoningEffort: "medium" },
       },
       hideFullAccessWarning: false,
@@ -505,7 +503,7 @@ if (import.meta.env.DEV) {
           { label: "开启 Codex 钩子功能", key: "features.hooks", value: "true" },
           { label: "注册 Codey 钩子", key: "hooks", value: "内联定义，不写入 hooks.json" },
         ];
-        const roleIds = ["codey_quick_scan", "codey_deep_research", "codey_visual_analysis", "codey_worker", "codey_visual_worker", "default"] as const;
+        const roleIds = ["codey_explorer", "codey_worker", "codey_reviewer", "default"] as const;
         return {
           status: "ok",
           platformSupported: true,
@@ -585,7 +583,7 @@ if (import.meta.env.DEV) {
                 template: null,
                 overrides: hookOverrides,
                 events: [
-                  { event: "PreToolUse", name: "调用工具前", purpose: "检查子代理角色的权限和并发上限。" },
+                  { event: "PreToolUse", name: "调用工具前", purpose: "检查子代理的派生、身份和并发上限。" },
                   { event: "SubagentStop", name: "子代理停止时", purpose: "结算子代理的活动状态，释放其占用。" },
                 ],
                 content: null,
@@ -604,7 +602,7 @@ if (import.meta.env.DEV) {
                 error: null,
               },
             ],
-            concurrency: { readOnly: 3, writable: 2 },
+            concurrency: { limit: 2 },
             rules: {
               source: "builtin",
               path: null,

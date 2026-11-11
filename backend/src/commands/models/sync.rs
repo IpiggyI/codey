@@ -372,10 +372,10 @@ pub(crate) async fn sync_provider_models_for_launch(
     let ownership_key = sync.snapshot.ownership_key.clone();
     let provider_label = sync.snapshot.id.clone();
 
-    let (models, synced) = match tokio::time::timeout(
-        STARTUP_PROVIDER_MODEL_SYNC_TIMEOUT,
-        provider_models::fetch(&sync.request, &state.http_client),
-    )
+    let (models, synced) = match tokio::time::timeout(STARTUP_PROVIDER_MODEL_SYNC_TIMEOUT, async {
+        let client = state.http_client().await.map_err(anyhow::Error::msg)?;
+        provider_models::fetch(&sync.request, client).await
+    })
     .await
     {
         Ok(Ok(models)) => {

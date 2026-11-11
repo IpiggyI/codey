@@ -119,7 +119,7 @@ pub struct AppState {
     #[cfg(test)]
     slow_apply_test: slow_apply_tests::TestHooks,
     provider_model_sync_lock: Mutex<()>,
-    pub(crate) http_client: crate::system_proxy_client::SystemProxyClient,
+    http_client: tokio::sync::OnceCell<crate::system_proxy_client::SystemProxyClient>,
     #[cfg(test)]
     pub webhook_http_client_override: Option<reqwest::Client>,
     #[cfg(test)]
@@ -257,14 +257,7 @@ impl AppState {
             #[cfg(test)]
             slow_apply_test: slow_apply_tests::TestHooks::default(),
             provider_model_sync_lock: Mutex::new(()),
-            http_client: crate::system_proxy_client::SystemProxyClient::new_blocking(|| {
-                reqwest::Client::builder()
-                    .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
-                    .connect_timeout(Duration::from_secs(5))
-                // TLS: system trust store via rustls native roots. Model sync
-                // does not carry Codey-owned certificates.
-            })
-            .expect("shared Codey HTTP client should be constructible"),
+            http_client: tokio::sync::OnceCell::new(),
             #[cfg(test)]
             webhook_http_client_override: None,
             #[cfg(test)]
@@ -330,6 +323,27 @@ impl AppState {
             restart_operation_pending: Notify::new(),
             shutdown_reason,
         }
+    }
+
+    pub(crate) async fn http_client(
+        &self,
+    ) -> Result<&crate::system_proxy_client::SystemProxyClient, String> {
+        self.http_client
+            .get_or_try_init(|| async {
+                tokio::task::spawn_blocking(|| {
+                    crate::system_proxy_client::SystemProxyClient::new_blocking(|| {
+                        reqwest::Client::builder()
+                            .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
+                            .connect_timeout(Duration::from_secs(5))
+                        // TLS: system trust store via rustls native roots. Model sync
+                        // does not carry Codey-owned certificates.
+                    })
+                })
+                .await
+                .map_err(|error| format!("创建共享 HTTP 客户端的任务异常退出：{error}"))?
+                .map_err(|error| format!("创建共享 HTTP 客户端失败：{error:#}"))
+            })
+            .await
     }
 }
 
@@ -1894,9 +1908,10 @@ pub(super) struct SubagentHotReloadOutcome {
 }
 
 impl SubagentHotReloadOutcome {
-    fn pending_restart() -> Self {
+    fn pending_restart(error: impl Into<String>) -> Self {
         Self {
             status: SubagentHotReloadStatus::PendingRestart,
+            error: Some(error.into()),
             ..Self::default()
         }
     }
@@ -2036,12 +2051,6 @@ async fn hot_reload_runtime_subagent_config_locked(
         );
     }
 
-    if runtime.subagent_registration_requires_restart(&current_config) {
-        runtime
-            .mark_subagent_config_requires_restart(&current_config)
-            .await;
-        return SubagentHotReloadOutcome::pending_restart();
-    }
     let runtime_config = current_config.clone();
     drop(_config_commit_guard);
     #[cfg(test)]
@@ -2049,12 +2058,12 @@ async fn hot_reload_runtime_subagent_config_locked(
     let result = tokio::task::spawn_blocking(move || {
         #[cfg(test)]
         if let Some(reconcile) = reconcile {
-            return reconcile(&runtime_config).map_err(|error| format!("{error:#}"));
+            return reconcile(&runtime_config);
         }
-        reconcile_runtime_subagent_roles(&runtime_config).map_err(|error| format!("{error:#}"))
+        reconcile_runtime_subagent_roles(&runtime_config)
     })
     .await
-    .map_err(|error| format!("子代理运行时文件更新任务异常退出：{error}"))
+    .map_err(|error| anyhow::anyhow!("子代理运行时文件更新任务异常退出：{error}"))
     .and_then(std::convert::identity);
     match result {
         Ok(report) => {
@@ -2096,6 +2105,12 @@ async fn hot_reload_runtime_subagent_config_locked(
             )
         }
         Err(error) => {
+            if error.is::<crate::codex_config::SubagentRoleRegistrationChanged>() {
+                runtime
+                    .mark_subagent_config_requires_restart(&current_config)
+                    .await;
+                return SubagentHotReloadOutcome::pending_restart(error.to_string());
+            }
             let error = format!("{error:#}");
             error_log::record_failure(
                 "patch_verification_failed",

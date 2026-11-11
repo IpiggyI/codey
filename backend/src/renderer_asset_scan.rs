@@ -12,10 +12,11 @@ use std::time::UNIX_EPOCH;
 
 use aho_corasick::AhoCorasick;
 use anyhow::{Context, Result, bail, ensure};
+use memchr::memmem::Finder;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::renderer_asset_patch::numeric_asset_name;
+use crate::renderer_asset_patch::{css_asset_name, numeric_asset_name};
 
 /// ASAR 索引上限。Codex 26.1029 的索引约 3 MB，留足余量又不至于读入异常文件。
 const MAX_ASAR_HEADER_BYTES: u64 = 64 << 20;
@@ -239,15 +240,20 @@ impl AssetSource {
     }
 
     fn scan(&self, anchors: &[String]) -> Result<AssetScan> {
-        let matcher = AhoCorasick::new(anchors).context("补丁前置字面量无法构建匹配器")?;
+        // 字面量数量有限，复用子串查找器可减少大脚本上逐字节多模式匹配的成本。
+        let finders = anchors
+            .iter()
+            .map(|anchor| Finder::new(anchor.as_bytes()))
+            .collect::<Vec<_>>();
+        let matches = |bytes: &[u8]| finders.iter().any(|finder| finder.find(bytes).is_some());
         match self {
-            Self::Asar { archive, unpacked } => scan_asar(archive, unpacked, &matcher),
-            Self::Directory { app } => scan_directory(&app.join("webview/assets"), &matcher),
+            Self::Asar { archive, unpacked } => scan_asar(archive, unpacked, &matches),
+            Self::Directory { app } => scan_directory(&app.join("webview/assets"), &matches),
         }
     }
 }
 
-fn script_entries<'a>(
+fn asset_entries<'a>(
     node: &'a serde_json::Map<String, Value>,
     prefix: &str,
     entries: &mut Vec<(String, &'a Value)>,
@@ -255,8 +261,8 @@ fn script_entries<'a>(
     for (name, value) in node {
         let relative = format!("{prefix}{name}");
         if let Some(children) = value.get("files").and_then(Value::as_object) {
-            script_entries(children, &format!("{relative}/"), entries);
-        } else if name.ends_with(".js") {
+            asset_entries(children, &format!("{relative}/"), entries);
+        } else if name.ends_with(".js") || css_asset_name(name) {
             entries.push((relative, value));
         }
     }
@@ -266,7 +272,16 @@ fn is_numeric_chunk(relative: &str) -> bool {
     numeric_asset_name(relative.strip_prefix("async/").unwrap_or(relative))
 }
 
-fn scan_asar(archive: &Path, unpacked: &Path, matcher: &AhoCorasick) -> Result<AssetScan> {
+fn is_scannable_asset(relative: &str) -> bool {
+    is_numeric_chunk(relative)
+        || css_asset_name(relative.strip_prefix("async/").unwrap_or(relative))
+}
+
+fn scan_asar(
+    archive: &Path,
+    unpacked: &Path,
+    matches: &impl Fn(&[u8]) -> bool,
+) -> Result<AssetScan> {
     let mut file = File::open(archive)
         .with_context(|| format!("无法打开 Codex 归档：{}", archive.display()))?;
     let archive_len = file.metadata().context("无法读取 Codex 归档大小")?.len();
@@ -295,7 +310,7 @@ fn scan_asar(archive: &Path, unpacked: &Path, matcher: &AhoCorasick) -> Result<A
         .context("ASAR 中没有 webview/assets 目录")?;
 
     let mut entries: Vec<(String, &Value)> = Vec::new();
-    script_entries(assets, "", &mut entries);
+    asset_entries(assets, "", &mut entries);
     let mut coverage = Coverage::new()?;
     let mut candidates = Vec::new();
     let mut buffer = Vec::new();
@@ -330,7 +345,7 @@ fn scan_asar(archive: &Path, unpacked: &Path, matcher: &AhoCorasick) -> Result<A
                 .with_context(|| format!("无法读取 ASAR 条目：{relative}"))?;
         }
         coverage.observe(&buffer);
-        if is_numeric_chunk(relative) && matcher.is_match(&buffer) {
+        if is_scannable_asset(relative) && matches(&buffer) {
             candidates.push(relative.clone());
         }
     }
@@ -345,14 +360,15 @@ fn scan_asar(archive: &Path, unpacked: &Path, matcher: &AhoCorasick) -> Result<A
     })
 }
 
-fn scan_directory(assets: &Path, matcher: &AhoCorasick) -> Result<AssetScan> {
+fn scan_directory(assets: &Path, matches: &impl Fn(&[u8]) -> bool) -> Result<AssetScan> {
     fn walk(root: &Path, dir: &Path, paths: &mut Vec<String>) -> Result<()> {
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             if entry.file_type()?.is_dir() {
                 walk(root, &entry.path(), paths)?;
             } else if entry.file_type()?.is_file()
-                && entry.path().extension().is_some_and(|ext| ext == "js")
+                && (entry.path().extension().is_some_and(|ext| ext == "js")
+                    || css_asset_name(&entry.file_name().to_string_lossy()))
             {
                 paths.push(
                     entry
@@ -376,7 +392,7 @@ fn scan_directory(assets: &Path, matcher: &AhoCorasick) -> Result<AssetScan> {
         let bytes = std::fs::read(&path)
             .with_context(|| format!("无法读取资源文件：{}", path.display()))?;
         coverage.observe(&bytes);
-        if is_numeric_chunk(relative) && matcher.is_match(&bytes) {
+        if is_scannable_asset(relative) && matches(&bytes) {
             candidates.push(relative.clone());
         }
     }
@@ -396,6 +412,7 @@ mod tests {
         vec![
             "sendMessageFromView".to_string(),
             "serviceTierAccess:".to_string(),
+            ":has([data-state=open])".to_string(),
         ]
     }
 
@@ -407,7 +424,7 @@ mod tests {
             return;
         }
         let matcher = AhoCorasick::new(anchors()).unwrap();
-        let scan = scan_directory(assets, &matcher).unwrap();
+        let scan = scan_directory(assets, &|bytes| matcher.is_match(bytes)).unwrap();
         assert!(
             scan.missing_items(true).is_empty(),
             "{:?}",
@@ -509,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn asar_scan_keeps_only_numeric_chunks_with_patch_anchors() {
+    fn asar_scan_keeps_numeric_chunks_and_stylesheets_with_patch_anchors() {
         let temp = tempfile::tempdir().unwrap();
         let resources = temp.path().join("Codex.app/Contents/Resources");
         std::fs::create_dir_all(resources.join("app.asar.unpacked/webview/assets/async")).unwrap();
@@ -530,6 +547,18 @@ mod tests {
                     b"r?.sendMessageFromView&&r()",
                 ),
                 ("webview/assets/async/4.eeeeeeeeee.js", b"plain"),
+                (
+                    "webview/assets/async/e77f816560c6.css",
+                    b".group:has([data-state=open]){opacity:1}",
+                ),
+                (
+                    "webview/assets/app-initial-90eb4239.css",
+                    b".group:has([data-state=open]){opacity:1}",
+                ),
+                (
+                    "webview/assets/async/9012f383f623.css",
+                    b".plain{color:red}",
+                ),
                 (
                     "webview/assets/async/5.dddddddddd.js",
                     b"x.sendMessageFromView(y)",
@@ -553,8 +582,10 @@ mod tests {
             first.scan.candidates,
             [
                 "2.bbbbbbbbbb.js",
+                "app-initial-90eb4239.css",
                 "async/3.cccccccccc.js",
-                "async/5.dddddddddd.js"
+                "async/5.dddddddddd.js",
+                "async/e77f816560c6.css"
             ]
         );
         let second = load_or_scan(&temp.path().join("Codex.app"), &cache, &anchors()).unwrap();
@@ -594,10 +625,28 @@ mod tests {
         std::fs::write(assets.parent().unwrap().join("index.html"), b"<html>").unwrap();
         std::fs::write(assets.join("async/7.0123456789.js"), b"serviceTierAccess:").unwrap();
         std::fs::write(assets.join("8.0123456789.js"), b"none").unwrap();
+        std::fs::write(
+            assets.join("async/e77f816560c6.css"),
+            b".group:has([data-state=open]){opacity:1}",
+        )
+        .unwrap();
+        std::fs::write(
+            assets.join("app-initial-90eb4239.css"),
+            b".group:has([data-state=open]){opacity:1}",
+        )
+        .unwrap();
+        std::fs::write(assets.join("async/9012f383f623.css"), b".plain{color:red}").unwrap();
         let cache = temp.path().join("scan.json");
         let app_dir = temp.path().join("Codex");
         let scan = load_or_scan(&app_dir, &cache, &anchors()).unwrap().scan;
-        assert_eq!(scan.candidates, ["async/7.0123456789.js"]);
+        assert_eq!(
+            scan.candidates,
+            [
+                "app-initial-90eb4239.css",
+                "async/7.0123456789.js",
+                "async/e77f816560c6.css"
+            ]
+        );
         assert_eq!(scan.numeric_chunks, 2);
 
         std::fs::write(
@@ -622,6 +671,36 @@ mod tests {
                 &anchors()
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn scan_handles_large_entries_and_backward_archive_offsets() {
+        let temp = tempfile::tempdir().unwrap();
+        let resources = temp.path().join("Codex.app/Contents/Resources");
+        std::fs::create_dir_all(&resources).unwrap();
+        let mut large = vec![b'x'; 65_530];
+        large.extend_from_slice(b"sendMessageFromView");
+        write_asar(
+            &resources.join("app.asar"),
+            &[
+                ("webview/assets/async/1.aaaaaaaaaa.js", &large),
+                ("webview/assets/2.bbbbbbbbbb.js", b"serviceTierAccess:"),
+                ("webview/assets/async/3.cccccccccc.js", b"plain"),
+            ],
+            &[],
+        );
+        let scan = load_or_scan(
+            &temp.path().join("Codex.app"),
+            &temp.path().join("scan.json"),
+            &anchors(),
+        )
+        .unwrap()
+        .scan;
+        assert_eq!(scan.numeric_chunks, 3);
+        assert_eq!(
+            scan.candidates,
+            ["2.bbbbbbbbbb.js", "async/1.aaaaaaaaaa.js"]
         );
     }
 }

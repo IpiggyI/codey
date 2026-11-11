@@ -4,7 +4,7 @@ import test from "node:test";
 
 const root = new URL("../", import.meta.url);
 
-test("subagent settings expose the five supported role controls", async () => {
+test("subagent settings expose the three supported role controls", async () => {
   const [featurePolicySource, modelHookSource, modelOptionsSource, comboboxSource, modelWhitelistSource] = await Promise.all([
     readFile(new URL("src/FeaturePolicyCard.tsx", root), "utf8"),
     readFile(new URL("src/useModelSelection.ts", root), "utf8"),
@@ -19,23 +19,23 @@ test("subagent settings expose the five supported role controls", async () => {
     /onCheckedChange=\{\(checked\) =>\s*onSubagentOptimizationChange\(checked\)\s*\}/,
   );
   for (const [id, name] of [
-    ["codey_quick_scan", "快速定位"],
-    ["codey_deep_research", "深度检索"],
-    ["codey_visual_analysis", "视觉分析"],
-    ["codey_worker", "代码实施"],
-    ["codey_visual_worker", "视觉实施"],
+    ["codey_explorer", "检索"],
+    ["codey_reviewer", "复核"],
+    ["codey_worker", "开发"],
   ]) {
     assert.match(featurePolicySource, new RegExp(`id: "${id}"`));
     assert.match(featurePolicySource, new RegExp(`name: "${name}"`));
   }
+  assert.equal(featurePolicySource.match(/^\s+id: "codey_\w+",$/gm)?.length, 3, "只有三个角色");
+  assert.doesNotMatch(featurePolicySource, /codey_(quick_scan|deep_research|visual_analysis|visual_worker)/);
   assert.match(featurePolicySource, /config\.subagentRoles\[task\.id\]/);
   assert.match(featurePolicySource, /checked=\{selection\.enabled\}/);
   assert.match(featurePolicySource, /onCheckedChange=\{\(enabled\) => updateRole\(\{ enabled \}\)\}/);
-  assert.match(featurePolicySource, /"可写"/);
-  assert.match(featurePolicySource, /"只读"/);
+  assert.match(featurePolicySource, /各角色工具权限一致/);
+  assert.match(featurePolicySource, /仅由提示词引导，不强制约束/);
+  assert.match(featurePolicySource, /实际操作仍受 Codex 原生权限约束/);
+  assert.doesNotMatch(featurePolicySource, /"可写"|"只读"|默认只读|默认可写|WRITABLE_SUBAGENT_ROLE_IDS|enabledReadOnlyRoleNames|请先启用至少一个只读角色/);
   assert.match(featurePolicySource, /roleDisabled/);
-  assert.match(featurePolicySource, /enabledReadOnlyRoleNames/);
-  assert.match(featurePolicySource, /请先启用至少一个只读角色/);
   assert.doesNotMatch(featurePolicySource, /关闭全部可写角色/);
   assert.doesNotMatch(featurePolicySource, /disableWritableRoles/);
   assert.match(featurePolicySource, /<ModelCombobox/);

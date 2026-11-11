@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde_json::{Map, Value};
@@ -16,7 +16,8 @@ use crate::subagent::protocol;
 
 use super::{
     AGENT_ID_COLLISION_ERROR_CODE, MAX_SPAWN_RESPONSE_JSON_BYTES,
-    MAX_TRANSCRIPT_METADATA_LINE_BYTES, SessionLedger,
+    MAX_TRANSCRIPT_METADATA_LINE_BYTES, SessionLedger, StatusResponseSource,
+    TerminalTaskObservation,
 };
 
 pub(super) fn response_is_explicit_failure(value: &Value) -> bool {
@@ -105,9 +106,12 @@ pub(super) fn spawn_task_name_matches(task_name: &str, expected_task_id: &str) -
 pub(super) fn collect_terminal_task_outcomes(
     value: &Value,
     ledger: &mut SessionLedger,
-    terminal_tasks: &mut BTreeMap<String, ExecutionOutcome>,
+    terminal_tasks: &mut BTreeMap<String, TerminalTaskObservation>,
+    usage_by_task_turn: &mut BTreeMap<String, BTreeMap<String, crate::subagent::api::TokenUsage>>,
+    source: StatusResponseSource,
     now_ms: u64,
-) -> Result<()> {
+) -> Result<bool> {
+    let mut needs_snapshot = false;
     let mut observations = Vec::new();
     protocol::collect_terminal_observations(value, &mut observations);
     for observation in observations {
@@ -124,18 +128,56 @@ pub(super) fn collect_terminal_task_outcomes(
         let Some(task_id) = candidates.into_iter().next() else {
             continue;
         };
-        let outcome = match observation.outcome {
-            protocol::TerminalOutcome::Succeeded => ExecutionOutcome::Succeeded,
-            protocol::TerminalOutcome::Failed => ExecutionOutcome::Failed,
-            protocol::TerminalOutcome::TimedOut => ExecutionOutcome::TimedOut,
-            protocol::TerminalOutcome::Lost => ExecutionOutcome::Lost,
+        let turn_hash = observation.turn_id.as_deref().map(hash_component);
+        let Some(reservation) = ledger.reservations.get(&task_id) else {
+            continue;
         };
+        // 等待队列中的匿名终态无法区分续派轮；当前状态查询才可确认归属。
+        if matches!(source, StatusResponseSource::Notification)
+            && observation.turn_id.is_none()
+            && reservation.followup_count > 0
+        {
+            needs_snapshot = true;
+            continue;
+        }
+        let snapshot_confirms_anonymous_turn = matches!(source, StatusResponseSource::Snapshot(_))
+            && turn_hash.is_none()
+            && reservation.followup_turn_is_unresolved();
+        if !snapshot_confirms_anonymous_turn
+            && !reservation.accepts_terminal_turn(turn_hash.as_deref())
+        {
+            continue;
+        }
+        let outcome = ExecutionOutcome::from(observation.outcome);
         terminal_tasks
             .entry(task_id)
-            .and_modify(|current| *current = stricter_outcome(*current, outcome))
-            .or_insert(outcome);
+            .and_modify(|current| {
+                current.outcome = stricter_outcome(current.outcome, outcome);
+                current.turn_hash = current.turn_hash.clone().or_else(|| turn_hash.clone());
+            })
+            .or_insert(TerminalTaskObservation { outcome, turn_hash });
     }
-    Ok(())
+    let mut usage_observations = Vec::new();
+    protocol::collect_native_usage_observations(value, &mut usage_observations);
+    for observation in usage_observations {
+        let candidates = identity_task_candidates(ledger, &observation.identifier);
+        if candidates.len() != 1 {
+            continue;
+        }
+        let Some(task_id) = candidates.into_iter().next() else {
+            continue;
+        };
+        let turn_hash = hash_component(&observation.turn_id);
+        usage_by_task_turn
+            .entry(task_id)
+            .or_default()
+            .entry(turn_hash)
+            .and_modify(|current| {
+                *current = super::merge_cumulative_usage(current, observation.usage.clone());
+            })
+            .or_insert(observation.usage);
+    }
+    Ok(needs_snapshot)
 }
 
 pub(super) fn stricter_outcome(
@@ -237,6 +279,7 @@ pub(super) fn identity_task_candidates(
         .iter()
         .filter(|(task_id, reservation)| {
             reservation.agent_id_hash.as_deref() == Some(identifier_hash.as_str())
+                || reservation.last_agent_id_hash.as_deref() == Some(identifier_hash.as_str())
                 || identifier_mentions_task(identifier, task_id)
         })
         .map(|(task_id, _)| task_id.clone())
@@ -261,27 +304,11 @@ pub(super) fn task_id_from_subagent_transcript(
     transcript_path: Option<&str>,
     ledger: &SessionLedger,
 ) -> Option<String> {
-    let transcript_path = Path::new(transcript_path?);
-    if !transcript_path.is_absolute()
-        || transcript_path.extension().and_then(|value| value.to_str()) != Some("jsonl")
-    {
+    if session_id.trim().is_empty() || agent_id.trim().is_empty() {
         return None;
     }
-    let metadata = fs::symlink_metadata(transcript_path).ok()?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return None;
-    }
-    let codex_home = state_root.parent()?;
-    let sessions_root = fs::canonicalize(codex_home.join("sessions")).ok()?;
-    let canonical_transcript = fs::canonicalize(transcript_path).ok()?;
-    if !canonical_transcript.starts_with(&sessions_root)
-        || !canonical_transcript
-            .file_name()
-            .and_then(|value| value.to_str())
-            .is_some_and(|name| name.ends_with(&format!("-{agent_id}.jsonl")))
-    {
-        return None;
-    }
+    let canonical_transcript =
+        resolve_verified_subagent_transcript(state_root, session_id, agent_id, transcript_path)?;
 
     let reader = BufReader::new(File::open(&canonical_transcript).ok()?);
     let mut limited = reader.take((MAX_TRANSCRIPT_METADATA_LINE_BYTES + 1) as u64);
@@ -308,9 +335,11 @@ pub(super) fn task_id_from_subagent_transcript(
         }
         None => None,
     };
+    if direct_parent.is_some() && nested_parent.is_some() && direct_parent != nested_parent {
+        return None;
+    }
     if consistent_string_field(payload, &["id"]).ok()? != Some(agent_id)
-        || direct_parent != Some(session_id)
-        || nested_parent.is_some_and(|parent| parent != session_id)
+        || direct_parent.or(nested_parent) != Some(session_id)
     {
         return None;
     }
@@ -332,7 +361,15 @@ pub(super) fn task_id_from_subagent_transcript(
     }
 
     let reservation = ledger.reservations.get(task_id)?;
-    if !reservation.state.is_active() || reservation.fenced_at_ms.is_some() {
+    let active_unfenced = reservation.state.is_active() && reservation.fenced_at_ms.is_none();
+    let resumable_or_provisional_terminal = reservation.resume_requested_at_ms.is_some()
+        || (reservation.state == ReservationState::Terminal
+            && reservation
+                .agent_id_hash
+                .as_deref()
+                .or(reservation.last_agent_id_hash.as_deref())
+                .is_some_and(|hash| is_provisional_task_binding(hash, task_id)));
+    if !active_unfenced && !resumable_or_provisional_terminal {
         return None;
     }
     let direct_role = consistent_string_field(payload, &["agent_role", "agentRole"]).ok()?;
@@ -348,6 +385,298 @@ pub(super) fn task_id_from_subagent_transcript(
         return None;
     }
     Some(task_id.to_string())
+}
+
+pub(crate) fn resolve_verified_subagent_transcript(
+    state_root: &Path,
+    session_id: &str,
+    agent_id: &str,
+    transcript_path: Option<&str>,
+) -> Option<PathBuf> {
+    let codex_home = state_root.parent()?;
+    let sessions_root = fs::canonicalize(codex_home.join("sessions")).ok()?;
+    let expected_suffix = format!("-{agent_id}.jsonl");
+    if let Some(raw_path) = transcript_path
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    {
+        let candidate = Path::new(raw_path);
+        if !candidate.is_absolute()
+            || candidate.extension().and_then(|value| value.to_str()) != Some("jsonl")
+        {
+            return None;
+        }
+        let metadata = fs::symlink_metadata(candidate).ok()?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return None;
+        }
+        let canonical = fs::canonicalize(candidate).ok()?;
+        if !canonical.starts_with(&sessions_root) {
+            return None;
+        }
+        let file_name = canonical.file_name().and_then(|value| value.to_str())?;
+        if file_name.ends_with(&expected_suffix) {
+            return Some(canonical);
+        }
+        if !session_id.trim().is_empty() && is_parent_session_rollout_name(file_name, session_id) {
+            let parent_dir = canonical.parent()?;
+            return find_unique_agent_rollout_in_dir(parent_dir, &sessions_root, &expected_suffix)
+                .or_else(|| find_unique_agent_rollout_in_tree(&sessions_root, &expected_suffix));
+        }
+        return None;
+    }
+    find_unique_agent_rollout_in_tree(&sessions_root, &expected_suffix)
+}
+
+fn is_parent_session_rollout_name(file_name: &str, session_id: &str) -> bool {
+    let Some(stem) = file_name
+        .strip_prefix("rollout-")
+        .and_then(|name| name.strip_suffix(".jsonl"))
+    else {
+        return false;
+    };
+    stem.ends_with(&format!("-{session_id}")) || stem.contains(&format!("-{session_id}_"))
+}
+
+fn find_unique_agent_rollout_in_dir(
+    dir: &Path,
+    sessions_root: &Path,
+    expected_suffix: &str,
+) -> Option<PathBuf> {
+    let entries = fs::read_dir(dir).ok()?;
+    let mut matched = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !name.ends_with(expected_suffix) {
+            continue;
+        }
+        let Ok(canonical) = fs::canonicalize(&path) else {
+            continue;
+        };
+        if !canonical.starts_with(sessions_root) {
+            continue;
+        }
+        if matched.replace(canonical).is_some() {
+            return None;
+        }
+    }
+    matched
+}
+
+fn find_unique_agent_rollout_in_tree(
+    sessions_root: &Path,
+    expected_suffix: &str,
+) -> Option<PathBuf> {
+    let mut matched = None;
+    if find_agent_rollout_in_tree_inner(
+        sessions_root,
+        sessions_root,
+        expected_suffix,
+        0,
+        &mut matched,
+    ) {
+        matched
+    } else {
+        None
+    }
+}
+
+fn find_agent_rollout_in_tree_inner(
+    dir: &Path,
+    sessions_root: &Path,
+    expected_suffix: &str,
+    depth: usize,
+    matched: &mut Option<PathBuf>,
+) -> bool {
+    if depth > 4 {
+        return true;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return true;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            if !find_agent_rollout_in_tree_inner(
+                &path,
+                sessions_root,
+                expected_suffix,
+                depth + 1,
+                matched,
+            ) {
+                return false;
+            }
+        } else if metadata.is_file()
+            && path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.ends_with(expected_suffix))
+            && let Ok(canonical) = fs::canonicalize(&path)
+            && canonical.starts_with(sessions_root)
+            && matched.replace(canonical).is_some()
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn collect_recent_session_rollout_files(
+    dir: &Path,
+    sessions_root: &Path,
+    depth: usize,
+    max_files: usize,
+    target: &mut Vec<PathBuf>,
+) {
+    if depth > 4 || target.len() >= max_files {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries = entries.flatten().collect::<Vec<_>>();
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.file_name()));
+    for entry in entries {
+        if target.len() >= max_files {
+            break;
+        }
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
+            collect_recent_session_rollout_files(
+                &path,
+                sessions_root,
+                depth + 1,
+                max_files,
+                target,
+            );
+        } else if metadata.is_file()
+            && path.extension().and_then(|value| value.to_str()) == Some("jsonl")
+            && let Ok(canonical) = fs::canonicalize(&path)
+            && canonical.starts_with(sessions_root)
+        {
+            target.push(canonical);
+        }
+    }
+}
+
+fn session_meta_agent_id(path: &Path) -> Option<String> {
+    let reader = BufReader::new(File::open(path).ok()?);
+    let mut limited = reader.take((MAX_TRANSCRIPT_METADATA_LINE_BYTES + 1) as u64);
+    let mut first_line = Vec::new();
+    let read = limited.read_until(b'\n', &mut first_line).ok()?;
+    if read == 0 || read > MAX_TRANSCRIPT_METADATA_LINE_BYTES {
+        return None;
+    }
+    let value: Value = serde_json::from_slice(&first_line).ok()?;
+    if value.get("type").and_then(Value::as_str) != Some("session_meta") {
+        return None;
+    }
+    let payload = value.get("payload")?.as_object()?;
+    consistent_string_field(payload, &["id"])
+        .ok()
+        .flatten()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+pub(super) fn rebind_provisional_reservations_from_sessions(
+    state_root: &Path,
+    session_id: &str,
+    ledger: &mut SessionLedger,
+    now_ms: u64,
+) -> bool {
+    let has_provisional = ledger.reservations.iter().any(|(task_id, reservation)| {
+        reservation
+            .agent_id_hash
+            .as_deref()
+            .or(reservation.last_agent_id_hash.as_deref())
+            .is_some_and(|hash| is_provisional_task_binding(hash, task_id))
+    });
+    if !has_provisional {
+        return false;
+    }
+    let Some(codex_home) = state_root.parent() else {
+        return false;
+    };
+    let Ok(sessions_root) = fs::canonicalize(codex_home.join("sessions")) else {
+        return false;
+    };
+    let mut files = Vec::new();
+    collect_recent_session_rollout_files(&sessions_root, &sessions_root, 0, 64, &mut files);
+    let mut changed = false;
+    for file in files {
+        let Some(agent_id) = session_meta_agent_id(&file) else {
+            continue;
+        };
+        let Some(path_str) = file.to_str() else {
+            continue;
+        };
+        let Some(task_id) = task_id_from_subagent_transcript(
+            state_root,
+            session_id,
+            &agent_id,
+            None,
+            Some(path_str),
+            ledger,
+        ) else {
+            continue;
+        };
+        let agent_hash = hash_component(&agent_id);
+        let already_owned = ledger.reservations.iter().any(|(other_task, other)| {
+            other_task != &task_id
+                && (other.agent_id_hash.as_deref() == Some(agent_hash.as_str())
+                    || other.last_agent_id_hash.as_deref() == Some(agent_hash.as_str()))
+        });
+        if already_owned {
+            continue;
+        }
+        let Some(reservation) = ledger.reservations.get_mut(&task_id) else {
+            continue;
+        };
+        let current_hash = reservation
+            .agent_id_hash
+            .as_deref()
+            .or(reservation.last_agent_id_hash.as_deref());
+        if current_hash.is_none_or(|hash| !is_provisional_task_binding(hash, &task_id)) {
+            continue;
+        }
+        if reservation.state.is_active() && reservation.fenced_at_ms.is_none() {
+            reservation.agent_id_hash = Some(agent_hash);
+            reservation.pending_init_observed_at_ms = None;
+            reservation.updated_at_ms = now_ms;
+            changed = true;
+        } else if reservation.state == ReservationState::Terminal {
+            if reservation.agent_id_hash.is_some() {
+                reservation.agent_id_hash = Some(agent_hash.clone());
+            }
+            reservation.last_agent_id_hash = Some(agent_hash);
+            reservation.updated_at_ms = now_ms;
+            changed = true;
+        }
+    }
+    changed
 }
 
 pub(super) fn is_provisional_task_binding(bound_hash: &str, task_id: &str) -> bool {
@@ -380,6 +709,7 @@ pub(super) fn fence_identity_conflict(
             continue;
         };
         reservation.agent_id_hash = None;
+        reservation.last_agent_id_hash = None;
         reservation.pending_init_observed_at_ms = None;
         if reservation.state.is_active() {
             reservation.state = ReservationState::Recovered;
@@ -393,16 +723,14 @@ pub(super) fn fence_identity_conflict(
 }
 
 pub(super) fn identifier_mentions_task(identifier: &str, task_id: &str) -> bool {
-    identifier == task_id || identifier == format!("/root/{task_id}")
+    spawn_task_name_matches(identifier, task_id)
 }
 
 pub(super) fn normalized_identifier(value: &str) -> String {
     protocol::normalize_identifier(value)
 }
 
-pub(super) fn hash_component(value: &str) -> String {
-    crate::fs_util::sha256_hex(value.as_bytes())
-}
+pub(super) use crate::fs_util::sha256_hex_str as hash_component;
 
 pub(super) fn hash_component_bytes(value: &[u8]) -> String {
     crate::fs_util::sha256_hex(value)

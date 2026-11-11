@@ -24,11 +24,12 @@ export type SettingsPageId = (typeof SETTINGS_PAGES)[number]["id"];
 type SettingsSection = ReactNode | ((active: boolean) => ReactNode);
 
 type SettingsLayoutProps = {
+  active?: boolean;
   hidden?: boolean;
   sections: Record<SettingsPageId, SettingsSection>;
 };
 
-export function SettingsLayout({ sections, hidden = false }: SettingsLayoutProps) {
+export function SettingsLayout({ active: layoutActive = true, sections, hidden = false }: SettingsLayoutProps) {
   const [activePage, setActivePage] = useState<SettingsPageId>("overview");
   const [visitedPages, setVisitedPages] = useState<ReadonlySet<SettingsPageId>>(
     () => new Set(["overview"]),
@@ -72,7 +73,7 @@ export function SettingsLayout({ sections, hidden = false }: SettingsLayoutProps
       <div className="settings-content" id="codey-settings-content" tabIndex={-1}>
         {/* 首次访问时挂载页面，之后隐藏而不卸载，保留草稿、展开状态和异步加载结果。 */}
         {SETTINGS_PAGES.map((page) => {
-          const active = !hidden && activePage === page.id;
+          const active = layoutActive && !hidden && activePage === page.id;
           const content = sections[page.id];
           return (
             <section

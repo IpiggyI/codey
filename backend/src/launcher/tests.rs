@@ -780,6 +780,62 @@ async fn exit_watcher_returns_the_child_to_stop_on_shutdown() {
     process.wait().await.expect("reap child");
 }
 #[test]
+fn applied_role_catalog_matches_the_gate_for_models_and_reasoning() {
+    let initial = CodeyConfig {
+        subagent_model: "shared-model".into(),
+        subagent_roles: crate::config::uniform_subagent_roles("shared-model", "high"),
+        ..Default::default()
+    };
+    let applied = RuntimeSubagentConfig::from_config(&initial);
+    let mut changed = initial.clone();
+    changed
+        .subagent_roles
+        .get_mut("codey_worker")
+        .unwrap()
+        .model = "provider-custom-model".into();
+    changed
+        .subagent_roles
+        .get_mut("codey_explorer")
+        .unwrap()
+        .reasoning_effort = "low".into();
+    let desired = RuntimeSubagentConfig::from_config(&changed);
+
+    assert_eq!(applied.roles, initial.subagent_roles);
+    assert_eq!(desired.roles, changed.subagent_roles);
+    assert_eq!(applied.model, desired.model);
+    assert_ne!(applied.roles, desired.roles);
+    assert_eq!(desired.roles["codey_worker"].model, "provider-custom-model");
+    assert_eq!(desired.roles["codey_explorer"].reasoning_effort, "low");
+}
+
+#[tokio::test]
+async fn live_role_changes_preserve_subagent_hot_reload_within_the_current_provider() {
+    let initial = CodeyConfig {
+        subagent_optimization: true,
+        ..Default::default()
+    };
+    let runtime = CodeyRuntime::for_model_delivery_test(initial.clone(), "ws://unused");
+    let mut latest = initial.clone();
+    latest
+        .subagent_roles
+        .get_mut("codey_worker")
+        .unwrap()
+        .reasoning_effort = "low".into();
+    latest
+        .subagent_roles
+        .get_mut("codey_explorer")
+        .unwrap()
+        .model = "provider-custom-model".into();
+    assert_ne!(
+        runtime.applied_subagent_config().await.as_ref(),
+        &RuntimeSubagentConfig::from_config(&latest)
+    );
+    assert!(runtime.supports_subagent_config_hot_reload(&latest));
+    latest.fast_context_tools = !initial.fast_context_tools;
+    assert!(!runtime.supports_subagent_config_hot_reload(&latest));
+}
+
+#[test]
 fn live_route_edits_preserve_subagent_hot_reload_support_within_the_current_provider() {
     let initial = CodeyConfig {
         subagent_optimization: true,

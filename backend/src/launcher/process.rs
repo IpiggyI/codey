@@ -923,6 +923,152 @@ fn prune_abandoned_runtime_staging(
 }
 
 #[cfg(any(windows, test))]
+const WINDOWS_RUNTIME_LAST_USED: &str = ".codey-last-used";
+/// Codex and Codex Beta share the cache root, so a copy for another build is
+/// kept while it is still launched within this period.
+#[cfg(any(windows, test))]
+const WINDOWS_RUNTIME_RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+#[cfg(any(windows, test))]
+fn mark_windows_runtime_used(runtime_dir: &std::path::Path) {
+    let marker = runtime_dir.join(WINDOWS_RUNTIME_LAST_USED);
+    if let Err(error) = std::fs::write(&marker, b"") {
+        #[cfg(not(test))]
+        {
+            let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                "launcher.windows_runtime_mark_used_failed",
+                serde_json::json!({ "marker": marker, "detail": error.to_string() }),
+            );
+        }
+        #[cfg(test)]
+        let _ = error;
+    }
+}
+
+/// Directories older Codey versions staged have no marker; their manifest
+/// records when the copy was made.
+#[cfg(any(windows, test))]
+fn windows_runtime_last_used(runtime_dir: &std::path::Path) -> Option<std::time::SystemTime> {
+    [
+        runtime_dir.join(WINDOWS_RUNTIME_LAST_USED),
+        runtime_dir.join(STAGED_RUNTIME_MANIFEST),
+        runtime_dir.to_path_buf(),
+    ]
+    .iter()
+    .find_map(|path| std::fs::metadata(path).and_then(|m| m.modified()).ok())
+}
+
+/// `{hash}`, a fallback `{hash}-{suffix}` or a `.staging-*` copy that may have
+/// been launched directly.
+#[cfg(any(windows, test))]
+fn is_windows_runtime_copy_name(name: &str) -> bool {
+    if name.starts_with(".staging-") {
+        return true;
+    }
+    let bytes = name.as_bytes();
+    bytes.len() >= 16
+        && bytes[..16]
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+        && (bytes.len() == 16 || bytes[16] == b'-')
+}
+
+/// A running copy keeps its executables open; Windows refuses write access to
+/// them, so such a directory is left for a later launch.
+#[cfg(any(windows, test))]
+fn windows_runtime_in_use(runtime_dir: &std::path::Path) -> std::io::Result<bool> {
+    for entry in std::fs::read_dir(runtime_dir)? {
+        let path = entry?.path();
+        if !path.is_file() {
+            continue;
+        }
+        if let Err(error) = std::fs::OpenOptions::new().write(true).open(&path) {
+            if cfg!(windows) && matches!(error.raw_os_error(), Some(32 | 33)) {
+                return Ok(true);
+            }
+            return Err(error);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(any(windows, test))]
+fn remove_unused_windows_runtime(
+    cache_root: &std::path::Path,
+    runtime_dir: &std::path::Path,
+) -> Result<bool> {
+    if windows_runtime_in_use(runtime_dir)
+        .with_context(|| format!("检查 Codex 旧运行副本失败：{}", runtime_dir.display()))?
+    {
+        return Ok(false);
+    }
+    // Moving the directory first means a launch can never pick up a half-deleted
+    // copy, and Windows refuses the move while a file in it is still open.
+    let trash = cache_root.join(format!(".trash-{}", uuid::Uuid::new_v4().simple()));
+    match std::fs::rename(runtime_dir, &trash) {
+        Ok(()) => {}
+        Err(error) if windows_runtime_publish_retryable(&error) => return Ok(false),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("移走 Codex 旧运行副本失败：{}", runtime_dir.display()));
+        }
+    }
+    std::fs::remove_dir_all(&trash)
+        .with_context(|| format!("删除 Codex 旧运行副本失败：{}", trash.display()))?;
+    Ok(true)
+}
+
+/// Each Codex update stages a new copy of several hundred megabytes. Remove
+/// copies no launch has used within `retention`, plus leftovers of earlier
+/// removals. A failure here never blocks the launch.
+#[cfg(any(windows, test))]
+fn prune_unused_windows_runtimes(
+    cache_root: &std::path::Path,
+    keep: &std::path::Path,
+    now: std::time::SystemTime,
+    retention: Duration,
+) {
+    let Ok(entries) = std::fs::read_dir(cache_root) else {
+        return;
+    };
+    let mut failures = Vec::new();
+    for entry in entries.flatten().take(1024) {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if path == keep || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let result = if name.starts_with(".trash-") {
+            std::fs::remove_dir_all(&path)
+                .with_context(|| format!("删除 Codex 旧运行副本失败：{}", path.display()))
+                .map(|()| true)
+        } else if is_windows_runtime_copy_name(name)
+            && windows_runtime_last_used(&path)
+                .and_then(|used| now.duration_since(used).ok())
+                .is_some_and(|age| age >= retention)
+        {
+            remove_unused_windows_runtime(cache_root, &path)
+        } else {
+            continue;
+        };
+        if let Err(error) = result {
+            failures.push(format!("{error:#}"));
+        }
+    }
+    if !failures.is_empty() {
+        #[cfg(not(test))]
+        {
+            let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                "launcher.windows_runtime_prune_failed",
+                serde_json::json!({ "cacheRoot": cache_root, "failures": failures }),
+            );
+        }
+    }
+}
+
+#[cfg(any(windows, test))]
 fn publish_windows_staged_runtime(
     staging: &std::path::Path,
     destination: &std::path::Path,
@@ -1056,15 +1202,34 @@ fn stage_windows_cli_runtime(
     // Codex 会清理自身 bin 中的旧哈希目录，Codey 的运行副本必须独立存放。
     let cache_root = local_app_data.join("Codey").join("codex-runtime");
     let destination = cache_root.join(hash_name);
-    if let Some(ready) = find_ready_windows_runtime(&cache_root, &destination, hash_name, &sources)
-    {
-        return Ok(ready.join("codex.exe"));
+    let executable =
+        match find_ready_windows_runtime(&cache_root, &destination, hash_name, &sources) {
+            Some(ready) => ready.join("codex.exe"),
+            None => stage_new_windows_cli_runtime(&cache_root, &destination, hash_name, &sources)?,
+        };
+    if let Some(runtime_dir) = executable.parent() {
+        mark_windows_runtime_used(runtime_dir);
+        prune_unused_windows_runtimes(
+            &cache_root,
+            runtime_dir,
+            std::time::SystemTime::now(),
+            WINDOWS_RUNTIME_RETENTION,
+        );
     }
+    Ok(executable)
+}
 
+#[cfg(any(windows, test))]
+fn stage_new_windows_cli_runtime(
+    cache_root: &std::path::Path,
+    destination: &std::path::Path,
+    hash_name: &str,
+    sources: &[WindowsCliRuntimeSource],
+) -> Result<PathBuf> {
     // Slow path: a new Codex build or a damaged copy. Hash, copy, verify, then
     // publish the directory atomically together with its manifest.
     let mut files = Vec::with_capacity(sources.len());
-    for source in &sources {
+    for source in sources {
         files.push(StagedRuntimeFile {
             name: source.name.to_string(),
             len: source.len,
@@ -1072,9 +1237,9 @@ fn stage_windows_cli_runtime(
             sha256: sha256_file(&source.path)?,
         });
     }
-    std::fs::create_dir_all(&cache_root)
+    std::fs::create_dir_all(cache_root)
         .with_context(|| format!("创建 Codex 用户运行目录失败：{}", cache_root.display()))?;
-    prune_abandoned_runtime_staging(&cache_root, &sources);
+    prune_abandoned_runtime_staging(cache_root, sources);
 
     let staging = cache_root.join(format!(
         ".staging-{hash_name}-{}",
@@ -1101,7 +1266,7 @@ fn stage_windows_cli_runtime(
             serde_json::to_vec(&manifest)?,
         )
         .with_context(|| format!("写入 Codex 运行目录清单失败：{}", staging.display()))?;
-        publish_windows_staged_runtime(&staging, &destination, hash_name, &sources)
+        publish_windows_staged_runtime(&staging, destination, hash_name, sources)
     })();
     if result.is_err() {
         let _ = std::fs::remove_dir_all(&staging);
@@ -2371,6 +2536,87 @@ mod cli_wrapper_tests {
         let updated = stage_windows_cli_runtime(&target, &local_app_data).unwrap();
         assert_ne!(updated.parent(), staged.parent());
         assert_eq!(std::fs::read(&updated).unwrap(), b"payload:codex.exe v2");
+    }
+
+    #[test]
+    fn windows_cli_runtime_prunes_copies_no_launch_used_within_retention() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_root = temp.path();
+        let copy = |name: &str| {
+            let directory = cache_root.join(name);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join("codex.exe"), "runtime").unwrap();
+            directory
+        };
+        let current = copy("0000000000000000");
+        let replaced = copy("1111111111111111");
+        let replaced_fallback = copy("1111111111111111-abcdef01");
+        let ready_staging = copy(".staging-1111111111111111-deadbeef");
+        let other_build = copy("2222222222222222");
+        let legacy = copy("3333333333333333");
+        std::fs::write(legacy.join(STAGED_RUNTIME_MANIFEST), "{}").unwrap();
+        let foreign = copy("not-a-runtime");
+        let trash = copy(".trash-leftover");
+        for directory in [&current, &replaced, &replaced_fallback, &ready_staging] {
+            mark_windows_runtime_used(directory);
+        }
+        let retention = Duration::from_secs(60);
+        let later = std::time::SystemTime::now() + retention;
+        // Codex Beta used its copy after the other copies were last launched.
+        std::fs::write(other_build.join(WINDOWS_RUNTIME_LAST_USED), "").unwrap();
+        let other_build_used = std::fs::File::options()
+            .write(true)
+            .open(other_build.join(WINDOWS_RUNTIME_LAST_USED))
+            .unwrap();
+        other_build_used.set_modified(later).unwrap();
+
+        prune_unused_windows_runtimes(cache_root, &current, later, retention);
+
+        assert!(current.join("codex.exe").is_file(), "kept copy was removed");
+        assert!(other_build.join("codex.exe").is_file());
+        assert!(foreign.join("codex.exe").is_file());
+        for removed in [
+            &replaced,
+            &replaced_fallback,
+            &ready_staging,
+            &legacy,
+            &trash,
+        ] {
+            assert!(!removed.exists(), "{}", removed.display());
+        }
+        assert_eq!(std::fs::read_dir(cache_root).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn windows_cli_runtime_staging_prunes_the_replaced_build() {
+        let temp = tempfile::tempdir().unwrap();
+        let resources = temp.path().join("resources");
+        std::fs::create_dir_all(&resources).unwrap();
+        for name in WINDOWS_CLI_RUNTIME_FILES {
+            std::fs::write(resources.join(name), format!("payload:{name}")).unwrap();
+        }
+        let local_app_data = temp.path().join("local-app-data");
+        let target = resources.join("codex.exe");
+        let old_dir = stage_windows_cli_runtime(&target, &local_app_data)
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert!(old_dir.join(WINDOWS_RUNTIME_LAST_USED).is_file());
+
+        std::fs::write(&target, "payload:codex.exe v2").unwrap();
+        let new_dir = stage_windows_cli_runtime(&target, &local_app_data)
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        assert!(old_dir.is_dir(), "a recently used copy must be retained");
+
+        let cache_root = local_app_data.join("Codey/codex-runtime");
+        let later = std::time::SystemTime::now() + WINDOWS_RUNTIME_RETENTION;
+        prune_unused_windows_runtimes(&cache_root, &new_dir, later, WINDOWS_RUNTIME_RETENTION);
+        assert!(!old_dir.exists());
+        assert!(new_dir.join("codex.exe").is_file());
     }
 
     #[cfg(target_os = "macos")]

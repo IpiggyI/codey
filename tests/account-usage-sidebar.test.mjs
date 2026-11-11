@@ -166,12 +166,17 @@ test("mounts weekly and five-hour usage before the sidebar footer's last child",
   assert.equal(usage.nextElementSibling, env.anchor);
   assert.deepEqual(env.footer.children, [usage, env.anchor]);
   assert.equal(env.footer.getAttribute("data-codey-usage-host"), "true");
-  assert.match(usage.innerHTML, /周额度[\s\S]*?60%[\s\S]*?5 小时[\s\S]*?85%/);
+  assert.match(usage.innerHTML, /每周<\/span>\s*<\/span>\s*<span class="codey-usage-value">60<span class="codey-usage-unit">%[\s\S]*?5 小时<\/span>\s*<\/span>\s*<span class="codey-usage-value">85</);
   assert.match(usage.innerHTML, /class="codey-usage-plan-tag" data-pro-tier="200">Pro 200</);
   assert.match(usage.innerHTML, /周额度[\s\S]*?codey-usage-detail-percent">60%/);
+  // 摘要是紧凑卡片：只有标签、大号百分比和重置时间，不含进度条与“重置”后缀。
+  const summaryHtml = usage.innerHTML.split('class="codey-usage-details"')[0];
+  assert.match(summaryHtml, /class="codey-usage-plan-tag" data-pro-tier="200">Pro 200<\/span>\s*<span class="codey-usage-window-label">每周</);
+  assert.match(summaryHtml, /class="codey-usage-reset">明天 \d{2}:\d{2}<\/span>/);
+  assert.doesNotMatch(summaryHtml, /重置|codey-usage-meter|codey-usage-border-progress|余额|>42</);
   assert.doesNotMatch(usage.innerHTML, /已用|detail-value">剩余/);
   assert.match(usage.innerHTML, /Credits 余额[\s\S]*?42/);
-  assert.equal(usage.dataset.state, "ready");
+  assert.equal(usage.dataset.codeyState, "ready");
   assert.equal(usage.dataset.windowCount, "2");
   assert.ok(env.delays.includes(250));
   assert.ok(env.delays.includes(8_000));
@@ -180,7 +185,7 @@ test("mounts weekly and five-hour usage before the sidebar footer's last child",
 
   env.setUsage({ status: "error", message: "官方额度接口返回 401" });
   await env.window.__codeyRefreshAccountUsage();
-  assert.equal(usage.dataset.state, "stale");
+  assert.equal(usage.dataset.codeyState, "stale");
   assert.match(usage.innerHTML, /周额度/);
 
   env.setUsage({ status: "disabled" });
@@ -295,7 +300,7 @@ test("shows the error state when the first quota read fails", async () => {
   await env.window.__codeyRefreshAccountUsage();
   const usage = env.document.getElementById("codey-account-usage");
   assert.ok(usage);
-  assert.equal(usage.dataset.state, "error");
+  assert.equal(usage.dataset.codeyState, "error");
   assert.equal(usage.textContent, "额度暂不可用");
 });
 
@@ -419,6 +424,50 @@ const renderedUsage = async (usageResult) => {
   return usage;
 };
 
+const summaryOf = (usage) => usage.innerHTML.split('class="codey-usage-details"')[0];
+const weeklyOnly = (usedPercent, resetsAt = localAfterDays(1)) => ({
+  ...resetCreditsBase(),
+  primary: { usedPercent, windowMinutes: 10080, resetsAt },
+  secondary: null,
+});
+
+test("a lone weekly window draws a border progress ring and a calendar-date reset", async () => {
+  const resetsAt = localAfterDays(1);
+  const usage = await renderedUsage(weeklyOnly(15, resetsAt));
+  assert.equal(usage.dataset.windowCount, "1");
+  const summary = summaryOf(usage);
+  assert.match(summary, new RegExp(`<span class="codey-usage-reset">${monthDayLabel(resetsAt)} 重置</span>`));
+  assert.doesNotMatch(summary, /今天|明天/);
+  assert.match(summary, /class="codey-usage-border-progress" aria-hidden="true" focusable="false"/);
+  assert.match(summary, /pathLength="100" stroke-dasharray="85 100"/);
+  assert.doesNotMatch(summary, /codey-usage-meter/);
+});
+
+test("the border progress follows the remaining percentage and the tone thresholds", async () => {
+  for (const [remaining, tone] of [[100, "healthy"], [71, "healthy"], [70, "normal"], [57, "normal"], [40, "warning"], [20, "critical"], [0, "critical"]]) {
+    const summary = summaryOf(await renderedUsage(weeklyOnly(100 - remaining)));
+    assert.ok(summary.includes(`data-window="weekly" data-tone="${tone}"`), `${remaining}% tone`);
+    assert.ok(summary.includes(`stroke-dasharray="${remaining} 100"`), `${remaining}% dash`);
+    assert.equal(summary.includes('opacity="0"'), remaining === 0, `${remaining}% hides the rounded end cap`);
+  }
+});
+
+test("the border progress is limited to a lone weekly window", async () => {
+  const both = await renderedUsage(resetCreditsBase());
+  assert.equal(both.dataset.windowCount, "2");
+  assert.doesNotMatch(both.innerHTML, /codey-usage-border-progress/);
+  assert.match(summaryOf(both), /class="codey-usage-reset">明天 15:30</);
+
+  const fiveHourOnly = await renderedUsage({
+    ...resetCreditsBase(),
+    primary: { usedPercent: 15, windowMinutes: 300, resetsAt: localAfterDays(1) },
+    secondary: null,
+  });
+  assert.equal(fiveHourOnly.dataset.windowCount, "1");
+  assert.doesNotMatch(fiveHourOnly.innerHTML, /codey-usage-border-progress/);
+  assert.match(fiveHourOnly.innerHTML, /data-window="five-hour"/);
+});
+
 test("reset credits render their count and the nearest expiry with the shared day-time label", async () => {
   const usage = await renderedUsage({
     ...resetCreditsBase(),
@@ -426,8 +475,9 @@ test("reset credits render their count and the nearest expiry with the shared da
   });
   assert.match(usage.innerHTML, /剩余重置次数[\s\S]*?codey-usage-detail-value">3 次</);
   assert.match(usage.innerHTML, /<span>最近 明天 15:30 过期<\/span>/);
-  // 窗口重置时间仍然带“重置”后缀，过期时间不带。
-  assert.match(usage.innerHTML, /<span class="codey-usage-reset">明天 15:30 重置<\/span>/);
+  // 详情里的窗口重置时间带“重置”后缀，摘要与过期时间不带。
+  assert.match(usage.innerHTML, /<span class="codey-usage-detail-reset">明天 15:30 重置<\/span>/);
+  assert.match(usage.innerHTML, /<span class="codey-usage-reset">明天 15:30<\/span>/);
   assert.doesNotMatch(usage.innerHTML, /过期[^<]*重置|重置[^<]*过期/);
   const summary = usage.innerHTML.slice(0, usage.innerHTML.indexOf("codey-account-usage-details"));
   assert.doesNotMatch(summary, /重置次数/);
@@ -464,7 +514,7 @@ test("a zero reset-credit count renders no row and no expiry warning", async () 
   assert.equal(usage.dataset.creditExpiring, undefined);
 });
 
-test("reset credits expiring within 12 hours light the warning dot, the critical row and the aria hint", async () => {
+test("reset credits expiring within 18 hours light the warning dot, the critical row and the aria hint", async () => {
   const usage = await renderedUsage({
     ...resetCreditsBase(),
     resetCredits: { availableCount: 2, nextExpiresAt: Math.floor(Date.now() / 1000) + 6 * 3600 },
@@ -475,15 +525,26 @@ test("reset credits expiring within 12 hours light the warning dot, the critical
   assert.match(usage.getAttribute("aria-label"), /重置次数即将过期/);
 });
 
+test("reset credits expiring at 17 hours are warned and at 19 hours are not", async () => {
+  for (const [hours, expiring] of [[17, true], [19, false]]) {
+    const usage = await renderedUsage({
+      ...resetCreditsBase(),
+      resetCredits: { availableCount: 3, nextExpiresAt: Math.floor(Date.now() / 1000) + hours * 3600 },
+    });
+    assert.equal(usage.dataset.creditExpiring === "true", expiring, `${hours}h`);
+    assert.equal(usage.innerHTML.includes("codey-usage-credit-dot"), expiring, `${hours}h dot`);
+  }
+});
+
 test("a zero Credits balance renders no row", async () => {
   const usage = await renderedUsage({ ...resetCreditsBase(), credits: { hasCredits: false, unlimited: false, balance: "0" } });
   assert.doesNotMatch(usage.innerHTML, /Credits 余额/);
 });
 
-test("reset credits expiring after more than 12 hours show no warning", async () => {
+test("reset credits expiring after more than 18 hours show no warning", async () => {
   const usage = await renderedUsage({
     ...resetCreditsBase(),
-    resetCredits: { availableCount: 2, nextExpiresAt: Math.floor(Date.now() / 1000) + 13 * 3600 },
+    resetCredits: { availableCount: 2, nextExpiresAt: Math.floor(Date.now() / 1000) + 24 * 3600 },
   });
   assert.equal(usage.dataset.creditExpiring, undefined);
   assert.doesNotMatch(usage.innerHTML, /codey-usage-credit-dot|is-expiring/);

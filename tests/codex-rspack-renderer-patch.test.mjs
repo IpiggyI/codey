@@ -177,6 +177,11 @@ test("native draft speed defaults preserve the saved user tier", async () => {
 test("unrelated rspack chunks are skipped by the patch anchors", async () => {
   const { logs, patch } = await installPatch();
   assert.equal(patch('export const __rspack_esm_id=1;export const __webpack_modules__={a(e,t){t.A="icon"}};'), null);
+  assert.equal(
+    patch('(0,u.useEffect)(()=>{l||t0.O1.dispatchMessage("electron-avatar-overlay-restore-ready",{onDemandEnabled:k,shouldPrewarmAvatarOverlay:t&&eP})},[k,t,l,eP]);'),
+    null,
+    "pet-only anchors stay inactive when pet slimming is disabled",
+  );
   assert.deepEqual(logs, []);
 });
 
@@ -205,6 +210,36 @@ test("real request reader clears a stale Fast tier after changing models", async
   assert.equal(await read(scope, "local", "standard-model"), null);
   scope.get = () => ({ type: "custom", serviceTier: "priority" });
   assert.equal(await read(scope, "local", "standard-model"), null);
+});
+
+test("Codex 26.1103 inline request reader clears a stale Fast tier after changing models", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const { runInNewContext } = await import("node:vm");
+  const { patch, logs } = await installPatch();
+  const request = await readFile(new URL("./fixtures/codex-service-tier-26.1103.js", import.meta.url), "utf8");
+  const shared = await readFile(new URL("./fixtures/codex-service-tier-shared.js", import.meta.url), "utf8");
+  const native = runInNewContext(`${shared};({DS:p,Pd:d,E_:m,W6:i,uw:s})`);
+  const models = [
+    { model: "fast-model", serviceTiers: [{ id: "priority", name: "Fast" }] },
+    { model: "standard-model", serviceTiers: [] },
+  ];
+  const scope = { get: () => ({ type: "fromConfig" }), query: { setData() {} } };
+  const patched = patch(request);
+  assert.equal(typeof patched, "string");
+  const read = runInNewContext(patched, {
+    u: { ...native, qh: (selection) => selection.serviceTier }, r: native,
+    i: { V: () => ({ sendRequest: async () => ({ data: models }) }) },
+    a: { QN: "selection" }, l: { s: async () => "chatgpt" },
+    s: { Wr: async () => ({ requirements: { featureRequirements: { fast_mode: true } } }), b9: "requirements" },
+    o: { ig: async () => ({ config: { model: "standard-model", service_tier: "priority" } }), Y$: (value) => value },
+    d: { v: { error: (message) => { throw Error(message); } } },
+  });
+  assert.equal(await read(scope, "local", "fast-model", "priority"), "priority");
+  assert.equal(await read(scope, "local", "standard-model", "priority"), null);
+  assert.equal(await read(scope, "local", "standard-model"), null);
+  scope.get = () => ({ type: "custom", serviceTier: "priority" });
+  assert.equal(await read(scope, "local", "standard-model"), null);
+  assert.deepEqual(logs, []);
 });
 
 test("real shared permissions grant null access and preserve explicit account denial", async () => {
@@ -297,5 +332,54 @@ test("real locale gate selects Chinese before the first render", async () => {
     d: {}, m: {}, p: { Ou: () => ({ get: (_key, fallback) => fallback }) }, g: { sd: () => false },
   });
   assert.deepEqual({ ...resolve({}) }, { enabled: true, source: "SYSTEM", override: "zh-CN" });
+  assert.deepEqual(logs, []);
+});
+
+test("rspack stylesheet assets rewrite data-state :has() rules without touching unrelated css", async () => {
+  const { logs, patch } = await installPatch();
+  const mainCss = [
+    ".group-has-\\[\\[data-state\\=open\\]\\]\\:opacity-100:is(:where(.group):has([data-state=open]) *){opacity:1}",
+    ".group-has-\\[\\[data-state\\=open\\]\\]\\/project-source\\:opacity-100:is(:where(.group\\/project-source):has([data-state=open]) *){opacity:1}",
+    ".group-has-\\[\\[aria-expanded\\=true\\]\\,\\[data-state\\=open\\]\\]\\:opacity-100:is(:where(.group):has([aria-expanded=true],[data-state=open]) *){opacity:1}",
+    ".has-\\[\\[data-state\\=open\\]\\]\\:opacity-100:has([data-state=open]){opacity:1}",
+    ".has-\\[button\\[data-state\\=open\\]\\]\\:opacity-100:has(:is(button[data-state=open])){opacity:1}",
+  ].join("");
+  const patchedMain = patch(mainCss, "app://-/assets/async/e77f816560c6.css");
+  assert.ok(patchedMain, "hashed async stylesheet should be patched");
+  assert.doesNotMatch(patchedMain, /:has\([^)]*data-state/);
+  assert.match(patchedMain, /:where\(\.group\)\[data-codey-open-within\]/);
+  assert.match(patchedMain, /:where\(\.group\\\/project-source\)\[data-codey-open-within\]/);
+  assert.match(
+    patchedMain,
+    /:where\(\.group\):is\(:has\(\[aria-expanded=true\]\),\[data-codey-open-within\]\)/,
+  );
+  assert.match(patchedMain, /\.has-\\\[\\\[data-state\\=open\\\]\\\]\\:opacity-100\[data-codey-open-within\]/);
+  assert.match(patchedMain, /\.has-\\\[button\\\[data-state\\=open\\\]\\\]\\:opacity-100\[data-codey-open-within\]/);
+  assert.match(patchedMain, /:root\{--codey-css-open-state-has-patched:1\}/);
+  assert.equal(
+    patch(patchedMain, "app://-/assets/async/e77f816560c6.css"),
+    null,
+    "patched stylesheet is idempotent",
+  );
+
+  const cardCss = ":where(.card-ineZLT):has(>[data-state=open]),:where(.card-ineZLT>*):has(>[data-state=open]){opacity:1!important}";
+  const patchedCard = patch(cardCss, "app://-/assets/async/166572aa20c2.css");
+  assert.ok(patchedCard);
+  assert.doesNotMatch(patchedCard, /:has\([^)]*data-state/);
+  assert.match(
+    patchedCard,
+    /:where\(\.card-ineZLT\)\[data-codey-open-within\],:where\(\.card-ineZLT>\*\)\[data-codey-open-within\]/,
+  );
+
+  assert.equal(
+    patch(".plain{color:red}[data-state=open]{opacity:1}", "app://-/assets/async/9012f383f623.css"),
+    null,
+    "stylesheets without :has(...data-state...) pass through unchanged",
+  );
+  assert.equal(
+    patch(mainCss, "app://-/assets/unhashed.css"),
+    null,
+    "unhashed css urls are ignored",
+  );
   assert.deepEqual(logs, []);
 });

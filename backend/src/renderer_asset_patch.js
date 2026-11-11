@@ -335,7 +335,7 @@
     {"label": "completed thread reconciliation", "alternatives": [["getHasInProgressLocalConversation(", "inactiveThreadUnsubscriber.clearConversationStreamOwnership", "getConversationStreamRevision("]]},
     {"label": "model allowlist", "alternatives": [["\"amazonBedrock\"!==", "availableAccessPrograms?.cyber", "useHiddenModels:"], ["useHiddenModels:", "availableModels:", "includeUltraReasoningEffort", "amazonBedrock"]]},
     {"label": "model visibility", "alternatives": [["\"amazonBedrock\"!==", "availableAccessPrograms?.cyber", "useHiddenModels:"], ["useHiddenModels:", "includeUltraReasoningEffort", "amazonBedrock"]]},
-    {"label": "third-party Ultra reasoning", "alternatives": [["includeUltraReasoningEffort:", "isCustomModelProvider:", "modelCatalogPath:", "1186680773"]]},
+    {"label": "third-party Ultra reasoning", "alternatives": [["includeUltraReasoningEffort:", "isCustomModelProvider:", "modelCatalogPath:", "1186680773"], ["includeUltraReasoningEffort:", "isCustomModelProvider:", "teamCatalog:", "1186680773"]]},
     {"label": "service tier access", "alternatives": [["supportsIndependentSpeedModes", "ultrafast_mode"]]},
     {"label": "service tier access state", "alternatives": [["serviceTierAccess:", "isLoading:"]]},
     {"label": "service tier request model validation", "alternatives": [["Failed to read service tier for request"]]},
@@ -343,7 +343,8 @@
     {"label": "fast model trigger fallback", "alternatives": [["composer.intelligenceDropdown.model.title", "modelPickerTriggerConfig:", "selectedServiceTierIconKind:"]], "legacy": "旧版模型入口的 Fast 标识；新版入口原生检查配置。"},
     {"label": "app state heartbeat snapshot", "alternatives": [["electron-app-state-snapshot-request"]]},
     {"label": "interaction CPU sampling", "alternatives": [["activeInteractions=new Map", "beginCpuSampling"]]},
-    {"label": "interaction heartbeat", "alternatives": [["activeInteractions=new Map", "beginCpuSampling"]]}
+    {"label": "interaction heartbeat", "alternatives": [["activeInteractions=new Map", "beginCpuSampling"]]},
+    {"label": "stylesheet open state", "alternatives": [[":has([data-state=open])"], [":has(:is(button[data-state=open]))"], [":has([aria-expanded=true],[data-state=open])"]]}
   ]/*end-codey-renderer-patch-items*/;
   const rendererPatchAnchors = /*codey-renderer-patch-anchors*/[
     "inactiveThreadUnsubscriber.clearConversationStreamOwnership",
@@ -366,14 +367,27 @@
     "useHiddenModels:",
     "modelPickerTriggerConfig:",
     "Failed to read service tier for request",
-    "maybe_resume_owner_discovery_failed"
+    "maybe_resume_owner_discovery_failed",
+    ":has([data-state=open])",
+    ":has(:is(button[data-state=open]))",
+    ":has([aria-expanded=true],[data-state=open])"
   ]/*end-codey-renderer-patch-anchors*/;
   if (rendererPatchItems.some((item) => item.alternatives.some((literals) =>
     !literals.some((literal) => rendererPatchAnchors.includes(literal))))) {
     throw new Error("页面资源补丁逐项定义与预筛字面量不一致");
   }
+  const petOnlyPatchAnchors = new Set([
+    "codex-avatar",
+    "codex-pet-assets",
+    "avatar-mascot-button",
+    "use-avatar-options",
+    "shouldPrewarmAvatarOverlay:",
+  ]);
+  const activeRendererPatchAnchors = disablePet
+    ? rendererPatchAnchors
+    : rendererPatchAnchors.filter((anchor) => !petOnlyPatchAnchors.has(anchor));
   const patchCodexRendererAsset = (source) => {
-    if (!rendererPatchAnchors.some((anchor) => source.includes(anchor))) return source;
+    if (!activeRendererPatchAnchors.some((anchor) => source.includes(anchor))) return source;
     let patched = source;
     let nativeCustomProviderModelAccess = false;
     if (!source.includes("/*codey-app-server-manager-registry*/")
@@ -637,16 +651,24 @@
     if (
       source.includes("includeUltraReasoningEffort:") &&
       source.includes("isCustomModelProvider:") &&
-      source.includes("modelCatalogPath:") &&
+      (source.includes("modelCatalogPath:") || source.includes("teamCatalog:")) &&
       source.includes("1186680773")
     ) {
       // 第三方 provider 按模型目录显示 Ultra，保留调用方和用户的思考强度设置。
       // 宿主服务资源模块只把同一开关作为参数传入，没有模型目录查询，不在此改写。
       patched = replaceUniqueRendererGate(
         patched,
-        /(\(\{[^{}]*\bincludeUltraReasoningEffort\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\bisCustomModelProvider\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\s*,\s*\{[^{}]*\bget\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\)\s*=>\s*\{[^{}]*\b[$A-Z_a-z][$\w]*\s*=\s*\2\s*&&\s*)(\4\(\s*[$A-Z_a-z][$\w]*(?:\.[$A-Z_a-z][$\w]*)?\s*,\s*(["'`])1186680773\6\s*\))/g,
-        (_match, prefix, _includeUltra, customProvider, _get, gate) =>
-          `${prefix}(${customProvider}||${gate})`,
+        [{
+          pattern: /(\(\{[^{}]*\bincludeUltraReasoningEffort\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\bisCustomModelProvider\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\s*,\s*\{[^{}]*\bget\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\)\s*=>\s*\{[^{}]*\b[$A-Z_a-z][$\w]*\s*=\s*\2\s*&&\s*)(\4\(\s*[$A-Z_a-z][$\w]*(?:\.[$A-Z_a-z][$\w]*)?\s*,\s*(["'`])1186680773\6\s*\))/g,
+          replacement: (_match, prefix, _includeUltra, customProvider, _get, gate) =>
+            `${prefix}(${customProvider}||${gate})`,
+        }, {
+          // Codex 26.1103 从配置推导自定义提供方，并在门控之前声明；只认传给 select 的同一变量。
+          pattern: /(\(\{[^{}]*\bincludeUltraReasoningEffort\s*:\s*([$A-Z_a-z][$\w]*)(?:\s*=\s*![01])?[^{}]*\}\s*,\s*\{[^{}]*\bget\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\)\s*=>\s*\{[\s\S]{0,1500}?[,;{]\s*([$A-Z_a-z][$\w]*)\s*=(?!=)[\s\S]{0,1500}?[,;{]\s*([$A-Z_a-z][$\w]*)\s*=\s*\2\s*&&\s*)(\3\(\s*[$A-Z_a-z][$\w]*(?:\.[$A-Z_a-z][$\w]*)?\s*,\s*(["'`])1186680773\7\s*\))(?=[\s\S]{0,2000}?\bincludeUltraReasoningEffort\s*:\s*\5\s*,\s*isCustomModelProvider\s*:\s*\4\b)/g,
+          replacement: (_match, prefix, _includeUltra, _get, customProvider, _result, gate) =>
+            `${prefix}(${customProvider}||${gate})`,
+        }],
+        undefined,
         "third-party Ultra reasoning",
       );
     }
@@ -675,12 +697,15 @@
       // 原生请求解析器不校验显式档位；复用同一模块的模型查询和原生档位解析。
       patched = replaceUniqueRendererGate(
         patched,
-        /async function ([$A-Z_a-z][$\w]*)\(([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*)\)\{try\{(?<body>[^}]{0,500}[\s\S]{0,1000}?return\(0,(?<tiers>[$A-Z_a-z][$\w]*)\.E_\)\(await (?<models>[$A-Z_a-z][$\w]*)\(\2,\3,\4\?\?(?<config>[$A-Z_a-z][$\w]*)\.model\),\k<config>\.service_tier,[$A-Z_a-z][$\w]*\))\}catch\(([$A-Z_a-z][$\w]*)\)\{return ([\s\S]{0,180}?"Failed to read service tier for request"[\s\S]{0,100}?),null\}\}/g,
+        /async function(?: ([$A-Z_a-z][$\w]*))?\(([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*)\)\{try\{(?<body>[^}]{0,500}[\s\S]{0,1000}?return\(0,(?<tiers>[$A-Z_a-z][$\w]*)\.E_\)\(await (?:(?<models>[$A-Z_a-z][$\w]*)|(?<inlineModels>async function\([$A-Z_a-z][$\w]*,[$A-Z_a-z][$\w]*,[$A-Z_a-z][$\w]*\)\{try\{[\s\S]{0,600}?"Failed to read service tier model"[\s\S]{0,120}?,null\}\}))\(\2,\3,\4\?\?(?<config>[$A-Z_a-z][$\w]*)\.model\),\k<config>\.service_tier,[$A-Z_a-z][$\w]*\))\}catch\(([$A-Z_a-z][$\w]*)\)\{return ([\s\S]{0,180}?"Failed to read service tier for request"[\s\S]{0,100}?),null\}\}/g,
         (match, name, scope, host, model, tier, ...rest) => {
-          const { body, tiers, models, config } = rest.at(-1);
-          const checked = body.replaceAll(`return(0,${tiers}.E_)(`, "return await __codeyRequestTier(")
-            .replace(`__codeyRequestTier(null,${config}.service_tier,`, `__codeyRequestTier(await ${models}(${scope},${host},${model}??${config}.model),${config}.service_tier,`);
-          const validate = `const __codeyRequestTier=async(m,t,a)=>{let v=(0,${tiers}.E_)(m,t,a);return v==null?null:(0,${tiers}.DS)(m??await ${models}(${scope},${host},${model}),v)};`;
+          const { body, tiers, models, inlineModels, config } = rest.at(-1);
+          // Codex 26.1103 把模型查询内联成立即调用的函数；提到同一 try 块开头以便复用。
+          const lookup = models ?? "__codeyModels";
+          const checked = (inlineModels ? body.replace(inlineModels, lookup) : body)
+            .replaceAll(`return(0,${tiers}.E_)(`, "return await __codeyRequestTier(")
+            .replace(`__codeyRequestTier(null,${config}.service_tier,`, `__codeyRequestTier(await ${lookup}(${scope},${host},${model}??${config}.model),${config}.service_tier,`);
+          const validate = `${inlineModels ? `const __codeyModels=${inlineModels};` : ""}const __codeyRequestTier=async(m,t,a)=>{let v=(0,${tiers}.E_)(m,t,a);return v==null?null:(0,${tiers}.DS)(m??await ${lookup}(${scope},${host},${model}),v)};`;
           return match.replace(body, validate + checked);
         },
         "service tier request model validation",
@@ -763,6 +788,53 @@
     }
     return patched;
   };
+  // Codex 样式表中的 :has([data-state=open]) 等规则会让 data-state 进入 Blink
+  // RuleFeatureSet 的 :has() 失效集，悬停侧栏行切换提示气泡 data-state 时触发
+  // 整页样式重算。改写为普通属性选择器 [data-codey-open-within]，由注入脚本仅在
+  // 出现 data-state="open" 时同步到容器。
+  const openStateCssPatchedMarker = "--codey-css-open-state-has-patched";
+  const openStateCssAriaAndDataStateHasPattern =
+    /:has\(\s*\[\s*aria-expanded\s*=\s*(?:"true"|'true'|true)\s*\]\s*,\s*\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\]\s*\)/g;
+  const openStateCssDataStateHasPattern =
+    /:has\(\s*(?::is\(\s*)?(?:>\s*)?(?:button)?\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\]\s*\)?\s*\)/g;
+  const patchCodexRendererCssAsset = (source) => {
+    if (
+      source.includes(openStateCssPatchedMarker) ||
+      (
+        !source.includes(":has([data-state=open])") &&
+        !source.includes(":has(:is(button[data-state=open]))") &&
+        !source.includes(":has([aria-expanded=true],[data-state=open])") &&
+        !source.includes("data-state")
+      )
+    ) {
+      return source;
+    }
+    const patched = source
+      .replace(
+        openStateCssAriaAndDataStateHasPattern,
+        ":is(:has([aria-expanded=true]),[data-codey-open-within])",
+      )
+      .replace(openStateCssDataStateHasPattern, "[data-codey-open-within]");
+    if (patched === source) return source;
+    return `${patched}\n:root{${openStateCssPatchedMarker}:1}\n`;
+  };
+  const isCodexRendererCssAssetUrl = (requestUrl) => {
+    try {
+      const url = new URL(requestUrl);
+      if (url.protocol !== "app:") return false;
+      const match = /^\/assets\/(?:async\/)?([a-z0-9_~.-]+)\.css$/i.exec(
+        url.pathname,
+      );
+      if (!match) return false;
+      const stem = match[1];
+      if (!stem || stem.startsWith(".")) return false;
+      return stem
+        .split(/[-~.]/)
+        .some((segment) => /^[a-f0-9]{8,32}$/i.test(segment));
+    } catch {
+      return false;
+    }
+  };
   const isCodexRendererAssetUrl = (requestUrl) => {
     try {
       const url = new URL(requestUrl);
@@ -774,6 +846,7 @@
             url.pathname,
           ) ||
           /^\/assets\/(?:async\/)?\d{1,10}\.[a-f0-9]{8,32}\.js$/i.test(url.pathname) ||
+          isCodexRendererCssAssetUrl(requestUrl) ||
           (
             disablePet &&
             /\/(?:(?:appearance-settings|pet-settings|pets-settings|app-runtime)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
@@ -797,7 +870,9 @@
       const previousRendererPatchFailures = activeRendererPatchFailures;
       activeRendererPatchFailures = rendererPatchFailuresForSource(source);
       try {
-        patched = patchCodexRendererAsset(source);
+        patched = isCodexRendererCssAssetUrl(requestUrl)
+          ? patchCodexRendererCssAsset(source)
+          : patchCodexRendererAsset(source);
       } catch (error) {
         // 渲染器压缩代码会随版本变化。可选界面补丁失败时放行原响应，
         // 避免模块请求失败导致启动页停留。

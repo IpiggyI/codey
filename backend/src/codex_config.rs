@@ -9,15 +9,14 @@ use std::time::{Duration, Instant};
 use std::os::unix::fs::OpenOptionsExt;
 
 use crate::codex_config_guidance::{
-    CODEY_FASTCTX_GUIDANCE, CODEY_FASTCTX_GUIDANCE_VERSIONS, NO_WRITABLE_SUBAGENT_GUIDANCE,
-    ROOT_AGENT_COLLABORATION_USAGE_HINT, ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS,
-    ROOT_AGENT_MULTI_AGENT_MODE_HINT, SUBAGENT_GUIDANCE,
+    CODEY_FASTCTX_GUIDANCE, ROOT_AGENT_COLLABORATION_USAGE_HINT_VERSIONS,
+    ROOT_AGENT_MULTI_AGENT_MODE_HINT, SUBAGENT_TASK_BOUNDARY_GUARD,
     append_root_agent_collaboration_usage_hint, remove_codey_fastctx_guidance,
-    remove_subagent_guidance, subagent_source_config,
+    remove_subagent_guidance, root_agent_collaboration_usage_hint, subagent_source_config,
 };
 use crate::config::{
     CodeyConfig, SUBAGENT_REASONING_EFFORTS, SUBAGENT_ROLE_DEFAULT, SUBAGENT_ROLE_IDS,
-    SUBAGENT_ROLE_VISUAL_WORKER, SUBAGENT_ROLE_WORKER, SubagentRoleConfig, default_config_path,
+    SubagentRoleConfig, default_config_path,
 };
 #[cfg(test)]
 use crate::config::{DEFAULT_SUBAGENT_MODEL, DEFAULT_SUBAGENT_REASONING_EFFORT};
@@ -57,11 +56,10 @@ const CODEY_FASTCTX_GREP_TOKEN_BUDGET: usize = 10_800;
 const CODEY_FASTCTX_GLOB_TOKEN_BUDGET: usize = 5_400;
 const CODEY_FASTCTX_STARTUP_TIMEOUT_SECONDS: i64 = 120;
 const CODEY_FASTCTX_TOOL_TIMEOUT_SECONDS: i64 = 300;
-const DEFAULT_SUBAGENT_MAX_CONCURRENCY: i64 = 3;
-const PREVIOUS_DEFAULT_SUBAGENT_MAX_CONCURRENCY: i64 = 2;
+const DEFAULT_SUBAGENT_MAX_CONCURRENCY: i64 = 2;
 const APPLIED_HOOKS_JSON_FILE: &str = "applied-hooks.json";
 const CODEY_CONSTRAINTS_DIR: &str = "codex-constraints";
-const CODEY_ROOT_INSTRUCTIONS_FILE: &str = "root-instructions.md";
+const CODEY_RETIRED_ROOT_INSTRUCTIONS_FILE: &str = "root-instructions.md";
 const CODEY_FASTCTX_INSTRUCTIONS_FILE: &str = "fastctx-instructions.md";
 const CODEY_COLLABORATION_HINT_FILE: &str = "collaboration-hint.md";
 const CODEY_SUBAGENT_SOURCE_FILE: &str = "subagent.toml";
@@ -95,6 +93,8 @@ struct RuntimeConfigLease {
     subagent_reasoning_effort: String,
     #[serde(default)]
     subagent_roles: BTreeMap<String, SubagentRoleConfig>,
+    #[serde(default)]
+    registered_subagent_roles: Vec<String>,
     #[serde(default)]
     runtime_home: PathBuf,
     #[serde(default)]
@@ -357,6 +357,7 @@ pub(crate) fn apply_runtime_router_config(
         },
         config,
     )?;
+    crate::subagent_gate::spawn_stale_session_state_sweep(home);
     Ok(applied)
 }
 
@@ -467,44 +468,71 @@ fn apply_isolated_runtime_router_config(
     let constraints_dir = marker.with_file_name(CODEY_CONSTRAINTS_DIR);
     create_private_dir_all(&constraints_dir)?;
     let fastctx_instructions = if fastctx_namespace.is_some() {
-        Some(read_or_create_versioned_constraint_file(
+        rebuild_constraint_file(
             &constraints_dir.join(CODEY_FASTCTX_INSTRUCTIONS_FILE),
             CODEY_FASTCTX_GUIDANCE,
-            CODEY_FASTCTX_GUIDANCE_VERSIONS,
-        )?)
+        )?;
+        Some(CODEY_FASTCTX_GUIDANCE.to_string())
     } else {
         None
     };
     let runtime_roles =
         runtime_subagent_roles(subagent_roles, subagent_model, subagent_reasoning_effort);
-    let (root_instructions, collaboration_hint, runtime_agents) = if subagent_optimization {
-        let root_path = constraints_dir.join(CODEY_ROOT_INSTRUCTIONS_FILE);
-        let root_instructions = read_or_create_constraint_file(&root_path, SUBAGENT_GUIDANCE)?;
-        let root_instructions =
-            runtime_root_instructions_for_roles(&root_instructions, &runtime_roles);
-        let collaboration_hint = read_or_create_constraint_file(
+    let registered_subagent_roles = if subagent_optimization {
+        SUBAGENT_ROLE_IDS
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    remove_optional(&constraints_dir.join(CODEY_RETIRED_ROOT_INSTRUCTIONS_FILE))?;
+    let (collaboration_hint, runtime_agents) = if subagent_optimization {
+        let collaboration_hint = root_agent_collaboration_usage_hint();
+        rebuild_constraint_file(
             &constraints_dir.join(CODEY_COLLABORATION_HINT_FILE),
-            ROOT_AGENT_COLLABORATION_USAGE_HINT,
+            &collaboration_hint,
+        )?;
+        let registration_roles = runtime_registration_roles(
+            &runtime_roles,
+            &registered_subagent_roles,
+            subagent_model,
+            subagent_reasoning_effort,
         )?;
         let runtime_agents = prepare_runtime_agent_files(
             &constraints_dir,
-            &runtime_roles,
+            &registration_roles,
             fastctx_instructions.as_deref(),
         )?;
-        (
-            Some(root_instructions),
-            Some(collaboration_hint),
-            runtime_agents,
-        )
+        (Some(collaboration_hint), runtime_agents)
     } else {
-        (None, None, Vec::new())
+        (None, Vec::new())
     };
     apply_isolated_prompt_sources(
         &mut effective_document,
-        root_instructions.as_deref(),
         fastctx_instructions.as_deref(),
         collaboration_hint.as_deref(),
     )?;
+    let original_document = parse_document(existing)?;
+    for path in [
+        &["developer_instructions"][..],
+        &[
+            "features",
+            "multi_agent_v2",
+            "subagent_developer_instructions",
+        ][..],
+    ] {
+        if document_item_at(&original_document, path).is_some()
+            && document_item_at(&effective_document, path).is_none()
+        {
+            if path.len() == 1 {
+                effective_document["developer_instructions"] = value("");
+            } else {
+                effective_document["features"]["multi_agent_v2"]["subagent_developer_instructions"] =
+                    value("");
+            }
+        }
+    }
 
     let runtime_hooks_enabled = subagent_optimization || fastctx_namespace.is_some() || scope_guard;
     let subagent_hook_commands = subagent_optimization
@@ -533,7 +561,6 @@ fn apply_isolated_runtime_router_config(
     };
     let mut runtime_config_overrides = build_isolated_runtime_overrides(
         &effective_document,
-        root_instructions.as_deref(),
         &runtime_agents,
         model_catalog_path,
         fastctx_namespace,
@@ -559,6 +586,7 @@ fn apply_isolated_runtime_router_config(
         subagent_model: subagent_model.to_string(),
         subagent_reasoning_effort: subagent_reasoning_effort.to_string(),
         subagent_roles: runtime_roles,
+        registered_subagent_roles,
         runtime_home: home.to_path_buf(),
         runtime_agent_schema_version: if subagent_optimization {
             RUNTIME_AGENT_SCHEMA_VERSION
@@ -647,64 +675,11 @@ fn apply_isolated_test_runtime_config(
     )
 }
 
-fn read_or_create_constraint_file(path: &Path, default_contents: &str) -> Result<String> {
-    if let Some(existing) = read_optional(path)? {
-        return String::from_utf8(existing)
-            .with_context(|| format!("Codey 约束文件不是 UTF-8：{}", path.display()));
+fn rebuild_constraint_file(path: &Path, contents: &str) -> Result<()> {
+    if read_optional(path)?.is_some_and(|existing| existing == contents.as_bytes()) {
+        return Ok(());
     }
-    write_private_file(path, default_contents.as_bytes())?;
-    Ok(default_contents.to_string())
-}
-
-pub(crate) fn read_constraint_source(
-    path: &Path,
-    default_contents: &str,
-) -> Result<(String, bool)> {
-    match read_optional(path)? {
-        Some(bytes) => Ok((
-            String::from_utf8(bytes)
-                .with_context(|| format!("Codey 约束文件不是 UTF-8：{}", path.display()))?,
-            true,
-        )),
-        None => Ok((default_contents.to_string(), false)),
-    }
-}
-
-fn runtime_root_instructions_for_roles(
-    root_instructions: &str,
-    roles: &BTreeMap<String, SubagentRoleConfig>,
-) -> String {
-    let has_writable_role =
-        roles.contains_key(SUBAGENT_ROLE_WORKER) || roles.contains_key(SUBAGENT_ROLE_VISUAL_WORKER);
-    if has_writable_role {
-        root_instructions.to_string()
-    } else {
-        append_constraint_text(root_instructions, NO_WRITABLE_SUBAGENT_GUIDANCE)
-    }
-}
-
-fn read_or_create_versioned_constraint_file(
-    path: &Path,
-    current: &str,
-    owned_versions: &[&str],
-) -> Result<String> {
-    let source = read_or_create_constraint_file(path, current)?;
-    Ok(versioned_constraint_contents(
-        source,
-        current,
-        owned_versions,
-    ))
-}
-
-fn versioned_constraint_contents(source: String, current: &str, owned_versions: &[&str]) -> String {
-    if owned_versions
-        .iter()
-        .any(|version| source.trim() == version.trim())
-    {
-        current.to_string()
-    } else {
-        source
-    }
+    write_private_file(path, contents.as_bytes())
 }
 
 pub(crate) fn runtime_subagent_roles(
@@ -728,6 +703,46 @@ pub(crate) fn runtime_subagent_roles(
         .collect()
 }
 
+fn runtime_registration_roles(
+    enabled_roles: &BTreeMap<String, SubagentRoleConfig>,
+    registered_roles: &[String],
+    legacy_model: &str,
+    legacy_reasoning_effort: &str,
+) -> Result<BTreeMap<String, SubagentRoleConfig>> {
+    // 旧版 Codex 实例仍注册旧角色名，需要重启后重新注册。
+    let registered_retired_role = registered_roles
+        .iter()
+        .any(|role| !SUBAGENT_ROLE_IDS.contains(&role.as_str()));
+    if registered_retired_role
+        || enabled_roles
+            .keys()
+            .any(|role| !registered_roles.contains(role))
+    {
+        return Err(SubagentRoleRegistrationChanged.into());
+    }
+    let fallback = enabled_roles
+        .get(SUBAGENT_ROLE_DEFAULT)
+        .or_else(|| enabled_roles.values().next())
+        .cloned()
+        .unwrap_or_else(|| SubagentRoleConfig::new(legacy_model, legacy_reasoning_effort));
+    Ok(registered_roles
+        .iter()
+        .map(|role| {
+            let selection = enabled_roles.get(role).unwrap_or(&fallback).clone();
+            (role.clone(), selection)
+        })
+        .collect())
+}
+
+fn registered_roles_for_lease(state: &RuntimeConfigLease) -> Vec<String> {
+    if state.registered_subagent_roles.is_empty() {
+        // 旧租约只注册当时启用的角色，不能把新增文件视为已在 Codex 注册。
+        state.subagent_roles.keys().cloned().collect()
+    } else {
+        state.registered_subagent_roles.clone()
+    }
+}
+
 fn prepare_runtime_agent_files(
     constraints_dir: &Path,
     roles: &BTreeMap<String, SubagentRoleConfig>,
@@ -740,7 +755,7 @@ fn prepare_runtime_agent_files(
         if let Some(parent) = source_path.parent() {
             create_private_dir_all(parent)?;
         }
-        read_or_create_constraint_file(&source_path, default_source)?;
+        rebuild_constraint_file(&source_path, default_source)?;
     }
     let plans = plan_runtime_agent_files(constraints_dir, roles, fastctx_instructions)?;
     let mut registrations = Vec::with_capacity(plans.len());
@@ -763,25 +778,37 @@ fn remove_unplanned_runtime_agent_files(
         .iter()
         .map(|registration| registration.role.as_str())
         .collect::<std::collections::BTreeSet<_>>();
-    for role in SUBAGENT_ROLE_IDS {
+    for role in crate::config::owned_subagent_role_ids() {
         if active_roles.contains(role) {
             continue;
         }
-        let path = runtime_agent_path(constraints_dir, role);
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!(
-                        "清理已停用的 Codey 子代理运行时文件失败：{}",
-                        path.display()
-                    )
-                });
-            }
+        let mut paths = vec![runtime_agent_path(constraints_dir, role)];
+        if !SUBAGENT_ROLE_IDS.contains(&role) {
+            // 旧角色还会留下生成的源模板。
+            paths.push(
+                constraints_dir
+                    .join(CODEY_SUBAGENT_SOURCES_DIR)
+                    .join(format!("{role}.toml")),
+            );
+        }
+        for path in paths {
+            remove_runtime_agent_file(&path)?;
         }
     }
     Ok(())
+}
+
+fn remove_runtime_agent_file(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "清理已停用的 Codey 子代理运行时文件失败：{}",
+                path.display()
+            )
+        }),
+    }
 }
 
 pub(crate) fn plan_runtime_agent_files(
@@ -797,10 +824,9 @@ pub(crate) fn plan_runtime_agent_files(
         let default_source = subagent_source_config(role)
             .with_context(|| format!("缺少 Codey 子代理约束模板：{role}"))?;
         let source_path = runtime_agent_source_path(constraints_dir, role);
-        let (source, from_file) = read_constraint_source(&source_path, default_source)?;
         let runtime_path = runtime_agent_path(constraints_dir, role);
         let (contents, description) =
-            render_runtime_agent(&source, role, selection, fastctx_instructions)?;
+            render_runtime_agent(default_source, role, selection, fastctx_instructions)?;
         let content_sha256 = crate::fs_util::sha256_hex(&contents);
         plans.push(RuntimeAgentPlan {
             registration: RuntimeAgentRegistration {
@@ -810,7 +836,7 @@ pub(crate) fn plan_runtime_agent_files(
                 content_sha256,
             },
             contents,
-            source_path: from_file.then_some(source_path),
+            source_path: Some(source_path),
         });
     }
     Ok(plans)
@@ -870,6 +896,12 @@ fn render_runtime_agent(
             "developer_instructions",
         )?;
     }
+    append_table_constraint_text(
+        document.as_table_mut(),
+        "developer_instructions",
+        SUBAGENT_TASK_BOUNDARY_GUARD,
+        "developer_instructions",
+    )?;
     document["name"] = value(role);
     document["model"] = value(model);
     document["model_reasoning_effort"] = value(&reasoning_effort);
@@ -891,7 +923,6 @@ fn runtime_agent_hashes(registrations: &[RuntimeAgentRegistration]) -> BTreeMap<
 
 fn apply_isolated_prompt_sources(
     document: &mut DocumentMut,
-    root_instructions: Option<&str>,
     fastctx_instructions: Option<&str>,
     collaboration_hint: Option<&str>,
 ) -> Result<()> {
@@ -906,14 +937,6 @@ fn apply_isolated_prompt_sources(
         remove_subagent_guidance,
     );
     if let Some(instructions) = fastctx_instructions {
-        append_table_constraint_text(
-            document.as_table_mut(),
-            "developer_instructions",
-            instructions,
-            "developer_instructions",
-        )?;
-    }
-    if let Some(instructions) = root_instructions {
         append_table_constraint_text(
             document.as_table_mut(),
             "developer_instructions",
@@ -1067,10 +1090,19 @@ pub(crate) struct RuntimeSubagentReconcileReport {
     pub reasons: Vec<RuntimeSubagentRepairReason>,
 }
 
-/// Verifies the complete Codey-owned generated role documents, their lease
-/// hashes and the child-runtime attestation policy. Any drift is rebuilt from
-/// the current saved role matrix. Editable source constraints and user-owned
-/// Codex files remain outside this repair boundary.
+#[derive(Debug)]
+pub(crate) struct SubagentRoleRegistrationChanged;
+
+impl std::fmt::Display for SubagentRoleRegistrationChanged {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("当前 Codex 尚未注册新增的子代理角色，请重启一次以启用动态角色配置")
+    }
+}
+
+impl std::error::Error for SubagentRoleRegistrationChanged {}
+
+/// 核对 Codey 生成的角色文件、租约哈希和子代理运行时策略。
+/// 用户 Codex 文件不在修复范围内。
 pub(crate) fn reconcile_runtime_subagent_roles(
     config: &CodeyConfig,
 ) -> Result<RuntimeSubagentReconcileReport> {
@@ -1103,15 +1135,17 @@ fn reconcile_runtime_subagent_roles_at(
         &config.subagent_model,
         &config.subagent_reasoning_effort,
     );
-    anyhow::ensure!(
-        state.subagent_roles.keys().eq(runtime_roles.keys()),
-        "Codey 子代理角色启用状态已变化，需要重启 Codex 以重新注册可用角色"
-    );
+    let registration_roles = runtime_registration_roles(
+        &runtime_roles,
+        &registered_roles_for_lease(&state),
+        &config.subagent_model,
+        &config.subagent_reasoning_effort,
+    )?;
     let constraints_dir = marker.with_file_name(CODEY_CONSTRAINTS_DIR);
     let fastctx_instructions = runtime_fastctx_instructions(&constraints_dir, &state)?;
     let plans = plan_runtime_agent_files(
         &constraints_dir,
-        &runtime_roles,
+        &registration_roles,
         fastctx_instructions.as_deref(),
     )
     .context("预检 Codey 子代理运行时配置失败；未写入运行时配置")?;
@@ -1221,11 +1255,11 @@ fn runtime_fastctx_instructions(
     state: &RuntimeConfigLease,
 ) -> Result<Option<String>> {
     if state.fastctx_command.is_some() {
-        Ok(Some(read_or_create_versioned_constraint_file(
+        rebuild_constraint_file(
             &constraints_dir.join(CODEY_FASTCTX_INSTRUCTIONS_FILE),
             CODEY_FASTCTX_GUIDANCE,
-            CODEY_FASTCTX_GUIDANCE_VERSIONS,
-        )?))
+        )?;
+        Ok(Some(CODEY_FASTCTX_GUIDANCE.to_string()))
     } else {
         Ok(None)
     }
@@ -1419,6 +1453,7 @@ fn patch_config_with_fastctx_mode(
         subagent_reasoning_effort,
     } = options;
     let mut doc = parse_document(existing)?;
+    remove_codey_owned_agent_roles(&mut doc);
     let home = config_path.parent().unwrap_or_else(|| Path::new("."));
     update_model_catalog_reference(&mut doc, home, catalog_dir, model_catalog_path);
     set_model_selection(&mut doc, default_model);
@@ -1445,6 +1480,27 @@ fn patch_config_with_fastctx_mode(
     document_string(&doc)
 }
 
+fn remove_codey_owned_agent_roles(doc: &mut DocumentMut) {
+    let Some(agents) = doc.get_mut("agents").and_then(Item::as_table_like_mut) else {
+        return;
+    };
+    for role in crate::config::owned_subagent_role_ids() {
+        let owned_default = agents
+            .get(role)
+            .and_then(Item::as_table_like)
+            .and_then(|table| table.get("config_file"))
+            .and_then(Item::as_str)
+            .is_some_and(|path| {
+                let normalized = path.replace('\\', "/");
+                normalized.contains("/codex-constraints/runtime/")
+                    || normalized.starts_with("codex-constraints/runtime/")
+            });
+        if role != SUBAGENT_ROLE_DEFAULT || owned_default {
+            agents.remove(role);
+        }
+    }
+}
+
 fn enable_subagent_optimization(
     doc: &mut DocumentMut,
     subagent_model: &str,
@@ -1464,25 +1520,6 @@ fn enable_subagent_optimization(
         .and_then(Item::as_str)
         .unwrap_or_default()
         .to_string();
-    let migrate_previous_owned_concurrency = doc
-        .get("agents")
-        .and_then(Item::as_table)
-        .is_some_and(|agents| {
-            agents
-                .get("max_concurrent_threads_per_session")
-                .and_then(Item::as_integer)
-                == Some(PREVIOUS_DEFAULT_SUBAGENT_MAX_CONCURRENCY)
-                && agents.get("codey_quick_scan").is_some()
-                && agents.get("codey_worker").is_some()
-        })
-        && doc
-            .get("features")
-            .and_then(Item::as_table)
-            .and_then(|features| features.get("multi_agent_v2"))
-            .and_then(Item::as_table)
-            .and_then(|multi_agent| multi_agent.get("tool_namespace"))
-            .and_then(Item::as_str)
-            == Some("agents");
     let agents = ensure_root_table(doc, "agents")?;
     let legacy_max_threads = agents.remove("max_threads");
     agents.remove("max_depth");
@@ -1491,9 +1528,7 @@ fn enable_subagent_optimization(
         .get("max_concurrent_threads_per_session")
         .and_then(Item::as_integer)
         .is_some_and(|concurrency| concurrency > 0);
-    if migrate_previous_owned_concurrency {
-        agents["max_concurrent_threads_per_session"] = value(DEFAULT_SUBAGENT_MAX_CONCURRENCY);
-    } else if !has_valid_concurrency {
+    if !has_valid_concurrency {
         agents["max_concurrent_threads_per_session"] = legacy_max_threads
             .filter(|legacy| {
                 legacy
@@ -1526,7 +1561,8 @@ fn enable_subagent_optimization(
         multi_agent.remove(migrated_key);
     }
     multi_agent["min_wait_timeout_ms"] = value(10_000);
-    multi_agent["default_wait_timeout_ms"] = value(30_000);
+    // 子代理完成或用户输入会立即结束等待，较长上限可减少空闲轮询。
+    multi_agent["default_wait_timeout_ms"] = value(120_000);
     multi_agent["max_wait_timeout_ms"] = value(120_000);
     let existing_root_usage_hint = multi_agent
         .get("root_agent_usage_hint_text")
@@ -1745,7 +1781,6 @@ fn json_hook_group_is_codey_owned(group: &serde_json::Value) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn build_isolated_runtime_overrides(
     effective: &DocumentMut,
-    root_instructions: Option<&str>,
     runtime_agents: &[RuntimeAgentRegistration],
     model_catalog_path: Option<&Path>,
     fastctx_namespace: Option<&str>,
@@ -1832,14 +1867,22 @@ fn build_isolated_runtime_overrides(
         )?;
     }
 
-    if fastctx_namespace.is_some() || root_instructions.is_some() {
-        push_document_override(
-            &mut overrides,
-            effective,
-            &["developer_instructions"],
-            "developer_instructions",
-        )?;
-    }
+    push_document_override(
+        &mut overrides,
+        effective,
+        &["developer_instructions"],
+        "developer_instructions",
+    )?;
+    push_document_override(
+        &mut overrides,
+        effective,
+        &[
+            "features",
+            "multi_agent_v2",
+            "subagent_developer_instructions",
+        ],
+        "features.multi_agent_v2.subagent_developer_instructions",
+    )?;
 
     if !runtime_agents.is_empty() {
         if fastctx_namespace.is_none() {
@@ -1910,18 +1953,6 @@ fn build_isolated_runtime_overrides(
             ),
         ] {
             push_required_document_override(&mut overrides, effective, path, key)?;
-        }
-        if fastctx_namespace.is_some() {
-            push_required_document_override(
-                &mut overrides,
-                effective,
-                &[
-                    "features",
-                    "multi_agent_v2",
-                    "subagent_developer_instructions",
-                ],
-                "features.multi_agent_v2.subagent_developer_instructions",
-            )?;
         }
         for registration in runtime_agents {
             push_runtime_override_value(

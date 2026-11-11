@@ -11,10 +11,8 @@ async fn subagent_restart_requires_a_confirmed_registration_change() {
         };
         let mut latest = initial.clone();
         latest.subagent_reasoning_effort = "high".into();
-        if registration_changed {
-            let role = latest.subagent_roles.get_mut("codey_quick_scan").unwrap();
-            role.enabled = !role.enabled;
-        }
+        let role = latest.subagent_roles.get_mut("codey_explorer").unwrap();
+        role.enabled = !role.enabled;
         let runtime = Arc::new(CodeyRuntime::for_model_delivery_test(
             initial.clone(),
             "ws://unused",
@@ -23,7 +21,12 @@ async fn subagent_restart_requires_a_confirmed_registration_change() {
             config: RwLock::new(latest.clone()),
             runtime: Mutex::new(Some(runtime.clone())),
             slow_apply_test: TestHooks {
-                subagents: Some(Arc::new(|_| anyhow::bail!("test role file write failed"))),
+                subagents: Some(Arc::new(move |_| {
+                    if registration_changed {
+                        return Err(crate::codex_config::SubagentRoleRegistrationChanged.into());
+                    }
+                    anyhow::bail!("test role file write failed")
+                })),
                 ..Default::default()
             },
             ..AppState::default()
@@ -155,7 +158,7 @@ async fn role_worker_wait_releases_config_lock_and_does_not_mark_old_roles_appli
     });
     entered_rx.await.unwrap();
     let mut newer = state.config.read().await.clone();
-    let role = newer.subagent_roles.get_mut("codey_quick_scan").unwrap();
+    let role = newer.subagent_roles.get_mut("codey_explorer").unwrap();
     role.reasoning_effort = if role.reasoning_effort == "high" {
         "low"
     } else {
@@ -293,7 +296,7 @@ async fn background_apply_writes_subagent_artifacts_without_touching_user_files(
         ..Default::default()
     });
     let mut next = config;
-    let role = next.subagent_roles.get_mut("codey_quick_scan").unwrap();
+    let role = next.subagent_roles.get_mut("codey_explorer").unwrap();
     role.reasoning_effort = if role.reasoning_effort == "high" {
         "low"
     } else {
