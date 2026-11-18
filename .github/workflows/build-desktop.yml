@@ -15,18 +15,10 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  macos:
-    name: macOS ${{ matrix.arch }} unsigned
-    runs-on: ${{ matrix.runner }}
-    env:
-      CARGO_PROFILE_RELEASE_LTO: thin
-      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: arm64
-            runner: macos-15
+  # 依赖安装与前端构建只做一次，各平台下载 dist-overlay 后直接编译 Rust。
+  frontend:
+    name: Embedded frontend overlay
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Codey
@@ -45,6 +37,73 @@ jobs:
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build embedded frontend assets
+        run: pnpm run vite:build
+
+      - name: Upload embedded frontend overlay
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-overlay-assets
+          path: dist-overlay
+          if-no-files-found: error
+
+  # 与平台构建并行；不依赖 frontend 任务，慢检查不拖住打包。
+  frontend-check:
+    name: Frontend checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Codey
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "11.5.2"
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: TypeScript check
+        run: pnpm run check
+
+      - name: JavaScript tests
+        run: pnpm run test:js
+
+  macos:
+    needs: frontend
+    name: macOS ${{ matrix.arch }} unsigned
+    runs-on: ${{ matrix.runner }}
+    env:
+      CARGO_PROFILE_RELEASE_LTO: thin
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+
+    steps:
+      - name: Checkout Codey
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -54,17 +113,17 @@ jobs:
           shared-key: macos-release
           cache-on-failure: true
 
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build embedded frontend assets
-        run: pnpm run vite:build
+      - name: Download prebuilt frontend overlay
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-overlay-assets
+          path: dist-overlay
 
       - name: Build unsigned macOS app
         env:
           CODEY_SKIP_CODESIGN: "1"
           CODEY_SKIP_OVERLAY_BUILD: "1"
-        run: pnpm run build
+        run: node scripts/build.mjs
 
       - name: Verify and archive macOS app
         id: package
@@ -108,6 +167,7 @@ jobs:
           if-no-files-found: error
 
   macos-check:
+    needs: frontend
     name: macOS ${{ matrix.arch }} checks
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -121,18 +181,10 @@ jobs:
       - name: Checkout Codey
         uses: actions/checkout@v4
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: "11.5.2"
-          run_install: false
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -142,17 +194,11 @@ jobs:
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
 
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: TypeScript check
-        run: pnpm run check
-
-      - name: JavaScript tests
-        run: pnpm run test:js
-
-      - name: Build embedded frontend assets
-        run: pnpm run vite:build
+      - name: Download prebuilt frontend overlay
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-overlay-assets
+          path: dist-overlay
 
       - name: Rust format
         run: cargo fmt --all -- --check
@@ -168,6 +214,7 @@ jobs:
           CODEY_SKIP_OVERLAY_BUILD: "1"
 
   windows:
+    needs: frontend
     name: Windows x64
     runs-on: windows-latest
     # 测试和 clippy 在 ci.yml 的 Windows 任务里跑。这里只编 release 并打安装包。
@@ -194,18 +241,10 @@ jobs:
             Add-MpPreference -ExclusionPath $path
           }
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: "11.5.2"
-          run_install: false
-
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: pnpm
-          cache-dependency-path: pnpm-lock.yaml
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -247,16 +286,16 @@ jobs:
           "NSISDIR=$nsisHome" | Out-File -FilePath $env:GITHUB_ENV -Append
           "MAKENSIS=$makensis" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-
-      - name: Build embedded frontend assets
-        run: pnpm run vite:build
+      - name: Download prebuilt frontend overlay
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-overlay-assets
+          path: dist-overlay
 
       - name: Build Windows executable
         env:
           CODEY_SKIP_OVERLAY_BUILD: "1"
-        run: pnpm run build
+        run: node scripts/build.mjs
 
       - name: Build Windows packages
         id: package
@@ -313,10 +352,12 @@ jobs:
     name: Attach packages to GitHub Release
     if: startsWith(github.ref, 'refs/tags/v')
     needs:
+      - frontend
+      - frontend-check
       - macos
       - macos-check
       - windows
-    runs-on: macos-15
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout release metadata

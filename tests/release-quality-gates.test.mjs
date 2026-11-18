@@ -57,13 +57,21 @@ function workflowJob(name, until) {
 
 test("tag-triggered desktop releases independently enforce Rust quality gates", () => {
   assert.match(workflow, /^\s*RUSTFLAGS: -D warnings$/m);
+  const frontend = workflowJob("frontend", "frontend-check");
+  const frontendCheck = workflowJob("frontend-check", "macos");
   const macosPackage = workflowJob("macos", "macos-check");
   const macosCheck = workflowJob("macos-check", "windows");
   const windowsPackage = workflowJob("windows", "publish");
   const publish = workflow.slice(workflow.indexOf("\n  publish:"));
   assertRustQualityGates(macosCheck);
-  assert.match(macosCheck, /pnpm run check/);
-  assert.match(macosCheck, /pnpm run test:js/);
+  assert.match(frontendCheck, /pnpm run check/);
+  assert.match(frontendCheck, /pnpm run test:js/);
+  // 前端检查与平台构建并行：它不依赖 frontend，也不被平台任务依赖。
+  assert.doesNotMatch(frontendCheck, /needs:/);
+  assert.doesNotMatch(frontend, /pnpm run check|pnpm run test:js/);
+  assert.doesNotMatch(macosCheck, /pnpm run check|pnpm run test:js/);
+  assert.match(publish, /- frontend\n/);
+  assert.match(publish, /- frontend-check\n/);
   assert.match(publish, /- macos\n/);
   assert.match(publish, /- macos-check\n/);
   assert.match(publish, /- windows\n/);
@@ -75,20 +83,32 @@ test("tag-triggered desktop releases independently enforce Rust quality gates", 
   assert.doesNotMatch(windowsPackage, /choco install/);
 });
 
-test("desktop release jobs reuse prebuilt assets and compile only release binaries", () => {
+test("desktop release jobs reuse one frontend build and compile only release binaries", () => {
+  const frontend = workflowJob("frontend", "frontend-check");
+  assert.match(frontend, /- name: Install frontend dependencies\s+run: pnpm install --frozen-lockfile/);
+  assert.match(frontend, /- name: Build embedded frontend assets\s+run: pnpm run vite:build/);
+  assert.match(frontend, /name: frontend-overlay-assets\s+path: dist-overlay/);
+  assert.match(frontend, /runs-on: ubuntu-latest/);
+  // 发布任务按 codey-* 收集安装包，overlay 产物名不能匹配该模式。
+  assert.match(workflow, /pattern: codey-\*/);
   for (const job of [
     workflowJob("macos", "macos-check"),
     workflowJob("macos-check", "windows"),
     workflowJob("windows", "publish"),
   ]) {
-    assert.match(job, /- name: Build embedded frontend assets\s+run: pnpm run vite:build/);
-    assert.match(job, /CODEY_SKIP_OVERLAY_BUILD: "1"/);
+    assert.match(job, /needs: frontend\n/);
+    assert.match(
+      job,
+      /uses: actions\/download-artifact@v4\s+with:\s+name: frontend-overlay-assets\s+path: dist-overlay/,
+    );
+    assert.doesNotMatch(job, /pnpm/);
+    assert.doesNotMatch(job, /vite:build/);
   }
   for (const job of [
     workflowJob("macos", "macos-check"),
     workflowJob("windows", "publish"),
   ]) {
-    assert.match(job, /CODEY_SKIP_OVERLAY_BUILD: "1"\s+run: pnpm run build/);
+    assert.match(job, /CODEY_SKIP_OVERLAY_BUILD: "1"\s+run: node scripts\/build\.mjs/);
     assert.match(job, /CARGO_PROFILE_RELEASE_LTO: thin/);
     assert.match(job, /CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"/);
   }
@@ -127,6 +147,16 @@ test("desktop builds generate embedded overlay assets before Cargo compiles", ()
     overlayBuild < cargoBuild,
     "the ignored dist-overlay directory must be generated before include_str! is compiled",
   );
+});
+
+test("release publishing runs on Linux and every job stays on Node 22", () => {
+  const publish = workflow.slice(workflow.indexOf("\n  publish:"));
+  assert.match(publish, /runs-on: ubuntu-latest/);
+  assert.match(publish, /actions\/download-artifact@v4/);
+  assert.doesNotMatch(publish, /pnpm|cargo|wrangler/);
+  const nodeVersions = [...workflow.matchAll(/node-version: "([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(nodeVersions.length >= 6);
+  assert.deepEqual([...new Set(nodeVersions)], ["22"]);
 });
 
 test("desktop release does not ship a client updater or update feed", () => {
@@ -186,7 +216,7 @@ test("Git Bash and WSL can package uniquely named Windows installers without pus
 test("Windows release publishes the installer without a portable zip", () => {
   const nsisInstallStep = workflowStep(
     "- name: Install NSIS",
-    "- name: Install frontend dependencies",
+    "- name: Download prebuilt frontend overlay",
   );
   const windowsPackageStep = workflowStep(
     "- name: Build Windows packages",
