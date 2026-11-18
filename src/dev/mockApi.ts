@@ -20,11 +20,11 @@ import {
 } from "../modelIds";
 import { validateNtfyTopic } from "../notifications/types";
 import { createCodexExtensionsPreview } from "./codexExtensionsMock";
-import { previewOfficialModels, previewUpstreamModels } from "../previewModels";
+import { previewOfficialModels, previewUpstreamModels } from "./previewModels";
 import {
   previewCrashpadPendingStats,
   previewTraceLogStats,
-} from "../previewTraceLogStats";
+} from "./previewTraceLogStats";
 
 const OFFICIAL_ACCOUNT_COMMANDS = new Set<string>([
   "list_official_accounts",

@@ -340,7 +340,7 @@ export function Checkbox({ checked, onCheckedChange, label, disabled, children, 
     >
       <HeroCheckbox.Content className="items-center gap-2">
         <HeroCheckbox.Control><HeroCheckbox.Indicator /></HeroCheckbox.Control>
-        {content != null ? <Label className="text-xs">{content}</Label> : null}
+        {content != null ? <Label className="text-[13px]">{content}</Label> : null}
       </HeroCheckbox.Content>
     </HeroCheckbox>
   );
@@ -369,7 +369,7 @@ export function Switch({ size, onCheckedChange, loading, disabled, checked, labe
     >
       <HeroSwitch.Content className="items-center gap-2">
         <HeroSwitch.Control><HeroSwitch.Thumb /></HeroSwitch.Control>
-        {label != null ? <Label className="text-xs">{label}</Label> : null}
+        {label != null ? <Label className="text-[13px]">{label}</Label> : null}
       </HeroSwitch.Content>
     </HeroSwitch>
   );
@@ -453,9 +453,9 @@ export function DialogFooter({ className, ...props }: React.HTMLAttributes<HTMLD
 }
 export function DialogTitle({ id, className, ...props }: React.ComponentProps<typeof Modal.Heading>) {
   const labels = React.useContext(DialogLabelContext);
-  return <Modal.Heading {...props} id={id ?? labels?.titleId} className={cn("text-[17px] font-semibold text-foreground", className)} />;
+  return <Modal.Heading {...props} id={id ?? labels?.titleId} className={cn("text-[20px] font-extrabold tracking-[-0.01em] text-foreground", className)} />;
 }
 export function DialogDescription({ id, className, ...props }: React.HTMLAttributes<HTMLParagraphElement>) {
   const labels = React.useContext(DialogLabelContext);
-  return <p {...props} id={id ?? labels?.descriptionId} className={cn("m-0 text-xs leading-relaxed text-muted", className)} />;
+  return <p {...props} id={id ?? labels?.descriptionId} className={cn("m-0 text-[13px] leading-relaxed text-muted", className)} />;
 }

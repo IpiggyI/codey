@@ -186,7 +186,7 @@ test("settings overlay stays inside body", async () => {
   );
   assert.equal(
     overlaySource.match(/getOverlayMountTarget\(\)\.appendChild\(host\)/g)?.length,
-    2,
+    1,
   );
   assert.doesNotMatch(
     overlaySource,
@@ -239,7 +239,8 @@ test("Tailwind is compiled for both the page and Shadow DOM overlay", async () =
     overlaySource,
     /MantineProvider|@mantine\/core|codeyMantineTheme|mantineStyles|data-mantine-color-scheme/,
   );
-  assert.match(overlaySource, /dataset\.theme = "light"/);
+  assert.doesNotMatch(overlaySource, /dataset\.theme = "light"/);
+  assert.match(overlaySource, /installOverlayTheme\(\[rootElement, modalContainer\]\)/);
   assert.match(tailwindSource, /@import "tailwindcss"/);
 });
 

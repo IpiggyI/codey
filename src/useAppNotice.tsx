@@ -113,13 +113,13 @@ export const NoticeToast = memo(function NoticeToast({
 
   if (!notice.text) return null;
   const toneBorder = notice.tone === "success"
-    ? "border-l-[#34c759]"
+    ? "border-l-[var(--codey-green)]"
     : notice.tone === "error"
-      ? "border-l-[#ff3b30]"
-      : "border-l-[#007aff]";
+      ? "border-l-[var(--codey-red)]"
+      : "border-l-[var(--codey-blue)]";
   return (
     <div
-      className={`absolute bottom-6 right-6 z-[90] flex max-w-[min(420px,calc(100%_-_48px))] items-center gap-2.5 rounded-xl border border-black/10 border-l-4 bg-white/92 px-4 py-3 text-xs text-[#1d1d1f] shadow-[0_12px_32px_rgba(0,0,0,0.14)] backdrop-blur-2xl ${toneBorder}`}
+      className={`absolute bottom-6 right-6 z-[90] flex max-w-[min(420px,calc(100%_-_48px))] items-center gap-2.5 rounded-[16px] border border-[var(--codey-border)] border-l-4 bg-[var(--codey-surface-elevated)] px-4 py-3 text-[13px] text-[var(--codey-text)] shadow-[var(--codey-popover-shadow)] ${toneBorder}`}
       role="status"
       aria-live="polite"
       onMouseEnter={() => setAutoDismissPaused(true)}

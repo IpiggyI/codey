@@ -1,11 +1,11 @@
 export const inputShellClass =
-  "flex h-[38px] min-w-0 items-center gap-2 rounded-[10px] border border-black/10 bg-[#f5f5f7] px-[11px] transition-colors focus-within:border-blue-500 focus-within:bg-white focus-within:ring-3 focus-within:ring-blue-500/12 [&_svg]:shrink-0 [&_svg]:text-[#7d7d83] [&_[data-slot=input]]:min-w-0 [&_[data-slot=input]]:flex-1 [&_[data-slot=input]]:w-full";
+  "flex h-[38px] min-w-0 items-center gap-2 rounded-[var(--field-radius)] border border-transparent bg-[var(--field-background)] px-[11px] transition-colors hover:border-[var(--codey-border-strong)] focus-within:border-[var(--codey-blue)] focus-within:bg-[var(--codey-surface)] focus-within:ring-1 focus-within:ring-[var(--codey-blue)] [&_svg]:shrink-0 [&_svg]:text-[var(--codey-subtle)] [&_[data-slot=input]]:min-w-0 [&_[data-slot=input]]:flex-1 [&_[data-slot=input]]:w-full";
 
 export const insetInputClass =
-  "h-9! min-w-0 w-full flex-1 border-0! bg-transparent! px-0! text-[13px] shadow-none! placeholder:text-[#8e8e93] focus:ring-0";
+  "h-9! min-w-0 w-full flex-1 border-0! bg-transparent! px-0! text-[13px] shadow-none! placeholder:text-[var(--field-placeholder)] focus:ring-0";
 
 export const compactSelectInputClass =
-  "h-8! min-h-[32px]! rounded-[7px]! border-black/15! bg-white! px-2.5! text-[12px] font-medium placeholder:text-[#8e8e93] focus:border-blue-500/65! focus:ring-2 focus:ring-blue-500/12";
+  "h-8! min-h-[32px]! rounded-[var(--field-radius)]! border-transparent! bg-[var(--field-background)]! px-2.5! text-[12px] font-medium placeholder:text-[var(--field-placeholder)] focus:border-[var(--codey-blue)]! focus:bg-[var(--codey-surface)]! focus:ring-1 focus:ring-[var(--codey-blue)]";
 
 export const flushCardClass = "p-0!";
 

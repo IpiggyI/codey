@@ -1281,35 +1281,37 @@ export function App({
   });
   if (!config || !provider) {
     const loadingContent = (
-      <main className="app-shell loading-shell">
-        <div className="loading-mark">
-          <GitBranch size={17} />
-        </div>
-        <div>
-          <strong>{loadFailed ? "Codey 加载失败" : "正在载入 Codey"}</strong>
-          <p>
-            <NoticeLoadingText controller={noticeController} />
-          </p>
-          {loadFailed && (
-            <div className="mt-3">
-              <Button
-                variant="secondary"
-                size="sm"
-                disabled={isBusy}
-                onPress={() => void runOperation("reload-config", load)}
-              >
-                重新检查
-              </Button>
-            </div>
+      <main className={`app-shell loading-shell${loadFailed ? " is-error" : ""}`}>
+        <div className="loading-card">
+          <div className="loading-mark">
+            <GitBranch size={18} />
+          </div>
+          <div className="loading-body">
+            <strong>{loadFailed ? "Codey 加载失败" : "正在载入 Codey"}</strong>
+            <p>
+              <NoticeLoadingText controller={noticeController} />
+            </p>
+            {loadFailed && (
+              <div className="mt-3.5">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={isBusy}
+                  onPress={() => void runOperation("reload-config", load)}
+                >
+                  重新检查
+                </Button>
+              </div>
+            )}
+          </div>
+          {!loadFailed && (
+            <LoaderCircle
+              className="animate-spin loading-animate-spin"
+              size={18}
+              aria-hidden="true"
+            />
           )}
         </div>
-        {!loadFailed && (
-          <LoaderCircle
-            className="animate-spin loading-animate-spin"
-            size={16}
-            aria-hidden="true"
-          />
-        )}
       </main>
     );
     return embedded ? (
@@ -1339,8 +1341,8 @@ export function App({
         <CodeyBrandMark />
         <div className="flex min-w-0 flex-col">
           <div className="flex min-w-0 items-center gap-2">
-            <h1 className="m-0 whitespace-nowrap text-base font-bold tracking-[-0.02em] text-[#1d1d1f]">Codey 控制台</h1>
-            <span className="whitespace-nowrap text-[11px] font-medium tracking-[0.01em] text-[#8e8e93]">
+            <h1 className="m-0 whitespace-nowrap text-[19px] font-extrabold leading-[22px] tracking-[-0.02em] text-[var(--codey-text)]">Codey 控制台</h1>
+            <span className="whitespace-nowrap font-mono text-[11.5px] font-medium tabular-nums text-[var(--codey-muted)]">
               v{status.appVersion || "0.2.0"}
             </span>
 
@@ -1350,7 +1352,7 @@ export function App({
               </Badge>
             )}
           </div>
-          <p className="m-0 mt-0.5 text-[11px] text-[#6e6e73] max-[760px]:hidden">查看当前 provider、管理模型清单、运行策略与诊断存储</p>
+          <p className="m-0 mt-0.5 text-xs text-[var(--codey-muted)] max-[760px]:hidden">查看当前 provider、管理模型清单、运行策略与诊断存储</p>
         </div>
       </div>
 
@@ -1415,7 +1417,7 @@ export function App({
           )}
           <Button
             aria-label={saving ? "正在保存设置" : saveButtonText}
-            className="h-8 min-w-[88px] px-3.5 text-xs max-[520px]:min-w-8! max-[520px]:w-8! max-[520px]:px-0!"
+            className="header-save-button h-8 min-w-[88px] px-3.5 text-xs max-[520px]:min-w-8! max-[520px]:w-8! max-[520px]:px-0!"
             disabled={!dirty || isBusy}
             loading={saving}
             onPress={handleSaveCurrent}
@@ -1505,22 +1507,21 @@ export function App({
       )}
 
       {!embedded && (
-        <header className="z-30 flex flex-col border-b border-black/8 bg-white/75 px-5 py-2.5 backdrop-blur-xl">
+        <header className="app-shell-header z-30 flex flex-col px-5 py-2.5">
           {configHeaderContent}
         </header>
       )}
 
       {configApplyBannerVisible(status.configApply, configApplyError) && status.configApply && (
         <div
-          role={status.configApply.state === "failed" || configApplyError ? "alert" : "status"}
-          className="flex flex-wrap items-center gap-2 border-b border-black/8 px-5 py-2 text-xs"
+          role="alert"
+          className="flex flex-wrap items-center justify-between gap-2.5 border-b border-[var(--codey-red-border)] bg-[var(--codey-red-soft)] px-5 py-2.5 text-xs font-medium text-[var(--codey-red)]"
         >
-          {status.configApply.state === "pending" && !configApplyError && (
-            <LoaderCircle size={14} className="animate-spin" aria-hidden="true" />
-          )}
-          <span>{configApplyError || configApplyNotice(status.configApply).text}</span>
+          <span className="min-w-0 flex-1 leading-relaxed">
+            {configApplyError || configApplyNotice(status.configApply).text}
+          </span>
           {configApplyError && (
-            <Button size="sm" variant="outline" onPress={() => void retryConfigApply()}>
+            <Button size="xs" variant="outline" onPress={() => void retryConfigApply()}>
               重新查询状态
             </Button>
           )}

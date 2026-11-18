@@ -198,3 +198,45 @@ test("App keeps retained pages inactive while the embedded settings modal is hid
   const app = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
   assert.match(app, /<SettingsLayout\s+active=\{!embedded \|\| modalVisible\}/);
 });
+
+test("sidebar keyboard navigation follows grouped menu order", () => {
+  const harness = layoutHarness();
+  const menu = () => harness.find("div").find(node => node.props.className === "settings-sidebar-menu");
+  let focused = null;
+  const items = harness.find("button").map(node => ({ id: node.props.id, focus() { focused = node.props.id; } }));
+  const press = (fromIndex, key) => {
+    let prevented = false;
+    menu().props.onKeyDown({
+      key,
+      target: items[fromIndex],
+      currentTarget: { querySelectorAll: () => items },
+      preventDefault() { prevented = true; },
+    });
+    assert.equal(prevented, true);
+    harness.render();
+  };
+
+  const isActive = (id) =>
+    harness.find("section").find(node => node.props.id === `settings-page-${id}`).props.hidden === false;
+
+  press(3, "ArrowDown");
+  assert.equal(focused, "settings-menu-mcp");
+  assert.equal(isActive("mcp"), true);
+  assert.ok(harness.page("mcp"));
+
+  press(0, "ArrowUp");
+  assert.equal(focused, "settings-menu-skills");
+  assert.equal(isActive("skills"), true);
+
+  press(1, "ArrowRight");
+  assert.equal(focused, "settings-menu-prompt");
+  assert.equal(harness.page("prompt").active, true);
+
+  press(5, "Home");
+  assert.equal(focused, "settings-menu-overview");
+  assert.equal(isActive("overview"), true);
+
+  press(0, "End");
+  assert.equal(focused, "settings-menu-skills");
+  assert.equal(isActive("skills"), true);
+});

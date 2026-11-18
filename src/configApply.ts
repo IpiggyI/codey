@@ -24,12 +24,12 @@ export function configApplyPending(next: ConfigApplyStatus | null | undefined, r
   return !next || next.revision < revision || next.state === "pending";
 }
 
-// 横幅只提示进行中、失败或状态无法确认；成功后隐藏。
+// 横幅只提示失败或状态无法确认；进行中与成功都不显示。
 export function configApplyBannerVisible(
   status: ConfigApplyStatus | null | undefined,
   queryError: string | null,
 ) {
-  return Boolean(status && (status.state === "pending" || status.state === "failed" || queryError));
+  return Boolean(status && (status.state === "failed" || queryError));
 }
 
 // 本次会话看到的应用从进行中结束时，用提示告知最终结果。

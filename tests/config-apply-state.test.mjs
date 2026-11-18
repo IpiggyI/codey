@@ -76,11 +76,11 @@ test("pending, failure and restart messages distinguish saving from applying", (
   assert.equal(configApplyNotice({ revision: 1, state: "saved" }).text, "配置已保存");
 });
 
-test("the status banner hides after a successful save or apply and shows failures", () => {
+test("the status banner hides while pending or after success and shows failures", () => {
   for (const state of ["applied", "saved", "restart_required"]) {
     assert.equal(configApplyBannerVisible({ revision: 1, state }, null), false, state);
   }
-  assert.equal(configApplyBannerVisible({ revision: 1, state: "pending" }, null), true);
+  assert.equal(configApplyBannerVisible({ revision: 1, state: "pending" }, null), false);
   assert.equal(configApplyBannerVisible({ revision: 1, state: "failed", error: "连接中断" }, null), true);
   assert.equal(configApplyBannerVisible({ revision: 1, state: "pending" }, "暂时无法确认"), true);
   assert.equal(configApplyBannerVisible(null, null), false);

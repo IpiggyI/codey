@@ -1,21 +1,151 @@
-:root {
+/*
+ * 视觉语言：信息流式的纯白画布。区块之间只用细分隔线，不叠卡片阴影；
+ * 粗黑标题、胶囊按钮和整行悬停底色承担层级，蓝色只留给主操作与当前状态。
+ */
+:root,
+:host {
   color-scheme: light;
   font-family:
-    -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
-    "PingFang SC", "Hiragino Sans GB", "Helvetica Neue", Arial, sans-serif;
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   font-synthesis: none;
-  --mac-blue: #007aff;
-  --mac-green: #34c759;
-  --mac-red: #ff3b30;
-  --mac-gray-bg: #f5f5f7;
-  --mac-card-bg: #ffffff;
-  --mac-text-primary: #1d1d1f;
-  --mac-text-secondary: #6e6e73;
-  --mac-text-tertiary: #8e8e93;
+
+  --codey-text: #0f1419;
+  --codey-text-soft: #2f3640;
+  --codey-muted: #536471;
+  --codey-subtle: #8b98a5;
+
+  --codey-surface: #ffffff;
+  --codey-surface-muted: #f7f9f9;
+  --codey-surface-sunken: #eff3f4;
+  --codey-surface-elevated: #ffffff;
+  --codey-surface-rgb: 255, 255, 255;
+  --codey-ink-rgb: 15, 20, 25;
+
+  --codey-border: #e6eaed;
+  --codey-border-subtle: #eff3f4;
+  --codey-border-strong: #cfd9de;
+  --codey-hover: rgba(15, 20, 25, 0.035);
+  --codey-press: rgba(15, 20, 25, 0.07);
+
+  --codey-blue: #1d8cf0;
+  --codey-blue-hover: #1a7fd8;
+  --codey-blue-soft: rgba(29, 140, 240, 0.1);
+  --codey-blue-border: rgba(29, 140, 240, 0.32);
+
+  --codey-signal: #1d8cf0;
+  --codey-signal-soft: rgba(29, 140, 240, 0.1);
+
+  --codey-green: #00a36c;
+  --codey-green-hover: #008f5e;
+  --codey-green-soft: rgba(0, 163, 108, 0.1);
+  --codey-green-border: rgba(0, 163, 108, 0.3);
+
+  --codey-red: #f4212e;
+  --codey-red-hover: #dc1e29;
+  --codey-red-soft: rgba(244, 33, 46, 0.1);
+  --codey-red-border: rgba(244, 33, 46, 0.3);
+
+  --codey-amber: #e08600;
+  --codey-amber-hover: #c77700;
+  --codey-amber-soft: rgba(255, 173, 31, 0.14);
+  --codey-amber-border: rgba(224, 134, 0, 0.32);
+
+  --codey-purple: #7856ff;
+  --codey-purple-soft: rgba(120, 86, 255, 0.1);
+  --codey-purple-border: rgba(120, 86, 255, 0.3);
+
+  /* 本分叉页面样式仍引用 --mac-*；深色块里重复声明，否则继承的是宿主上已解析的浅色值。 */
+  --mac-blue: var(--codey-blue);
+  --mac-gray-bg: var(--codey-surface-sunken);
+  --mac-text-primary: var(--codey-text);
+  --mac-text-secondary: var(--codey-muted);
+  --mac-text-tertiary: var(--codey-subtle);
+  --mac-green: var(--codey-green);
+  --mac-red: var(--codey-red);
+  --mac-card-bg: var(--codey-card);
+
+  /* 侧栏、画布与卡片同为白底，仅靠细线分区；面板用极浅灰托底。 */
+  --codey-sidebar: #ffffff;
+  --codey-canvas: #ffffff;
+  --codey-card: #ffffff;
+  --codey-panel: #f7f9f9;
+  --codey-card-shadow: none;
+  --codey-popover-shadow: 0 0 15px rgba(101, 119, 134, 0.2), 0 0 3px 1px rgba(101, 119, 134, 0.15);
+
+  --codey-font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+/* 深色模式：柔和石墨深灰层级画布与细腻冷灰描边，避免纯黑高反差刺眼。 */
+[data-theme="dark"] {
+  color-scheme: dark;
+  --codey-text: #eceff4;
+  --codey-text-soft: #cfd6e2;
+  --codey-muted: #9aa3b2;
+  --codey-subtle: #6e7787;
+
+  --codey-surface: #1d2129;
+  --codey-surface-muted: #191d24;
+  --codey-surface-sunken: #13161c;
+  --codey-surface-elevated: #232833;
+  --codey-surface-rgb: 29, 33, 41;
+
+  --codey-sidebar: #14171d;
+  --codey-canvas: #171a20;
+  --codey-card: #1d2129;
+  --codey-panel: #1a1e26;
+  --codey-card-shadow: 0 2px 8px rgba(0, 0, 0, 0.18), 0 1px 2px rgba(0, 0, 0, 0.12);
+  --codey-popover-shadow: 0 18px 42px rgba(0, 0, 0, 0.46), 0 4px 12px rgba(0, 0, 0, 0.28), 0 0 0 1px rgba(255, 255, 255, 0.08);
+  --codey-ink-rgb: 236, 239, 244;
+
+  --codey-border: #2b313d;
+  --codey-border-subtle: #232833;
+  --codey-border-strong: #394150;
+  --codey-hover: rgba(236, 239, 244, 0.045);
+  --codey-press: rgba(236, 239, 244, 0.085);
+
+  --codey-blue: #3b9eff;
+  --codey-blue-hover: #58adff;
+  --codey-blue-soft: rgba(59, 158, 255, 0.15);
+  --codey-blue-border: rgba(59, 158, 255, 0.42);
+
+  --codey-signal: #3b9eff;
+  --codey-signal-soft: rgba(59, 158, 255, 0.15);
+
+  --codey-green: #24c98b;
+  --codey-green-hover: #3ad69b;
+  --codey-green-soft: rgba(36, 201, 139, 0.15);
+  --codey-green-border: rgba(36, 201, 139, 0.38);
+
+  --codey-red: #ff5c6c;
+  --codey-red-hover: #ff7583;
+  --codey-red-soft: rgba(255, 92, 108, 0.15);
+  --codey-red-border: rgba(255, 92, 108, 0.4);
+
+  --codey-amber: #f5b041;
+  --codey-amber-hover: #f8c063;
+  --codey-amber-soft: rgba(245, 176, 65, 0.15);
+  --codey-amber-border: rgba(245, 176, 65, 0.38);
+
+  --codey-purple: #a388ff;
+  --codey-purple-soft: rgba(163, 136, 255, 0.16);
+  --codey-purple-border: rgba(163, 136, 255, 0.4);
+
+  --mac-blue: var(--codey-blue);
+  --mac-gray-bg: var(--codey-surface-sunken);
+  --mac-text-primary: var(--codey-text);
+  --mac-text-secondary: var(--codey-muted);
+  --mac-text-tertiary: var(--codey-subtle);
+  --mac-green: var(--codey-green);
+  --mac-red: var(--codey-red);
+  --mac-card-bg: var(--codey-card);
+  color: var(--mac-text-primary);
 }
 
 :host {
   background: transparent;
+  /* 弹层独立挂载，需在宿主边界重置文字颜色，避免继承 Codex 深色页面的白字。 */
+  color: var(--mac-text-primary);
 }
 
 * {
@@ -38,11 +168,118 @@ body {
   text-rendering: optimizeLegibility;
 }
 
-button,
-input,
-textarea {
-  -webkit-app-region: no-drag;
-  font: inherit;
+/* 放入 base 层：未分层的 font 简写会压过 HeroUI 与 Tailwind 的字号工具类。 */
+@layer base {
+  button,
+  input,
+  textarea {
+    -webkit-app-region: no-drag;
+    font: inherit;
+  }
+}
+
+@layer components {
+  /* 胶囊按钮：主操作为墨色实心，次操作为描边，幽灵按钮只在悬停时出现底色。 */
+  .button {
+    height: 34px;
+    gap: 6px;
+    border-radius: 999px;
+    padding-inline: 16px;
+    font-size: 13.5px;
+    font-weight: 700;
+    letter-spacing: 0;
+    transition:
+      background-color 140ms cubic-bezier(0.22, 1, 0.36, 1),
+      border-color 140ms cubic-bezier(0.22, 1, 0.36, 1),
+      color 140ms ease,
+      box-shadow 140ms ease,
+      transform 110ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .button:active:not(:disabled):not([aria-disabled="true"]) {
+    transform: scale(0.975);
+  }
+
+  .button--sm {
+    height: 30px;
+    border-radius: 999px;
+    padding-inline: 13px;
+    font-size: 12.5px;
+  }
+
+  .button--lg {
+    height: 42px;
+    border-radius: 999px;
+    padding-inline: 22px;
+    font-size: 15px;
+  }
+
+  .button--icon-only {
+    width: 34px;
+    padding: 0;
+  }
+
+  .button--icon-only.button--sm {
+    width: 30px;
+  }
+
+  .button--primary {
+    --button-bg: var(--codey-text);
+    --button-bg-hover: color-mix(in srgb, var(--codey-text) 86%, var(--codey-surface));
+    --button-bg-pressed: color-mix(in srgb, var(--codey-text) 78%, var(--codey-surface));
+    --button-fg: var(--codey-surface);
+  }
+
+  .button--outline,
+  .button--secondary {
+    --button-bg: transparent;
+    --button-bg-hover: var(--codey-hover);
+    --button-bg-pressed: var(--codey-press);
+    --button-fg: var(--codey-text);
+    border: 1px solid var(--codey-border-strong);
+    box-shadow: none;
+  }
+
+  .button--tertiary {
+    --button-bg: var(--codey-surface-sunken);
+    --button-bg-hover: color-mix(in srgb, var(--codey-surface-sunken) 82%, var(--codey-text));
+    --button-bg-pressed: var(--button-bg-hover);
+    --button-fg: var(--codey-text);
+    box-shadow: none;
+  }
+
+  .button--ghost {
+    --button-bg-hover: var(--codey-press);
+    --button-bg-pressed: var(--codey-press);
+  }
+
+  .button--secondary:disabled,
+  .button--secondary[aria-disabled="true"],
+  .button--tertiary:disabled,
+  .button--tertiary[aria-disabled="true"] {
+    box-shadow: none;
+  }
+
+  .chip {
+    border-radius: 999px;
+    font-size: 11.5px;
+    line-height: 18px;
+    font-weight: 600;
+    letter-spacing: 0;
+  }
+}
+@layer components {
+  /* 头部保存按钮是全局唯一的蓝色主操作，其余主按钮保持墨色。 */
+  .button--primary.header-save-button {
+    --button-bg: var(--codey-blue);
+    --button-bg-hover: var(--codey-blue-hover);
+    --button-bg-pressed: var(--codey-blue-hover);
+    --button-fg: #ffffff;
+  }
+
+  .button--primary.header-save-button:not(:disabled) {
+    box-shadow: 0 4px 14px color-mix(in srgb, var(--codey-blue) 32%, transparent);
+  }
 }
 
 button,
@@ -55,22 +292,138 @@ input:focus-visible,
 [role="button"]:focus-visible,
 [role="switch"]:focus-visible,
 [role="checkbox"]:focus-visible {
-  outline: 2px solid var(--mac-blue);
+  outline: 2px solid var(--codey-blue);
   outline-offset: 2px;
 }
 
 .app-shell {
-  --foreground: #1d1d1f;
-  --ring: #007aff;
+  --foreground: var(--codey-text);
+  --ring: var(--codey-blue);
   position: relative;
   display: flex;
   height: 100%;
   min-height: 0;
   flex-direction: column;
   overflow: hidden;
-  background: linear-gradient(180deg, #fafafc 0%, #f2f2f5 100%);
+  background: var(--codey-canvas);
   color: var(--foreground);
   isolation: isolate;
+}
+
+.loading-shell {
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.loading-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  width: min(440px, 100%);
+  padding: 20px 22px;
+  border: 1px solid var(--codey-border);
+  border-radius: 18px;
+  background: var(--codey-card);
+  box-shadow: var(--codey-card-shadow, none);
+  animation: codey-panel-enter 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.loading-shell.is-error .loading-card {
+  border-color: var(--codey-red-border);
+}
+
+.loading-mark {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  place-items: center;
+  border-radius: 12px;
+  background: var(--codey-blue-soft);
+  color: var(--codey-blue);
+}
+
+.loading-shell.is-error .loading-mark {
+  background: var(--codey-red-soft);
+  color: var(--codey-red);
+}
+
+.loading-body {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.loading-body strong {
+  color: var(--codey-text);
+  font-size: 15.5px;
+  font-weight: 750;
+  line-height: 1.35;
+}
+
+.loading-body p {
+  margin: 0;
+  color: var(--codey-muted);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.loading-animate-spin {
+  margin-top: 2px;
+  flex-shrink: 0;
+  color: var(--codey-blue);
+}
+
+@keyframes codey-modal-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.986);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes codey-page-enter {
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes codey-panel-enter {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.settings-modal-shell {
+  border: 1px solid var(--codey-border);
+  background: var(--codey-canvas);
+  box-shadow: 0 20px 60px -10px rgba(15, 20, 25, 0.28), 0 0 0 1px rgba(15, 20, 25, 0.04);
+  animation: codey-modal-enter 190ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+[data-theme="dark"] .settings-modal-shell {
+  border-color: rgba(255, 255, 255, 0.09);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.07),
+    0 24px 68px -8px rgba(0, 0, 0, 0.58),
+    0 8px 24px -4px rgba(0, 0, 0, 0.34);
 }
 
 .sr-only {
@@ -91,11 +444,12 @@ input:focus-visible,
   top: 10px;
   left: 16px;
   border: 1px solid var(--ring);
-  border-radius: 10px;
-  background: #ffffff;
-  padding: 8px 14px;
-  color: #1d1d1f;
+  border-radius: 999px;
+  background: var(--codey-surface);
+  padding: 7px 13px;
+  color: var(--codey-text);
   font-size: 12px;
+  font-weight: 600;
   opacity: 0;
   pointer-events: none;
   transform: translateY(-140%);
@@ -114,15 +468,13 @@ input:focus-visible,
 
 .macos-titlebar {
   display: flex;
-  height: 38px;
-  flex: 0 0 38px;
+  height: 36px;
+  flex: 0 0 36px;
   align-items: center;
   justify-content: space-between;
   padding: 0 16px;
-  background: rgba(246, 246, 248, 0.85);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  background: var(--codey-sidebar);
+  border-bottom: 1px solid var(--codey-border);
   user-select: none;
   z-index: 40;
 }
@@ -138,32 +490,45 @@ input:focus-visible,
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  font-family: var(--codey-font-mono);
+  font-size: 11px;
   font-weight: 600;
-  color: #1d1d1f;
-  letter-spacing: -0.01em;
+  text-transform: uppercase;
+  color: var(--codey-muted);
+  letter-spacing: 0.06em;
+  white-space: nowrap;
 }
 
 .app-title-text {
-  color: #1d1d1f;
+  color: var(--codey-text-soft);
 }
 
 .app-version-tag {
   font-size: 10px;
   font-weight: 500;
-  color: #8e8e93;
-  background: rgba(0, 0, 0, 0.05);
+  color: var(--codey-subtle);
+  background: var(--codey-surface-sunken);
   padding: 1px 6px;
   border-radius: 999px;
 }
 
 .settings-modal-header {
-  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
-  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.04), 0 1px 2px rgba(0, 0, 0, 0.02);
+  border-bottom: 1px solid var(--codey-border);
+  background: var(--codey-surface);
+}
+
+/* 独立窗口模式的头部与弹窗头部共用同一层表面。 */
+.app-shell-header {
+  border-bottom: 1px solid var(--codey-border);
+  background: var(--codey-surface);
 }
 
 .settings-modal-body {
   position: relative;
+}
+
+.toast-region {
+  z-index: 100;
 }
 
 .toast-portal-host {
@@ -176,11 +541,13 @@ input:focus-visible,
   z-index: 100;
 }
 
+/* 与 ToastProvider 的 top 方向一致，让提示从弹窗顶部向内展开。 */
 .toast-portal-host .toast-region,
 .settings-modal-shell .toast-region,
 .modal__dialog .toast-region {
   position: absolute;
-  top: 10px;
+  top: 16px;
+  bottom: auto;
   left: 50%;
   transform: translateX(-50%);
   translate: none;
@@ -198,7 +565,7 @@ input:focus-visible,
 }
 
 /* ==========================================================================
-   Main Scroll & Page Container
+   Main Scroll & Feed Column
    ========================================================================== */
 
 .page-scroll {
@@ -206,14 +573,17 @@ input:focus-visible,
   flex: 1;
   overflow-y: auto;
   overscroll-behavior: contain;
-  scrollbar-color: rgba(0, 0, 0, 0.18) transparent;
+  scrollbar-color: rgba(var(--codey-ink-rgb, 15, 20, 25), 0.18) transparent;
   scrollbar-width: thin;
+  scrollbar-gutter: stable;
 }
 
+/* 内容列贴住侧栏左对齐，在左侧 1000px 内排布，宽窗口下右侧留白。 */
 .page {
-  width: min(100%, 1360px);
-  margin: 0 auto;
-  padding: 18px 22px 36px;
+  width: 100%;
+  min-height: 100%;
+  margin: 0;
+  padding: 22px var(--page-gutter-end, 28px) 40px var(--page-gutter, 28px);
 }
 
 /* ==========================================================================
@@ -222,10 +592,11 @@ input:focus-visible,
 
 .settings-layout {
   display: grid;
-  grid-template-columns: 208px minmax(0, 1fr);
+  grid-template-columns: 252px minmax(0, 1fr);
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  background: var(--codey-canvas);
 }
 
 .settings-sidebar {
@@ -234,16 +605,18 @@ input:focus-visible,
   flex-direction: column;
   overflow: hidden;
   overscroll-behavior: contain;
-  border-right: 1px solid rgba(0, 0, 0, 0.06);
-  background: rgba(255, 255, 255, 0.55);
-  padding: 16px 10px 12px;
+  border-right: 1px solid var(--codey-border);
+  background: var(--codey-sidebar);
+  padding: 14px 14px 14px;
 }
 
 .settings-sidebar-menu {
   flex: 1;
   min-height: 0;
+  margin-inline: -6px;
+  padding-inline: 6px;
   overflow-y: auto;
-  scrollbar-width: thin;
+  scrollbar-width: none;
 }
 
 .settings-nav-group {
@@ -253,38 +626,42 @@ input:focus-visible,
 }
 
 .settings-nav-group + .settings-nav-group {
-  margin-top: 22px;
+  margin-top: 14px;
 }
 
 .settings-nav-group-title {
-  padding: 0 10px 6px;
-  color: var(--mac-text-tertiary);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
+  padding: 6px 14px 5px;
+  color: var(--codey-subtle);
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
   user-select: none;
 }
 
 .settings-nav-item {
   position: relative;
   display: flex;
-  min-height: 34px;
+  width: 100%;
+  min-height: 41px;
   flex-shrink: 0;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   border: 0;
-  border-radius: 8px;
+  border-radius: 999px;
   background: transparent;
-  padding: 7px 10px;
-  color: #3a3a3c;
-  font: inherit;
-  font-size: 13px;
+  padding: 0 16px 0 13px;
+  color: var(--codey-text-soft);
+  font-size: 14.5px;
   font-weight: 500;
-  line-height: 1.3;
+  line-height: 1.25;
   text-align: left;
   white-space: nowrap;
   cursor: pointer;
-  transition: background-color 120ms ease, color 120ms ease;
+  transition:
+    background-color 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    color 160ms ease,
+    box-shadow 160ms ease,
+    transform 110ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .settings-nav-item span {
@@ -294,47 +671,64 @@ input:focus-visible,
 }
 
 .settings-nav-item svg {
+  width: 19px;
+  height: 19px;
   flex-shrink: 0;
-  color: var(--mac-text-tertiary);
-  transition: color 120ms ease;
+  color: var(--codey-muted);
+  stroke-width: 1.8;
+  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1), color 160ms ease;
 }
 
 .settings-nav-item:hover {
-  background: rgba(0, 0, 0, 0.05);
-  color: var(--mac-text-primary);
+  background: var(--codey-hover);
+  color: var(--codey-text);
 }
 
 .settings-nav-item:hover svg {
-  color: #3a3a3c;
+  color: var(--codey-text);
+  transform: translateX(1px);
+}
+
+.settings-nav-item:active {
+  transform: scale(0.985);
 }
 
 .settings-nav-item[aria-current="page"] {
-  background: var(--mac-card-bg);
-  color: var(--mac-text-primary);
-  font-weight: 600;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 0 0 1px rgba(0, 0, 0, 0.04);
+  background: var(--codey-blue-soft);
+  color: var(--codey-text);
+  font-weight: 700;
+}
+
+[data-theme="dark"] .settings-nav-item[aria-current="page"] {
+  background: var(--codey-blue-soft);
+  box-shadow: inset 0 0 0 1px var(--codey-blue-border);
 }
 
 .settings-nav-item[aria-current="page"] svg {
-  color: var(--mac-blue);
+  stroke-width: 2.15;
+  color: var(--codey-blue);
 }
 
 .settings-nav-item:focus-visible {
-  outline: 2px solid var(--mac-blue);
-  outline-offset: 1px;
+  outline: 2px solid var(--codey-blue);
+  outline-offset: -2px;
 }
 
 .settings-content {
+  --page-gutter: 28px;
+  --page-gutter-end: max(var(--page-gutter), calc(100cqi - 1000px + var(--page-gutter)));
   position: relative;
   display: flex;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
+  container: settings-content / inline-size;
+  background: var(--codey-canvas);
 }
 
 .settings-content:focus-visible,
 .settings-page-scroll:focus-visible {
-  outline: 2px solid var(--mac-blue);
+  outline: 2px solid var(--codey-blue);
   outline-offset: -2px;
 }
 
@@ -347,10 +741,16 @@ input:focus-visible,
   overflow: hidden;
 }
 
+.settings-page:not([hidden]) {
+  animation: codey-page-enter 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
 .settings-layout[hidden],
 .settings-page[hidden] {
   display: none;
 }
+
+/* ---------- 页面与区块标题 ---------- */
 
 .section-title {
   display: flex;
@@ -367,49 +767,214 @@ input:focus-visible,
 .section-heading {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 9px;
   min-width: 0;
 }
 
+/* 标题只保留粗体文字，图标交给左侧导航表达。 */
 .section-icon {
-  display: grid;
-  width: 30px;
-  height: 30px;
-  flex: 0 0 auto;
-  place-items: center;
-  border-radius: 8px;
-  background: rgba(0, 122, 255, 0.09);
-  color: var(--mac-blue);
+  display: none;
 }
 
 .section-title h1,
 .section-title h2 {
-  margin: 2px 0 2px;
-  color: #1d1d1f;
-  font-size: 15px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
+  margin: 1px 0;
+  color: var(--codey-text);
+  font-size: 19px;
+  font-weight: 800;
+  line-height: 1.35;
+  letter-spacing: -0.015em;
 }
 
 .section-title p {
   margin: 0;
-  color: #6e6e73;
-  font-size: 12px;
-  line-height: 1.4;
+  color: var(--codey-muted);
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .route-heading-actions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 8px;
   flex-shrink: 0;
+  min-height: 34px;
 }
 
 .route-heading-actions .route-item-usage-toggle {
   margin-left: 0;
 }
 
+/* 关闭态开关轨道在白底上需要足够对比度。 */
+.switch {
+  --switch-control-bg: var(--codey-border-strong);
+}
+
+/* ==========================================================================
+   Dropdown / ListBox Item Selected State
+   ========================================================================== */
+
+.list-box-item[data-selected="true"]:not([data-disabled="true"]),
+.list-box-item[aria-selected="true"]:not([data-disabled="true"]) {
+  background-color: var(--codey-blue-soft);
+  color: var(--codey-text);
+  font-weight: 700;
+}
+
+.list-box-item[data-selected="true"]:not([data-disabled="true"]):hover,
+.list-box-item[data-selected="true"]:not([data-disabled="true"])[data-hovered="true"],
+.list-box-item[data-selected="true"]:not([data-disabled="true"]):focus,
+.list-box-item[data-selected="true"]:not([data-disabled="true"])[data-focused="true"] {
+  background-color: color-mix(in srgb, var(--codey-blue-soft) 70%, var(--codey-blue) 12%);
+  color: var(--codey-text);
+}
+
+.list-box-item[data-selected="true"] * {
+  color: inherit;
+}
+
+.list-box-item__indicator {
+  display: none;
+}
+
+.list-box-item:has(.list-box-item__indicator) {
+  padding-inline-end: 0.625rem;
+}
+
+/* ==========================================================================
+   Form Controls (Inputs, Selects)
+   灰底无阴影，悬停加深描边，聚焦时转白底蓝框。
+   ========================================================================== */
+
+.input,
+.input-group,
+.select__trigger {
+  --field-shadow: 0 0 0 0 transparent;
+  --tw-shadow: 0 0 0 0 transparent;
+  border-width: 1px;
+  border-color: var(--field-border, rgba(var(--codey-ink-rgb, 0, 0, 0), 0.12));
+}
+
+.input:not(:focus):not([data-focused="true"]):not([data-focus-visible="true"]),
+.input-group:not(:focus-within):not([data-focus-within="true"]),
+.select__trigger:not(:focus):not([data-focus="true"]):not([data-focus-visible="true"]) {
+  box-shadow: none;
+}
+
+.input:hover:not(:focus):not(:focus-visible),
+.input[data-hovered="true"]:not([data-focused="true"]):not([data-focus-visible="true"]),
+.input-group:hover:not(:focus-within),
+.input-group[data-hovered="true"]:not([data-focus-within="true"]),
+.select__trigger:hover:not(:focus):not(:focus-visible),
+.select__trigger[data-hovered="true"]:not([data-focused="true"]):not([data-focus-visible="true"]) {
+  border-color: var(--field-border-hover, rgba(var(--codey-ink-rgb, 0, 0, 0), 0.24));
+}
+
+.input:focus,
+.input[data-focused="true"],
+.input-group:has([data-slot="input-group-input"]:focus),
+.select__trigger:focus,
+.select__trigger[data-focus="true"],
+.select__trigger[data-focus-visible="true"] {
+  border-color: var(--field-border-focus, var(--codey-blue));
+  background-color: var(--codey-surface);
+  box-shadow: 0 0 0 1px var(--field-border-focus, var(--codey-blue));
+}
+
+.input[data-invalid="true"],
+.input[aria-invalid="true"],
+.input-group[data-invalid="true"],
+.input-group[aria-invalid="true"],
+.select__trigger[data-invalid="true"],
+.select__trigger[aria-invalid="true"] {
+  border-color: var(--danger, #ff3b30);
+}
+
+.input-group__prefix,
+.input-group__suffix {
+  border: none;
+}
+
+/* ==========================================================================
+   Checkbox
+   ========================================================================== */
+
+.checkbox__control,
+[data-slot="checkbox-control"] {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  border-radius: 5px;
+  border: 1.5px solid var(--codey-subtle);
+  background-color: var(--codey-surface);
+  box-shadow: none;
+  transition: border-color 150ms ease, background-color 150ms ease, box-shadow 150ms ease;
+}
+
+.checkbox:hover .checkbox__control,
+.checkbox:hover [data-slot="checkbox-control"],
+.checkbox [data-slot="checkbox-content"][data-hovered="true"] .checkbox__control,
+.checkbox [data-slot="checkbox-content"][data-hovered="true"] [data-slot="checkbox-control"],
+[data-slot="checkbox"]:hover [data-slot="checkbox-control"] {
+  border-color: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.48);
+}
+
+.checkbox[data-selected="true"] .checkbox__control,
+.checkbox[aria-checked="true"] .checkbox__control,
+.checkbox[data-indeterminate="true"] .checkbox__control,
+[data-slot="checkbox"][data-selected="true"] [data-slot="checkbox-control"],
+[data-slot="checkbox"][aria-checked="true"] [data-slot="checkbox-control"],
+[data-slot="checkbox"][data-indeterminate="true"] [data-slot="checkbox-control"] {
+  border-color: var(--codey-blue, #007aff);
+  background-color: var(--codey-blue, #007aff);
+  box-shadow: none;
+}
+
+.checkbox[data-selected="true"] .checkbox__control::before,
+.checkbox[aria-checked="true"] .checkbox__control::before,
+.checkbox[data-indeterminate="true"] .checkbox__control::before,
+[data-slot="checkbox"][data-selected="true"] [data-slot="checkbox-control"]::before,
+[data-slot="checkbox"][aria-checked="true"] [data-slot="checkbox-control"]::before,
+[data-slot="checkbox"][data-indeterminate="true"] [data-slot="checkbox-control"]::before {
+  background-color: var(--codey-blue, #007aff);
+  opacity: 1;
+  transform: scale(1);
+}
+
+.checkbox[data-selected="true"]:hover .checkbox__control,
+.checkbox[aria-checked="true"]:hover .checkbox__control,
+[data-slot="checkbox"][data-selected="true"]:hover [data-slot="checkbox-control"],
+[data-slot="checkbox"][aria-checked="true"]:hover [data-slot="checkbox-control"] {
+  border-color: var(--codey-blue-hover, #0071eb);
+  background-color: var(--codey-blue-hover, #0071eb);
+}
+
+.checkbox__indicator,
+[data-slot="checkbox-indicator"] {
+  color: #ffffff;
+}
+
+.checkbox__indicator svg,
+[data-slot="checkbox-indicator"] svg {
+  stroke: #ffffff;
+}
+
+.checkbox:focus-visible .checkbox__control,
+.checkbox [data-slot="checkbox-content"][data-focus-visible="true"] .checkbox__control,
+[data-slot="checkbox"]:focus-visible [data-slot="checkbox-control"] {
+  outline: 2px solid var(--codey-blue, #007aff);
+  outline-offset: 2px;
+}
+
+.checkbox[data-disabled="true"],
+.checkbox[aria-disabled="true"],
+.checkbox:has(:disabled) {
+  opacity: 0.45;
+  pointer-events: none;
+}
 
 .system-settings-icon {
   display: flex;
@@ -419,8 +984,8 @@ input:focus-visible,
   align-items: center;
   justify-content: center;
   border-radius: 12px;
-  background: rgba(0, 122, 255, 0.1);
-  color: var(--mac-blue);
+  background: var(--codey-blue-soft);
+  color: var(--codey-blue);
 }
 
 .system-settings-body {
@@ -436,16 +1001,16 @@ input:focus-visible,
   flex-direction: column;
   gap: 10px;
   padding: 12px;
-  border: 1px solid rgba(0, 0, 0, 0.08);
+  border: 1px solid var(--codey-border);
   border-radius: 12px;
-  background: var(--mac-gray-bg);
+  background: var(--codey-panel);
 }
 
 .system-settings-versions {
   display: grid;
   grid-template-columns: 1fr 1fr;
   padding-bottom: 10px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  border-bottom: 1px solid var(--codey-border);
 }
 
 .system-settings-version-cell {
@@ -458,7 +1023,7 @@ input:focus-visible,
 
 .system-settings-version-cell:first-child {
   padding-right: 12px;
-  border-right: 1px solid rgba(0, 0, 0, 0.08);
+  border-right: 1px solid var(--codey-border);
 }
 
 .system-settings-version-cell:last-child {
@@ -469,17 +1034,17 @@ input:focus-visible,
   flex-shrink: 0;
   font-size: 12px;
   font-weight: 500;
-  color: var(--mac-text-secondary);
+  color: var(--codey-muted);
 }
 
 .system-settings-value {
   min-width: 0;
   overflow: hidden;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-family: var(--codey-font-mono);
   font-size: 12px;
   font-weight: 600;
   letter-spacing: -0.01em;
-  color: var(--mac-text-primary);
+  color: var(--codey-text);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -510,7 +1075,7 @@ input:focus-visible,
   gap: 6px;
   font-size: 12px;
   font-weight: 500;
-  color: var(--mac-text-secondary);
+  color: var(--codey-muted);
 }
 
 .system-settings-copy {
@@ -518,24 +1083,39 @@ input:focus-visible,
   height: 24px;
   min-width: 24px;
   flex-shrink: 0;
-  color: var(--mac-text-secondary);
+  color: var(--codey-muted);
 }
 
 .system-settings-path-box {
   padding: 6px 10px;
-  border: 1px solid rgba(0, 0, 0, 0.08);
+  border: 1px solid var(--codey-border);
   border-radius: 8px;
-  background: var(--mac-card-bg);
+  background: var(--codey-surface);
 }
 
 .system-settings-path-box code {
   display: block;
   max-height: 80px;
   overflow-y: auto;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-family: var(--codey-font-mono);
   font-size: 11px;
   line-height: 1.6;
-  color: var(--mac-text-primary);
+  color: var(--codey-text);
   overflow-wrap: anywhere;
   user-select: all;
+}
+
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-modal-shell,
+  .settings-page:not([hidden]),
+  .loading-card {
+    animation: none;
+  }
+
+  .button,
+  .settings-nav-item,
+  .settings-nav-item svg {
+    transition: none;
+  }
 }

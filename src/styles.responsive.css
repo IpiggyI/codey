@@ -10,7 +10,7 @@
 
   .settings-sidebar {
     border-right: 0;
-    border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+    border-bottom: 1px solid var(--codey-border);
     padding: 8px 12px;
   }
 
@@ -26,17 +26,27 @@
   }
 
   .settings-sidebar-menu .settings-nav-group + .settings-nav-group {
-    margin: 0 0 0 8px;
-    padding: 0 0 0 8px;
-    border-left: 1px solid rgba(0, 0, 0, 0.05);
+    margin: 0 0 0 4px;
   }
 
   .settings-sidebar-menu .settings-nav-group-title {
     display: none;
   }
 
+  .settings-nav-item {
+    width: auto;
+    min-height: 38px;
+    gap: 8px;
+    padding: 0 14px 0 10px;
+    font-size: 14px;
+  }
+
+  .settings-content {
+    --page-gutter: 16px;
+  }
+
   .settings-page .page {
-    padding: 14px 16px 28px;
+    padding-block: 18px 28px;
   }
 }
 
@@ -47,7 +57,7 @@
 
   .route-list-pane {
     border-right: 0;
-    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+    border-bottom: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.06);
   }
 
   .route-list {
@@ -149,7 +159,7 @@
   }
 
   .notification-dialog-test {
-    border-top: 1px solid rgba(0, 0, 0, 0.08);
+    border-top: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.08);
     border-left: 0;
   }
 
