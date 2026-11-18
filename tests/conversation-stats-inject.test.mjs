@@ -102,6 +102,19 @@ const createEnvironment = (options = {}) => {
     }
   }
 
+  const resizeObservers = [];
+  class FakeResizeObserver {
+    constructor(callback) {
+      this.callback = callback;
+      this.targets = new Set();
+      resizeObservers.push(this);
+    }
+
+    observe(target) { this.targets.add(target); }
+    unobserve(target) { this.targets.delete(target); }
+    disconnect() { this.targets.clear(); this.disconnected = true; }
+  }
+
   const document = {
     body,
     documentElement,
@@ -211,6 +224,7 @@ const createEnvironment = (options = {}) => {
     location,
     URLSearchParams,
     MutationObserver: FakeMutationObserver,
+    ...(options.resizeObserver === false ? {} : { ResizeObserver: FakeResizeObserver }),
     HTMLElement: FakeElement,
     setTimeout: testSetTimeout,
     clearTimeout,
@@ -267,6 +281,7 @@ const createEnvironment = (options = {}) => {
     rerun: () => vm.runInContext(source, context),
     dispose: () => context.window.__codeyConversationStats.dispose(),
     markPreviousVersion: () => { context.window.__codeyConversationStats.version = 0; },
+    resizeObservers,
     animationFrames,
     runAnimationFrames: () => {
       const callbacks = [...animationFrames.values()];
@@ -729,7 +744,8 @@ test("renders three buttons and the agreed cards for a full payload", async () =
     env.notify(tokenUsageMessage());
     await flushTimers(30);
     const bar = env.bar();
-    assert.equal(bar.parentElement, env.scope);
+    assert.equal(bar.parentElement, env.document.body);
+    assert.equal(env.scope.contains(bar), false);
     assert.equal(bar.querySelectorAll(".codey-cs-summary").length, 3);
     assert.equal(buttonText(env, "activity"), "4 轮 · 2 步 · 188 tok/s");
     assert.equal(buttonText(env, "tokens"), "132k tok · 缓存命中 93%");
@@ -926,7 +942,7 @@ test("estimated speed carries ≈ during generation and is corrected by the reco
   }
 });
 
-test("a session switch clears the previous conversation's numbers at once", async () => {
+test("a session switch clears the previous conversation's numbers once the loading delay passes", async () => {
   const pending = [];
   const env = createEnvironment({ request: (sessionId) => new Promise((resolve) => pending.push({ sessionId, resolve })) });
   try {
@@ -1626,22 +1642,34 @@ test("quota unlock keeps the stats bar on real token counts", async () => {
   }
 });
 
-test("remounts into a replacement composer after an in-flight stats response", async () => {
+test("keeps the bar persistently mounted across a replacement composer after an in-flight stats response", async () => {
   let resolve;
   const env = createEnvironment({ request: () => new Promise(done => { resolve = done; }) });
   try {
     await flushTimers(30);
     const originalBar = env.bar();
+    assert.equal(originalBar.parentElement, env.document.body);
+    let bodyAppends = 0;
+    const appendChild = env.document.body.appendChild.bind(env.document.body);
+    env.document.body.appendChild = (child) => {
+      if (child === originalBar) bodyAppends += 1;
+      return appendChild(child);
+    };
     env.scope.remove();
     const replacement = env.document.createElement("div");
+    replacement.getBoundingClientRect = () => ({ bottom: 780, height: 80, left: 240, right: 940, top: 700, width: 700 });
     const anchor = env.document.createElement("div");
     anchor.setAttribute("data-above-composer-conversation-id", "conversation-1");
     replacement.append(anchor, env.document.createElement("textarea"));
     env.document.body.appendChild(replacement);
+    // 不发 MutationObserver 通知，确保完成异步读取时主动重新定位且无需重插节点。
     resolve({ status: "ok", stats: STATS });
     await flushTimers(30);
     assert.equal(env.bar(), originalBar);
-    assert.equal(env.bar().parentElement, replacement);
+    assert.equal(env.bar().parentElement, env.document.body);
+    assert.equal(bodyAppends, 0, "stats bar must remain fixed without re-inserting into the DOM");
+    assert.equal(env.bar().style.getPropertyValue("left"), "240px");
+    assert.equal(env.bar().style.getPropertyValue("width"), "700px");
     assert.equal(metric(env.bar(), "total"), "132k tok");
   } finally {
     env.dispose();
@@ -1699,7 +1727,7 @@ test("mounts cached stats when the composer appears after the initial response",
     env.scope.append(env.anchor, env.textarea);
     env.emitAnchorMutation();
     await flushTimers(160);
-    assert.equal(env.bar().parentElement, env.scope);
+    assert.equal(env.bar().parentElement, env.document.body);
     assert.equal(metric(env.bar(), "total"), "132k tok");
     assert.equal(env.statsCalls().length, 1, "mounting must not refetch the same session");
   } finally {
@@ -1725,9 +1753,9 @@ test("remounts the bar after Codex rebuilds the composer DOM", async () => {
     await flushTimers(30);
     const bar = env.bar();
     bar.remove();
-    env.emitMutation([{ type: "childList", target: env.scope, removedNodes: [bar], addedNodes: [] }]);
+    env.emitMutation([{ type: "childList", target: env.document.body, removedNodes: [bar], addedNodes: [] }]);
     await flushTimers(200);
-    assert.equal(env.bar().parentElement, env.scope);
+    assert.equal(env.bar().parentElement, env.document.body);
     assert.equal(env.bar().hidden, false);
   } finally {
     env.dispose();
@@ -1787,7 +1815,7 @@ test("does not double-install on repeated injection", async () => {
     await flushTimers(30);
     env.rerun();
     await flushTimers(30);
-    assert.equal(env.scope.children.filter((child) => child.id === "codey-conversation-stats").length, 1);
+    assert.equal(env.document.body.children.filter((child) => child.id === "codey-conversation-stats").length, 1);
   } finally {
     env.dispose();
   }
@@ -2172,7 +2200,7 @@ test("reuses one detached bar and overlay and closes panels on remount", async (
     const overlay = panel(env).parentElement;
     click(summary(env));
     originalBar.remove();
-    env.emitMutation([{ type: "childList", target: env.scope, removedNodes: [originalBar] }]);
+    env.emitMutation([{ type: "childList", target: env.document.body, removedNodes: [originalBar] }]);
     await flushTimers(160);
     assert.equal(env.bar(), originalBar);
     assert.equal(panel(env).parentElement, overlay);
@@ -2277,6 +2305,395 @@ test("polls soon after the composer submits and keeps fast polling while the tur
     delays.length = 0;
     env.document.dispatchEvent({ type: "click", target: env.bar().querySelector(".codey-cs-tokens-summary") });
     assert.equal(delays.includes(300), false, "the stats buttons themselves do not count as a submit");
+  } finally {
+    env.dispose();
+  }
+});
+
+// 输入区宽度由 composer 容器的布局矩形决定。
+const setComposerWidth = (env, width, { left = 0 } = {}) => {
+  env.scope.getBoundingClientRect = () => ({
+    bottom: 160, height: 60, left, right: left + width, top: 100, width,
+  });
+};
+
+const resizeComposer = (env, width) => {
+  setComposerWidth(env, width);
+  env.resizeObservers[0].callback([]);
+  env.runAnimationFrames();
+};
+
+test("a fast session switch keeps the previous numbers until the new stats arrive", async () => {
+  const env = createEnvironment({
+    statsBySession: {
+      "conversation-1": STATS,
+      "conversation-2": { ...STATS, totalTokens: 900 },
+    },
+  });
+  try {
+    await flushTimers(30);
+    const bar = env.bar();
+    assert.equal(metric(bar, "total"), "132k tok");
+    const totalWrites = [];
+    let currentTotal = bar.__codeyCs.total.textContent;
+    Object.defineProperty(bar.__codeyCs.total, "textContent", {
+      configurable: true,
+      get: () => currentTotal,
+      set: (next) => { totalWrites.push(next); currentTotal = next; },
+    });
+
+    env.setConversation("conversation-2");
+    env.emitAnchorMutation();
+    await flushTimers(200);
+
+    assert.deepEqual(totalWrites, ["900 tok"], "fast session switch must not flash a placeholder between sessions");
+    assert.equal(metric(bar, "total"), "900 tok");
+    assert.equal(env.calls.at(-1).payload.sessionId, "conversation-2");
+  } finally {
+    env.dispose();
+  }
+});
+
+test("a slow session switch clears the previous numbers after the loading delay", async () => {
+  const pending = [];
+  const env = createEnvironment({ request: (sessionId) => new Promise((resolve) => pending.push({ sessionId, resolve })) });
+  try {
+    await flushTimers(30);
+    pending[0].resolve({ status: "ok", stats: STATS });
+    await flushTimers(30);
+    assert.equal(metric(env.bar(), "total"), "132k tok");
+    env.setConversation("conversation-2");
+    env.emitAnchorMutation();
+    await flushTimers(130);
+    assert.equal(env.bar().hidden, false);
+    assert.equal(metric(env.bar(), "total"), "132k tok", "old text stays inside the loading delay");
+    await flushTimers(60);
+    assert.equal(metric(env.bar(), "total"), "—");
+    assert.equal(pending.at(-1).sessionId, "conversation-2");
+  } finally {
+    env.dispose();
+  }
+});
+
+test("the bar is a fixed overlay positioned from the composer rect", async () => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    const css = env.document.getElementById("codey-conversation-stats-styles").textContent;
+    assert.match(css, /#codey-conversation-stats \{ position: fixed; left: 0; bottom: 10px;[^}]*pointer-events: none !important; \}/);
+    assert.match(css, /\.codey-cs-groups \{ pointer-events: auto !important;/);
+    assert.match(css, /\[data-above-composer-conversation-id\] ~ :last-child \{ margin-bottom: 34px !important; \}/);
+    assert.match(css, /\.codey-cs-groups \{[^}]*flex-wrap: nowrap;[^}]*overflow: hidden;/);
+    assert.match(css, /\.codey-cs-summary \{[^}]*flex-wrap: nowrap;[^}]*white-space: nowrap;/);
+    assert.match(css, /\.codey-cs-metric \{[^}]*text-overflow: ellipsis; white-space: nowrap;/);
+    assert.doesNotMatch(css, /flex-wrap: wrap/, "the bar never wraps onto a second line");
+
+    // 输入卡片下方留白在 4 到 32px 内时状态条贴着卡片，否则保持默认底边距。
+    setComposerWidth(env, 700, { left: 240 });
+    env.scope.lastElementChild = { getBoundingClientRect: () => ({ bottom: 750 }) };
+    env.resizeObservers[0].callback([]);
+    env.runAnimationFrames();
+    const bar = env.bar();
+    assert.equal(bar.style.getPropertyValue("left"), "240px");
+    assert.equal(bar.style.getPropertyValue("width"), "700px");
+    assert.equal(bar.style.getPropertyValue("bottom"), "16px");
+    env.scope.lastElementChild = { getBoundingClientRect: () => ({ bottom: 400 }) };
+    env.resizeObservers[0].callback([]);
+    env.runAnimationFrames();
+    assert.equal(bar.style.getPropertyValue("bottom"), "16px", "an implausible gap keeps the last docked offset");
+  } finally {
+    env.dispose();
+  }
+});
+
+test("density follows the composer width at the 459 px and 309 px breakpoints", async () => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    env.notify(tokenUsageMessage("conversation-1", { total: { totalCostUsd: 2 } }));
+    await flushTimers(30);
+    assert.equal(env.resizeObservers.length, 1);
+    assert.ok(env.resizeObservers[0].targets.has(env.scope), "the composer container is observed");
+    const texts = () => ({
+      activity: buttonText(env, "activity"),
+      tokens: buttonText(env, "tokens"),
+      session: buttonText(env, "session"),
+    });
+    const full = {
+      activity: "4 轮 · 2 步 · 188 tok/s",
+      tokens: "132k tok · 缓存命中 93%",
+      session: "≈$2.00 · 10.3% · 36.4k",
+    };
+    const compact = {
+      activity: "2 步 · 188 tok/s",
+      tokens: "132k · 缓存命中 93%",
+      session: "≈$2.00 · 10.3% · 36.4k",
+    };
+    const minimal = {
+      activity: "2 步 · 188/s",
+      tokens: "132k · 93%",
+      session: "10.3%",
+    };
+    assert.equal(env.snapshot().density, "full");
+    assert.deepEqual(texts(), full);
+    for (const [width, density, expected] of [
+      [460, "full", full],
+      [459, "compact", compact],
+      [310, "compact", compact],
+      [309, "minimal", minimal],
+      [180, "minimal", minimal],
+      [310, "compact", compact],
+      [700, "full", full],
+    ]) {
+      resizeComposer(env, width);
+      assert.equal(env.snapshot().density, density, `${width}px density`);
+      assert.equal(env.bar().dataset.density, density, `${width}px dataset`);
+      assert.deepEqual(texts(), expected, `${width}px text`);
+    }
+    // 卡片与读屏标签不随档位缩短。
+    resizeComposer(env, 309);
+    assert.equal(field(env.bar(), "turnSpeed"), "188 tok/s");
+    assert.equal(field(env.bar(), "totalTokens"), "131.5k");
+    assert.match(summary(env, "tokens").getAttribute("aria-label"), /132k tok，缓存命中 93%/);
+    assert.match(summary(env, "session").getAttribute("aria-label"), /费用估算 ≈\$2\.00，上下文占用 10\.3% · 36\.4k/);
+  } finally {
+    env.dispose();
+  }
+});
+
+test("a render reads the density from the current composer width", async () => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    setComposerWidth(env, 400);
+    env.refresh();
+    await flushTimers(30);
+    assert.equal(env.snapshot().density, "compact");
+    assert.equal(buttonText(env, "activity"), "2 步 · 188 tok/s");
+    assert.equal(metric(env.bar(), "total"), "132k");
+  } finally {
+    env.dispose();
+  }
+});
+
+test("compact and minimal densities shorten speed status words", async () => {
+  const env = createEnvironment({
+    statsBySession: { "conversation-1": { ...STATS, lastTurn: { ...LAST_TURN, status: "running", averageOutputTokensPerSecond: null } } },
+  });
+  try {
+    await flushTimers(30);
+    for (const [width, expected] of [[600, "生成中"], [400, "生成中"], [300, "生成"]]) {
+      resizeComposer(env, width);
+      assert.equal(metric(env.bar(), "speed"), expected, `${width}px generating`);
+    }
+    env.setStatsFailures(1);
+    env.refresh();
+    await flushTimers(30);
+    for (const [width, expected] of [[600, "更新暂停"], [400, "暂停"], [300, "暂停"]]) {
+      resizeComposer(env, width);
+      assert.equal(metric(env.bar(), "speed"), expected, `${width}px stale`);
+    }
+  } finally {
+    env.dispose();
+  }
+});
+
+test("resize events reposition the bar and re-observe a replaced composer container", async () => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    setComposerWidth(env, 420);
+    env.window.dispatchEvent({ type: "resize" });
+    assert.equal(env.animationFrames.size, 1, "a resize schedules one frame even with every panel closed");
+    env.runAnimationFrames();
+    assert.equal(env.snapshot().density, "compact");
+
+    env.scope.remove();
+    const replacement = env.document.createElement("div");
+    replacement.getBoundingClientRect = () => ({ bottom: 780, height: 80, left: 100, right: 800, top: 700, width: 700 });
+    const anchor = env.document.createElement("div");
+    anchor.setAttribute("data-above-composer-conversation-id", "conversation-1");
+    replacement.append(anchor, env.document.createElement("textarea"));
+    env.document.body.appendChild(replacement);
+    env.refresh();
+    await flushTimers(30);
+    assert.equal(env.snapshot().density, "full");
+    assert.deepEqual([...env.resizeObservers[0].targets], [replacement]);
+  } finally {
+    env.dispose();
+  }
+});
+
+test("dispose disconnects the composer resize observer and clears the loading timer", async () => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": STATS, "conversation-2": STATS } });
+  await flushTimers(30);
+  env.setConversation("conversation-2");
+  env.emitAnchorMutation();
+  await flushTimers(130);
+  env.dispose();
+  assert.equal(env.resizeObservers[0].disconnected, true);
+  assert.equal(env.bar(), null);
+  await flushTimers(40);
+  assert.equal(env.bar(), null, "the loading timer must not resurrect the bar");
+});
+
+test("runs without ResizeObserver and stays at the full density", async () => {
+  const env = createEnvironment({ resizeObserver: false, statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    assert.equal(env.resizeObservers.length, 0);
+    assert.equal(env.snapshot().density, "full");
+    assert.equal(buttonText(env, "activity"), "4 轮 · 2 步 · 188 tok/s");
+  } finally {
+    env.dispose();
+  }
+});
+
+test("reuses the visible composer input cached on the anchor", async () => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    let scans = 0;
+    const scan = env.scope.querySelectorAll.bind(env.scope);
+    env.scope.querySelectorAll = (selector) => {
+      if (selector.includes("textarea")) scans += 1;
+      return scan(selector);
+    };
+    env.refresh();
+    await flushTimers(30);
+    assert.equal(scans, 0, "a still-visible cached input needs no container scan");
+    env.textarea.visible = false;
+    env.refresh();
+    await flushTimers(30);
+    assert.ok(scans > 0, "a hidden cached input falls back to a container scan");
+    assert.equal(env.snapshot().anchorFound, false);
+  } finally {
+    env.dispose();
+  }
+});
+
+test("falls back to session attributes with one batched query", async () => {
+  const env = createEnvironment({
+    anchor: false,
+    statsBySession: { "conversation-2": STATS },
+  });
+  try {
+    const marker = env.document.createElement("div");
+    marker.setAttribute("data-thread-id", "conversation-2");
+    env.scope.appendChild(marker);
+    const selectors = [];
+    const querySelectorAll = env.document.querySelectorAll;
+    env.document.querySelectorAll = (selector) => {
+      selectors.push(selector);
+      return querySelectorAll(selector);
+    };
+    env.refresh();
+    await flushTimers(30);
+    assert.equal(env.snapshot().sessionId, "conversation-2");
+    const fallbackQueries = selectors.filter((selector) => /^\[data-(session-id|conversation-id|thread-id)\]/.test(selector));
+    assert.ok(fallbackQueries.length > 0);
+    for (const selector of fallbackQueries) {
+      assert.ok(
+        ["data-session-id", "data-conversation-id", "data-thread-id"].every((attribute) => selector.includes(`[${attribute}]`)),
+        `one query covers every fallback attribute: ${selector}`,
+      );
+    }
+  } finally {
+    env.dispose();
+  }
+});
+
+// 假布局：每个入口宽度按显示文字估算，可用宽度为 composer 宽度。
+const stubFitMeasurement = (env, getWidth) => {
+  const groups = env.bar().__codeyCs.groups;
+  const reads = { count: 0 };
+  Object.defineProperty(groups, "scrollWidth", {
+    configurable: true,
+    get: () => {
+      reads.count += 1;
+      return ["activity", "tokens", "session"]
+        .reduce((total, kind) => total + buttonText(env, kind).length * 7 + 30, 0);
+    },
+  });
+  Object.defineProperty(groups, "clientWidth", { configurable: true, get: () => getWidth() });
+  return reads;
+};
+
+const settleFrames = (env) => {
+  for (let guard = 0; guard < 5 && env.animationFrames.size; guard += 1) env.runAnimationFrames();
+};
+
+test("density steps down until the summary fits the composer width", async () => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    env.notify(tokenUsageMessage("conversation-1", { total: { totalCostUsd: 2 } }));
+    await flushTimers(30);
+    let width = 600;
+    stubFitMeasurement(env, () => width);
+    // 500px 在 459px 断点之上，但完整文字放不下，必须收紧到 compact。
+    for (const [composerWidth, density] of [
+      [600, "full"],
+      [500, "compact"],
+      [470, "compact"],
+      [440, "minimal"],
+      [300, "minimal"],
+      [200, "minimal"],
+      [600, "full"],
+    ]) {
+      width = composerWidth;
+      resizeComposer(env, composerWidth);
+      settleFrames(env);
+      assert.equal(env.snapshot().density, density, `${composerWidth}px density`);
+      assert.equal(env.bar().dataset.density, density, `${composerWidth}px dataset`);
+    }
+    width = 500;
+    resizeComposer(env, 500);
+    settleFrames(env);
+    assert.equal(buttonText(env, "activity"), "2 步 · 188 tok/s");
+    assert.equal(buttonText(env, "tokens"), "132k · 缓存命中 93%");
+  } finally {
+    env.dispose();
+  }
+});
+
+test("a text change that widens the summary re-fits the density on the next frame", async () => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    env.notify(tokenUsageMessage());
+    await flushTimers(30);
+    const width = 480;
+    setComposerWidth(env, width);
+    const reads = stubFitMeasurement(env, () => width);
+    env.resizeObservers[0].callback([]);
+    settleFrames(env);
+    assert.equal(env.snapshot().density, "full", "without a cost the full text fits 480px");
+    reads.count = 0;
+    env.notify(tokenUsageMessage("conversation-1", { total: { totalCostUsd: 2 } }));
+    assert.equal(reads.count, 0, "layout is not read synchronously while rendering");
+    assert.equal(env.animationFrames.size, 1, "one frame is scheduled for the re-fit");
+    settleFrames(env);
+    assert.equal(env.snapshot().density, "compact", "the cost widens the full text past 480px");
+  } finally {
+    env.dispose();
+  }
+});
+
+test("measures layout at most once per frame when several changes arrive together", async () => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    env.notify(tokenUsageMessage());
+    await flushTimers(30);
+    const width = 500;
+    setComposerWidth(env, width);
+    stubFitMeasurement(env, () => width);
+    env.resizeObservers[0].callback([]);
+    env.window.dispatchEvent({ type: "resize" });
+    env.notify(tokenUsageMessage("conversation-1", { total: { totalCostUsd: 3 } }));
+    env.notify(tokenUsageMessage("conversation-1", { total: { totalCostUsd: 4 } }));
+    assert.equal(env.animationFrames.size, 1, "all triggers share one frame");
   } finally {
     env.dispose();
   }

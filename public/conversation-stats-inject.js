@@ -4,7 +4,7 @@
 // stats.lastModelRequest 中与通知对上的请求时间为锚点。会话 id 取自可见 composer。
 (() => {
   const PROBE_KEY = "__codeyConversationStats";
-  const VERSION = 3;
+  const VERSION = 4;
   const previous = window[PROBE_KEY];
   if (previous?.installed && (previous.version === VERSION || !previous.dispose)) return;
   previous?.dispose?.();
@@ -44,6 +44,11 @@
   const SUBMIT_POLL_DELAY_MS = 300;
   const SUBMIT_WATCH_MS = 15_000;
   const RESCAN_DEBOUNCE_MS = 120;
+  // 切换会话后最多保留旧文本这么久，等新会话首包返回，避免先闪一帧「—」。
+  const LOADING_CLEAR_DELAY_MS = 20;
+  // 按输入区宽度分三档：宽度不超过阈值时收紧。
+  const COMPACT_MAX_WIDTH = 459;
+  const MINIMAL_MAX_WIDTH = 309;
   const settingsPath = "/settings/get";
   const accountIdentityPath = "/account/identity";
   const configChangedEvent = "codey:config-changed";
@@ -66,10 +71,20 @@
   ];
 
   let statsElement = null;
+  let composerHost = null;
+  let observedHost = null;
+  let hostResizeObserver = null;
+  let currentDensity = "full";
+  let breakpointDensity = "full";
+  let lastBarWidth = 0;
+  let fitPending = false;
+  let dockedBottom = 10;
+  let resizePending = false;
   let currentSessionId = "";
   let stats = null;
   let pollTimer = 0;
   let rescanTimer = 0;
+  let clearTimer = 0;
   let positionFrame = 0;
   let cacheTimer = 0;
   let fetchInFlight = false;
@@ -118,25 +133,50 @@
 
   const composerInputSelector =
     "textarea, [contenteditable='true'], [role='textbox']";
+  const fallbackSessionAttributes = sessionIdAttributes.slice(1);
+  const fallbackSessionAttributeSelector = fallbackSessionAttributes
+    .map((attribute) => `[${attribute}]`)
+    .join(", ");
+  const rescanNodeSelector = [
+    sessionAttributeSelector,
+    activeThreadSelector,
+    composerInputSelector,
+  ].join(", ");
+
+  const isVisibleComposerInput = (input, viewportHeight) => {
+    if (!(input instanceof HTMLElement) || input.isConnected === false) return false;
+    if (input.closest?.("[hidden], [aria-hidden='true']")) return false;
+    const rect = input.getBoundingClientRect?.();
+    if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+    if (viewportHeight > 0 && (rect.bottom <= 0 || rect.top >= viewportHeight)) {
+      return false;
+    }
+    return true;
+  };
 
   // 锚点是只带数据属性的标记元素，自身通常没有布局矩形，不能用
   // getClientRects 判断。当前对话的判定标准是锚点所在 composer 容器内
   // 存在视口内可见的输入框；Codex 保留的非活动会话不满足这一点。
+  // 上次找到的输入框缓存在锚点上，仍可见时不再遍历容器。
   const visibleComposerInput = (anchor) => {
     const host = anchor?.parentElement || anchor;
     if (!host) return null;
     const viewportHeight =
       window.innerHeight || document.documentElement.clientHeight || 0;
+    const cachedInput = anchor?.__codeyVisibleComposerInput;
+    if (
+      cachedInput
+      && host.contains?.(cachedInput) !== false
+      && isVisibleComposerInput(cachedInput, viewportHeight)
+    ) {
+      return cachedInput;
+    }
     for (const input of host.querySelectorAll?.(composerInputSelector) || []) {
-      if (!(input instanceof HTMLElement)) continue;
-      if (input.closest?.("[hidden], [aria-hidden='true']")) continue;
-      const rect = input.getBoundingClientRect?.();
-      if (!rect || rect.width <= 0 || rect.height <= 0) continue;
-      if (viewportHeight > 0 && (rect.bottom <= 0 || rect.top >= viewportHeight)) {
-        continue;
-      }
+      if (!isVisibleComposerInput(input, viewportHeight)) continue;
+      if (anchor) anchor.__codeyVisibleComposerInput = input;
       return input;
     }
+    if (anchor) anchor.__codeyVisibleComposerInput = null;
     return null;
   };
 
@@ -169,8 +209,14 @@
   const resolveSessionId = (anchor = findVisibleComposerAnchor()) => {
     // 可见输入框的空标识表示会话尚未建立，不从旧 URL 或侧边栏取回旧会话。
     if (anchor) return normalizeSessionId(anchor.getAttribute(conversationAttribute));
-    for (const attribute of sessionIdAttributes.slice(1)) {
-      const value = visibleSessionElement(`[${attribute}]`)?.getAttribute(attribute);
+    // 一次查询取回全部后备属性的候选，再按属性优先级挑选可见元素。
+    const renderedCandidates = [
+      ...(document.querySelectorAll?.(fallbackSessionAttributeSelector) || []),
+    ].filter(isRendered);
+    for (const attribute of fallbackSessionAttributes) {
+      const value = renderedCandidates
+        .find((element) => element.hasAttribute?.(attribute))
+        ?.getAttribute(attribute);
       const normalized = normalizeSessionId(value);
       if (normalized) return normalized;
     }
@@ -194,16 +240,22 @@
     const style = document.createElement("style");
     style.id = styleId;
     style.textContent = `
+      [${conversationAttribute}] ~ :last-child { margin-bottom: 34px !important; }
       ${styleScope} { --cs-text: var(--text-primary, CanvasText); --cs-muted: color-mix(in srgb, var(--cs-text) 60%, transparent); --cs-line: color-mix(in srgb, var(--cs-text) 11%, transparent); --cs-surface: color-mix(in srgb, var(--bg-primary, Canvas) 97%, var(--cs-text)); -webkit-app-region: no-drag !important; pointer-events: auto !important; position: relative; box-sizing: border-box; width: 100%; min-width: 0; padding: 5px 4px 0; color: var(--cs-text); font: 12px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif; font-variant-numeric: tabular-nums; }
+      #${barId} { position: fixed; left: 0; bottom: 10px; z-index: 20; pointer-events: none !important; }
       ${styleScope} *, ${styleScope} *::before { box-sizing: border-box; }
       ${styleScope}[hidden], ${styleScope} [hidden] { display: none !important; }
-      ${styleScope} .codey-cs-groups { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 2px 10px; }
+      ${styleScope} .codey-cs-groups { pointer-events: auto !important; display: flex; flex-wrap: nowrap; justify-content: center; align-items: center; gap: 2px 10px; width: fit-content; max-width: 100%; overflow: hidden; margin: 0 auto; }
       ${styleScope} button { font: inherit; color: inherit; cursor: pointer; }
-      ${styleScope} .codey-cs-summary { display: inline-flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 6px; min-width: 0; max-width: 100%; padding: 4px 9px; border: 0; border-radius: 999px; background: transparent; color: var(--cs-muted); text-align: center; }
+      ${styleScope} .codey-cs-summary { display: inline-flex; align-items: center; justify-content: center; flex-wrap: nowrap; flex: none; gap: 6px; min-width: 0; max-width: 100%; padding: 4px 9px; white-space: nowrap; border: 0; border-radius: 999px; background: transparent; color: var(--cs-muted); text-align: center; }
       ${styleScope} .codey-cs-summary:hover, ${styleScope} .codey-cs-summary[data-codey-expanded="true"] { background: color-mix(in srgb, var(--cs-text) 5%, transparent); color: color-mix(in srgb, var(--cs-text) 72%, transparent); }
       ${styleScope} button:focus-visible { outline: 2px solid var(--cs-text); outline-offset: 2px; }
       ${styleScope} .codey-cs-icon { display: inline-block; width: 15px; height: 15px; flex: 0 0 15px; background: currentColor; mask: var(--cs-icon) center / contain no-repeat; }
-      ${styleScope} .codey-cs-metric { white-space: nowrap; }
+      ${styleScope} .codey-cs-metric { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      #${barId}:is([data-density="compact"], [data-density="minimal"]) .codey-cs-groups { gap: 2px 4px; }
+      #${barId}:is([data-density="compact"], [data-density="minimal"]) .codey-cs-summary { gap: 4.5px; padding-inline: 7px; font-size: 11.5px; }
+      #${barId}:is([data-density="compact"], [data-density="minimal"]) .codey-cs-icon { width: 12.5px; height: 12.5px; flex-basis: 12.5px; }
+      #${barId}[data-density="minimal"] .codey-cs-summary { flex: 0 1 auto; gap: 4px; padding-inline: 6px; font-size: 11px; overflow: hidden; }
       ${styleScope} .codey-cs-details { -webkit-app-region: no-drag !important; pointer-events: auto !important; position: fixed; inset: auto; margin: 0; z-index: 1000; width: min(250px, calc(100vw - 24px)); max-height: calc(100dvh - 24px); overflow: auto; padding: 15px 16px 13px; color: var(--cs-text); background: var(--cs-surface); border: 1px solid var(--cs-line); border-radius: 15px; box-shadow: 0 5px 20px #0000000d; user-select: text; animation: codey-cs-enter 150ms ease-out; }
       @keyframes codey-cs-enter { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
       ${styleScope} .codey-cs-heading { display: flex; align-items: center; gap: 8px; padding-bottom: 11px; margin-bottom: 10px; border-bottom: 1px solid var(--cs-line); }
@@ -213,7 +265,7 @@
       ${styleScope} .codey-cs-detail-row { display: flex; justify-content: space-between; gap: 14px; padding: 4px 0; }
       ${styleScope} dt { color: var(--cs-muted); }
       ${styleScope} dd { margin: 0; text-align: right; color: color-mix(in srgb, var(--cs-text) 72%, transparent); overflow-wrap: anywhere; }
-      @media (max-width: 480px) { ${styleScope} .codey-cs-groups { gap: 2px; } ${styleScope} .codey-cs-summary { padding-inline: 6px; font-size: 11px; } ${styleScope} .codey-cs-details { padding: 14px; } }
+      @media (max-width: 480px) { ${styleScope} .codey-cs-details { padding: 14px; } }
       @media (prefers-reduced-motion: reduce) { ${styleScope} .codey-cs-details { animation: none; } }
     `;
     document.documentElement.appendChild(style);
@@ -237,11 +289,115 @@
     ]],
   ];
 
-  // 状态条挂在 composer 标记所在的同一列容器末尾，即输入卡片下方；
-  // composer 容器会随会话切换重建，所以每次都要重新核对挂载父节点。
+  const resolveDensity = (width) => (
+    !(width > 0) ? "full"
+      : width <= MINIMAL_MAX_WIDTH ? "minimal"
+      : width <= COMPACT_MAX_WIDTH ? "compact"
+      : "full"
+  );
+
+  // 输入区宽度变化不一定伴随窗口 resize（侧栏拖拽、右侧面板开合），
+  // 所以对当前 composer 容器挂一个尺寸观察器。
+  const syncHostObserver = (host) => {
+    const nextHost = host?.isConnected !== false ? host || null : null;
+    if (observedHost === nextHost) return;
+    if (observedHost && hostResizeObserver) hostResizeObserver.unobserve?.(observedHost);
+    observedHost = nextHost;
+    if (!observedHost) return;
+    const Observer = typeof ResizeObserver === "function" ? ResizeObserver : window.ResizeObserver;
+    if (typeof Observer !== "function") return;
+    hostResizeObserver ||= new Observer(() => {
+      if (disposed || !statsElement || statsElement.hidden) return;
+      resizePending = true;
+      schedulePanelPosition();
+    });
+    hostResizeObserver.observe(observedHost);
+  };
+
+  const setStyle = (element, name, value) => {
+    const written = element.__codeyCsStyle ||= {};
+    if (written[name] === value) return;
+    written[name] = value;
+    element.style.setProperty?.(name, value);
+  };
+
+  // 真实 DOM 才有布局宽度；没有时只按断点分档。用属性存在性判断，不触发布局读取。
+  const canMeasureFit = () => Boolean(statsElement?.__codeyCs?.groups && "scrollWidth" in statsElement.__codeyCs.groups);
+
+  const groupsOverflow = (groups) => groups.scrollWidth > groups.clientWidth + 1;
+
+  const applyDensity = (bar, density) => {
+    currentDensity = density;
+    setValue(bar.dataset, "density", density);
+    syncSummaryText(bar);
+  };
+
+  // 从断点档位起，内容超出可用宽度就收紧一档；minimal 仍放不下时由样式省略号截断。
+  // 只在帧回调里执行，每帧最多一次，避免交错读写布局。
+  const fitDensity = (bar) => {
+    const groups = bar?.__codeyCs?.groups;
+    if (!groups || !canMeasureFit()) return;
+    const order = ["full", "compact", "minimal"];
+    for (let index = order.indexOf(breakpointDensity); index < order.length; index += 1) {
+      applyDensity(bar, order[index]);
+      if (index === order.length - 1 || !groupsOverflow(groups)) return;
+    }
+  };
+
+  // 文字或宽度变化后请求下一帧重新适配。
+  const requestFit = () => {
+    if (disposed || !canMeasureFit()) return;
+    fitPending = true;
+    requestFrame();
+  };
+
+  // 状态条常驻挂载在 body 并固定在会话底部，避免随会话切换反复从旧
+  // composer 容器卸载并重新插入新容器；水平范围跟随当前可见 composer。
+  // 返回档位是否变化，由调用方决定是否重写摘要文字。
+  const positionBar = (host = composerHost?.isConnected ? composerHost : findVisibleComposerAnchor()?.parentElement, anchor = null) => {
+    if (!statsElement || !host) {
+      syncHostObserver(null);
+      return false;
+    }
+    composerHost = host;
+    syncHostObserver(host);
+    const rect = host.getBoundingClientRect?.();
+    if (!rect || rect.width <= 0) return false;
+    const width = Math.round(rect.width);
+    // 宽度或断点档位变化时从断点档位重新按内容适配；否则沿用上次适配结果。
+    const nextBreakpoint = resolveDensity(width);
+    const refit = nextBreakpoint !== breakpointDensity || width !== lastBarWidth;
+    breakpointDensity = nextBreakpoint;
+    lastBarWidth = width;
+    let densityChanged = false;
+    if (refit) {
+      densityChanged = nextBreakpoint !== currentDensity;
+      currentDensity = nextBreakpoint;
+      setValue(statsElement.dataset, "density", nextBreakpoint);
+      if (canMeasureFit()) fitPending = true;
+    }
+    setStyle(statsElement, "left", `${Math.round(rect.left)}px`);
+    setStyle(statsElement, "width", `${width}px`);
+    const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
+    // 状态条脱离文档流后，输入卡片下方靠样式预留 34px；底边距取卡片实际留白，
+    // 只接受 4 到 32px 的合理间距。
+    const card = host.lastElementChild;
+    const slotBottom = card && card !== anchor
+      ? (card.getBoundingClientRect?.().bottom ?? rect.bottom) + 34
+      : rect.bottom;
+    const bottomGap = viewportHeight - slotBottom;
+    if (viewportHeight > 0 && bottomGap >= 4 && bottomGap <= 32) {
+      dockedBottom = Math.round(bottomGap);
+    }
+    setStyle(statsElement, "bottom", `${dockedBottom}px`);
+    return densityChanged;
+  };
+
   const ensureBar = (anchor = findVisibleComposerAnchor()) => {
     const host = anchor?.parentElement;
     if (!host) return null;
+    composerHost = host;
+    const root = document.body || document.documentElement;
     let bar = document.getElementById(barId) || statsElement;
     if (!bar?.__codeyCs) {
       bar = document.createElement("div");
@@ -256,10 +412,10 @@
       };
       const groups = make("div", "codey-cs-groups", "", bar);
       // 浮层独立于 composer，避免 transform 改变 fixed 坐标系或 overflow 裁切。
-      const overlay = make("div", "", "", document.body || document.documentElement);
+      const overlay = make("div", "", "", root);
       overlay.id = overlayId;
       overlay.style.display = "contents";
-      const refs = { overlay, buttons: {}, panels: {}, fields: {}, rows: {}, active: null, pinned: false, closeTimer: 0 };
+      const refs = { groups, overlay, buttons: {}, panels: {}, fields: {}, rows: {}, active: null, pinned: false, closeTimer: 0 };
       // Tabler Icons v3.45.0 (MIT), matching the existing application icon family.
       const paths = {
         activity: ["M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0", "M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0", "M13.41 10.59l2.59 -2.59", "M7 12a5 5 0 0 1 5 -5"],
@@ -293,7 +449,8 @@
         } else if (kind === "tokens") {
           refs.total = make("span", "codey-cs-metric codey-cs-total", "—", button);
           separator(button);
-          const cache = make("span", "codey-cs-metric", "缓存命中 ", button);
+          const cache = make("span", "codey-cs-metric", "", button);
+          refs.cacheLabel = make("span", "codey-cs-cache-label", "缓存命中 ", cache);
           refs["cache-rate"] = make("span", "codey-cs-cache-rate", "—", cache);
         } else {
           refs.cost = make("span", "codey-cs-metric codey-cs-cost", "", button);
@@ -348,16 +505,17 @@
       refs.rows.cost.hidden = true;
       bar.__codeyCs = refs;
     }
-    if (bar.parentElement !== host) {
+    if (bar.parentElement !== root) {
       if (statsElement) setExpanded(false);
-      host.appendChild(bar);
+      root.appendChild(bar);
     }
     const overlay = bar.__codeyCs.overlay;
     if (!overlay.isConnected) {
       setExpanded(false);
-      (document.body || document.documentElement).appendChild(overlay);
+      root.appendChild(overlay);
     }
     statsElement = bar;
+    positionBar(host, anchor);
     return bar;
   };
 
@@ -421,19 +579,41 @@
   };
 
   // 滚动和缩放事件可能一帧多次，合并到下一帧测量一次。
+  const runFrame = () => {
+    positionFrame = 0;
+    const shouldPositionBar = resizePending;
+    resizePending = false;
+    if (disposed) return;
+    const densityChanged = shouldPositionBar ? positionBar() : false;
+    if (densityChanged && statsElement && !clearTimer) syncSummaryText(statsElement);
+    if (fitPending) {
+      fitPending = false;
+      if (statsElement && !statsElement.hidden && !clearTimer) fitDensity(statsElement);
+    }
+    if (statsElement?.__codeyCs?.active) positionPanel();
+  };
+
+  const requestFrame = () => {
+    if (disposed || positionFrame) return;
+    positionFrame = window.requestAnimationFrame(runFrame);
+  };
+
+  // 窗口缩放或 composer 尺寸变化时同一帧里先重新定位状态条，再适配档位，最后定位浮层。
   const schedulePanelPosition = (event) => {
-    if (disposed || !statsElement?.__codeyCs?.active || positionFrame) return;
+    if (disposed) return;
+    if (event?.type === "resize" && statsElement && !statsElement.hidden) resizePending = true;
+    const active = Boolean(statsElement?.__codeyCs?.active);
+    if (positionFrame || (!active && !resizePending && !fitPending)) return;
     // 浮层内部滚动不会移动入口。
     if (event?.type === "scroll" && containsStats(event.target)) return;
-    positionFrame = window.requestAnimationFrame(() => {
-      positionFrame = 0;
-      if (!disposed) positionPanel();
-    });
+    requestFrame();
   };
 
   const setExpanded = (expanded, restoreFocus = false, kind = null) => {
-    if (positionFrame) window.cancelAnimationFrame(positionFrame);
-    positionFrame = 0;
+    if (positionFrame && !resizePending && !fitPending) {
+      window.cancelAnimationFrame(positionFrame);
+      positionFrame = 0;
+    }
     const refs = statsElement?.__codeyCs;
     if (!refs) return;
     const active = kind || refs.active || "activity";
@@ -467,14 +647,45 @@
     fetchAttempted = false;
     idleStreak = 0;
     lastStatsKey = "";
+    clearTimeout(clearTimer);
+    clearTimer = 0;
     setExpanded(false);
   };
 
-  const formatSpeed = (value) => (
+  // 会话切换时若旧会话已有统计数据，先保留当前文本最多 LOADING_CLEAR_DELAY_MS
+  // 等新会话首包返回，避免本地桥接返回前先闪一帧「—」并触发宽度跳变；
+  // 超时未返回再清空旧值。
+  const switchSession = (sessionId, anchor) => {
+    const hadStats = stats !== null;
+    resetSession(sessionId);
+    if (hadStats && sessionId && anchor && statsElement) {
+      setHidden(statsElement, false);
+      positionBar(anchor.parentElement, anchor);
+      clearTimer = setTimeout(() => {
+        clearTimer = 0;
+        if (!disposed && !fetchAttempted) render();
+      }, LOADING_CLEAR_DELAY_MS);
+      return;
+    }
+    render(anchor);
+  };
+
+  const formatSpeedNumber = (value) => (
     value == null || !Number.isFinite(value) || value < 0
       ? null
-      : `${value >= 100 ? Math.round(value) : value.toFixed(1)} tok/s`
+      : `${value >= 100 ? Math.round(value) : value.toFixed(1)}`
   );
+
+  // 摘要速度随档位缩短单位：full 与 compact 为 tok/s，minimal 为 /s；
+  // 无速度时 compact 起缩短状态词。
+  const formatSummarySpeed = ({ speedNum, speedPrefix, running, stale }, density) => {
+    if (speedNum != null) {
+      return `${speedPrefix}${speedNum}${density === "minimal" ? "/s" : " tok/s"}`;
+    }
+    if (!running) return "—";
+    if (stale) return density === "full" ? "更新暂停" : "暂停";
+    return density === "minimal" ? "生成" : "生成中";
+  };
 
   // 缓存读占输入总量的百分比；记录未提供缓存字段时返回 null，显示未知而不是 0%。
   const cacheRatePercent = (input, cached) => {
@@ -617,6 +828,33 @@
     setText(refs.fields.requestDuration, known ? formatRequestDuration(seconds) : "—");
   };
 
+  // 按当前档位写入三个入口的摘要文字：
+  // full    `N 轮 · N 步 · 速度 tok/s`、`总量 tok · 缓存命中 N%`
+  // compact 去掉轮数与总量的 tok 后缀
+  // minimal 速度改为 /s，缓存命中去掉标签，会话入口只留上下文占用
+  const syncSummaryText = (bar) => {
+    const refs = bar?.__codeyCs;
+    const data = refs?.summaryData;
+    if (!data) return false;
+    const full = currentDensity === "full";
+    const minimal = currentDensity === "minimal";
+    const changes = [
+      setText(refs.speed, formatSummarySpeed(data, currentDensity)),
+      setText(refs.activity, full ? `${data.turnText} 轮 · ${data.stepText} 步` : `${data.stepText} 步`),
+      setText(refs.total, data.totalFormatted == null ? "—" : full ? `${data.totalFormatted} tok` : data.totalFormatted),
+      setText(refs.cacheLabel, minimal ? "" : "缓存命中 "),
+    ];
+    const session = data.session;
+    if (session) {
+      const showCost = session.costText !== "" && !minimal;
+      setHidden(refs.cost, !showCost);
+      setHidden(refs.costSeparator, !showCost);
+      changes.push(setText(refs.cost, showCost ? session.costText : ""));
+      changes.push(setText(refs.contextSummary, minimal ? session.contextPercent || "—" : session.contextText));
+    }
+    return changes.includes(true);
+  };
+
   const renderSessionCard = (refs, usage, anchor, request) => {
     const finite = value => Number.isFinite(value) && value >= 0;
     setText(refs.fields.account, accountRowValue());
@@ -629,7 +867,6 @@
       ? `${contextPercent} (${formatTokenCount(usage.contextUsedTokens)}/${formatTokenCount(usage.contextWindowTokens)})`
       : "—");
     const contextText = contextKnown ? `${contextPercent} · ${formatTokenCount(usage.contextUsedTokens)}` : "—";
-    setText(refs.contextSummary, contextText);
     const compaction = Number.isInteger(request?.compactionCount) && request.compactionCount >= 0
       ? String(request.compactionCount) : "—";
     setText(refs.fields.compactionCount, compaction);
@@ -637,11 +874,10 @@
     const cost = usage?.totalCostUsd;
     const costKnown = cost !== undefined;
     setHidden(refs.rows.cost, !costKnown);
-    setHidden(refs.cost, !costKnown);
-    setHidden(refs.costSeparator, !costKnown);
     setText(refs.fields.cost, costKnown ? `$${cost.toFixed(3)}` : "—");
-    setText(refs.cost, costKnown ? `≈$${cost.toFixed(2)}` : "");
-    return { contextLabel: `上下文占用 ${contextKnown ? contextText : "未知"}`, cost: costKnown ? refs.cost.textContent : "" };
+    const costText = costKnown ? `≈$${cost.toFixed(2)}` : "";
+    refs.summaryData.session = { costText, contextText, contextPercent };
+    return { contextLabel: `上下文占用 ${contextKnown ? contextText : "未知"}`, cost: costText };
   };
 
   const render = (anchor) => {
@@ -672,10 +908,12 @@
       if (!Number.isSafeInteger(data[key]) || data[key] < 0) data[key] = null;
     }
     if (!Number.isSafeInteger(data.turnCount) || data.turnCount < 0) data.turnCount = null;
-    const formattedSpeed = formatSpeed(running && stale ? null : turn?.averageOutputTokensPerSecond);
-    const speedKnown = formattedSpeed != null;
+    const speedNum = formatSpeedNumber(running && stale ? null : turn?.averageOutputTokensPerSecond);
+    const speedKnown = speedNum != null;
     const estimatedSpeed = turn?.speedIsEstimate === true;
-    const speedText = speedKnown ? `${estimatedSpeed ? "≈" : ""}${formattedSpeed}` : running ? stale ? "更新暂停" : "生成中" : "—";
+    const speedPrefix = estimatedSpeed && speedKnown ? "≈" : "";
+    // 卡片与标签始终用完整写法，摘要按档位缩短。
+    const speedText = formatSummarySpeed({ speedNum, speedPrefix, running, stale }, "full");
     const coverageNote = ({
       recorded: "仅覆盖本轮可恢复且有有效计时的记录",
       partial: "本轮记录不完整，仅统计可恢复的部分",
@@ -684,10 +922,9 @@
       : `本轮平均速度为本轮输出 Token ÷ 本轮各次模型请求用时之和，含等待首个 Token 的时间，不含工具调用用时；${coverageNote}${estimatedSpeed && speedKnown ? "；含生成中的 Token 估算" : ""}`;
     const rate = cacheRatePercent(data.inputTokens, data.cachedInputTokens) || "—";
     const refs = bar.__codeyCs;
-    setText(refs.speed, speedText);
     setValue(refs.speed, "title", speedNote);
     setText(refs["cache-rate"], rate);
-    setText(refs.total, data.totalTokens == null ? "—" : `${formatTotalTokens(data.totalTokens)} tok`);
+    const totalFormatted = data.totalTokens == null ? null : formatTotalTokens(data.totalTokens);
     const finite = value => Number.isFinite(value) && value >= 0;
     const count = value => Number.isSafeInteger(value) && value >= 0 ? value.toLocaleString("zh-CN") : "—";
     const duration = (value) => {
@@ -696,7 +933,16 @@
       if (seconds < 60) return `${Number(seconds.toFixed(1))}秒`;
       return `${Math.floor(seconds / 60)}分 ${Math.floor(seconds % 60)}秒`;
     };
-    setText(refs.activity, `${count(data.turnCount)} 轮 · ${count(turn?.stepCount)} 步`);
+    refs.summaryData = {
+      turnText: count(data.turnCount),
+      stepText: count(turn?.stepCount),
+      speedNum,
+      speedPrefix,
+      running,
+      stale,
+      totalFormatted,
+      session: null,
+    };
     const hasData = stats && (turn || hasRuntimeRequest || [data.turnCount, data.totalTokens, data.inputTokens, data.outputTokens].some(finite));
     const unknownUsage = data.usageSource === "unknown" || data.usageScope === "unknown";
     const scopeLabel = !stats || unknownUsage ? "统计范围未知" : sessionUsage ? "会话累计" : "本次运行";
@@ -739,12 +985,16 @@
       : requestValues.map((value) => value === undefined ? "—" : count(value)).join(" / "));
     renderCacheRemaining();
     const session = renderSessionCard(refs, usage, anchorEntry, request);
+    syncSummaryText(bar);
     setAttribute(refs.buttons.activity, "aria-label", `会话总轮数 ${count(data.turnCount)} 轮，最近一轮统计 ${count(turn?.stepCount)} 步，本轮平均速度 ${speedText}，${status}。${speedNote}。查看统计详情`);
-    setAttribute(refs.buttons.tokens, "aria-label", `Token 用量，${scopeLabel} ${refs.total.textContent}，缓存命中 ${rate}，${status}。查看统计详情`);
+    setAttribute(refs.buttons.tokens, "aria-label", `Token 用量，${scopeLabel} ${totalFormatted == null ? "—" : `${totalFormatted} tok`}，缓存命中 ${rate}，${status}。查看统计详情`);
     setAttribute(refs.buttons.session, "aria-label", `会话，${session.cost ? `费用估算 ${session.cost}，` : ""}${session.contextLabel}。查看会话详情`);
     setValue(bar.dataset, "running", running ? "true" : "false");
     setValue(bar.dataset, "codeyState", state);
     // 入口仍可能因侧栏或输入框布局变化而移动；位置和数据都不变时才跳过浮层测量。
+    // 文字变化可能改变内容宽度，交给下一帧统一适配。
+    if (contentRevision !== revision) requestFit();
+    else if (fitPending) requestFrame();
     positionPanel(anchor, contentRevision === revision);
   };
 
@@ -1252,8 +1502,7 @@
     if (document.visibilityState === "hidden") return;
     const { anchor, sessionId } = resolveSessionContext();
     if (sessionId !== currentSessionId) {
-      resetSession(sessionId);
-      render(anchor);
+      switchSession(sessionId, anchor);
     }
     void subscribeNotifications(visibleComposerInput(anchor));
     if (!currentSessionId) {
@@ -1262,7 +1511,8 @@
     }
     if (!fetchInFlight) {
       fetchInFlight = true;
-      render(anchor);
+      // 保留旧文本的短暂窗口内不重绘，由首包返回或定时器统一刷新。
+      if (!clearTimer) render(anchor);
       const requestSessionId = currentSessionId;
       const requestGeneration = sessionGeneration;
       let completedContext = null;
@@ -1310,13 +1560,13 @@
     rescanTimer = setTimeout(() => {
       rescanTimer = 0;
       const { anchor, sessionId } = resolveSessionContext();
-      const changed = sessionId !== currentSessionId;
-      if (changed) {
-        resetSession(sessionId);
+      if (sessionId !== currentSessionId) {
+        switchSession(sessionId, anchor);
+        // 会话切换立即拉取，不等下一轮轮询。
+        if (currentSessionId) schedulePoll(0);
+        return;
       }
       render(anchor);
-      // 会话切换立即拉取，不等下一轮轮询。
-      if (changed && currentSessionId) schedulePoll(0);
     }, RESCAN_DEBOUNCE_MS);
   };
 
@@ -1332,11 +1582,12 @@
         );
         if (visibilityChanged) {
           if (target.closest?.(conversationTurnSelector)) continue;
-          const host = statsElement?.parentElement;
-          const touchesComposer = host
-            ? target === host || host.contains(target) || target.contains(host)
-            : target.matches?.(composerInputSelector)
-              || target.querySelector?.(composerInputSelector);
+          const host = composerHost?.isConnected ? composerHost : null;
+          const touchesComposer = (
+            (host && (target === host || host.contains(target) || target.contains(host)))
+            || target.matches?.(composerInputSelector)
+            || target.querySelector?.(composerInputSelector)
+          );
           if (!touchesComposer) continue;
         }
         if (contextAttributes.includes(mutation.attributeName)) {
@@ -1363,17 +1614,8 @@
           if (node.id === barId || node.querySelector?.(`#${barId}`)) scheduleRescan();
           continue;
         }
-        if (
-          node.matches?.(sessionAttributeSelector)
-          || node.querySelector?.(sessionAttributeSelector)
-          || node.matches?.(activeThreadSelector)
-          || node.querySelector?.(activeThreadSelector)
-        ) {
-          scheduleRescan();
-          return;
-        }
-        // 会话容器子树变化一律重扫，代价只是一次 debounce 查询。
-        if (node.matches?.(composerInputSelector) || node.querySelector?.(composerInputSelector)) {
+        // 会话标记、活动侧栏项和输入框变化一律重扫，代价只是一次 debounce 查询。
+        if (node.matches?.(rescanNodeSelector) || node.querySelector?.(rescanNodeSelector)) {
           scheduleRescan();
           return;
         }
@@ -1429,8 +1671,8 @@
       void loadAccountIdentity();
     });
     // 发送入口只看当前输入卡片：Enter 提交或点击卡片内按钮。误判只多一次轮询。
-    const composerHost = () => statsElement?.isConnected ? statsElement.parentElement : null;
-    const inComposer = (target) => Boolean(target && !containsStats(target) && composerHost()?.contains(target));
+    const activeComposerHost = () => !statsElement?.hidden && composerHost?.isConnected ? composerHost : null;
+    const inComposer = (target) => Boolean(target && !containsStats(target) && activeComposerHost()?.contains(target));
     listen(document, "keydown", (event) => {
       if (event.key === "Enter" && !event.shiftKey && !event.isComposing && inComposer(event.target)) {
         wake(SUBMIT_POLL_DELAY_MS, true);
@@ -1463,6 +1705,7 @@
           anchorFound: Boolean(findVisibleComposerAnchor()),
           mounted: statsElement?.isConnected === true,
           hidden: statsElement?.hidden !== false,
+          density: currentDensity,
           stats,
           lastFetchOk,
           lastResult,
@@ -1482,15 +1725,22 @@
         clearTimeout(pollTimer);
         clearTimeout(rescanTimer);
         clearTimeout(cacheTimer);
+        clearTimeout(clearTimer);
         if (positionFrame) window.cancelAnimationFrame(positionFrame);
         positionFrame = 0;
+        resizePending = false;
+        fitPending = false;
         setExpanded(false);
+        hostResizeObserver?.disconnect?.();
+        hostResizeObserver = null;
+        observedHost = null;
         releaseNotifications();
         window.__codeyConversationStatsObserver?.disconnect?.();
         delete window.__codeyConversationStatsObserver;
         listeners.splice(0).forEach(remove => remove());
         statsElement?.__codeyCs?.overlay.remove();
         statsElement?.remove();
+        composerHost = null;
         document.getElementById(styleId)?.remove();
         window[PROBE_KEY].installed = false;
       },
