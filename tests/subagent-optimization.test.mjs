@@ -45,7 +45,7 @@ test("subagent settings expose the three supported role controls", async () => {
   assert.match(featurePolicySource, /resolveCurrentProviderModelOption/);
   assert.doesNotMatch(featurePolicySource, /所有线路均暂无模型/);
   assert.match(featurePolicySource, /from "\.\/components\/ui"/);
-  assert.match(featurePolicySource, /import \{ Card, Table \} from "@heroui\/react"/);
+  assert.match(featurePolicySource, /import \{ Table \} from "@heroui\/react"/);
   assert.doesNotMatch(featurePolicySource, /from "\.\/components\/mantine"/);
   assert.doesNotMatch(featurePolicySource, /from "\.\/mantine"/);
   assert.doesNotMatch(featurePolicySource, /@mantine\/core/);

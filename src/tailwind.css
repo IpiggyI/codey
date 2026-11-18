@@ -46,7 +46,6 @@
 @import "@heroui/styles/components/input-group.css" layer(components);
 
 /* 布局 */
-@import "@heroui/styles/components/card.css" layer(components);
 @import "@heroui/styles/components/header.css" layer(components);
 
 /* 弹层 */
@@ -68,7 +67,6 @@
 @source "../node_modules/@heroui/react/dist/utils";
 @source "../node_modules/@heroui/react/dist/hooks";
 @source "../node_modules/@heroui/react/dist/components/button";
-@source "../node_modules/@heroui/react/dist/components/card";
 @source "../node_modules/@heroui/react/dist/components/checkbox";
 @source "../node_modules/@heroui/react/dist/components/chip";
 @source "../node_modules/@heroui/react/dist/components/close-button";

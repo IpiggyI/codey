@@ -7,6 +7,7 @@ import {
   IconSparkles,
   IconUsersGroup,
 } from "@tabler/icons-react";
+import { SettingsPageHeaderTarget } from "./SettingsPageHeader";
 
 // 新增页面时追加条目并在 App 的 sections 中提供对应内容；分组按首次出现的顺序展示。
 const SETTINGS_PAGES = [
@@ -37,11 +38,33 @@ type SettingsSection = ReactNode | ((active: boolean) => ReactNode);
 
 type SettingsLayoutProps = {
   active?: boolean;
+  brand?: ReactNode;
   hidden?: boolean;
   sections: Record<SettingsPageId, SettingsSection>;
+  sidebarFooter?: ReactNode;
 };
 
-export function SettingsLayout({ active: layoutActive = true, sections, hidden = false }: SettingsLayoutProps) {
+function SettingsPageContent({ children, labelledBy }: {
+  children: ReactNode;
+  labelledBy: string;
+}) {
+  const [headerTarget, setHeaderTarget] = useState<HTMLDivElement | null>(null);
+
+  return (
+    <SettingsPageHeaderTarget.Provider value={headerTarget}>
+      <div className="settings-page-header-host" ref={setHeaderTarget} />
+      <div
+        className="settings-page-scroll page-scroll"
+        aria-labelledby={labelledBy}
+        tabIndex={0}
+      >
+        <div className="page">{children}</div>
+      </div>
+    </SettingsPageHeaderTarget.Provider>
+  );
+}
+
+export function SettingsLayout({ active: layoutActive = true, brand, sections, sidebarFooter, hidden = false }: SettingsLayoutProps) {
   const [activePage, setActivePage] = useState<SettingsPageId>("overview");
   const [visitedPages, setVisitedPages] = useState<ReadonlySet<SettingsPageId>>(
     () => new Set(["overview"]),
@@ -81,6 +104,7 @@ export function SettingsLayout({ active: layoutActive = true, sections, hidden =
   return (
     <div className="settings-layout" hidden={hidden}>
       <nav className="settings-sidebar" aria-label="配置功能菜单">
+        {brand && <div className="settings-sidebar-header">{brand}</div>}
         <div className="settings-sidebar-menu" onKeyDown={handleMenuKeyDown}>
           {SETTINGS_GROUP_ENTRIES.map(([group, pages]) => (
             <div key={group} className="settings-nav-group">
@@ -105,6 +129,7 @@ export function SettingsLayout({ active: layoutActive = true, sections, hidden =
             </div>
           ))}
         </div>
+        {sidebarFooter && <div className="settings-sidebar-footer">{sidebarFooter}</div>}
       </nav>
 
       <div className="settings-content" id="codey-settings-content" tabIndex={-1}>
@@ -121,15 +146,9 @@ export function SettingsLayout({ active: layoutActive = true, sections, hidden =
               hidden={!active}
             >
               {visitedPages.has(page.id) && (
-                <div
-                  className="settings-page-scroll page-scroll"
-                  aria-labelledby={`${id}-menu-${page.id}`}
-                  tabIndex={0}
-                >
-                  <div className="page">
-                    {typeof content === "function" ? content(active) : content}
-                  </div>
-                </div>
+                <SettingsPageContent labelledBy={`${id}-menu-${page.id}`}>
+                  {typeof content === "function" ? content(active) : content}
+                </SettingsPageContent>
               )}
             </section>
           );

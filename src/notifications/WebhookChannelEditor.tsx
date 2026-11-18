@@ -41,7 +41,7 @@ export function createWebhookChannelEditor(emptyPlaceholder: string) {
         {channel.urlConfigured ? (
           <div className="-mt-[7px] flex justify-end">
             <Button
-              className="text-[#8e8e93] hover:text-[#d70015]"
+              className="text-[var(--codey-subtle)] hover:text-[var(--codey-red)]"
               variant="ghost"
               size="xs"
               disabled={disabled}

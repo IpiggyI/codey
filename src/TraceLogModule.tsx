@@ -11,11 +11,9 @@ import {
   IconTrash as Trash2,
 } from "@tabler/icons-react";
 
-import { Card } from "@heroui/react";
 import { Badge, Button } from "./components/ui";
 import { formatBytes } from "./formatters";
 import type { CrashpadPendingStats, TraceLogStats } from "./traceLogTypes";
-import { surfaceCardPaddingClass } from "./uiClasses";
 
 type TraceLogModuleProps = {
   stats?: TraceLogStats;
@@ -156,8 +154,8 @@ function TraceLogModuleComponent({
         </div>
       </div>
 
-      <Card
-        className={`trace-card ${surfaceCardPaddingClass}${hasSnapshot ? "" : " trace-card-empty"}`}
+      <div
+        className={`trace-card${hasSnapshot ? "" : " trace-card-empty"}`}
         aria-busy={loading}
       >
         {!hasSnapshot ? (
@@ -334,7 +332,7 @@ function TraceLogModuleComponent({
             )}
           </>
         )}
-      </Card>
+      </div>
     </section>
   );
 }

@@ -192,11 +192,11 @@ function WechatClawChannelEditorComponent({
         ? "当前绑定缺少激活上下文，请重新扫码并按提示向 ClawBot 发送一条消息。"
         : "扫码确认后，需要在微信中向 ClawBot 发送一条消息完成激活。二维码 10 分钟内有效。");
   const bindingCardClass = sessionExpired
-    ? "rounded-[10px] border border-[#f59e0b]/35 bg-[#fff8eb] p-3"
-    : "rounded-[10px] border border-[#07c160]/25 bg-[#f2fff5] p-3";
+    ? "rounded-[10px] border border-[var(--codey-amber-border)] bg-[var(--codey-amber-soft)] p-3"
+    : "rounded-[10px] border border-[var(--codey-green-border)] bg-[var(--codey-green-soft)] p-3";
   const bindingIconClass = sessionExpired
-    ? "grid size-7 place-items-center rounded-full bg-[#f59e0b]/12 text-[#a15c00]"
-    : "grid size-7 place-items-center rounded-full bg-[#07c160]/12 text-[#07a854]";
+    ? "grid size-7 place-items-center rounded-full bg-[var(--codey-amber-soft)] text-[var(--codey-amber)]"
+    : "grid size-7 place-items-center rounded-full bg-[var(--codey-green-soft)] text-[var(--codey-green)]";
 
   return (
     <>
@@ -207,8 +207,8 @@ function WechatClawChannelEditorComponent({
               <IconQrcode size={17} aria-hidden="true" />
             </span>
             <div>
-              <strong className="block text-xs text-[#1d1d1f]">微信 ClawBot 绑定</strong>
-              <span className="block text-[11px] text-[#5d6b61]">无需企业微信机器人或常驻转发服务</span>
+              <strong className="block text-xs text-[var(--codey-text)]">微信 ClawBot 绑定</strong>
+              <span className="block text-[11px] text-[var(--codey-muted)]">无需企业微信机器人或常驻转发服务</span>
             </div>
           </div>
           <Button
@@ -221,7 +221,7 @@ function WechatClawChannelEditorComponent({
             {isStarting ? "正在生成" : sessionExpired || hasBinding ? "重新扫码" : "扫码绑定"}
           </Button>
         </div>
-        <p className="mt-2 text-[11px] leading-5 text-[#526158]" role="status" aria-live="polite">
+        <p className="mt-2 text-[11px] leading-5 text-[var(--codey-muted)]" role="status" aria-live="polite">
           {loginMessage}
         </p>
         {login?.qrCodeImageUrl && (login.phase === "waiting" || login.phase === "scanned") ? (
@@ -259,7 +259,7 @@ function WechatClawChannelEditorComponent({
       {hasBinding || channel.contextTokenConfigured ? (
         <div className="-mt-[7px] flex justify-end">
           <Button
-            className="text-[#8e8e93] hover:text-[#d70015]"
+            className="text-[var(--codey-subtle)] hover:text-[var(--codey-red)]"
             variant="ghost"
             size="xs"
             disabled={disabled}

@@ -81,7 +81,7 @@ test("operations status details expand through HeroUI Disclosure", async () => {
     "utf8",
   );
 
-  assert.match(source, /import \{ Card, Disclosure \} from "@heroui\/react"/);
+  assert.match(source, /import \{ Disclosure \} from "@heroui\/react"/);
   assert.match(source, /import \{ Badge, Button \} from "\.\/components\/ui"/);
   assert.match(source, /<Disclosure[\s\S]*isExpanded=\{Boolean\(activeCardTitle\)\}/);
   assert.match(source, /<Disclosure\.Content>/);
@@ -149,11 +149,11 @@ test("notification channels, notices and trace log use HeroUI without Mantine im
   }
   assert.match(sources[0], /from "\.\.\/components\/ui"/);
   assert.match(sources[0], /<DialogContent[\s\S]*container=\{container \?\? popupContainer/);
-  assert.match(sources[1], /import \{ Card \} from "@heroui\/react"/);
+  assert.doesNotMatch(sources[1], /from "@heroui\/react"/);
   assert.match(sources[1], /from "\.\.\/components\/ui"/);
   assert.match(sources[5], /from "\.\/components\/ui"/);
   assert.match(sources[5], /autoDismissEnabled/);
-  assert.match(sources[6], /import \{ Card \} from "@heroui\/react"/);
+  assert.doesNotMatch(sources[6], /from "@heroui\/react"/);
   assert.match(sources[6], /from "\.\/components\/ui"/);
 });
 
@@ -272,17 +272,18 @@ test("console surfaces do not erase page spacing with inline padding", async () 
     `${styles}\n${appSource}`,
     /\.config-header-(?:inner|right|actions)|\.config-brand(?:-|\s*\{)/,
   );
+  // 基础功能页的功能开关与通知渠道在描边容器内两列排布，奇数项时最后一项占满整行。
   assert.match(
     styles,
-    /\.notification-channel-list\s*\{\s*display:\s*grid;\s*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);/,
+    /\.overview-config \.feature-grid,\s*\.overview-config \.notification-channel-list\s*\{\s*display:\s*grid;\s*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\);/,
+  );
+  assert.match(
+    styles,
+    /\.overview-config \.notification-channel-list > li:last-child:nth-child\(odd\)\s*\{\s*grid-column:\s*1 \/ -1;/,
   );
   assert.doesNotMatch(
     styles,
     /\.notification-channel-list > li:only-child/,
-  );
-  assert.doesNotMatch(
-    styles,
-    /\.feature-grid > \.feature-card:last-child:nth-child\(odd\)/,
   );
 });
 

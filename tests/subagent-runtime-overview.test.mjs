@@ -13,6 +13,8 @@ const policyGraph = createModuleGraph(new URL("../src/FeaturePolicyCard.tsx", im
     "./components/ui": ui,
     "@tabler/icons-react": autoStubModule("icons"),
     "react-aria": { UNSAFE_PortalProvider: heroui.PortalProvider },
+    // 页头在没有布局目标时原地渲染，不会调用 createPortal。
+    "react-dom": { createPortal: (node) => node },
   },
 });
 const overviewGraph = createModuleGraph(new URL("../src/components/SubagentRuntimeOverview.tsx", import.meta.url), {

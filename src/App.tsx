@@ -78,7 +78,7 @@ import type {
   RuntimeStatus,
   TraceLogCleanup,
 } from "./App.types";
-import { Badge, Button } from "./components/ui";
+import { Button } from "./components/ui";
 
 const Check = IconCheck;
 const X = IconX;
@@ -1335,119 +1335,118 @@ export function App({
 
   const saving = busy === "save";
   const saveButtonText = saving ? "保存中" : dirty ? "保存更改" : "已保存";
-  const configHeaderContent = (
-    <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-5 max-[760px]:grid-cols-[minmax(0,1fr)_auto_auto] max-[760px]:gap-2.5">
-      <div className="flex min-w-0 items-center gap-3 justify-self-start max-[760px]:gap-2">
-        <CodeyBrandMark />
-        <div className="flex min-w-0 flex-col">
-          <div className="flex min-w-0 items-center gap-2">
-            <h1 className="m-0 whitespace-nowrap text-[19px] font-extrabold leading-[22px] tracking-[-0.02em] text-[var(--codey-text)]">Codey 控制台</h1>
-            <span className="whitespace-nowrap font-mono text-[11.5px] font-medium tabular-nums text-[var(--codey-muted)]">
-              v{status.appVersion || "0.2.0"}
-            </span>
-
-            {dirty && (
-              <Badge variant="warning">
-                未保存更改
-              </Badge>
-            )}
-          </div>
-          <p className="m-0 mt-0.5 text-xs text-[var(--codey-muted)] max-[760px]:hidden">查看当前 provider、管理模型清单、运行策略与诊断存储</p>
-        </div>
+  const brand = (
+    <div className="sidebar-brand">
+      <CodeyBrandMark />
+      <div className="sidebar-brand-text">
+        <h1>Codey</h1>
+        <span>控制台</span>
       </div>
+    </div>
+  );
 
+  const codexStatusTone = restartStatusError
+    ? "warning"
+    : status.restartInProgress
+      ? "pending"
+      : status.running
+        ? "running"
+        : "stopped";
+
+  const sidebarFooter = (
+    <>
       {embedded && (
-        <div className="flex items-center gap-3 justify-self-center max-[520px]:gap-2">
+        <div className={`codex-status-card is-${codexStatusTone}`}>
+          <span className="codex-status-dot" aria-hidden="true" />
+          <div className="codex-status-text">
+            <strong>Codex</strong>
+            <span>{restartStatusError ? "状态未知" : status.restartInProgress ? "正在重启" : status.running ? "运行中" : "未运行"}</span>
+          </div>
           <Button
-            aria-label="打开 Codey GitHub 仓库"
-            className="w-8! min-w-8! px-0!"
-            onClick={() => window.open("https://github.com/IpiggyI/codey", "_blank", "noopener,noreferrer")}
+            aria-label={restartStatusError ? "重新查询状态" : waitingForRestart ? "等待重启 Codex，点击重启以应用配置" : status.running ? "重启 Codex" : "Codex 未运行"}
+            className={`codex-status-action${waitingForRestart ? " is-warning" : ""}`}
+            disabled={isBusy || (!restartStatusError && (status.restartInProgress || !status.running))}
+            onPress={handleRestartCodex}
             size="sm"
-            title="GitHub 仓库"
-            variant="brand-outline"
+            variant="ghost"
           >
-            <IconBrandGithub aria-hidden="true" />
+            {busy === "restart" || (status.restartInProgress && !restartStatusError) ? (
+              <LoaderCircle className="animate-spin" size={13} aria-hidden="true" />
+            ) : (
+              <RefreshCw size={13} aria-hidden="true" />
+            )}
+            <span>{restartStatusError ? "重新查询" : waitingForRestart ? "等待重启" : "重启"}</span>
           </Button>
         </div>
       )}
-
-      <div className="flex min-w-0 items-center gap-4 justify-self-end">
-        <div className="flex items-center gap-2">
+      <div className="sidebar-save">
+        {dirty && (
+          <span className="sidebar-dirty-hint" role="status">
+            <span aria-hidden="true" />
+            有未保存的更改
+          </span>
+        )}
+        <Button
+          aria-label={saving ? "正在保存设置" : saveButtonText}
+          className="sidebar-save-button"
+          disabled={!dirty || isBusy}
+          loading={saving}
+          onPress={handleSaveCurrent}
+          variant={dirty ? "default" : "secondary"}
+        >
+          {!saving && (dirty ? (
+            <Save size={14} aria-hidden="true" />
+          ) : (
+            <Check size={14} aria-hidden="true" />
+          ))}
+          <span>{saveButtonText}</span>
+        </Button>
+        {dirty && (
+          <Button
+            aria-label="放弃更改"
+            className="sidebar-discard-button"
+            disabled={isBusy}
+            onPress={handleDiscardChanges}
+            size="sm"
+            variant="ghost"
+          >
+            <Undo size={14} aria-hidden="true" />
+            <span>放弃更改</span>
+          </Button>
+        )}
+      </div>
+      <div className="sidebar-footer-bar">
+        <div className="sidebar-footer-left">
+          <span className="sidebar-footer-version font-mono">
+            v{status.appVersion || "0.2.0"}
+          </span>
+        </div>
+        <div className="sidebar-footer-right">
+          {embedded && (
+            <Button
+              aria-label="打开 Codey GitHub 仓库"
+              className="sidebar-footer-icon-btn"
+              onPress={() => window.open("https://github.com/IpiggyI/codey", "_blank", "noopener,noreferrer")}
+              size="icon-sm"
+              title="GitHub 仓库"
+              variant="ghost"
+            >
+              <IconBrandGithub size={15} aria-hidden="true" />
+            </Button>
+          )}
           <Button
             aria-label="系统设置与偏好"
-            className="flex-none"
+            className="sidebar-footer-icon-btn"
             onPress={() => setSystemSettingsOpen(true)}
             size="icon-sm"
             title="系统设置与偏好"
             variant="ghost"
           >
-            <IconSettings aria-hidden="true" />
+            <IconSettings size={15} aria-hidden="true" />
           </Button>
-          {embedded && (
-            <Button
-              aria-label={restartStatusError ? "重新查询状态" : waitingForRestart ? "等待重启 Codex，点击重启以应用配置" : status.running ? "重启 Codex" : "Codex 未运行"}
-              className="max-[520px]:w-8! max-[520px]:px-0!"
-              disabled={isBusy || (!restartStatusError && (status.restartInProgress || !status.running))}
-              onPress={handleRestartCodex}
-              size="sm"
-              variant="warning"
-            >
-              {busy === "restart" || (status.restartInProgress && !restartStatusError) ? (
-                <LoaderCircle className="animate-spin" aria-hidden="true" />
-              ) : (
-                <RefreshCw aria-hidden="true" />
-              )}
-              <span className="max-[520px]:hidden">
-                {restartStatusError ? "重新查询状态" : waitingForRestart ? "等待重启" : status.running ? "重启 Codex" : "未运行"}
-              </span>
-            </Button>
-          )}
-          {dirty && (
-            <Button
-              aria-label="放弃更改"
-              className="max-[520px]:w-8! max-[520px]:px-0!"
-              disabled={isBusy}
-              onPress={handleDiscardChanges}
-              size="sm"
-              variant="ghost"
-            >
-              <Undo aria-hidden="true" />
-              <span className="max-[520px]:hidden">放弃更改</span>
-            </Button>
-          )}
-          <Button
-            aria-label={saving ? "正在保存设置" : saveButtonText}
-            className="header-save-button h-8 min-w-[88px] px-3.5 text-xs max-[520px]:min-w-8! max-[520px]:w-8! max-[520px]:px-0!"
-            disabled={!dirty || isBusy}
-            loading={saving}
-            onPress={handleSaveCurrent}
-            size="sm"
-            variant={dirty ? "default" : "secondary"}
-          >
-            {!saving && (dirty ? (
-              <Save aria-hidden="true" />
-            ) : (
-              <Check aria-hidden="true" />
-            ))}
-            <span className="max-[520px]:hidden">
-              {saveButtonText}
-            </span>
-          </Button>
-          {embedded && (
-            <Button
-              aria-label="关闭配置"
-              className="flex-none max-[520px]:h-8! max-[520px]:w-8! max-[520px]:p-0!"
-              disabled={isBusy}
-              onPress={handleCloseSettings}
-              size="icon-sm"
-              variant="ghost"
-            >
-              <X aria-hidden="true" />
-            </Button>
-          )}
         </div>
       </div>
-    </div>
+    </>
   );
 
   const appContent = (
@@ -1506,10 +1505,17 @@ export function App({
         </div>
       )}
 
-      {!embedded && (
-        <header className="app-shell-header z-30 flex flex-col px-5 py-2.5">
-          {configHeaderContent}
-        </header>
+      {embedded && (
+        <Button
+          aria-label="关闭配置"
+          className="settings-close-button"
+          disabled={isBusy}
+          onPress={handleCloseSettings}
+          size="icon"
+          variant="ghost"
+        >
+          <X size={16} aria-hidden="true" />
+        </Button>
       )}
 
       {configApplyBannerVisible(status.configApply, configApplyError) && status.configApply && (
@@ -1530,6 +1536,8 @@ export function App({
 
       <SettingsLayout
         active={!embedded || modalVisible}
+        brand={brand}
+        sidebarFooter={sidebarFooter}
         sections={{
           overview: (
             <>
@@ -1547,8 +1555,9 @@ export function App({
                 showRestartAction={!embedded}
               />
 
-              {/* Codex 功能策略（含启动代理） */}
-              <div className="full-row-section">
+              {/* 基础功能页配置区：各区块按上游的描边容器分组排布 */}
+              <div className="overview-config">
+                {/* Codex 功能策略（含启动代理） */}
                 <FeaturePolicyCard
                   config={config}
                   fastContextToolsStatus={fastContextToolsStatus}
@@ -1559,10 +1568,8 @@ export function App({
                   configEditingDisabled={isBusy && busy !== "save"}
                   onConfigChange={handleConfigChange}
                 />
-              </div>
 
-              {/* 消息通知：每个渠道 item 占一半 */}
-              <div className="full-row-section">
+                {/* 消息通知：每个渠道 item 占一半 */}
                 <NotificationChannelsCard
                   config={config}
                   container={portalContainer}
@@ -1572,10 +1579,8 @@ export function App({
                   onChannelChange={handleNotificationChannelChange}
                   onRequestRemoveChannel={handleRequestRemoveNotificationChannel}
                 />
-              </div>
 
-              {/* 诊断存储保护 */}
-              <div className="full-row-section">
+                {/* 诊断存储保护 */}
                 <TraceLogModule
                   stats={status.traceLogStats}
                   crashpadStats={status.crashpadPendingStats}
@@ -1716,11 +1721,7 @@ export function App({
     <SettingsModalShell
       afterClose={onAfterClose}
       container={modalContainer}
-      header={
-        <div className="relative z-[2] flex w-full items-center overflow-visible">
-          {configHeaderContent}
-        </div>
-      }
+      header={null}
       onCancel={handleCloseSettings}
       visible={modalVisible}
     >

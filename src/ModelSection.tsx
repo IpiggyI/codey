@@ -18,7 +18,6 @@ import type {
   OfficialAccountsResult,
   RouterSessionDiagnosis,
 } from "./App.types";
-import { Card } from "@heroui/react";
 import {
   Badge,
   Button,
@@ -38,7 +37,7 @@ import { OfficialAccountsPanel } from "./OfficialAccountsPanel";
 import { modelIdsEqual, modelKey, uniqueModelIds } from "./modelIds";
 import { globalDefaultForProvider } from "./modelRoutes";
 import { SETTINGS_OVERLAY_Z_INDEX } from "./overlay.constants";
-import { flushCardClass } from "./uiClasses";
+import { SettingsPageHeader } from "./SettingsPageHeader";
 
 export function ModelContextFields({ model, policy, disabled, onChange }: {
   model: string;
@@ -48,7 +47,7 @@ export function ModelContextFields({ model, policy, disabled, onChange }: {
 }) {
   return <details className="w-full text-xs">
     <summary className="cursor-pointer">上下文预算{policy ? ` · ${policy.contextWindowTokens} Token` : " · 默认"}</summary>
-    <p className="my-2 text-xs text-[#6e6e73]">自定义值优先于 1M；清空窗口恢复默认。未知模型默认使用 32768 Token 保守预算，不代表服务端容量。修改后重启 Codex 生效。</p>
+    <p className="my-2 text-xs text-[var(--codey-muted)]">自定义值优先于 1M；清空窗口恢复默认。未知模型默认使用 32768 Token 保守预算，不代表服务端容量。修改后重启 Codex 生效。</p>
     <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
       {([
         ["contextWindowTokens", "窗口", 1024, "默认"],
@@ -65,7 +64,7 @@ export function ModelContextFields({ model, policy, disabled, onChange }: {
           }} />
       </label>)}
     </div>
-    <p className="my-2 text-xs text-[#6e6e73]">阈值不能超过窗口的 90% 和预留后的有效空间；预留按整百分比向下取整，不是输出长度上限。</p>
+    <p className="my-2 text-xs text-[var(--codey-muted)]">阈值不能超过窗口的 90% 和预留后的有效空间；预留按整百分比向下取整，不是输出长度上限。</p>
   </details>;
 }
 
@@ -251,41 +250,38 @@ function ModelSectionComponent({
 
   return (
     <section className="route-section" aria-labelledby="provider-title">
-      <div className="section-title">
-        <div className="section-heading">
-          <span className="section-icon" aria-hidden="true">
-            <Server size={15} />
-          </span>
-          <div>
-            <h2 id="provider-title">当前 provider 与模型</h2>
-            <p>只读展示当前 Codex 配置中的 provider，并管理对应模型</p>
-          </div>
-        </div>
-        <div className="route-heading-actions">
-          <div className="route-item-usage-toggle">
-            <span className="route-item-usage-label">额度显示</span>
-            <Switch
-              size="xs"
-              checked={showAccountUsageInHeader}
-              disabled={isBusy}
-              onCheckedChange={(checked) => onToggleAccountUsage?.(checked)}
-              aria-label="在侧栏底部显示账号额度"
-            />
-          </div>
-          <Button
-            variant="outline"
-            size="sm"
-            disabled={dirty || isBusy}
-            onPress={onSyncCurrentProvider}
-          >
-            <RefreshCw
-              className={busy === "sync-provider" ? "animate-spin" : ""}
-              aria-hidden="true"
-            />
-            重新读取 Codex 配置
-          </Button>
-        </div>
-      </div>
+      <SettingsPageHeader
+        id="provider-title"
+        title="当前 provider 与模型"
+        icon={<Server size={15} />}
+        description="只读展示当前 Codex 配置中的 provider，并管理对应模型"
+        actions={
+          <>
+            <div className="route-item-usage-toggle">
+              <span className="route-item-usage-label">额度显示</span>
+              <Switch
+                size="xs"
+                checked={showAccountUsageInHeader}
+                disabled={isBusy}
+                onCheckedChange={(checked) => onToggleAccountUsage?.(checked)}
+                aria-label="在侧栏底部显示账号额度"
+              />
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={dirty || isBusy}
+              onPress={onSyncCurrentProvider}
+            >
+              <RefreshCw
+                className={busy === "sync-provider" ? "animate-spin" : ""}
+                aria-hidden="true"
+              />
+              重新读取 Codex 配置
+            </Button>
+          </>
+        }
+      />
 
       <ChannelSection
         channelList={channelList}
@@ -422,7 +418,7 @@ function ModelSectionComponent({
         </aside>
       ) : null}
 
-      <Card className={`route-card ${flushCardClass}`}>
+      <div className={`route-card`}>
         <div className="route-manager route-manager-single">
           <div className="route-catalog-pane">
             <div className="catalog-aggregate-heading">
@@ -565,7 +561,7 @@ function ModelSectionComponent({
             </div>
           </div>
         </div>
-      </Card>
+      </div>
 
       <Dialog
         open={officialEditorOpen}

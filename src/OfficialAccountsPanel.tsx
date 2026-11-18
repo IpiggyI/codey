@@ -101,12 +101,12 @@ function formatTime(value: number | string) {
 const accountLabel = (account: OfficialAccount) => account.email?.trim() || account.accountId || account.id;
 
 function UsageLine({ usage, loading }: { usage: UsageView | undefined; loading: boolean }) {
-  if (!usage) return <small className="text-xs text-[#6e6e73]">{loading ? "正在读取账号额度…" : "尚未读取账号额度"}</small>;
-  if (usage.status === "error") return <small className="text-xs text-[#9a6700]">{usage.message}</small>;
+  if (!usage) return <small className="text-xs text-[var(--codey-muted)]">{loading ? "正在读取账号额度…" : "尚未读取账号额度"}</small>;
+  if (usage.status === "error") return <small className="text-xs text-[var(--codey-amber)]">{usage.message}</small>;
   const windows = [usage.snapshot.primary, usage.snapshot.secondary].filter(
     (window): window is OfficialUsageWindow => Boolean(window),
   );
-  if (windows.length === 0) return <small className="text-xs text-[#6e6e73]">官方未返回额度窗口</small>;
+  if (windows.length === 0) return <small className="text-xs text-[var(--codey-muted)]">官方未返回额度窗口</small>;
   return (
     <div className="official-account-usage-grid">
       {windows.map((window) => {
@@ -121,7 +121,7 @@ function UsageLine({ usage, loading }: { usage: UsageView | undefined; loading: 
             <div className="official-account-progress-track" aria-hidden="true">
               <div className={`official-account-progress-fill ${tone}`} style={{ width: `${remaining}%` }} />
             </div>
-            <small className="text-[11px] text-[#6e6e73]">
+            <small className="text-[11px] text-[var(--codey-muted)]">
               {window.resetsAt ? `${formatTime(window.resetsAt * 1000)} 重置` : "暂无重置信息"}
             </small>
           </div>
@@ -456,24 +456,24 @@ function OfficialAccountsPanelComponent({
       </div>
 
       {switchDisabledReason ? (
-        <p role="alert" className="mb-2 text-xs text-[#9a6700]">{switchDisabledReason}</p>
+        <p role="alert" className="mb-2 text-xs text-[var(--codey-amber)]">{switchDisabledReason}</p>
       ) : null}
       {accountSwitched ? (
-        <p role="status" className="mb-2 text-xs text-[#9a6700]">{SESSION_NOTICE}</p>
+        <p role="status" className="mb-2 text-xs text-[var(--codey-amber)]">{SESSION_NOTICE}</p>
       ) : null}
       {loadError ? (
-        <div role="alert" className="mb-2 flex items-center gap-2 text-xs text-[#c4271c]">
+        <div role="alert" className="mb-2 flex items-center gap-2 text-xs text-[var(--codey-red)]">
           <span className="min-w-0 flex-1">{loadError}</span>
           <Button variant="outline" size="xs" disabled={disabled} onPress={() => void refresh()}>重新读取</Button>
         </div>
       ) : null}
-      {!accounts && !loadError ? <small className="text-xs text-[#6e6e73]">正在读取官方账号</small> : null}
+      {!accounts && !loadError ? <small className="text-xs text-[var(--codey-muted)]">正在读取官方账号</small> : null}
       {accounts && accounts.length === 0 ? (
-        <small className="text-xs text-[#6e6e73]">尚未添加官方账号。添加后，每个官方账号都会作为一个渠道出现在渠道列表中。</small>
+        <small className="text-xs text-[var(--codey-muted)]">尚未添加官方账号。添加后，每个官方账号都会作为一个渠道出现在渠道列表中。</small>
       ) : null}
 
       {accounts && accounts.length > 0 ? (
-        <ul className="m-0 grid list-none gap-2 p-0">
+        <ul className="provider-row-list m-0 grid list-none gap-0 p-0">
           {accounts.map((account) => {
             const label = accountLabel(account);
             const usage = usages[account.id];
@@ -485,7 +485,7 @@ function OfficialAccountsPanelComponent({
             return (
               <li
                 key={account.id}
-                className={`official-account-item grid gap-2 rounded-lg border border-black/5 bg-white px-3 py-2${account.invalid ? " is-invalid" : ""}`}
+                className={`official-account-item grid gap-2${account.invalid ? " is-invalid" : ""}`}
               >
                 <div className="flex flex-wrap items-center gap-2">
                   <strong className="min-w-0 truncate text-[13px]" title={label}>{label}</strong>
@@ -495,11 +495,11 @@ function OfficialAccountsPanelComponent({
                   ) : null}
                   {account.invalid ? <Badge variant="destructive">已失效</Badge> : null}
                   {account.lastRefresh ? (
-                    <span className="ml-auto text-xs text-[#6e6e73]">上次刷新：{formatTime(account.lastRefresh)}</span>
+                    <span className="ml-auto text-xs text-[var(--codey-muted)]">上次刷新：{formatTime(account.lastRefresh)}</span>
                   ) : null}
                 </div>
                 {account.invalid ? (
-                  <small className="text-xs text-[#c4271c]">账号凭据已失效，不再查询账号额度；请移除后重新添加。</small>
+                  <small className="text-xs text-[var(--codey-red)]">账号凭据已失效，不再查询账号额度；请移除后重新添加。</small>
                 ) : (
                   <UsageLine usage={usage} loading={loading} />
                 )}
@@ -560,16 +560,16 @@ function OfficialAccountsPanelComponent({
           </DialogHeader>
           <div className="grid gap-2">
             {login?.callbackListening === false ? (
-              <small role="alert" className="text-xs text-[#9a6700]">
+              <small role="alert" className="text-xs text-[var(--codey-amber)]">
                 无法自动完成登录{login.callbackError ? `：${login.callbackError}` : ""}
               </small>
             ) : null}
             {login ? (
-              <code className="block select-text break-all rounded bg-[#f2f2f4] p-2 text-xs">{login.authUrl}</code>
+              <code className="block select-text break-all rounded bg-[var(--codey-surface-sunken)] p-2 text-xs">{login.authUrl}</code>
             ) : null}
             {login && !loginError ? (
               <div className="grid gap-1">
-                <small className="text-xs text-[#6e6e73]">
+                <small className="text-xs text-[var(--codey-muted)]">
                   在浏览器中完成授权后，浏览器会跳转到以 http://localhost:1455/auth/callback 开头的地址。
                   如果该页面没有自动完成，或打不开，请从浏览器地址栏复制完整地址，粘贴到下方。
                 </small>
@@ -586,7 +586,7 @@ function OfficialAccountsPanelComponent({
                     if (callbackError) setCallbackError("");
                   }}
                 />
-                {callbackError ? <small role="alert" className="text-xs text-[#c4271c]">{callbackError}</small> : null}
+                {callbackError ? <small role="alert" className="text-xs text-[var(--codey-red)]">{callbackError}</small> : null}
                 <div>
                   <Button
                     variant={login.callbackListening === false ? undefined : "outline"}
@@ -601,9 +601,9 @@ function OfficialAccountsPanelComponent({
               </div>
             ) : null}
             {loginError ? (
-              <small role="alert" className="text-xs text-[#c4271c]">{loginError}</small>
+              <small role="alert" className="text-xs text-[var(--codey-red)]">{loginError}</small>
             ) : login ? (
-              <small className="text-xs text-[#6e6e73]">等待浏览器完成登录。登录链接在 {formatTime(login.expiresAt)} 前有效。</small>
+              <small className="text-xs text-[var(--codey-muted)]">等待浏览器完成登录。登录链接在 {formatTime(login.expiresAt)} 前有效。</small>
             ) : null}
           </div>
           <DialogFooter>
@@ -636,7 +636,7 @@ function OfficialAccountsPanelComponent({
               >
                 {manualFileReading ? "正在读取" : "选择账号文件"}
               </Button>
-              <small className="text-[11px] text-[#6e6e73]">仅支持 .json，最多 64 KiB</small>
+              <small className="text-[11px] text-[var(--codey-muted)]">仅支持 .json，最多 64 KiB</small>
               <input
                 ref={manualFileInput}
                 type="file"
@@ -667,11 +667,11 @@ function OfficialAccountsPanelComponent({
               }}
             />
             {manualFileName ? (
-              <small role="status" className="break-all text-[11px] text-[#10a37f]">
+              <small role="status" className="break-all text-[11px] text-[var(--codey-green)]">
                 已载入 {manualFileName}，请检查内容后添加
               </small>
             ) : null}
-            {manualError ? <small role="alert" className="text-xs text-[#c4271c]">{manualError}</small> : null}
+            {manualError ? <small role="alert" className="text-xs text-[var(--codey-red)]">{manualError}</small> : null}
           </div>
           <DialogFooter>
             <Button variant="outline" size="sm" disabled={pending === "manual"} onPress={closeManual}>取消</Button>

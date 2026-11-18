@@ -268,20 +268,6 @@ body {
     letter-spacing: 0;
   }
 }
-@layer components {
-  /* 头部保存按钮是全局唯一的蓝色主操作，其余主按钮保持墨色。 */
-  .button--primary.header-save-button {
-    --button-bg: var(--codey-blue);
-    --button-bg-hover: var(--codey-blue-hover);
-    --button-bg-pressed: var(--codey-blue-hover);
-    --button-fg: #ffffff;
-  }
-
-  .button--primary.header-save-button:not(:disabled) {
-    box-shadow: 0 4px 14px color-mix(in srgb, var(--codey-blue) 32%, transparent);
-  }
-}
-
 button,
 [role="button"] {
   touch-action: manipulation;
@@ -517,10 +503,9 @@ input:focus-visible,
   background: var(--codey-surface);
 }
 
-/* 独立窗口模式的头部与弹窗头部共用同一层表面。 */
-.app-shell-header {
-  border-bottom: 1px solid var(--codey-border);
-  background: var(--codey-surface);
+/* 页头和保存操作已移入侧栏与页面标题，嵌入模式不再保留空的弹窗头部。 */
+.settings-modal-header:empty {
+  display: none;
 }
 
 .settings-modal-body {
@@ -578,12 +563,32 @@ input:focus-visible,
   scrollbar-gutter: stable;
 }
 
-/* 内容列贴住侧栏左对齐，在左侧 1000px 内排布，宽窗口下右侧留白。 */
+/* 内容列贴住侧栏左对齐，区块之间用通栏细线分隔。 */
+/* 分隔线通栏，内容在左侧 1000px 内排布，宽窗口下右侧留白。 */
 .page {
   width: 100%;
   min-height: 100%;
   margin: 0;
-  padding: 22px var(--page-gutter-end, 28px) 40px var(--page-gutter, 28px);
+  padding: 0 0 40px;
+}
+
+.page > section,
+.page > .secondary-section,
+.overview-config > section {
+  margin: 0;
+  padding: 22px var(--page-gutter-end) 26px var(--page-gutter);
+  border-bottom: 1px solid var(--codey-border);
+}
+
+.page > section:last-child,
+.overview-config > section:last-child {
+  border-bottom: 0;
+}
+
+/* 基础功能页配置区：标题在上，配置项按两列分组排列；保持与 DOM 焦点顺序一致。 */
+.overview-config {
+  display: flex;
+  flex-direction: column;
 }
 
 /* ==========================================================================
@@ -607,7 +612,51 @@ input:focus-visible,
   overscroll-behavior: contain;
   border-right: 1px solid var(--codey-border);
   background: var(--codey-sidebar);
-  padding: 14px 14px 14px;
+  padding: 10px 14px 14px;
+}
+
+.settings-sidebar-header {
+  flex: none;
+  padding: 8px 6px 14px;
+}
+
+.sidebar-brand {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 10px;
+  min-width: max-content;
+}
+
+.sidebar-brand > .codey-brand-mark {
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border-radius: 50%;
+}
+
+.sidebar-brand-text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0;
+  white-space: nowrap;
+}
+
+.sidebar-brand-text h1 {
+  margin: 0;
+  color: var(--codey-text);
+  font-size: 19px;
+  font-weight: 800;
+  line-height: 22px;
+  letter-spacing: -0.02em;
+}
+
+.sidebar-brand-text span {
+  color: var(--codey-muted);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 16px;
 }
 
 .settings-sidebar-menu {
@@ -714,6 +763,217 @@ input:focus-visible,
   outline-offset: -2px;
 }
 
+.settings-sidebar-footer {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--codey-border-subtle);
+}
+
+/* Codex 运行状态：仿账户条的整行胶囊。 */
+.codex-status-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 6px 7px 13px;
+  border: 1px solid var(--codey-border);
+  border-radius: 999px;
+  background: var(--codey-panel);
+  transition: background-color 150ms ease, border-color 150ms ease;
+}
+
+.codex-status-card:hover {
+  background: var(--codey-hover);
+  border-color: var(--codey-border-strong);
+}
+
+.codex-status-dot {
+  position: relative;
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--codey-subtle);
+}
+
+.codex-status-card.is-running .codex-status-dot {
+  background: var(--codey-green);
+}
+
+.codex-status-card.is-pending .codex-status-dot {
+  background: var(--codey-blue);
+  animation: codey-pulse 1.2s ease-in-out infinite;
+}
+
+.codex-status-card.is-warning .codex-status-dot {
+  background: var(--codey-amber);
+}
+
+@keyframes codey-pulse {
+  50% { opacity: 0.35; }
+}
+
+.codex-status-text {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  line-height: 1.3;
+}
+
+.codex-status-text strong {
+  color: var(--codey-text);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.codex-status-text span {
+  overflow: hidden;
+  color: var(--codey-muted);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-status-action {
+  flex: none;
+  height: 28px;
+  padding-inline: 11px;
+  border: 1px solid var(--codey-border-strong);
+  border-radius: 999px;
+  color: var(--codey-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.codex-status-action.is-warning {
+  border-color: var(--codey-amber-border);
+  color: var(--codey-amber);
+  background-color: var(--codey-amber-soft);
+}
+
+.codex-status-action.is-warning:hover:not(:disabled) {
+  background-color: color-mix(in srgb, var(--codey-amber-soft) 80%, var(--codey-amber));
+}
+
+.sidebar-save {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sidebar-dirty-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding-inline: 16px;
+  color: var(--codey-amber);
+  font-size: 12px;
+  font-weight: 600;
+  animation: codey-panel-enter 160ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.sidebar-dirty-hint > span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: codey-pulse 1.5s ease-in-out infinite;
+}
+
+/* 保存按钮是全局唯一的蓝色主操作。 */
+.sidebar-save-button {
+  width: 100%;
+  height: 42px;
+  border-radius: 999px;
+  font-size: 14.5px;
+  font-weight: 750;
+  border: 0;
+  transition:
+    background-color 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 160ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 160ms ease,
+    transform 110ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.sidebar-save-button.button--primary:not(:disabled) {
+  background: var(--codey-blue);
+  color: var(--accent-foreground);
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--codey-blue) 32%, transparent);
+}
+
+.sidebar-save-button.button--primary:hover:not(:disabled) {
+  background: var(--codey-blue-hover);
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--codey-blue) 42%, transparent);
+  transform: translateY(-1px);
+}
+
+.sidebar-save-button.button--primary:active:not(:disabled) {
+  transform: translateY(0) scale(0.985);
+}
+
+.sidebar-save-button:disabled {
+  background: var(--codey-blue);
+  color: var(--accent-foreground);
+  opacity: 0.45;
+  box-shadow: none;
+}
+
+.sidebar-footer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 2px 4px 0;
+}
+
+.sidebar-footer-left {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sidebar-footer-right {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 0;
+}
+
+.sidebar-footer-version {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px 0 8px;
+  color: var(--codey-muted);
+  font-family: var(--codey-font-mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+  user-select: none;
+}
+
+.sidebar-footer-icon-btn {
+  color: var(--codey-muted);
+  border-radius: 999px;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.sidebar-footer-icon-btn:hover {
+  color: var(--codey-blue);
+  background-color: var(--codey-blue-soft);
+}
+
+.sidebar-discard-button {
+  width: 100%;
+  border-radius: 999px;
+  color: var(--codey-muted);
+}
+
 .settings-content {
   --page-gutter: 28px;
   --page-gutter-end: max(var(--page-gutter), calc(100cqi - 1000px + var(--page-gutter)));
@@ -747,6 +1007,121 @@ input:focus-visible,
 
 .settings-layout[hidden],
 .settings-page[hidden] {
+  display: none;
+}
+
+.settings-page-header-host {
+  flex: none;
+  overflow: hidden;
+  scrollbar-gutter: stable;
+  border-bottom: 1px solid var(--codey-border);
+  background: var(--codey-canvas);
+}
+
+.settings-page-header-host .settings-page-header {
+  position: static;
+  width: 100%;
+  margin: 0;
+  padding: 14px var(--page-gutter-end) 14px var(--page-gutter);
+  border-bottom: 0;
+  box-shadow: none;
+  background: transparent;
+}
+
+.app-shell.embedded .settings-page-header-host .settings-page-header {
+  padding-right: max(64px, var(--page-gutter-end));
+}
+
+.settings-close-button {
+  position: absolute;
+  top: 15px;
+  right: 16px;
+  z-index: 50;
+  border-radius: 999px;
+  color: var(--codey-text);
+}
+
+.settings-close-button:hover {
+  background: var(--codey-press);
+}
+
+.settings-page-header {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  margin: 0 -28px 16px;
+  padding: 14px 28px;
+  background: var(--codey-canvas);
+}
+
+.app-shell.embedded .settings-page-header {
+  padding-right: 58px;
+}
+
+.settings-page-header-main {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex: 1 1 200px;
+}
+
+/* 页头只保留粗体标题，图标交给左侧导航表达。 */
+.settings-page-icon-pill {
+  display: none;
+}
+
+.settings-page-heading {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  gap: 1px;
+}
+
+.settings-page-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.settings-page-heading h2 {
+  margin: 0;
+  color: var(--codey-text);
+  font-size: 21px;
+  font-weight: 800;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+  overflow-wrap: anywhere;
+}
+
+.settings-page-description,
+.settings-page-heading p {
+  margin: 0;
+  color: var(--codey-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.settings-page-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 34px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* 未提供页头的页面不显示空白页头区。 */
+.settings-page-header-host:empty {
   display: none;
 }
 
@@ -1109,13 +1484,17 @@ input:focus-visible,
 @media (prefers-reduced-motion: reduce) {
   .settings-modal-shell,
   .settings-page:not([hidden]),
-  .loading-card {
+  .loading-card,
+  .sidebar-dirty-hint,
+  .sidebar-dirty-hint > span,
+  .codex-status-card.is-pending .codex-status-dot {
     animation: none;
   }
 
   .button,
   .settings-nav-item,
-  .settings-nav-item svg {
+  .settings-nav-item svg,
+  .sidebar-save-button {
     transition: none;
   }
 }

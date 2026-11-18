@@ -632,7 +632,7 @@ test("App 在页头提供入口，并把对话框接到只读状态刷新", () =
 test("Codex 版本与目录移入对话框，运行面板不再重复显示", () => {
   assert.doesNotMatch(operationsSource, /codex-version-tag|codexVersionLabel|Codex 版本未知/);
   assert.doesNotMatch(operationsSource, /header-path-display|Codex 应用路径|codexAppPath/);
-  assert.match(operationsSource, /<h2 id="operations-title">Codex 运行状态<\/h2>/);
+  assert.match(operationsSource, /<SettingsPageHeader\s+id="overview-title"\s+title="基础功能"/);
   assert.match(appSource, /v\{status\.appVersion \|\| "0\.2\.0"\}/);
 });
 
