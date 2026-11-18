@@ -34,6 +34,9 @@ toml_edit = "0.22"
 uuid = { version = "1", features = ["v4"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+[profile.dev]
+debug = 0
+
 [profile.dev.package.codey-runtime-data]
 opt-level = 3
 

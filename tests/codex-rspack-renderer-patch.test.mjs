@@ -159,6 +159,21 @@ test("rspack checkout prewarm and avatar overlay prewarm stay off until shown", 
   assert.deepEqual(logs, []);
 });
 
+test("rspack combined checkout webview mounts only when a checkout is shown", async () => {
+  const { logs, patch } = await installPatch();
+  // Codex 26.1106 mounts one hidden prewarm webview whenever a checkout is
+  // shown or either embedded checkout experiment is on.
+  const checkout = 'function Q(W,O,$,M,v,l,C){let I=O?.get("use_embedded_checkout",!1)===!0&&null!=(0,l.bc$)(C(M(),v),v),z=$&&O?.get("use_embedded_credit_checkout",!1)===!0;let G=null!=W||I||z;return G?{isPrewarm:!0}:null}';
+  const patched = patch(checkout);
+  assert.ok(patched, "the combined checkout gate is rewritten");
+  assert.equal(patch(patched), null, "the patch is idempotent");
+  const mount = Function(`${patched};return Q`)();
+  const experiments = [{ get: () => true }, true, () => "/pricing", "https://chatgpt.com", { bc$: () => "url" }, (url) => url];
+  assert.equal(mount(null, ...experiments), null, "no hidden checkout page is mounted for experiment accounts");
+  assert.deepEqual(mount("?url=checkout", ...experiments), { isPrewarm: true }, "a shown checkout still loads");
+  assert.deepEqual(logs, []);
+});
+
 test("native draft speed defaults preserve the saved user tier", async () => {
   const { logs, patch } = await installPatch();
   const factory = 'let c=(0,a.createContext)(void 0),p=(0,i.bD)(l.u,e=>({isManuallyChanged:!1,modelSettings:null,serviceTier:null}));function h(e){return{isNewThreadDraft:e}}';

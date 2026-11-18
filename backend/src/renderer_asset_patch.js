@@ -327,7 +327,7 @@
     {"label": "app server model result rewrite", "alternatives": [["AppServerRequestClient is missing a message dispatcher", "mcp_request_enqueued"]]},
     {"label": "pet settings avatar resources", "alternatives": [["settings.", "import", "codex-avatar"], ["settings.", "import", "codex-pet-assets"], ["settings.", "import", "avatar-mascot-button"], ["settings.", "import", "use-avatar-options"]], "legacy": "旧版 Vite 设置页的静态导入；Rspack 已使用数字模块。", "disablePet": true},
     {"label": "avatar overlay prewarm", "alternatives": [["shouldPrewarmAvatarOverlay:", "electron-avatar-overlay-restore-ready"]], "disablePet": true},
-    {"label": "pricing webview prewarm", "alternatives": [["forcePricingRefreshInBackground", "use_embedded_checkout"]]},
+    {"label": "pricing webview prewarm", "alternatives": [["forcePricingRefreshInBackground", "use_embedded_checkout"], ["isPrewarm:", "use_embedded_checkout", "use_embedded_credit_checkout"]]},
     {"label": "credit checkout webview prewarm", "alternatives": [["isPrewarm:", "use_embedded_credit_checkout"]]},
     {"label": "hosted app server manager marker", "alternatives": [["Desktop host did not provide its AppServerManager service"]]},
     {"label": "default Chinese locale", "alternatives": [["72216192", "enable_i18n", "locale_source", ".localeOverride"]]},
@@ -488,8 +488,13 @@
       );
     }
     if (
-      source.includes("forcePricingRefreshInBackground")
+      (
+        source.includes("forcePricingRefreshInBackground")
+        || source.includes("isPrewarm:")
+          && /[`"]use_embedded_credit_checkout[`"]/.test(source)
+      )
       && /[`"]use_embedded_checkout[`"]/.test(source)
+      && !/=!1&&[$A-Z_a-z][$\w]*\?\.get\("use_embedded_checkout",!1\)/.test(source)
     ) {
       // 账号命中内嵌结账实验时，Codex 会在后台把 chatgpt.com 定价页预载进隐藏
       // webview 并常驻（独立渲染进程）。只去掉这份后台预取：打开定价页时原生仍按
@@ -503,6 +508,11 @@
           // Codex 26.1029 把 URL 构造内联成函数表达式；让条件恒假即得 null。
           pattern: /\b([$A-Z_a-z][$\w]*)=(?=!\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\)\(\)&&[^;]{0,600}?\.get\("use_embedded_checkout",!1\)\?function\(\{currentPlan:)/g,
           replacement: (_match, desired) => `${desired}=!1&&`,
+        }, {
+          // Codex 26.1106 把定价页和额度购买页合并成一个结账组件，任一实验条件
+          // 为真即挂载隐藏的预热 webview。让定价页条件恒假；展示路由照常加载。
+          pattern: /\b([$A-Z_a-z][$\w]*)=(?=[$A-Z_a-z][$\w]*\?\.get\("use_embedded_checkout",!1\)===!0&&)/g,
+          replacement: (_match, enabled) => `${enabled}=!1&&`,
         }],
         null,
         "pricing webview prewarm",
@@ -512,12 +522,20 @@
       source.includes("isPrewarm:")
       && /[`"]use_embedded_credit_checkout[`"]/.test(source)
       && !/&&\(!0\|\|[^;]{0,600}?[`"]use_embedded_credit_checkout[`"]/.test(source)
+      && !/=!1&&(?:[$A-Z_a-z][$\w]*&&)?[$A-Z_a-z][$\w]*\?\.get\("use_embedded_credit_checkout",!1\)/.test(source)
     ) {
       // 额度购买页同理：未展示时不再挂载隐藏的预热 webview，展示时照常加载。
       patched = replaceUniqueRendererGate(
         patched,
-        /,!([$A-Z_a-z][$\w]*)&&\((?=[^;]{0,600}?\.get\([`"]use_embedded_credit_checkout[`"],!1\)\)\)return null;)/g,
-        (_match, presented) => `,!${presented}&&(!0||`,
+        [{
+          pattern: /,!([$A-Z_a-z][$\w]*)&&\((?=[^;]{0,600}?\.get\([`"]use_embedded_credit_checkout[`"],!1\)\)\)return null;)/g,
+          replacement: (_match, presented) => `,!${presented}&&(!0||`,
+        }, {
+          // Codex 26.1106 的合并结账组件：让额度购买页条件恒假。
+          pattern: /\b([$A-Z_a-z][$\w]*)=(?=(?:[$A-Z_a-z][$\w]*&&)?[$A-Z_a-z][$\w]*\?\.get\("use_embedded_credit_checkout",!1\)===!0[,;])/g,
+          replacement: (_match, enabled) => `${enabled}=!1&&`,
+        }],
+        null,
         "credit checkout webview prewarm",
       );
     }
