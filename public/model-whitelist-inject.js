@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current Codey channel.
 (() => {
-  const patchVersion = "63";
+  const patchVersion = "64";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -1193,6 +1193,185 @@
     return applyGptPrefixGate();
   };
 
+  const offlineStatsigMarker = "codey_offline_statsig";
+  const forkPlacementGateKeys = new Set([
+    "sidebarCustomSectionsEnabled",
+    "useAppServerCustomSections",
+  ]);
+  const forkFallbackPollMs = 1_500;
+  const maxForkFallbackPolls = 24;
+  let forkFallbackTimer = 0;
+  let forkFallbackPolls = 0;
+  const forkCapabilitiesRestorers = [];
+
+  const statsigContextWithoutAccount = (client) => {
+    if (!client || typeof client !== "object" || typeof client.getContext !== "function") {
+      return null;
+    }
+    try {
+      const context = client.getContext();
+      if (!context || typeof context !== "object") return null;
+      const user = context.user;
+      if (!user || typeof user !== "object") return null;
+      if ((user.customIDs?.account_id ?? null) != null) return null;
+      return context;
+    } catch {
+      return null;
+    }
+  };
+
+  const isPendingAnonymousStatsigClient = (client) => (
+    (client?.loadingStatus === "Loading" || client?.loadingStatus === "Uninitialized")
+    && statsigContextWithoutAccount(client) != null
+  );
+
+  // When Codex launches offline without a ChatGPT login, Statsig becomes Ready
+  // with `values == null` (NoValues) and never retries in that session, which
+  // prevents publishing execution assignments and blocks fork with
+  // `execution-config-loading`. Seed minimal empty gates in memory only.
+  const seedOfflineAnonymousStatsigClient = (client) => {
+    if (!client || client.loadingStatus !== "Ready") return false;
+    const context = statsigContextWithoutAccount(client);
+    if (!context || context.values != null) return false;
+    const adapter = client.dataAdapter;
+    if (typeof adapter?.setData !== "function" || typeof client.updateUserSync !== "function") {
+      return false;
+    }
+    if (catalog.loaded) patchStatsigClient(client);
+    const values = {
+      feature_gates: {},
+      dynamic_configs: {},
+      layer_configs: {},
+      param_stores: {},
+      time: Date.now(),
+      has_updates: true,
+      hash_used: "none",
+      user: context.user,
+      [offlineStatsigMarker]: true,
+    };
+    try {
+      adapter.setData(JSON.stringify(values));
+      client.updateUserSync(context.user);
+    } catch {
+      return false;
+    }
+    if (catalog.loaded) patchStatsigClient(client);
+    return true;
+  };
+
+  const forkPlacementSettingsProxy = (settings) => new Proxy(settings, {
+    get(target, property) {
+      if (property === "read") {
+        return (key, ...rest) => {
+          const value = target.read(key, ...rest);
+          return value === undefined && forkPlacementGateKeys.has(key)
+            ? false
+            : value;
+        };
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+
+  const forkCapabilitiesFallbackActive = (manager) => {
+    if (disposed) return false;
+    try {
+      if (typeof manager?.settings?.read !== "function") return false;
+      return manager.runtime?.accountId?.() == null;
+    } catch {
+      return false;
+    }
+  };
+
+  const installForkCapabilitiesOnPrototype = (prototype) => {
+    if (!prototype || typeof prototype !== "object") return false;
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, "getForkCapabilities");
+    const original = descriptor?.value;
+    if (typeof original !== "function") return false;
+    if (original.__codeyForkReadinessPatchVersion === patchVersion) return true;
+    if (descriptor.writable === false && descriptor.configurable === false) return false;
+    const patched = function getForkCapabilities(...args) {
+      if (!forkCapabilitiesFallbackActive(this)) return original.apply(this, args);
+      const receiver = Object.create(this, {
+        settings: { value: forkPlacementSettingsProxy(this.settings) },
+      });
+      return original.apply(receiver, args);
+    };
+    Object.defineProperty(patched, "__codeyForkReadinessPatchVersion", {
+      value: patchVersion,
+    });
+    try {
+      Object.defineProperty(prototype, "getForkCapabilities", {
+        ...descriptor,
+        value: patched,
+      });
+    } catch {
+      return false;
+    }
+    if (prototype.getForkCapabilities !== patched) return false;
+    forkCapabilitiesRestorers.push(() => {
+      if (prototype.getForkCapabilities === patched) {
+        Object.defineProperty(prototype, "getForkCapabilities", descriptor);
+      }
+    });
+    return true;
+  };
+
+  const installLocalForkCapabilitiesFallback = () => {
+    const registry = globalThis.__codeyAppServerManagers || window.__codeyAppServerManagers;
+    const manager = registry instanceof Map ? registry.get("local") : null;
+    if (!manager || typeof manager !== "object") return false;
+    for (
+      let proto = Object.getPrototypeOf(manager), depth = 0;
+      proto && proto !== Object.prototype && depth < 6;
+      proto = Object.getPrototypeOf(proto), depth += 1
+    ) {
+      if (Object.prototype.hasOwnProperty.call(proto, "getForkCapabilities")) {
+        return installForkCapabilitiesOnPrototype(proto);
+      }
+    }
+    return false;
+  };
+
+  const clearForkFallbackTimer = () => {
+    if (!forkFallbackTimer) return;
+    window.clearTimeout(forkFallbackTimer);
+    forkFallbackTimer = 0;
+  };
+
+  const scheduleForkFallbackPoll = () => {
+    if (disposed || forkFallbackTimer || forkFallbackPolls >= maxForkFallbackPolls) return;
+    forkFallbackTimer = window.setTimeout(() => {
+      forkFallbackTimer = 0;
+      if (disposed) return;
+      forkFallbackPolls += 1;
+      ensureForkReadinessFallback();
+    }, forkFallbackPollMs);
+  };
+
+  const ensureForkReadinessFallback = ({ resetPollBudget = false } = {}) => {
+    if (disposed) return false;
+    if (resetPollBudget && !forkFallbackTimer) forkFallbackPolls = 0;
+    let seededAny = false;
+    let hasPendingAnonymous = false;
+    for (const client of statsigClients()) {
+      if (seedOfflineAnonymousStatsigClient(client)) {
+        seededAny = true;
+      } else if (isPendingAnonymousStatsigClient(client)) {
+        hasPendingAnonymous = true;
+      }
+    }
+    if (hasPendingAnonymous) {
+      scheduleForkFallbackPoll();
+    } else {
+      clearForkFallbackTimer();
+      forkFallbackPolls = 0;
+    }
+    const patchedCapabilities = installLocalForkCapabilitiesFallback();
+    return seededAny || patchedCapabilities;
+  };
+
   const notifyStatsigClients = () => {
     let notified = 0;
     for (const client of statsigClients()) {
@@ -1209,6 +1388,7 @@
 
   const applyModelWhitelist = () => {
     if (disposed) return false;
+    ensureForkReadinessFallback();
     // The display gate does not read the model catalog, so it is installed
     // even when the catalog request has not returned.
     applyGptPrefixGate();
@@ -1585,9 +1765,15 @@
     if (element.matches?.(subagentModelLabelSelector)) {
       observeSubagentModelLabel(element);
     }
-    for (const label of element.querySelectorAll?.(subagentModelLabelSelector) || []) {
-      if (probe && !probe.admit(label)) break;
-      observeSubagentModelLabel(label);
+    const roots = element.closest?.("[class*='h-toolbar-pane']")
+      ? [element]
+      : Array.from(element.querySelectorAll?.("[class*='h-toolbar-pane']") || []);
+    for (const root of roots) {
+      if (!allowTurn && root.closest?.("[data-turn-key]")) continue;
+      for (const label of root.querySelectorAll?.(subagentModelLabelSelector) || []) {
+        if (probe && !probe.admit(label)) break;
+        observeSubagentModelLabel(label);
+      }
     }
   };
 
@@ -1656,8 +1842,8 @@
     return { hasContext, menuContext, menus, nodes, visits };
   };
 
-  const probeAddedMutationNodes = (nodes, target) => {
-    if (!turnAncestor(target)) return null;
+  const probeAddedMutationNodes = (nodes, target, targetTurn = turnAncestor(target)) => {
+    if (!targetTurn) return null;
     const roots = Array.from(nodes || [])
       .filter((node) => node?.nodeType !== 3)
       .map(groupedMenuElement)
@@ -1678,9 +1864,9 @@
 
   const turnAncestor = (target) => target?.closest?.("[data-turn-key]") || null;
 
-  const isStreamingMutationInsideTurn = (mutation, target) => (
+  const isStreamingMutationInsideTurn = (mutation, target, targetTurn = turnAncestor(target)) => (
     mutation.type === "childList"
-    && Boolean(turnAncestor(target))
+    && Boolean(targetTurn)
   );
 
   const stopGroupedMenuTextObserver = (container) => {
@@ -1744,8 +1930,9 @@
     let relevant = false;
     for (const mutation of mutations) {
       const target = groupedMenuElement(mutation.target);
-      const turnProbe = probeAddedMutationNodes(mutation.addedNodes || [], mutation.target);
-      if (isStreamingMutationInsideTurn(mutation, target)) {
+      const targetTurn = turnAncestor(target);
+      const turnProbe = probeAddedMutationNodes(mutation.addedNodes || [], mutation.target, targetTurn);
+      if (isStreamingMutationInsideTurn(mutation, target, targetTurn)) {
         if (turnProbe?.hasContext) {
           relevant = true;
           if (!nativeSelectionOnly && turnProbe.menuContext) {
@@ -1829,7 +2016,7 @@
     window.__codeySharedRuntime.reactInternalKeys(element, { includeContainer: true });
 
   const reactModelStateNodes = (forceScan = false) => {
-    const nodes = [
+    const primary = [
       document.body,
       document.documentElement,
       document.getElementById?.("root"),
@@ -1837,10 +2024,17 @@
         "[role='menu'], [role='dialog'], [role='listbox'], [data-radix-popper-content-wrapper]",
       ) || []),
     ].filter(Boolean);
+    const seen = new Set(primary);
+    const primaryCount = seen.size;
     if (forceScan) {
-      nodes.push(...Array.from(document.querySelectorAll?.("*") || []).slice(0, maxReactScanNodes));
+      const allNodes = document.querySelectorAll?.("*") || [];
+      const limit = Math.min(allNodes.length || 0, maxReactScanNodes);
+      for (let index = 0; index < limit; index += 1) {
+        const node = allNodes[index];
+        if (node) seen.add(node);
+      }
     }
-    return nodes.filter((node, index, all) => all.indexOf(node) === index);
+    return { nodes: [...seen], primaryCount };
   };
 
   const scanReactObjectGraph = (forceScan = false, discover = false) =>
@@ -1857,6 +2051,7 @@
       };
     }
     const queryClients = new Set(knownModelQueryClients);
+    const initialClientCount = queryClients.size;
     const visited = new WeakSet();
     let visitedCount = 0;
 
@@ -1921,7 +2116,12 @@
       }
     };
 
-    for (const node of reactModelStateNodes(forceScan)) {
+    const { nodes, primaryCount } = reactModelStateNodes(forceScan);
+    for (let index = 0; index < nodes.length; index += 1) {
+      if (index >= primaryCount && queryClients.size > initialClientCount) {
+        break;
+      }
+      const node = nodes[index];
       for (const key of reactFiberKeys(node)) {
         let root;
         try {
@@ -3090,6 +3290,7 @@
     );
     if (event?.type === "keydown"
       && (!pickerInteraction || !["Enter", " ", "ArrowDown"].includes(event.key))) return;
+    ensureForkReadinessFallback({ resetPollBudget: true });
     installGroupedModelMenuObserver();
     if (nativeSelectionOnly && !pickerInteraction) return;
     if (!nativeSelectionOnly) {
@@ -3105,6 +3306,7 @@
     scheduleInteractionModelDelivery(pickerInteraction);
   };
   const handleFocus = () => {
+    ensureForkReadinessFallback({ resetPollBudget: true });
     void loadModelCatalog();
   };
   interactionEvents.forEach((eventName) => {
@@ -3154,6 +3356,10 @@
     }),
     dispose() {
       disposed = true;
+      clearForkFallbackTimer();
+      forkFallbackPolls = 0;
+      forkCapabilitiesRestorers.reverse().forEach((restore) => restore());
+      forkCapabilitiesRestorers.length = 0;
       disposeGptPrefixGate();
       excludedNativeDescriptors.clear();
       window.clearTimeout(refreshTimer);
@@ -3199,5 +3405,6 @@
   };
   window.__codeyModelWhitelistPatch = api;
   installGptPrefixGate();
+  ensureForkReadinessFallback();
   void loadModelCatalog();
 })();

@@ -9,7 +9,7 @@ const MODEL_CONFIG_ID = "107580212";
 async function loadPatch(
   catalogResponse,
   clients,
-  { bridgeReady = true, queryClient = null, reactModelState = null, documentBody = null, storage = null, nativeSelectionOnly = false } = {},
+  { bridgeReady = true, queryClient = null, reactModelState = null, documentBody = null, storage = null, nativeSelectionOnly = false, beforeInstall = null } = {},
 ) {
   const [bridgeSource, source] = await Promise.all([
     readFile(new URL("../public/codey-bridge.js", import.meta.url), "utf8"),
@@ -145,6 +145,7 @@ async function loadPatch(
       set: (children) => { trackedBodyChildren = children; },
     });
   }
+  beforeInstall?.({ window, document });
   Function("window", "document", "globalThis", "console", source)(
     window,
     document,
@@ -794,7 +795,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "63");
+  assert.equal(patch.version, "64");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],
@@ -5107,4 +5108,212 @@ test("an empty model-array query receives newly added route models", async () =>
   assert.equal(runtime.patch.delivery().queryEntries, 1);
   assert.equal(runtime.patch.delivery().pendingQueryEntries, 0);
   runtime.patch.dispose();
+});
+
+function offlineStatsigClient({
+  loadingStatus = "Ready",
+  values = null,
+  user = { userID: "user-1", customIDs: { stableID: "stable-1" } },
+} = {}) {
+  let currentValues = values;
+  const writes = [];
+  const memoCache = new Map();
+  return {
+    loadingStatus,
+    _memoCache: memoCache,
+    writes,
+    getContext() {
+      return { values: currentValues, user };
+    },
+    dataAdapter: {
+      setData(raw) {
+        writes.push(raw);
+      },
+    },
+    updateUserSync() {
+      currentValues = JSON.parse(writes.at(-1) ?? "null");
+      memoCache.clear();
+    },
+    getDynamicConfig(name) {
+      if (name !== MODEL_CONFIG_ID) return { value: {} };
+      return currentValues?.dynamic_configs?.[name] ?? { value: {} };
+    },
+    $emt() {},
+  };
+}
+
+function readNativePermissionRefresh(client) {
+  const values = client.getContext().values;
+  if (client.loadingStatus !== "Ready" || values == null) return null;
+  return values.feature_gates?.permissionRefresh?.value ?? false;
+}
+
+test("anonymous offline Ready Statsig clients receive empty gate values once without breaking model config", async () => {
+  const catalog = {
+    status: "ok",
+    models: ["third/model"],
+    default_model: "third/model",
+    model_metadata: [
+      { model: "third/model", provider_id: "codey_router", route_provider_id: "third", source_model: "model" },
+    ],
+  };
+  for (const nativeSelectionOnly of [false, true]) {
+    const client = offlineStatsigClient();
+    assert.equal(readNativePermissionRefresh(client), null);
+    const runtime = await loadPatch(
+      { ...catalog, native_selection_only: nativeSelectionOnly },
+      [client, client],
+      { nativeSelectionOnly },
+    );
+    assert.equal(client.writes.length, 1);
+    const seeded = JSON.parse(client.writes[0]);
+    assert.deepEqual(seeded.feature_gates, {});
+    assert.equal(seeded.has_updates, true);
+    assert.equal(seeded.codey_offline_statsig, true);
+    assert.deepEqual(seeded.user, { userID: "user-1", customIDs: { stableID: "stable-1" } });
+    assert.equal(readNativePermissionRefresh(client), false);
+    assert.deepEqual(
+      client.getDynamicConfig(MODEL_CONFIG_ID).value.available_models,
+      ["third/model"],
+    );
+    runtime.dispatchDocumentEvent("click", { target: {} });
+    await runtime.patch.refresh();
+    assert.equal(client.writes.length, 1);
+    runtime.patch.dispose();
+  }
+});
+
+test("Statsig offline fork fallback skips real data or logged-in accounts and polls until Ready", async () => {
+  const catalog = { status: "ok", models: ["third/model"], default_model: "third/model" };
+
+  for (const [label, client] of [
+    ["real values", offlineStatsigClient({ values: { feature_gates: { existing: { value: true } } } })],
+    ["logged-in account", offlineStatsigClient({ user: { userID: "u", customIDs: { account_id: "acct-1" } }, values: null })],
+  ]) {
+    const runtime = await loadPatch(catalog, [client]);
+    await runtime.runPendingTimers();
+    assert.equal(client.writes.length, 0, label);
+    await assert.rejects(() => runtime.runTimer(1500), /1500ms timer should be pending/, label);
+    runtime.patch.dispose();
+  }
+
+  const delayedClient = offlineStatsigClient({ loadingStatus: "Loading", values: null });
+  const delayed = await loadPatch(catalog, [delayedClient]);
+  assert.equal(delayedClient.writes.length, 0);
+  delayedClient.loadingStatus = "Ready";
+  await delayed.runTimer(1500);
+  assert.equal(delayedClient.writes.length, 1);
+  assert.equal(readNativePermissionRefresh(delayedClient), false);
+  await assert.rejects(() => delayed.runTimer(1500), /1500ms timer should be pending/);
+  delayed.patch.dispose();
+
+  const disposedWhileLoading = offlineStatsigClient({ loadingStatus: "Loading", values: null });
+  const pending = await loadPatch(catalog, [disposedWhileLoading]);
+  pending.patch.dispose();
+  await assert.rejects(() => pending.runTimer(1500), /1500ms timer should be pending/);
+  assert.equal(disposedWhileLoading.writes.length, 0);
+});
+
+test("local AppServerManager.getForkCapabilities falls back placement gates when anonymous and restores on dispose", async () => {
+  class Settings {
+    #gates;
+    constructor(gates) { this.#gates = gates; }
+    read(key) { return this.#gates[key]; }
+  }
+  let currentAccountId = null;
+  let currentGates = { sidebarCustomSectionsEnabled: false, useAppServerCustomSections: undefined };
+  class AppServerManager {
+    #secret = "private";
+    hostId = "local";
+    disposed = false;
+    runtime = { accountId: () => currentAccountId };
+    get settings() { return new Settings(currentGates); }
+    secret() { return this.#secret; }
+    getForkCapabilities() {
+      const readSetting = this.settings.read.bind(this.settings);
+      const isActive = () => !this.disposed;
+      return {
+        hostId: this.hostId,
+        isActive,
+        readPlacement() {
+          const sections = readSetting("sidebarCustomSectionsEnabled");
+          const appServer = readSetting("useAppServerCustomSections");
+          if (sections === undefined || appServer === undefined) {
+            return { status: "not-ready", reason: "execution-config-loading" };
+          }
+          return { status: "ready", placement: { sections, appServer } };
+        },
+      };
+    }
+  }
+  const originalGetForkCapabilities = AppServerManager.prototype.getForkCapabilities;
+  const manager = new AppServerManager();
+  const runtime = await loadPatch({ status: "ok", models: ["third/model"], default_model: "third/model" }, [], {
+    beforeInstall({ window }) {
+      window.__codeyAppServerManagers = new Map([["local", manager]]);
+    },
+  });
+
+  const anonymousCaps = manager.getForkCapabilities();
+  assert.deepEqual(anonymousCaps.readPlacement(), {
+    status: "ready",
+    placement: { sections: false, appServer: false },
+  });
+  assert.equal(anonymousCaps.hostId, "local");
+  assert.equal(anonymousCaps.isActive(), true);
+  assert.equal(manager.secret(), "private");
+  manager.disposed = true;
+  assert.equal(anonymousCaps.isActive(), false);
+  manager.disposed = false;
+
+  currentGates = { sidebarCustomSectionsEnabled: true, useAppServerCustomSections: true };
+  assert.deepEqual(manager.getForkCapabilities().readPlacement(), {
+    status: "ready",
+    placement: { sections: true, appServer: true },
+  });
+
+  currentGates = { sidebarCustomSectionsEnabled: false, useAppServerCustomSections: undefined };
+  currentAccountId = "acct-1";
+  assert.deepEqual(manager.getForkCapabilities().readPlacement(), {
+    status: "not-ready",
+    reason: "execution-config-loading",
+  });
+  currentAccountId = null;
+
+  const patchedMethod = AppServerManager.prototype.getForkCapabilities;
+  assert.notEqual(patchedMethod, originalGetForkCapabilities);
+  const reloadedPatch = await runtime.reload();
+  assert.equal(AppServerManager.prototype.getForkCapabilities, patchedMethod);
+
+  reloadedPatch.dispose();
+  assert.equal(AppServerManager.prototype.getForkCapabilities, originalGetForkCapabilities);
+  assert.deepEqual(manager.getForkCapabilities().readPlacement(), {
+    status: "not-ready",
+    reason: "execution-config-loading",
+  });
+});
+
+test("seeding an offline anonymous Statsig client keeps the GPT prefix gate override", async () => {
+  const catalog = { status: "ok", models: ["third/model"], default_model: "third/model" };
+  const gateClient = (loadingStatus) => {
+    const client = offlineStatsigClient({ loadingStatus, values: null });
+    client.getFeatureGate = () => ({ name: "3849065407", value: false, details: { reason: "Default" } });
+    return client;
+  };
+  const gateValue = (client) => client.getFeatureGate("3849065407").value;
+
+  const ready = gateClient("Ready");
+  const readyRuntime = await loadPatch(catalog, [ready]);
+  assert.equal(ready.writes.length, 1);
+  assert.equal(gateValue(ready), true);
+  readyRuntime.patch.dispose();
+
+  const delayed = gateClient("Loading");
+  const delayedRuntime = await loadPatch(catalog, [delayed]);
+  assert.equal(gateValue(delayed), true);
+  delayed.loadingStatus = "Ready";
+  await delayedRuntime.runTimer(1500);
+  assert.equal(delayed.writes.length, 1);
+  assert.equal(gateValue(delayed), true);
+  delayedRuntime.patch.dispose();
 });
