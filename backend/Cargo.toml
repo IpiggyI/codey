@@ -72,16 +72,16 @@ winres = "0.1"
 [target.'cfg(windows)'.dependencies]
 rfd = { version = "0.15", default-features = false, features = ["common-controls-v6"] }
 windows = { version = "0.58", default-features = false, features = [
+  "Wdk_System_Threading",
   "Win32_Foundation",
-  "Win32_Globalization",
   "Win32_Security",
   "Win32_Graphics_Gdi",
   "Win32_Storage_FileSystem",
   "Win32_Storage_Packaging_Appx",
-  "Win32_System_LibraryLoader",
   "Win32_System_JobObjects",
   "Win32_System_Diagnostics_ToolHelp",
   "Win32_System_Com",
+  "Win32_System_Registry",
   "Win32_System_RemoteDesktop",
   "Win32_System_SystemServices",
   "Win32_System_Threading",

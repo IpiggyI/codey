@@ -2,18 +2,18 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const normalizeLineEndings = (source) => source.replace(/\r\n/g, "\n");
+import { normalizeLineEndings, readSource } from "./helpers/read-source.mjs";
 
 // Static contracts keep Windows-only wiring visible on non-Windows CI jobs. Runtime
 // behavior remains covered by Rust tests and the dedicated Windows build job.
-test("Windows source contract: Codey uses the GUI subsystem", async () => {
-  const [main, library, manifest] = await Promise.all([
-    readFile(new URL("../backend/src/main.rs", import.meta.url), "utf8")
-      .then(normalizeLineEndings),
-    readFile(new URL("../backend/src/lib.rs", import.meta.url), "utf8")
-      .then(normalizeLineEndings),
-    readFile(new URL("../backend/Cargo.toml", import.meta.url), "utf8")
-      .then(normalizeLineEndings),
+test("Windows source contract: Codey uses the GUI subsystem and non-admin execution", async () => {
+  const [main, library, manifest, buildScript, nsisScript, windowsSession] = await Promise.all([
+    readSource("backend/src/main.rs"),
+    readSource("backend/src/lib.rs"),
+    readSource("backend/Cargo.toml"),
+    readSource("backend/build.rs"),
+    readSource("scripts/installer/windows/Codey.nsi"),
+    readSource("backend/src/windows_session.rs"),
   ]);
 
   assert.match(
@@ -21,8 +21,28 @@ test("Windows source contract: Codey uses the GUI subsystem", async () => {
     /^#!\[cfg_attr\(target_os = "windows", windows_subsystem = "windows"\)\]/,
   );
   assert.doesNotMatch(library, /hide_exclusive_windows_console|ShowWindow|GetConsoleWindow/);
+  assert.doesNotMatch(main, /AllocConsole|AttachConsole|ShowWindow|GetConsoleWindow/);
+  assert.doesNotMatch(library, /AllocConsole|AttachConsole/);
   assert.doesNotMatch(manifest, /Win32_System_Console/);
   assert.match(manifest, /Win32_UI_WindowsAndMessaging/);
+  assert.match(manifest, /Win32_System_Registry/);
+  assert.match(
+    buildScript,
+    /<requestedExecutionLevel\s+level="asInvoker"\s+uiAccess="false"\s*\/>/,
+  );
+  assert.doesNotMatch(buildScript, /requireAdministrator|highestAvailable/);
+  assert.match(nsisScript, /RequestExecutionLevel user/);
+  assert.match(
+    nsisScript,
+    /DeleteRegValue HKCU "\$\{APPCOMPAT_LAYERS_KEY\}" "\$INSTDIR\\Codey\.exe"/,
+  );
+  assert.match(
+    library,
+    /windows_session::clear_admin_launch_settings\(\);[\s\S]*?windows_session::relaunch_deelevated_if_needed\(\)[\s\S]*?desktop_instance::claim\(\)/,
+  );
+  assert.match(windowsSession, /strip_runasadmin_layer/);
+  assert.match(windowsSession, /clear_shortcut_runas_flag/);
+  assert.match(windowsSession, /CreateProcessWithTokenW/);
 });
 
 test("Windows source contract: fatal startup failures remain visible", async () => {
@@ -125,8 +145,9 @@ test("Windows source contract: background helpers request no-window execution", 
   }
 });
 
-test("Windows source contract: packaged Codex exit uses an OS process wait", async () => {
-  const [launcherProcess, coreLauncher] = await Promise.all([
+test("Windows source contract: Codex exit follows the desktop process with an OS wait fallback", async () => {
+  const [launcher, launcherProcess, coreLauncher] = await Promise.all([
+    readSource("backend/src/launcher.rs"),
     readFile(new URL("../backend/src/launcher/process.rs", import.meta.url), "utf8")
       .then(normalizeLineEndings),
     readFile(
@@ -142,6 +163,9 @@ test("Windows source contract: packaged Codex exit uses an OS process wait", asy
     launcherProcess.indexOf("struct SpawnedCodex"),
   );
 
+  assert.match(watcher, /if let Some\(mut process\) = startup_process[\s\S]*?process\.refresh\(\)/);
+  assert.match(launcher, /spawn_codex_exit_watcher\(child, process_id, startup_process, codex_exited\)/);
+  assert.match(launcher, /stop_codex_processes\(\s*&self\.codex_app_path,\s*#\[cfg\(windows\)\]\s*self\.current_process_id\(\)/);
   assert.match(
     watcher,
     /codey_runtime_core::launcher::wait_for_windows_process_exit\(process_id\)/,
