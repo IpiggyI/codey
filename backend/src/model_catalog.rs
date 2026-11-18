@@ -1152,11 +1152,14 @@ pub(crate) fn prepare_cached_catalog_for_native_web_search(
     native_web_search_models: &[String],
     context_1m_models: &[String],
 ) -> Result<bool> {
-    if !is_available(catalog_dir) {
+    let Some(mut catalog) = read_derived_catalog(catalog_dir) else {
+        return Ok(false);
+    };
+    let mut models = catalog_models_from_value(&catalog);
+    if !runtime_compatible_models(&models) {
         return Ok(false);
     }
 
-    let mut models = read_runtime_catalog_models(catalog_dir)?;
     let allowed_model_keys = native_web_search_models
         .iter()
         .map(|model| model_id::key(model))
@@ -1175,21 +1178,20 @@ pub(crate) fn prepare_cached_catalog_for_native_web_search(
         configure_1m_context_window(model, &context_1m_model_keys);
         changed |= *model != previous;
     }
-    if changed {
-        let mut catalog = read_derived_catalog(catalog_dir).unwrap_or_else(|| json!({}));
-        catalog["models"] = json!(models);
-        write_derived_catalog(catalog_dir, &catalog)?;
+    if !changed {
+        return Ok(true);
     }
 
-    let written_models = read_runtime_catalog_models(catalog_dir)?;
-    let mut safely_gated_models = written_models.clone();
+    let mut safely_gated_models = models.clone();
     for model in &mut safely_gated_models {
         gate_cached_native_web_search(model, &allowed_model_keys);
         configure_1m_context_window(model, &context_1m_model_keys);
     }
-    if safely_gated_models != written_models {
+    if safely_gated_models != models {
         bail!("复用的 Codey 模型目录仍包含与当前线路不匹配的原生网页搜索能力");
     }
+    catalog["models"] = Value::Array(models);
+    write_derived_catalog(catalog_dir, &catalog)?;
     Ok(true)
 }
 
@@ -3885,6 +3887,7 @@ mod tests {
         .unwrap();
         let path = home.path().join(DERIVED_CATALOG_FILE_NAME);
         let mut stale: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        stale["codey_runtime_source"] = json!({"version": "test"});
         assert_eq!(stale["models"][0]["supports_search_tool"], true);
         assert!(stale["models"][0]["web_search_tool_type"].is_string());
         stale["models"][0]
@@ -3898,6 +3901,10 @@ mod tests {
             "a valid cached catalog should remain usable after stale capabilities are removed"
         );
         let sanitized: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            sanitized["codey_runtime_source"],
+            stale["codey_runtime_source"]
+        );
         assert!(sanitized["models"][0].get("supports_search_tool").is_none());
         assert!(sanitized["models"][0].get("web_search_tool_type").is_none());
         let sanitized_bytes = fs::read(&path).unwrap();

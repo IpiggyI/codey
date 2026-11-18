@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::fs_util::{atomic_write_preserving_permissions as atomic_write, timestamp_millis};
+use crate::message_delete::rollout_thread_id_from_filename;
 use crate::sqlite_util::table_columns;
 
 const SESSION_DIRS: [&str; 2] = ["sessions", "archived_sessions"];
@@ -339,22 +340,6 @@ fn collect_rollout_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn rollout_thread_id_from_filename(name: &str) -> Option<String> {
-    let stem = name.strip_prefix("rollout-")?.strip_suffix(".jsonl")?;
-    if stem.len() < 36 {
-        return None;
-    }
-    let candidate = &stem[stem.len() - 36..];
-    let valid = candidate
-        .chars()
-        .enumerate()
-        .all(|(index, ch)| match index {
-            8 | 13 | 18 | 23 => ch == '-',
-            _ => ch.is_ascii_hexdigit(),
-        });
-    valid.then(|| candidate.to_string())
 }
 
 fn sqlite_paths(home: &Path) -> Result<Vec<PathBuf>> {

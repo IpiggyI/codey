@@ -2,10 +2,15 @@ use std::path::Path;
 
 use anyhow::{Result, anyhow};
 use codey_runtime_core::codex_sqlite::codex_session_db_paths_from_home;
-use codey_runtime_core::models::{DeleteResult, DeleteStatus, SessionRef};
-use codey_runtime_data::delete_local_from_paths;
+use models::{DeleteResult, DeleteStatus, SessionRef};
+use storage::delete_local_from_paths;
 
 use crate::session_index_cleanup;
+
+mod models;
+mod storage;
+#[cfg(test)]
+mod storage_adapter;
 
 pub fn delete_session(home: &Path, session_id: &str, title: &str) -> Result<DeleteResult> {
     let session_id = session_id.trim();

@@ -1,5 +1,5 @@
-use codey_runtime_core::models::{DeleteStatus, SessionRef};
-use codey_runtime_data::delete_local_from_paths;
+use super::models::{DeleteStatus, SessionRef};
+use super::storage::delete_local_from_paths;
 use rusqlite::Connection;
 use std::fs;
 use std::path::Path;

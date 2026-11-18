@@ -1,4 +1,4 @@
-use codey_runtime_core::models::{DeleteResult, DeleteStatus, SessionRef};
+use super::models::{DeleteResult, DeleteStatus, SessionRef};
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OptionalExtension, ToSql};
 use serde_json::{Map, Value, json};
