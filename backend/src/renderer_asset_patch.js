@@ -28,6 +28,7 @@
   const maxRendererPatchFingerprints = 64;
   const rendererPatchFailuresByFingerprint = new Map();
   let activeRendererPatchFailures = null;
+  let activeRendererPatchSource = null;
   // 指纹只作补丁结果缓存键，不需要加密强度；原主进程版用 sha256，
   // 页面里用双路 32 位 FNV-1a，避免逐字符 BigInt 运算。
   const rendererPatchFingerprint = (source) => {
@@ -45,8 +46,7 @@
       return null;
     }
   };
-  const rendererPatchFailuresForSource = (source) => {
-    const fingerprint = rendererPatchFingerprint(source);
+  const rendererPatchFailuresForFingerprint = (fingerprint, create) => {
     if (fingerprint == null) return null;
     const existing = rendererPatchFailuresByFingerprint.get(fingerprint);
     if (existing) {
@@ -55,6 +55,7 @@
       rendererPatchFailuresByFingerprint.set(fingerprint, existing);
       return existing;
     }
+    if (!create) return null;
     const failures = new Set();
     rendererPatchFailuresByFingerprint.set(fingerprint, failures);
     while (rendererPatchFailuresByFingerprint.size > maxRendererPatchFingerprints) {
@@ -124,6 +125,11 @@
     return excerpts;
   };
   const recordIncompatibleRendererGate = (source, name, matchCount) => {
+    if (activeRendererPatchFailures === null && activeRendererPatchSource !== null) {
+      activeRendererPatchFailures = rendererPatchFailuresForFingerprint(
+        rendererPatchFingerprint(activeRendererPatchSource), true,
+      );
+    }
     activeRendererPatchFailures?.add(name);
     const message =
       `Codey skipped an incompatible Codex renderer patch: ${name} gate matched ${matchCount} times`;
@@ -159,63 +165,11 @@
     }
     return patched;
   };
-  const replaceNearestRendererGateBeforeAnchor = (
-    source,
-    pattern,
-    replacement,
-    name,
-    anchor,
-    maximumDistance,
-  ) => {
-    if (activeRendererPatchFailures?.has(name)) return source;
-    const anchorIndexes = [];
-    for (
-      let index = source.indexOf(anchor);
-      index >= 0;
-      index = source.indexOf(anchor, index + anchor.length)
-    ) anchorIndexes.push(index);
-    if (anchorIndexes.length !== 1) {
-      return recordIncompatibleRendererGate(source, name, anchorIndexes.length);
-    }
-
-    const anchorIndex = anchorIndexes[0];
-    const scopeStart = Math.max(0, anchorIndex - maximumDistance);
-    const scope = source.slice(scopeStart, anchorIndex + anchor.length);
-    const gates = Array.isArray(pattern) ? pattern : [{ pattern, replacement }];
-    const candidates = [];
-    for (const gate of gates) {
-      scope.replace(gate.pattern, (...args) => {
-        candidates.push({ args, gate, offset: args.at(-2) });
-        return args[0];
-      });
-    }
-    if (candidates.length === 0) {
-      return recordIncompatibleRendererGate(source, name, 0);
-    }
-
-    const nearestOffset = Math.max(
-      ...candidates.map((candidate) => candidate.offset),
-    );
-    const nearestCandidates = candidates.filter(
-      (candidate) => candidate.offset === nearestOffset,
-    );
-    if (nearestCandidates.length !== 1) {
-      return recordIncompatibleRendererGate(
-        source,
-        name,
-        nearestCandidates.length,
-      );
-    }
-
-    const [{ args, gate, offset }] = nearestCandidates;
-    const effectiveReplacement = gate.replacement ?? replacement;
-    const replaced = typeof effectiveReplacement === "function"
-      ? effectiveReplacement(...args)
-      : effectiveReplacement;
-    const absoluteOffset = scopeStart + offset;
-    return source.slice(0, absoluteOffset) +
-      replaced +
-      source.slice(absoluteOffset + args[0].length);
+  const replaceMarkedRendererGate = (source, pattern, replacement, name) => {
+    const marker = `/*codey:${name}*/`;
+    if (source.includes(marker)) return source;
+    const patched = replaceUniqueRendererGate(source, pattern, replacement, name);
+    return patched === source ? source : `${patched}\n${marker}`;
   };
   const rendererHasNativeCustomProviderModelAccess = (source) =>
     /function\s+[$A-Z_a-z][$\w]*\(\{[^}]*isCustomModelProvider\s*:\s*([$A-Z_a-z][$\w]*)[^}]*model\s*:\s*([$A-Z_a-z][$\w]*)[^}]*useHiddenModels\s*:\s*([$A-Z_a-z][$\w]*)[^}]*\}\)\s*\{\s*return[\s\S]{0,512}?\3\s*&&\s*!\s*\1\s*&&[\s\S]{0,256}?\?\s*[$A-Z_a-z][$\w]*\.has\(\s*\2\.model\s*\)\s*:\s*!\s*\2\.hidden\s*\)*\s*\}/.test(
@@ -344,7 +298,18 @@
     {"label": "app state heartbeat snapshot", "alternatives": [["electron-app-state-snapshot-request"]]},
     {"label": "interaction CPU sampling", "alternatives": [["activeInteractions=new Map", "beginCpuSampling"]]},
     {"label": "interaction heartbeat", "alternatives": [["activeInteractions=new Map", "beginCpuSampling"]]},
-    {"label": "stylesheet open state", "alternatives": [[":has([data-state=open])"], [":has(:is(button[data-state=open]))"], [":has([aria-expanded=true],[data-state=open])"]]}
+    {"label": "syntax highlight worker pool", "alternatives": [["totalASTLRUCacheSize:", "poolSize:", "workerFactory:"]]},
+    {"label": "orbit character preload iframe", "alternatives": [["orbit-character-preloaded", "allow-same-origin"]]},
+    {"label": "startup secondary route prefetch", "alternatives": [["\"general-settings\",\"appearance\",\"keyboard-shortcuts\""]]},
+    {"label": "sentry loaf observer", "alternatives": [["PerformanceObserver.supportedEntryTypes.includes(\"long-animation-frame\")", "auto.ui.browser.metrics"]]},
+    {"label": "interaction loaf observers", "alternatives": [["ensureObserver(\"long-animation-frame\")", "ensureObserver(\"longtask\")"]]},
+    {"label": "codex pages pending observation sampler", "alternatives": [["_pending_observations", "pending_age_ms", "setInterval("]]},
+    {"label": "statsig post-login bootstrap timeout", "alternatives": [["Reached the post-login Statsig bootstrap deadline", "Timed out while fetching post-login Statsig bootstrap"]]},
+    {"label": "statsig fallback identity non-blocking", "alternatives": [["CodexStatsigProvider.async.identity"]]},
+    {"label": "statsig async client init cap", "alternatives": [["useStatsigInternalClientFactoryAsync=function(", ".initializeAsync().catch("]]},
+    {"label": "personal checkout webview prewarm", "alternatives": [["checkout-webview-presentation-changed", "isPrewarm:"]]},
+    {"label": "personal checkout prewarm element", "alternatives": [["checkout-webview-presentation-changed", "isPrewarm:"]]},
+    {"label": "stylesheet open state", "alternatives": [[":has([data-state=open])"], [":has(>[data-state=open])"], [":has(button[data-state=open])"], [":has(:is(button[data-state=open]))"], [":has([aria-expanded=true],[data-state=open])"]]}
   ]/*end-codey-renderer-patch-items*/;
   const rendererPatchAnchors = /*codey-renderer-patch-anchors*/[
     "inactiveThreadUnsubscriber.clearConversationStreamOwnership",
@@ -368,6 +333,18 @@
     "modelPickerTriggerConfig:",
     "Failed to read service tier for request",
     "maybe_resume_owner_discovery_failed",
+    "totalASTLRUCacheSize:",
+    "orbit-character-preloaded",
+    "\"general-settings\",\"appearance\",\"keyboard-shortcuts\"",
+    "PerformanceObserver.supportedEntryTypes.includes(\"long-animation-frame\")",
+    "ensureObserver(\"long-animation-frame\")",
+    "_pending_observations",
+    "Reached the post-login Statsig bootstrap deadline",
+    "CodexStatsigProvider.async.identity",
+    "useStatsigInternalClientFactoryAsync=function(",
+    "checkout-webview-presentation-changed",
+    ":has(>[data-state=open])",
+    ":has(button[data-state=open])",
     ":has([data-state=open])",
     ":has(:is(button[data-state=open]))",
     ":has([aria-expanded=true],[data-state=open])"
@@ -434,36 +411,45 @@
       && source.includes("mcp_request_enqueued")
       && /this\.dispatchMessage\?\.\([`"]mcp-request[`"]/.test(source)
     ) {
-      // 当前 Codex 可直接通过 AppServerRequestClient 创建会话。
-      // 入队时的可选改写只供模型目录跟踪使用，不能改变用户的请求目的地。
-      patched = replaceUniqueRendererGate(
-        patched,
-        /(enqueueRequest\(([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*)=[$A-Z_a-z][$\w]*=>\{this\.dispatchMessage\?\.\([`"]mcp-request[`"],\{request:[$A-Z_a-z][$\w]*,hostId:this\.hostId,[\s\S]{0,1500}?widget:\4\?\.widget\}\)\},[$A-Z_a-z][$\w]*=null\)\{)let /g,
-        (_match, prefix, methodName, paramsName) =>
-          `${prefix}let __codeyRoute=globalThis.__codeyModelWhitelistPatch?.rewriteOutgoingMessage?.({type:\`mcp-request\`,request:{method:${methodName},params:${paramsName}}});if(__codeyRoute?.request){${methodName}=__codeyRoute.request.method??${methodName},${paramsName}=__codeyRoute.request.params??${paramsName}}let `,
-        "app server request route preflight",
-      );
-      // 预检发生在分配请求编号之前；创建后登记实际请求以关联模型目录回复，
-      // 保留用户的 modelProvider。
-      patched = replaceUniqueRendererGate(
-        patched,
-        /(let\{request:([$A-Z_a-z][$\w]*),promise:[$A-Z_a-z][$\w]*\}=this\.createRequest\([^;]{1,256}\);)/g,
-        (_match, createRequest, requestName) =>
-          `${createRequest}globalThis.__codeyModelWhitelistPatch?.trackOutgoingMessage?.({type:\`mcp-request\`,request:${requestName}});`,
-        "app server request identity tracking",
-      );
-      // 异步结果的使用方先于诊断事件更新 React Query。
-      // 在结果解析边界改写模型目录，避免原生结果覆盖当前线路目录。
-      patched = replaceUniqueRendererGate(
-        patched,
-        /(([$A-Z_a-z][$\w]*)\.resolve\()([$A-Z_a-z][$\w]*)(\),this\.emitRequestLifecycleEvent\(\{type:[`"]completed[`"],hostId:this\.hostId,method:\2\.method)/g,
-        (_match, prefix, requestName, resultName, suffix) =>
-          `${prefix}${resultName}=globalThis.__codeyModelWhitelistPatch?.rewriteIncomingResult?.(${requestName}.method,${resultName})??${resultName}${suffix}`,
-        "app server model result rewrite",
-      );
+      if (!source.includes("let __codeyRoute=globalThis.__codeyModelWhitelistPatch")) {
+        // 当前 Codex 可直接通过 AppServerRequestClient 创建会话。
+        // 入队时的可选改写只供模型目录跟踪使用，不能改变用户的请求目的地。
+        patched = replaceUniqueRendererGate(
+          patched,
+          /(enqueueRequest\(([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*)=[$A-Z_a-z][$\w]*=>\{this\.dispatchMessage\?\.\([`"]mcp-request[`"],\{request:[$A-Z_a-z][$\w]*,hostId:this\.hostId,[\s\S]{0,1500}?widget:\4\?\.widget\}\)\},[$A-Z_a-z][$\w]*=null\)\{)let /g,
+          (_match, prefix, methodName, paramsName) =>
+            `${prefix}let __codeyRoute=globalThis.__codeyModelWhitelistPatch?.rewriteOutgoingMessage?.({type:\`mcp-request\`,request:{method:${methodName},params:${paramsName}}});if(__codeyRoute?.request){${methodName}=__codeyRoute.request.method??${methodName},${paramsName}=__codeyRoute.request.params??${paramsName}}let `,
+          "app server request route preflight",
+        );
+      }
+      if (!source.includes("globalThis.__codeyModelWhitelistPatch?.trackOutgoingMessage?.({type:`mcp-request`")) {
+        // 预检发生在分配请求编号之前；创建后登记实际请求以关联模型目录回复，
+        // 保留用户的 modelProvider。
+        patched = replaceUniqueRendererGate(
+          patched,
+          /(let\{request:([$A-Z_a-z][$\w]*),promise:[$A-Z_a-z][$\w]*\}=this\.createRequest\([^;]{1,256}\);)/g,
+          (_match, createRequest, requestName) =>
+            `${createRequest}globalThis.__codeyModelWhitelistPatch?.trackOutgoingMessage?.({type:\`mcp-request\`,request:${requestName}});`,
+          "app server request identity tracking",
+        );
+      }
+      if (!source.includes("/*codey-request-result*/")) {
+        // 异步结果的使用方先于诊断事件更新 React Query。
+        // 在结果解析边界改写模型目录，避免原生结果覆盖当前线路目录。
+        patched = replaceUniqueRendererGate(
+          patched,
+          /(([$A-Z_a-z][$\w]*)\.resolve\()([$A-Z_a-z][$\w]*)(\),this\.emitRequestLifecycleEvent\(\{type:[`"]completed[`"],hostId:this\.hostId,method:\2\.method)/g,
+          (_match, prefix, requestName, resultName, suffix) =>
+            `${prefix}/*codey-request-result*/${resultName}=globalThis.__codeyModelWhitelistPatch?.rewriteIncomingResult?.(${requestName}.method,${resultName})??${resultName}${suffix}`,
+          "app server model result rewrite",
+        );
+      }
     }
     if (
       disablePet
+      && source.includes("settings.")
+      && (source.includes("codex-avatar") || source.includes("codex-pet-assets")
+        || source.includes("avatar-mascot-button") || source.includes("use-avatar-options"))
       && /settings\.(?:(?:appearance|personalization)\.)?(?:pets|mini)(?:[."`]|$)/.test(source)
       && petRendererResourceImport.test(source)
     ) {
@@ -476,6 +462,7 @@
     }
     if (
       disablePet
+      && source.includes("electron-avatar-overlay-restore-ready")
       && /[`"]electron-avatar-overlay-restore-ready[`"]/.test(source)
       && source.includes("shouldPrewarmAvatarOverlay:")
     ) {
@@ -521,6 +508,7 @@
     if (
       source.includes("isPrewarm:")
       && /[`"]use_embedded_credit_checkout[`"]/.test(source)
+      && !source.includes("checkout-webview-presentation-changed")
       && !/&&\(!0\|\|[^;]{0,600}?[`"]use_embedded_credit_checkout[`"]/.test(source)
       && !/=!1&&(?:[$A-Z_a-z][$\w]*&&)?[$A-Z_a-z][$\w]*\?\.get\("use_embedded_credit_checkout",!1\)/.test(source)
     ) {
@@ -537,6 +525,144 @@
         }],
         null,
         "credit checkout webview prewarm",
+      );
+    }
+    if (
+      source.includes("checkout-webview-presentation-changed")
+      && source.includes("isPrewarm:")
+      && !source.includes("/*codey-personal-checkout-prewarm*/")
+    ) {
+      // Codex 26.1111 起个人版定价与额度充值共用 CheckoutPersonalWebviewHost：
+      // 仅在存在实际路由参数时启用宿主，并跳过伴随挂载的隐藏预热 webview。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /,([$A-Z_a-z][$\w]*)=null!=([$A-Z_a-z][$\w]*)\|\|[$A-Z_a-z][$\w]*\|\|[$A-Z_a-z][$\w]*;(?=return\s*[^;]{0,300}?\{chatGptOrigin:[$A-Z_a-z][$\w]*,enabled:\1,search:\2\})/g,
+        (_match, enabled, search) => `,${enabled}=/*codey-personal-checkout-prewarm*/null!=${search};`,
+        "personal checkout webview prewarm",
+      );
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(\b[$A-Z_a-z][$\w]*=)\(0,[$A-Z_a-z][$\w]*\.jsx\)\([`"]div[`"],\{[`"]aria-hidden[`"]:!0,inert:!0,className:[`"]pointer-events-none invisible fixed inset-0[`"],children:\(0,[$A-Z_a-z][$\w]*\.jsx\)\([$A-Z_a-z][$\w]*,\{isPrewarm:!0,partition:[$A-Z_a-z][$\w]*,search:[$A-Z_a-z][$\w]*\}\)\}\)/g,
+        (_match, assign) => `${assign}null`,
+        "personal checkout prewarm element",
+      );
+    }
+    if (
+      !source.includes("/*codey-pierre-pool-size*/")
+      && source.includes("totalASTLRUCacheSize:")
+      && /poolSize:(?:[2-9]\d*)/.test(source)
+    ) {
+      // 代码高亮与 diff 池默认按 4 个常驻 Web Worker 启动，缩减到 1 个减少内存与线程占用。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(\{workerFactory:[$A-Z_a-z][$\w]*,poolSize:)[2-9]\d*(,totalASTLRUCacheSize:\d+\})/g,
+        (_match, prefix, suffix) => `${prefix}/*codey-pierre-pool-size*/1${suffix}`,
+        "syntax highlight worker pool",
+      );
+    }
+    if (
+      !source.includes("/*codey-orbit-preload-skip*/")
+      && source.includes("orbit-character-preloaded")
+      && source.includes("allow-same-origin")
+    ) {
+      // Orbit 角色预热会挂载隐藏的 cross-origin-isolated iframe 拉起独立 WASM 线程，改为按需打开再加载。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /function ([$A-Z_a-z][$\w]*)\(\)\{let [$A-Z_a-z][$\w]*=\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\)\(\);if\([`"]u[`"]<typeof document\|\|null==[$A-Z_a-z][$\w]*\|\|\([$A-Z_a-z][$\w]*\.prefetch\(\),[$A-Z_a-z][$\w]*\)\)return;[\s\S]{0,1200}?[`"]orbit-character-preloaded[`"]===[$A-Z_a-z][$\w]*\.data&&[$A-Z_a-z][$\w]*\(\)\},\{signal:[$A-Z_a-z][$\w]*\.signal\}\),window\.addEventListener\([`"]pagehide[`"],[$A-Z_a-z][$\w]*,\{once:!0,signal:[$A-Z_a-z][$\w]*\.signal\}\),document\.body\.append\([$A-Z_a-z][$\w]*\)\}/g,
+        (_match, fnName) => `function ${fnName}(){/*codey-orbit-preload-skip*/}`,
+        "orbit character preload iframe",
+      );
+    }
+    if (
+      !source.includes("/*codey-startup-prefetch-skip*/")
+      && /[`"]general-settings[`"],[`"]appearance[`"],[`"]keyboard-shortcuts[`"]/.test(source)
+    ) {
+      // 启动阶段会批量预加载数十个设置页与对话框分包，改为打开对应页面时再按需拉取。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /function ([$A-Z_a-z][$\w]*)\(\)\{[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\.prefetch\(\),function\(\)\{for\(let [$A-Z_a-z][$\w]* of\([^;]{0,800}?\[[`"]general-settings[`"],[`"]appearance[`"],[`"]keyboard-shortcuts[`"]\]\)\)[\s\S]{0,2000}?\.then\([$A-Z_a-z][$\w]*\.bind\([$A-Z_a-z][$\w]*,[`"][^`"]+[`"]\)\)\.catch\(\(\)=>void 0\)\}\(\)\}/g,
+        (_match, fnName) => `function ${fnName}(){/*codey-startup-prefetch-skip*/}`,
+        "startup secondary route prefetch",
+      );
+    }
+    if (
+      !source.includes("/*codey-sentry-loaf-skip*/")
+      && source.includes("auto.ui.browser.metrics")
+      && /PerformanceObserver\.supportedEntryTypes\.includes\([`"]long-animation-frame[`"]\)/.test(source)
+    ) {
+      // 禁用 Sentry 长动画帧与长任务常驻监控，避免每次长帧在主线程分配归因跨度。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /[$A-Z_a-z][$\w]*&&[$A-Z_a-z][$\w]*\.PerformanceObserver&&PerformanceObserver\.supportedEntryTypes&&PerformanceObserver\.supportedEntryTypes\.includes\([`"]long-animation-frame[`"]\)\?new PerformanceObserver\([\s\S]{0,1200}?\)\.observe\(\{type:[`"]long-animation-frame[`"],buffered:!0\}\):[$A-Z_a-z][$\w]*&&[$A-Z_a-z][$\w]*\([`"]longtask[`"],\([\s\S]{0,600}?op:[`"]ui\.long-task[`"][^;]{0,180}?\}\}\)\}\}\)/g,
+        "(void 0/*codey-sentry-loaf-skip*/)",
+        "sentry loaf observer",
+      );
+    }
+    if (
+      !source.includes("/*codey-interaction-loaf-skip*/")
+      && /ensureObserver\([`"]long-animation-frame[`"]\)/.test(source)
+      && /ensureObserver\([`"]longtask[`"]\)/.test(source)
+    ) {
+      // 交互跟踪器每次启动都额外创建 longtask / LoAF PerformanceObserver 并缓存记录，直接返回不支持。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /ensureObserver\(([$A-Z_a-z][$\w]*)\)\{try\{if\(!this\.isSupported\(\1\)\)return!1\}catch\{return!1\}if\(null!=\([`"]longtask[`"]===\1\?this\.longTaskObserver:this\.longAnimationFrameObserver\)\)return!0;[\s\S]{0,400}?this\.longAnimationFrameObserver=[$A-Z_a-z][$\w]*,!0\}catch\{return!1\}\}/g,
+        (_match, kind) => `ensureObserver(${kind}){/*codey-interaction-loaf-skip*/return!1}`,
+        "interaction loaf observers",
+      );
+    }
+    if (
+      !source.includes("/*codey-pending-observations-sampler-skip*/")
+      && source.includes("_pending_observations")
+      && source.includes("pending_age_ms")
+    ) {
+      // 协同编辑观测跟踪器在存在未结束观测时会每 10s 轮询并绑定整组文档可见性监听，保留 ping 心跳，停用定时采样。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /1===([$A-Z_a-z][$\w]*)\.size&&\([$A-Z_a-z][$\w]*=setInterval\(\(\)=>\{for\(let [$A-Z_a-z][$\w]* of\[\.\.\.\1\]\)[$A-Z_a-z][$\w]*\.sample\(\)\},1e4\),[\s\S]{0,240}?window\.addEventListener\([`"]pagehide[`"],[$A-Z_a-z][$\w]*,!0\)\)/g,
+        "/*codey-pending-observations-sampler-skip*/0",
+        "codex pages pending observation sampler",
+      );
+    }
+    if (
+      !source.includes("/*codey-statsig-bootstrap-deadline*/")
+      && source.includes("Reached the post-login Statsig bootstrap deadline")
+      && source.includes("Timed out while fetching post-login Statsig bootstrap")
+    ) {
+      // 登录态 Statsig 启动拉取默认阻塞最多 62.5s 才渲染路由，收敛上限让弱网快速回退默认配置。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(Error\([`"]Reached the post-login Statsig bootstrap deadline[`"]\)\)\)\},)(?:[1-9]\d{4,}|[1-9]\d*e[4-9])(\);[\s\S]{0,600}?Error\([`"]Timed out while fetching post-login Statsig bootstrap[`"]\)\)\},)(?:[1-9]\d{3,}|[1-9]\d*e[4-9])(\)\})/g,
+        (_match, deadlinePrefix, attemptPrefix, suffix) =>
+          `${deadlinePrefix}/*codey-statsig-bootstrap-deadline*/5e3${attemptPrefix}/*codey-statsig-bootstrap-attempt*/4500${suffix}`,
+        "statsig post-login bootstrap timeout",
+      );
+    }
+    if (
+      !source.includes("/*codey-statsig-identity-nonblocking*/")
+      && source.includes("CodexStatsigProvider.async.identity")
+    ) {
+      // 登录态 bootstrap 失败回退时只等本地令牌解析，不再串行阻塞等待同域名的远端账号检查。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /if\(([$A-Z_a-z][$\w]*)\|\|[$A-Z_a-z][$\w]*&&![$A-Z_a-z][$\w]*\)(?=\{let [$A-Z_a-z][$\w]*;return[^}]{0,260}?debugName:[`"]CodexStatsigProvider\.async\.identity[`"])/g,
+        (_match, localAccountLoading) =>
+          `if(${localAccountLoading}/*codey-statsig-identity-nonblocking*/)`,
+        "statsig fallback identity non-blocking",
+      );
+    }
+    if (
+      !source.includes("/*codey-statsig-async-init-cap*/")
+      && source.includes("useStatsigInternalClientFactoryAsync=function(")
+      && source.includes(".initializeAsync().catch(")
+    ) {
+      // 回退或非登录态的异步客户端默认阻塞重试约 32s；超时后先以空评估置为 Ready 挂载界面，保留后台请求与自动刷新。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(\buseStatsigInternalClientFactoryAsync=function\([$A-Z_a-z][$\w]*,[$A-Z_a-z][$\w]*\)\{let ([$A-Z_a-z][$\w]*)=\(0,[$A-Z_a-z][$\w]*\.useMemo\)\([\s\S]{0,240}?\[[$A-Z_a-z][$\w]*,([$A-Z_a-z][$\w]*)\]=\(0,[$A-Z_a-z][$\w]*\.useState\)\([`"]Ready[`"]!==\2\.loadingStatus\);return\(0,[$A-Z_a-z][$\w]*\.useMemo\)\(\(\)=>\{)[`"]Ready[`"]!==\2\.loadingStatus&&\2\.initializeAsync\(\)\.catch\(([$A-Z_a-z][$\w]*\.Log\.error)\)\.finally\(\(\)=>\3\(!1\)\)(\},\[\]\),\{client:\2,isLoading:[$A-Z_a-z][$\w]*\}\})/g,
+        (_match, prefix, clientName, setLoadingName, logErrorExpr, suffix) =>
+          `${prefix}"Ready"!==${clientName}.loadingStatus&&(()=>{/*codey-statsig-async-init-cap*/let __codeyDone=!1,__codeyFinish=()=>{__codeyDone||(__codeyDone=!0,clearTimeout(__codeyTimer),"Loading"===${clientName}.loadingStatus&&typeof ${clientName}._finalizeUpdate==="function"&&${clientName}._finalizeUpdate(null),${setLoadingName}(!1))},__codeyTimer=setTimeout(__codeyFinish,1500);${clientName}.initializeAsync().catch(${logErrorExpr}).finally(__codeyFinish)})()${suffix}`,
+        "statsig async client init cap",
       );
     }
     if (
@@ -618,13 +744,13 @@
     }
     if (source.includes('"amazonBedrock"!==') && source.includes("availableAccessPrograms?.cyber")
       && source.includes("useHiddenModels:")) {
-      patched = replaceUniqueRendererGate(
+      patched = replaceMarkedRendererGate(
         patched,
         /(\?)([$A-Z_a-z][$\w]*)\.has\(([$A-Z_a-z][$\w]*)\.model\)(\|\|"apikey"===)/g,
         (_match, question, allowlist, model, rest) => `${question}(${allowlist}.has(${model}.model)||!${model}.hidden)${rest}`,
         "model allowlist",
       );
-      patched = replaceUniqueRendererGate(
+      patched = replaceMarkedRendererGate(
         patched,
         /(&&)("amazonBedrock"!==)([$A-Z_a-z][$\w]*)(\?)/g,
         (_match, and, _comparison, auth, question) => `${and}"chatgpt"===${auth}${question}`,
@@ -641,9 +767,13 @@
       // 新版 Codex 已为自定义提供方跳过原生白名单并使用模型可见性。
       // 识别这一兼容形式，避免误报。
       nativeCustomProviderModelAccess ||=
-        rendererHasNativeCustomProviderModelAccess(source);
+        rendererHasNativeCustomProviderModelAccess(source) || (
+          !source.includes("availableAccessPrograms?.cyber")
+          && /select:\(\{data:[^}]+\}\)=>\(\{\.\.\.\(0,[$\w]+\.[$\w]+\)\(\{additionalAvailableModels:/.test(source)
+          && /models:[^;{}]{1,200},useHiddenModels:[$\w]+\.useHiddenModels\}\)/.test(source)
+        );
       if (!nativeCustomProviderModelAccess) {
-        patched = replaceUniqueRendererGate(
+        patched = replaceMarkedRendererGate(
           patched,
           /if\s*\(\s*\(*\s*(?:[$A-Z_a-z][$\w]*\s*(?:\?\.|\.)\s*has\(\s*[$A-Z_a-z][$\w]*\.model\s*\)\s*(?:===\s*!0)?\s*\|\|\s*)?\(?\s*([$A-Z_a-z][$\w]*)\s*\?\s*([$A-Z_a-z][$\w]*)\.has\(\s*([$A-Z_a-z][$\w]*)\.model\s*\)\s*:\s*(?:!\s*\3\.hidden|\3\.hidden\s*!==\s*!0|\3\.hidden\s*===\s*!1)\s*\)?\s*\)*\s*\)/g,
           (_match, useAllowlistName, allowlistName, modelName) =>
@@ -658,7 +788,7 @@
       source.includes("amazonBedrock") &&
       !nativeCustomProviderModelAccess
     ) {
-      patched = replaceUniqueRendererGate(
+      patched = replaceMarkedRendererGate(
         patched,
         /(\b[$A-Z_a-z][$\w]*\s*=\s*\(?\s*[$A-Z_a-z][$\w]*(?:\s*(?:\?\.|\.)\s*[$A-Z_a-z][$\w]*)?\s*\)?\s*&&\s*)\(?\s*([$A-Z_a-z][$\w]*(?:\s*(?:\?\.|\.)\s*[$A-Z_a-z][$\w]*)?)\s*(?:!==|!=)\s*(["'`])amazonBedrock\3\s*\)?/g,
         (_match, visibilityPrefix, authMethodExpression) =>
@@ -674,7 +804,7 @@
     ) {
       // 第三方 provider 按模型目录显示 Ultra，保留调用方和用户的思考强度设置。
       // 宿主服务资源模块只把同一开关作为参数传入，没有模型目录查询，不在此改写。
-      patched = replaceUniqueRendererGate(
+      patched = replaceMarkedRendererGate(
         patched,
         [{
           pattern: /(\(\{[^{}]*\bincludeUltraReasoningEffort\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\bisCustomModelProvider\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\s*,\s*\{[^{}]*\bget\s*:\s*([$A-Z_a-z][$\w]*)[^{}]*\}\)\s*=>\s*\{[^{}]*\b[$A-Z_a-z][$\w]*\s*=\s*\2\s*&&\s*)(\4\(\s*[$A-Z_a-z][$\w]*(?:\.[$A-Z_a-z][$\w]*)?\s*,\s*(["'`])1186680773\6\s*\))/g,
@@ -704,14 +834,15 @@
     }
     if (/=\{serviceTierAccess:[$A-Z_a-z][$\w]*,isLoading:/.test(source)) {
       // 仅为空权限补充可见性，保留账号明确拒绝的速度档。
-      patched = replaceUniqueRendererGate(
+      patched = replaceMarkedRendererGate(
         patched,
         /(\b([$A-Z_a-z][$\w]*)=)[$A-Z_a-z][$\w]*&&![$A-Z_a-z][$\w]*&&(?:[$A-Z_a-z][$\w]*!=null|null!=[$A-Z_a-z][$\w]*)\?(?:[$A-Z_a-z][$\w]*|\(0,[$A-Z_a-z][$\w]*\.[$A-Z_a-z][$\w]*\))\([$A-Z_a-z][$\w]*\):null(?=[^;]{0,200};let [$A-Z_a-z][$\w]*=\2(?:,[$A-Z_a-z][$\w]*)?;return[^;]{0,200}?\{serviceTierAccess:)/g,
         (match, assignment) => `${assignment}(${match.slice(assignment.length)})??{fast:!0,ultrafast:!0}`,
         "service tier access state",
       );
     }
-    if (source.includes("Failed to read service tier for request")) {
+    if (source.includes("Failed to read service tier for request")
+      && !source.includes("const __codeyRequestTier=async(")) {
       // 原生请求解析器不校验显式档位；复用同一模块的模型查询和原生档位解析。
       patched = replaceUniqueRendererGate(
         patched,
@@ -735,7 +866,7 @@
       source.includes("selectedServiceTierIconKind:")
     ) {
       // 所有线路和模型使用新版入口，兼容新版缓存入口配置及移除旧字段的结构。
-      patched = replaceUniqueRendererGate(
+      patched = replaceMarkedRendererGate(
         patched,
         [
           {
@@ -774,13 +905,15 @@
         "fast model trigger fallback",
       );
     }
-    if (/case[`"]electron-app-state-snapshot-request[`"]:/.test(source)) {
+    if (source.includes("electron-app-state-snapshot-request")
+      && !source.includes("/*codey-heartbeat-snapshot-skip*/")
+      && /case[`"]electron-app-state-snapshot-request[`"]:/.test(source)) {
       // 跳过周期心跳快照，保留卡顿等诊断触发的响应。
       patched = replaceUniqueRendererGate(
         patched,
         /(case[`"]electron-app-state-snapshot-request[`"]:\{)(?=[\s\S]{0,2000}?collectAppStateSnapshot\(([$A-Z_a-z][$\w]*)\.hostId,\2\.reason\)[\s\S]{0,2000}?dispatchMessage\([`"]electron-app-state-snapshot-response[`"][^;]{0,400};break((?: [$A-Z_a-z][$\w]*)?)\})/g,
         (_match, prefix, messageName, label) =>
-          `${prefix}if(${messageName}.reason===\`heartbeat\`)break${label};`,
+          `${prefix}/*codey-heartbeat-snapshot-skip*/if(${messageName}.reason===\`heartbeat\`)break${label};`,
         "app state heartbeat snapshot",
       );
     }
@@ -818,12 +951,7 @@
   const patchCodexRendererCssAsset = (source) => {
     if (
       source.includes(openStateCssPatchedMarker) ||
-      (
-        !source.includes(":has([data-state=open])") &&
-        !source.includes(":has(:is(button[data-state=open]))") &&
-        !source.includes(":has([aria-expanded=true],[data-state=open])") &&
-        !source.includes("data-state")
-      )
+      !source.includes("data-state") || !source.includes(":has(")
     ) {
       return source;
     }
@@ -886,7 +1014,11 @@
       if (!isCodexRendererAssetUrl(requestUrl)) return null;
       let patched;
       const previousRendererPatchFailures = activeRendererPatchFailures;
-      activeRendererPatchFailures = rendererPatchFailuresForSource(source);
+      const previousRendererPatchSource = activeRendererPatchSource;
+      activeRendererPatchSource = source;
+      activeRendererPatchFailures = rendererPatchFailuresByFingerprint.size
+        ? rendererPatchFailuresForFingerprint(rendererPatchFingerprint(source), false)
+        : null;
       try {
         patched = isCodexRendererCssAssetUrl(requestUrl)
           ? patchCodexRendererCssAsset(source)
@@ -903,6 +1035,7 @@
         return null;
       } finally {
         activeRendererPatchFailures = previousRendererPatchFailures;
+        activeRendererPatchSource = previousRendererPatchSource;
       }
       return patched === source ? null : patched;
     } catch (error) {
