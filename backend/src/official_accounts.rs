@@ -25,6 +25,8 @@ pub(crate) struct Account {
     pub plan_type: Option<String>,
     #[serde(default)]
     pub email: Option<String>,
+    #[serde(default)]
+    pub invalid: bool,
     pub auth: Value,
 }
 
@@ -76,6 +78,7 @@ impl Account {
             generation: uuid::Uuid::new_v4().to_string(),
             plan_type: None,
             email: None,
+            invalid: false,
             auth,
         })
     }
@@ -87,7 +90,7 @@ impl Account {
             .filter_map(crate::account_usage::jwt_claims)
             .collect();
         let mut value = json!({"id":self.id,"accountId":self.auth["tokens"]["account_id"],
-            "addedAt":self.added_at,"invalid":false,"isDefault":current == Some(&self.id)});
+            "addedAt":self.added_at,"invalid":self.invalid,"isDefault":current == Some(&self.id)});
         for (field, source) in [("email", "email"), ("planType", "chatgpt_plan_type")] {
             if let Some(text) = claims.iter().find_map(|claim| {
                 claim[source]
@@ -196,9 +199,10 @@ impl OfficialAccountStore {
 
     pub fn upsert(&self, mut account: Account) -> Result<Account> {
         validate_auth(&account.auth)?;
+        account.invalid = false;
         if let Some(old) = self.get(&account.id)? {
             account.added_at = old.added_at;
-            if old.auth == account.auth {
+            if old.auth == account.auth && old.invalid == account.invalid {
                 return Ok(old);
             }
             if account.plan_type.is_none() {
@@ -208,6 +212,10 @@ impl OfficialAccountStore {
                 account.email = old.email;
             }
         }
+        self.save_credentials(account)
+    }
+
+    pub(crate) fn save_credentials(&self, mut account: Account) -> Result<Account> {
         account.generation = uuid::Uuid::new_v4().to_string();
         storage::write_private(&self.path(&account.id)?, &serde_json::to_vec(&account)?)?;
         Ok(account)
@@ -251,7 +259,7 @@ impl OfficialAccountStore {
                 (Some(current), Some(saved)) => current >= saved,
                 _ => true,
             };
-            if newer {
+            if newer && stored.auth != account.auth {
                 self.upsert(account)?;
             }
         }
@@ -370,6 +378,13 @@ pub(crate) fn current_id(home: &Path) -> Result<Option<String>> {
     Ok(read_auth(home)?.and_then(|mut auth| {
         oauth::complete_identity(&mut auth);
         Account::from_auth(auth).ok().map(|account| account.id)
+    }))
+}
+
+pub(crate) fn auth_account_id(home: &Path) -> Result<Option<String>> {
+    Ok(read_auth(home)?.and_then(|mut auth| {
+        oauth::complete_identity(&mut auth);
+        auth["tokens"]["account_id"].as_str().map(account_key)
     }))
 }
 

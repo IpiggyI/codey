@@ -1008,7 +1008,21 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
             official_accounts::invoke(state, command, &args, codex_home()).await
         }
         "list_channels" => channels::list_channels(state).await,
-        "select_channel" => channels::change_channel(state, &args, false).await,
+        "select_channel" => {
+            let lock = if let Some(id) = args["channelId"]
+                .as_str()
+                .and_then(|id| id.strip_prefix("official:"))
+            {
+                Some(state.official_account_usage.lock().await.refresh_lock(id))
+            } else {
+                None
+            };
+            let _switch = match lock {
+                Some(lock) => Some(lock.lock_owned().await),
+                None => None,
+            };
+            channels::change_channel(state, &args, false).await
+        }
         "set_channel_default_model" => channels::change_channel(state, &args, true).await,
         "load_codey_config" => load_codey_config(state).await,
         "subagent_runtime_overview" => subagent_runtime_overview(state).await,

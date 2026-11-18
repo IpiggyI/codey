@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
@@ -9,9 +10,12 @@ use crate::account_usage::{AccountUsageSnapshot, OfficialAuth};
 
 #[derive(Default)]
 pub(crate) struct UsageState {
+    refresh_locks: HashMap<String, Weak<RefreshLock>>,
     sequence: u64,
     entries: HashMap<String, Entry>,
 }
+
+pub(crate) type RefreshLock = tokio::sync::Mutex<Option<(String, Result<(), String>)>>;
 
 struct Entry {
     credential_generation: String,
@@ -28,6 +32,17 @@ pub(crate) struct Request {
 }
 
 impl UsageState {
+    pub fn refresh_lock(&mut self, id: &str) -> Arc<RefreshLock> {
+        self.refresh_locks
+            .retain(|_, lock| lock.strong_count() != 0);
+        if let Some(lock) = self.refresh_locks.get(id).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(RefreshLock::default());
+        self.refresh_locks
+            .insert(id.to_owned(), Arc::downgrade(&lock));
+        lock
+    }
     pub fn cached(&self, account: &Account) -> Option<Value> {
         let entry = self.entries.get(&account.id)?;
         (entry.credential_generation == account.generation && entry.expires > Instant::now())
