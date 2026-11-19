@@ -947,7 +947,7 @@
   const openStateCssAriaAndDataStateHasPattern =
     /:has\(\s*\[\s*aria-expanded\s*=\s*(?:"true"|'true'|true)\s*\]\s*,\s*\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\]\s*\)/g;
   const openStateCssDataStateHasPattern =
-    /:has\(\s*(?::is\(\s*)?(?:>\s*)?(?:button)?\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\]\s*\)?\s*\)/g;
+    /:has\(\s*(?::is\(\s*(?:>\s*)?(?:button)?\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\]\s*\)|(?:>\s*)?(?:button)?\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\])\s*\)/g;
   const patchCodexRendererCssAsset = (source) => {
     if (
       source.includes(openStateCssPatchedMarker) ||

@@ -322,6 +322,40 @@ test("runtime stylesheet fallback rewrites unpatched link stylesheets and skips 
   );
 });
 
+test("runtime stylesheet fallback keeps :not(:has()) balanced and leaves codey-owned styles untouched", () => {
+  const head = new FakeElement("head", { connected: true });
+  const notHasRule = "[data-codey-session-menu]:not(:focus-within):not(:has([data-state=\"open\"])) { opacity: 1; }";
+  const popoverRule = "#codey-session-delete-popover { position: fixed; }";
+  const makeStyle = (id) => {
+    const style = head.appendChild(new FakeElement("style"));
+    style.setAttribute("id", id);
+    style.textContent = `${notHasRule}\n${popoverRule}`;
+    return {
+      style,
+      sheet: {
+        ownerNode: style,
+        disabled: false,
+        cssRules: [
+          { selectorText: "[data-codey-session-menu]:not(:focus-within):not(:has([data-state=\"open\"]))", cssText: notHasRule },
+          { selectorText: "#codey-session-delete-popover", cssText: popoverRule },
+        ],
+      },
+    };
+  };
+  const codey = makeStyle("codey-injected-style");
+  const foreign = makeStyle("foreign-style");
+
+  createRuntime({ styleSheets: [codey.sheet, foreign.sheet] });
+
+  assert.equal(codey.style.textContent, `${notHasRule}\n${popoverRule}`);
+  assert.equal(codey.style.getAttribute("data-codey-open-state-patched"), null);
+  assert.match(
+    foreign.style.textContent,
+    /:not\(:focus-within\):not\(\[data-codey-open-within\]\) \{/,
+  );
+  assert.match(foreign.style.textContent, /#codey-session-delete-popover \{/);
+});
+
 test("open-within sync remains active after session tools disconnect bootstrap and adapts to renamed bundle classes", async () => {
   const prePatchedLink = new FakeElement("link", {
     attributes: {

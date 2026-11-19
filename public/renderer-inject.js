@@ -86,7 +86,7 @@
   const openStateCssAriaAndDataStateHasPattern =
     /:has\(\s*\[\s*aria-expanded\s*=\s*(?:"true"|'true'|true)\s*\]\s*,\s*\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\]\s*\)/g;
   const openStateCssDataStateHasPattern =
-    /:has\(\s*(?::is\(\s*)?(?:>\s*)?(?:button)?\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\]\s*\)?\s*\)/g;
+    /:has\(\s*(?::is\(\s*(?:>\s*)?(?:button)?\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\]\s*\)|(?:>\s*)?(?:button)?\[\s*data-state\s*=\s*(?:"open"|'open'|open)\s*\])\s*\)/g;
   const openStateElements = new Set();
   const syncedOpenContainers = new Set();
 
@@ -1832,9 +1832,10 @@
     for (let index = 0; index < sheets.length; index += 1) {
       const sheet = sheets[index];
       const ownerNode = sheet?.ownerNode;
+      // Codey 自己的样式（id 以 codey- 开头）保留原生 :has() 语义，不做改写。
       if (
         !ownerNode
-        || ownerNode.id === styleId
+        || String(ownerNode.id || "").startsWith("codey-")
         || ownerNode.getAttribute?.(openStateCssPatchedDatasetKey) === "true"
       ) {
         continue;

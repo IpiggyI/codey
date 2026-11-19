@@ -723,6 +723,14 @@ test("rspack stylesheet assets rewrite data-state :has() rules without touching 
     "patched stylesheet is idempotent",
   );
 
+  const notHasCss = ".a:not(:has([data-state=\"open\"])){opacity:1}.b:not(:has(:is(button[data-state='open']))){opacity:1}.c:not(:focus-within):not(:has( [ data-state = open ] )){opacity:1}";
+  const patchedNotHas = patch(notHasCss, "app://-/assets/async/not-has-0123abcd.css");
+  assert.ok(patchedNotHas);
+  assert.match(
+    patchedNotHas,
+    /^\.a:not\(\[data-codey-open-within\]\)\{opacity:1\}\.b:not\(\[data-codey-open-within\]\)\{opacity:1\}\.c:not\(:focus-within\):not\(\[data-codey-open-within\]\)\{opacity:1\}\n/,
+  );
+
   const cardCss = ":where(.card-ineZLT):has(>[data-state=open]),:where(.card-ineZLT>*):has(>[data-state=open]){opacity:1!important}";
   const patchedCard = patch(cardCss, "app://-/assets/async/166572aa20c2.css");
   assert.ok(patchedCard);
