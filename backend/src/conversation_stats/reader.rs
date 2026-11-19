@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+#[cfg(test)]
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -65,7 +66,14 @@ struct Reader {
 
 impl Reader {
     fn read(&mut self, path: &Path, session_id: &str) -> Result<()> {
-        let mut file = File::open(path)?;
+        let path = crate::rollout_file::resolve(path)?;
+        if crate::rollout_file::compressed(&path) {
+            let bytes = crate::rollout_file::bounded(&path, crate::rollout_file::MAX_DECODED)?;
+            let len = bytes.len() as u64;
+            *self = Self::default();
+            return self.read_append(&mut std::io::Cursor::new(bytes), len, session_id);
+        }
+        let mut file = crate::rollout_file::open_plain(&path)?;
         let metadata = file.metadata()?;
         let len = metadata.len();
         let modified = metadata.modified().ok();
@@ -90,7 +98,12 @@ impl Reader {
         Ok(())
     }
 
-    fn read_append(&mut self, file: &mut File, len: u64, session_id: &str) -> Result<()> {
+    fn read_append(
+        &mut self,
+        file: &mut impl crate::rollout_file::ReadSeek,
+        len: u64,
+        session_id: &str,
+    ) -> Result<()> {
         file.seek(SeekFrom::Start(self.offset))?;
         let mut reader = BufReader::with_capacity(64 * 1024, file.take(len - self.offset));
         let mut line = Vec::new();

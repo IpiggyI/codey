@@ -269,7 +269,7 @@ fn collect_live_thread_ids(home: &Path, candidate_ids: &HashSet<String>) -> Resu
             // to discover the same session_meta id.
             continue;
         }
-        let text = fs::read_to_string(&path)
+        let text = crate::rollout_file::text(&path)
             .with_context(|| format!("读取 rollout 失败：{}", path.display()))?;
         for segment in text.split_inclusive('\n') {
             let (line, _) = split_line_ending(segment);
@@ -334,9 +334,9 @@ fn collect_rollout_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
         } else if path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
+            .is_some_and(crate::rollout_file::is_rollout)
         {
-            files.push(path);
+            files.push(crate::rollout_file::resolve(&path)?);
         }
     }
     Ok(())

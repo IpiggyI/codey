@@ -349,6 +349,16 @@ impl RecentSessionEventCache {
         rollouts: Vec<(String, PathBuf)>,
         dirty_paths: Option<&HashSet<PathBuf>>,
     ) -> Arc<RecentSessionEvents> {
+        let rollouts: Vec<_> = rollouts
+            .into_iter()
+            .filter_map(|(id, path)| match crate::rollout_file::resolve(&path) {
+                Ok(path) => Some((id, path)),
+                Err(error) => {
+                    eprintln!("解析会话记录失败：{error}");
+                    None
+                }
+            })
+            .collect();
         let active_paths = rollouts
             .iter()
             .map(|(_, path)| path.clone())
@@ -539,8 +549,19 @@ fn read_rollout_update(
     path: &Path,
     resumable: Option<RolloutReadState>,
 ) -> Option<(RolloutReadState, bool)> {
+    if crate::rollout_file::compressed(path) {
+        let bytes = crate::rollout_file::bounded(path, crate::rollout_file::MAX_DECODED)
+            .inspect_err(|error| eprintln!("读取压缩会话记录失败：{}：{error}", path.display()))
+            .ok()?;
+        let mut state = RolloutReadState::default();
+        consume_rollout_reader(std::io::Cursor::new(bytes), &mut state).or_else(|| {
+            eprintln!("解析压缩会话记录失败：{}", path.display());
+            None
+        })?;
+        return Some((state, false));
+    }
     let full = || {
-        let file = fs::File::open(path).ok()?;
+        let file = crate::rollout_file::open_plain(path).ok()?;
         let mut state = RolloutReadState::default();
         consume_rollout_reader(BufReader::new(file), &mut state)?;
         Some((state, false))
@@ -555,7 +576,7 @@ fn read_rollout_update(
     if fingerprint_len == 0 || fingerprint_len > state.consumed_bytes {
         return full();
     }
-    let Ok(mut file) = fs::File::open(path) else {
+    let Ok(mut file) = crate::rollout_file::open_plain(path) else {
         return full();
     };
     // The caller only reaches this path because the file changed. Without new

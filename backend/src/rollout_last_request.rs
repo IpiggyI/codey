@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -55,7 +54,11 @@ struct RolloutSummary {
     session_started_at: Option<i64>,
 }
 
-fn rollout_summary(file: &mut File, len: u64, path: &Path) -> Result<(Option<i64>, u64)> {
+fn rollout_summary(
+    file: &mut impl crate::rollout_file::ReadSeek,
+    len: u64,
+    path: &Path,
+) -> Result<(Option<i64>, u64)> {
     static CACHE: OnceLock<Mutex<HashMap<PathBuf, RolloutSummary>>> = OnceLock::new();
     let mut cache = CACHE
         .get_or_init(Mutex::default)
@@ -80,7 +83,10 @@ fn rollout_summary(file: &mut File, len: u64, path: &Path) -> Result<(Option<i64
     Ok((summary.session_started_at, summary.compaction_count))
 }
 
-fn prefix_matches(file: &mut File, summary: &RolloutSummary) -> Result<bool> {
+fn prefix_matches(
+    file: &mut impl crate::rollout_file::ReadSeek,
+    summary: &RolloutSummary,
+) -> Result<bool> {
     // Validate all counted bytes so in-place rewrites cannot preserve a stale count.
     // Only appended complete lines are parsed again after this fingerprint check.
     file.seek(SeekFrom::Start(0))?;
@@ -119,8 +125,10 @@ impl RolloutSummary {
 /// Finds the latest `token_count` with usage in a bounded tail, alongside cached
 /// whole-file session metadata and compaction counts. Torn JSON is skipped.
 pub(crate) fn last_model_request(path: &Path) -> Result<Option<LastModelRequest>> {
-    let mut file =
-        File::open(path).with_context(|| format!("打开会话记录失败：{}", path.display()))?;
+    let resolved = crate::rollout_file::resolve(path)?;
+    let path = resolved.as_path();
+    let mut file = crate::rollout_file::seekable(path, crate::rollout_file::MAX_DECODED)
+        .with_context(|| format!("打开会话记录失败：{}", path.display()))?;
     let len = file
         .seek(SeekFrom::End(0))
         .with_context(|| format!("读取会话记录长度失败：{}", path.display()))?;

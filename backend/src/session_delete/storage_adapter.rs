@@ -599,3 +599,27 @@ fn missing_db_and_unsupported_schema_return_failed_results() {
     assert_eq!(result.status, DeleteStatus::Failed);
     assert!(result.message.contains("Unsupported"));
 }
+
+#[test]
+fn session_delete_compressed_rollout_checks_variants_before_deleting() {
+    for record_compressed in [false, true] {
+        let home = tempdir().unwrap();
+        let db = home.path().join("state_5.sqlite");
+        let plain = managed_rollout_path(home.path(), "rollout-t1.jsonl");
+        let packed = plain.with_extension("jsonl.zst");
+        let meta = b"{\"type\":\"session_meta\",\"payload\":{\"id\":\"t1\"}}\n";
+        fs::write(&plain, meta).unwrap();
+        fs::write(&packed, zstd::encode_all(&meta[..], 1).unwrap()).unwrap();
+        create_codex_thread_db(&db, if record_compressed { &packed } else { &plain });
+        let error = super::delete_session(home.path(), "t1", "")
+            .unwrap_err()
+            .to_string();
+        crate::rollout_file::assert_conflicting_paths(&error, &plain, &packed);
+        assert_eq!(thread_count(&db, "t1"), 1);
+        assert!(plain.exists() && packed.exists());
+        fs::remove_file(&plain).unwrap();
+        super::delete_session(home.path(), "t1", "").unwrap();
+        assert!(!packed.exists());
+        assert_eq!(thread_count(&db, "t1"), 0);
+    }
+}

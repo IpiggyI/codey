@@ -132,6 +132,16 @@ pub(crate) fn restore_backup(home: &Path, backup_dir: &Path) -> Result<()> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    for relative in files.iter().filter_map(Value::as_str) {
+        let destination = home.join(relative);
+        if destination
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(crate::rollout_file::is_rollout)
+        {
+            crate::rollout_file::resolve(&destination)?;
+        }
+    }
     for file in files {
         let Some(relative) = file.as_str() else {
             continue;
@@ -143,6 +153,18 @@ pub(crate) fn restore_backup(home: &Path, backup_dir: &Path) -> Result<()> {
         }
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent)?;
+        }
+        if destination
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(crate::rollout_file::is_rollout)
+        {
+            let current = crate::rollout_file::resolve(&destination)?;
+            if current.exists() {
+                let original = crate::rollout_file::text(&source)?;
+                crate::rollout_file::rewrite(&current, original.as_bytes())?;
+                continue;
+            }
         }
         fs::copy(&source, &destination).with_context(|| {
             format!(
@@ -328,7 +350,7 @@ fn is_valid_provider_id(value: &str) -> bool {
 fn collect_affected_ids(home: &Path) -> Result<Vec<String>> {
     let mut ids = HashSet::new();
     for path in rollout_files(home)? {
-        match fs::read_to_string(&path) {
+        match crate::rollout_file::text(&path) {
             Ok(text) => ids.extend(inspect_rollout_text(&text).1),
             Err(error) if is_locked_io_error(&error) => continue,
             Err(error) => return Err(error.into()),
@@ -353,7 +375,7 @@ fn plan_rollout_changes(home: &Path, session_ids: &[String]) -> Result<RolloutPl
     let mut files = Vec::new();
     let mut had_locked_rollout = false;
     for path in rollout_files(home)? {
-        let original = match fs::read_to_string(&path) {
+        let original = match crate::rollout_file::text(&path) {
             Ok(text) => text,
             Err(error) if is_locked_io_error(&error) => {
                 had_locked_rollout = true;
@@ -387,10 +409,16 @@ fn apply_rollout_file(file: &PlannedFile, target_provider: &str) -> Result<bool>
     if !changed {
         return Ok(true);
     }
-    match fs::write(&file.path, next) {
+    match crate::rollout_file::rewrite(&file.path, next.as_bytes()) {
         Ok(()) => Ok(true),
-        Err(error) if is_locked_io_error(&error) => Ok(false),
-        Err(error) => Err(error.into()),
+        Err(error)
+            if error
+                .downcast_ref::<io::Error>()
+                .is_some_and(is_locked_io_error) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -643,7 +671,7 @@ fn collect_rollout_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
         if path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
+            .is_some_and(crate::rollout_file::is_rollout)
         {
             files.push(path);
         }

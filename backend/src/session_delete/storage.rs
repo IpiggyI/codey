@@ -4,6 +4,7 @@ use rusqlite::{Connection, OptionalExtension, ToSql};
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+#[cfg(test)]
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
@@ -41,6 +42,27 @@ pub fn delete_local_from_paths(
     let mut deleted_count = 0usize;
     let mut hard_failures = Vec::new();
     let mut rollout_cache = HashMap::new();
+    let db_paths: Vec<_> = db_paths.into_iter().collect();
+    if db_paths.len() > 1 {
+        for path in &db_paths {
+            let Ok(db) =
+                Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            else {
+                continue;
+            };
+            if !matches!(schema_kind(&db), Ok(Some(SchemaKind::CodexThreads))) {
+                continue;
+            }
+            let id = normalize_codex_thread_id(&session.session_id);
+            let rows = match select_dicts(&db, "SELECT * FROM threads WHERE id = ?1", &[&id]) {
+                Ok(rows) => rows,
+                Err(_) => continue,
+            };
+            if let Err(error) = codex_thread_rollout_paths(path, &rows, &id, &mut rollout_cache) {
+                return failed(&session.session_id, error.to_string());
+            }
+        }
+    }
     for db_path in db_paths {
         let candidate_result = delete_local_permanently(&db_path, session, &mut rollout_cache);
         if matches!(candidate_result.status, DeleteStatus::LocalDeleted) {
@@ -204,7 +226,7 @@ fn permanently_delete_codex_thread(
 
     let mut file_errors = Vec::new();
     for path in rollout_paths {
-        if let Err(error) = fs::remove_file(&path)
+        if let Err(error) = crate::rollout_file::remove_current(&path)
             && error.kind() != std::io::ErrorKind::NotFound
         {
             file_errors.push(format!("{}: {error}", path.display()));
@@ -421,6 +443,7 @@ fn checked_codex_rollout_path(db_path: &Path, value: &str) -> anyhow::Result<Opt
     let home = codex_home_from_db_path(db_path)
         .ok_or_else(|| anyhow::anyhow!("database path has no Codex home: {}", db_path.display()))?
         .canonicalize()?;
+    let path = crate::rollout_file::resolve(&path)?;
     let canonical_path = match path.canonicalize() {
         Ok(path) => path,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -529,7 +552,7 @@ fn collect_matching_rollout_paths(
         if file_type.is_dir() {
             collect_matching_rollout_paths(&path, thread_id, paths, seen, budget, depth + 1)?;
         } else if file_type.is_file()
-            && path.extension().and_then(|extension| extension.to_str()) == Some("jsonl")
+            && crate::rollout_file::has_extension(&path)
             && rollout_matches_thread_id(&path, thread_id, budget)?
         {
             add_rollout_path(paths, seen, path);
@@ -543,7 +566,7 @@ fn rollout_matches_thread_id(
     thread_id: &str,
     budget: &mut RolloutScanBudget,
 ) -> anyhow::Result<bool> {
-    let mut reader = BufReader::new(File::open(path)?);
+    let mut reader = BufReader::new(crate::rollout_file::reader_current(path)?);
     let mut line = Vec::new();
     let mut remaining_file_bytes = MAX_ROLLOUT_METADATA_BYTES;
     loop {

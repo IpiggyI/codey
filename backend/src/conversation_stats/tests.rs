@@ -563,3 +563,29 @@ fn conversation_stats_resets_after_earlier_turn_deletion_with_equal_or_greater_l
         assert_eq!(actual.last_turn.unwrap().id, "remaining");
     }
 }
+
+#[test]
+fn compressed_rollout_stats_match_plain_even_after_recompression() {
+    let dir = tempfile::tempdir().unwrap();
+    let plain = dir.path().join("rollout-stats.jsonl");
+    let packed = plain.with_extension("jsonl.zst");
+    write(&plain, &fixture());
+    let mut cache = reader::Cache::default();
+    let expected = serde_json::to_value(cache.read(&plain, SESSION).unwrap()).unwrap();
+    fs::write(
+        &packed,
+        zstd::encode_all(fs::read(&plain).unwrap().as_slice(), 1).unwrap(),
+    )
+    .unwrap();
+    fs::remove_file(&plain).unwrap();
+    assert_eq!(
+        serde_json::to_value(cache.read(&plain, SESSION).unwrap()).unwrap(),
+        expected
+    );
+    let next = format!("{}\n{}\n", start(1, "two"), count(2, 20, 120));
+    fs::write(&packed, zstd::encode_all(next.as_bytes(), 1).unwrap()).unwrap();
+    assert_eq!(
+        cache.read(&packed, SESSION).unwrap().total_tokens,
+        Some(120)
+    );
+}
