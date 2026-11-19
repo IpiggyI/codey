@@ -578,14 +578,41 @@ fn compressed_rollout_stats_match_plain_even_after_recompression() {
     )
     .unwrap();
     fs::remove_file(&plain).unwrap();
-    assert_eq!(
-        serde_json::to_value(cache.read(&plain, SESSION).unwrap()).unwrap(),
-        expected
-    );
+    let opens = &crate::rollout_file::DECODER_OPENS;
+    let initial = opens.get();
+    for path in [&plain, &packed] {
+        assert_eq!(
+            serde_json::to_value(cache.read(path, SESSION).unwrap()).unwrap(),
+            expected
+        );
+    }
+    assert_eq!(opens.get() - initial, 1);
     let next = format!("{}\n{}\n", start(1, "two"), count(2, 20, 120));
     fs::write(&packed, zstd::encode_all(next.as_bytes(), 1).unwrap()).unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&packed)
+        .unwrap()
+        .set_modified(std::time::UNIX_EPOCH)
+        .unwrap();
     assert_eq!(
         cache.read(&packed, SESSION).unwrap().total_tokens,
         Some(120)
     );
+    assert_eq!(opens.get() - initial, 2);
+
+    let saved = dir.path().join("saved.zst");
+    fs::rename(&packed, &saved).unwrap();
+    write(&plain, &fixture());
+    assert_eq!(
+        serde_json::to_value(cache.read(&plain, SESSION).unwrap()).unwrap(),
+        expected
+    );
+    fs::remove_file(&plain).unwrap();
+    fs::rename(saved, &packed).unwrap();
+    assert_eq!(
+        cache.read(&packed, SESSION).unwrap().total_tokens,
+        Some(120)
+    );
+    assert_eq!(opens.get() - initial, 3);
 }

@@ -3,12 +3,12 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
 use super::{ConversationStatsSnapshot, state::State};
+use crate::rollout_file::{self, FileVersion};
 
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SESSIONS: usize = 8;
@@ -36,19 +36,21 @@ pub(super) struct Cache {
 
 impl Cache {
     pub fn read(&mut self, path: &Path, session_id: &str) -> Result<ConversationStatsSnapshot> {
-        let index = self
-            .entries
-            .iter()
-            .position(|(cached, id, _)| cached == path && id == session_id);
-        let mut entry = index
+        let context = || format!("读取对话用量失败：{}", path.display());
+        let path = rollout_file::resolve(path).with_context(context)?;
+        let alternate = rollout_file::alternate_path(&path);
+        let index = self.entries.iter().position(|(cached, id, _)| {
+            id == session_id && (*cached == path || Some(cached) == alternate.as_ref())
+        });
+        let mut reader = index
             .and_then(|index| self.entries.remove(index))
-            .unwrap_or_else(|| (path.to_owned(), session_id.to_owned(), Reader::default()));
-        entry
-            .2
-            .read(path, session_id)
-            .with_context(|| format!("读取对话用量失败：{}", path.display()))?;
-        let snapshot = entry.2.state.snapshot();
-        self.entries.push_back(entry);
+            .filter(|(cached, _, _)| *cached == path)
+            .map(|(_, _, reader)| reader)
+            .unwrap_or_default();
+        reader.read(&path, session_id).with_context(context)?;
+        let snapshot = reader.state.snapshot();
+        self.entries
+            .push_back((path, session_id.to_owned(), reader));
         if self.entries.len() > MAX_SESSIONS {
             self.entries.pop_front();
         }
@@ -60,23 +62,26 @@ impl Cache {
 struct Reader {
     offset: u64,
     checkpoint: Option<[u8; 32]>,
-    version: Option<(u64, Option<SystemTime>)>,
+    version: Option<FileVersion>,
     state: State,
 }
 
 impl Reader {
     fn read(&mut self, path: &Path, session_id: &str) -> Result<()> {
-        let path = crate::rollout_file::resolve(path)?;
-        if crate::rollout_file::compressed(&path) {
-            let bytes = crate::rollout_file::bounded(&path, crate::rollout_file::MAX_DECODED)?;
+        if rollout_file::compressed(path) {
+            let version = rollout_file::file_version(&std::fs::metadata(path)?);
+            if self.version == Some(version) {
+                return Ok(());
+            }
+            let bytes = rollout_file::bounded(path, rollout_file::MAX_DECODED)?;
             let len = bytes.len() as u64;
             *self = Self::default();
-            return self.read_append(&mut std::io::Cursor::new(bytes), len, session_id);
+            self.read_append(&mut std::io::Cursor::new(bytes), len, session_id)?;
+            self.version = Some(version);
+            return Ok(());
         }
-        let mut file = crate::rollout_file::open_plain(&path)?;
-        let metadata = file.metadata()?;
-        let len = metadata.len();
-        let modified = metadata.modified().ok();
+        let mut file = rollout_file::open_plain(path)?;
+        let (len, modified) = rollout_file::file_version(&file.metadata()?);
         if len < self.offset
             || self
                 .version

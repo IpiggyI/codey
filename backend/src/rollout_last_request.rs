@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -9,10 +9,13 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::rollout_file::{self, FileVersion};
+
 const INITIAL_TAIL_BYTES: u64 = 256 * 1024;
 /// A turn can append large tool outputs after its last `token_count`; past this
 /// window the answer is reported as unknown rather than scanning the whole file.
 const MAX_TAIL_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_COMPRESSED_SESSIONS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -64,23 +67,18 @@ fn rollout_summary(
         .get_or_init(Mutex::default)
         .lock()
         .map_err(|_| anyhow::anyhow!("会话记录统计缓存锁已损坏"))?;
+    if rollout_file::compressed(path) {
+        if let Some(plain) = rollout_file::alternate_path(path) {
+            cache.remove(&plain);
+        }
+        drop(cache);
+        return RolloutSummary::default().scan(file, len);
+    }
     let summary = cache.entry(path.to_path_buf()).or_default();
     if len < summary.scanned_bytes || !prefix_matches(file, summary)? {
         *summary = RolloutSummary::default();
     }
-    file.seek(SeekFrom::Start(summary.scanned_bytes))?;
-    let mut reader = BufReader::new(file.take(len - summary.scanned_bytes));
-    let mut line = Vec::new();
-    while reader.read_until(b'\n', &mut line)? > 0 {
-        if !line.ends_with(b"\n") {
-            break;
-        }
-        summary.scanned_bytes += line.len() as u64;
-        summary.fingerprint.update(&line);
-        summary.observe(&line);
-        line.clear();
-    }
-    Ok((summary.session_started_at, summary.compaction_count))
+    summary.scan(file, len)
 }
 
 fn prefix_matches(
@@ -104,6 +102,26 @@ fn prefix_matches(
 }
 
 impl RolloutSummary {
+    fn scan(
+        &mut self,
+        file: &mut impl rollout_file::ReadSeek,
+        len: u64,
+    ) -> Result<(Option<i64>, u64)> {
+        file.seek(SeekFrom::Start(self.scanned_bytes))?;
+        let mut reader = BufReader::new(file.take(len - self.scanned_bytes));
+        let mut line = Vec::new();
+        while reader.read_until(b'\n', &mut line)? > 0 {
+            if !line.ends_with(b"\n") {
+                break;
+            }
+            self.scanned_bytes += line.len() as u64;
+            self.fingerprint.update(&line);
+            self.observe(&line);
+            line.clear();
+        }
+        Ok((self.session_started_at, self.compaction_count))
+    }
+
     fn observe(&mut self, line: &[u8]) {
         let Ok(record) = serde_json::from_slice::<Value>(line) else {
             return;
@@ -122,12 +140,56 @@ impl RolloutSummary {
     }
 }
 
+struct CompressedRequest {
+    path: PathBuf,
+    version: FileVersion,
+    request: Option<LastModelRequest>,
+}
+
 /// Finds the latest `token_count` with usage in a bounded tail, alongside cached
 /// whole-file session metadata and compaction counts. Torn JSON is skipped.
 pub(crate) fn last_model_request(path: &Path) -> Result<Option<LastModelRequest>> {
-    let resolved = crate::rollout_file::resolve(path)?;
-    let path = resolved.as_path();
-    let mut file = crate::rollout_file::seekable(path, crate::rollout_file::MAX_DECODED)
+    static COMPRESSED: Mutex<VecDeque<CompressedRequest>> = Mutex::new(VecDeque::new());
+    let path = rollout_file::resolve(path)?;
+    if !rollout_file::compressed(&path) {
+        if let Some(alternate) = rollout_file::alternate_path(&path) {
+            COMPRESSED
+                .lock()
+                .map_err(|_| anyhow::anyhow!("会话记录统计缓存锁已损坏"))?
+                .retain(|entry| entry.path != alternate);
+        }
+        return read_last_model_request(&path);
+    }
+
+    let mut cache = COMPRESSED
+        .lock()
+        .map_err(|_| anyhow::anyhow!("会话记录统计缓存锁已损坏"))?;
+    let version = rollout_file::file_version(
+        &std::fs::metadata(&path)
+            .with_context(|| format!("打开会话记录失败：{}", path.display()))?,
+    );
+    let previous = cache
+        .iter()
+        .position(|entry| entry.path == path)
+        .and_then(|index| cache.remove(index));
+    let entry = match previous {
+        Some(entry) if entry.version == version => entry,
+        _ => CompressedRequest {
+            request: read_last_model_request(&path)?,
+            path,
+            version,
+        },
+    };
+    let request = entry.request.clone();
+    cache.push_back(entry);
+    if cache.len() > MAX_COMPRESSED_SESSIONS {
+        cache.pop_front();
+    }
+    Ok(request)
+}
+
+fn read_last_model_request(path: &Path) -> Result<Option<LastModelRequest>> {
+    let mut file = rollout_file::seekable(path, rollout_file::MAX_DECODED)
         .with_context(|| format!("打开会话记录失败：{}", path.display()))?;
     let len = file
         .seek(SeekFrom::End(0))
@@ -410,6 +472,47 @@ mod tests {
             "{\"timestamp\":\"2026-09-28T07:49:09.471Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
         );
         assert_eq!(last_model_request(rollout.path()).unwrap(), None);
+    }
+
+    #[test]
+    fn compressed_rollout_last_request_reuses_only_the_current_version() {
+        use std::fs;
+
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("rollout-request.jsonl");
+        let packed = plain.with_extension("jsonl.zst");
+        let time = "2026-09-28T07:49:18.540Z";
+        let first = token_count(time, 10);
+        let write_packed = |contents: &str| {
+            fs::write(&packed, zstd::encode_all(contents.as_bytes(), 1).unwrap()).unwrap();
+        };
+        write_packed(&first);
+        let opens = &crate::rollout_file::DECODER_OPENS;
+        let initial = opens.get();
+        let expected = Some(request(&first));
+        assert_eq!(last_model_request(&plain).unwrap(), expected);
+        assert_eq!(last_model_request(&packed).unwrap(), expected);
+        assert_eq!(opens.get() - initial, 1);
+
+        write_packed("{}\n");
+        fs::File::options()
+            .write(true)
+            .open(&packed)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH)
+            .unwrap();
+        assert_eq!(last_model_request(&packed).unwrap(), None);
+        assert_eq!(last_model_request(&packed).unwrap(), None);
+        assert_eq!(opens.get() - initial, 2);
+
+        let saved = dir.path().join("saved.zst");
+        fs::rename(&packed, &saved).unwrap();
+        fs::write(&plain, first).unwrap();
+        assert_eq!(last_model_request(&plain).unwrap(), expected);
+        fs::remove_file(&plain).unwrap();
+        fs::rename(saved, &packed).unwrap();
+        assert_eq!(last_model_request(&packed).unwrap(), None);
+        assert_eq!(opens.get() - initial, 3);
     }
 
     fn record(second: u8, kind: &str, payload: Value) -> String {

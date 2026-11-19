@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::{self, Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 pub(crate) const MAX_DECODED: u64 = 512 * 1024 * 1024;
 
@@ -23,12 +24,23 @@ pub(crate) fn compressed(path: &Path) -> bool {
 pub(crate) fn has_extension(path: &Path) -> bool {
     path.extension().is_some_and(|ext| ext == "jsonl") || compressed(path)
 }
-pub(crate) fn resolve(path: &Path) -> io::Result<PathBuf> {
-    let sibling = if compressed(path) {
-        path.with_extension("")
+pub(crate) fn alternate_path(path: &Path) -> Option<PathBuf> {
+    if compressed(path) {
+        Some(path.with_extension(""))
     } else if path.extension().is_some_and(|e| e == "jsonl") {
-        path.with_extension("jsonl.zst")
+        Some(path.with_extension("jsonl.zst"))
     } else {
+        None
+    }
+}
+pub(crate) type FileVersion = (u64, Option<SystemTime>);
+
+pub(crate) fn file_version(metadata: &fs::Metadata) -> FileVersion {
+    (metadata.len(), metadata.modified().ok())
+}
+
+pub(crate) fn resolve(path: &Path) -> io::Result<PathBuf> {
+    let Some(sibling) = alternate_path(path) else {
         return Ok(path.to_owned());
     };
     let present = |p: &Path| match fs::symlink_metadata(p) {
@@ -88,11 +100,19 @@ fn compare_content(reader: &mut impl Read, original: &[u8]) -> Result<()> {
     anyhow::ensure!(remaining.is_empty(), "会话记录已变化，请重新加载后再删除");
     Ok(())
 }
+#[cfg(test)]
+thread_local! {
+    pub(crate) static DECODER_OPENS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) fn reader_current(path: &Path) -> io::Result<Box<dyn Read>> {
     ensure_current_path(path)?;
     let file = File::open(path)?;
     if compressed(path) {
-        Ok(Box::new(zstd::Decoder::new(file)?))
+        let decoder = zstd::Decoder::new(file)?;
+        #[cfg(test)]
+        DECODER_OPENS.with(|count| count.set(count.get() + 1));
+        Ok(Box::new(decoder))
     } else {
         Ok(Box::new(file))
     }
