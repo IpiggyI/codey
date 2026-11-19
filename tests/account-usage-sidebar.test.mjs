@@ -484,7 +484,8 @@ test("reset credits render their count and the nearest expiry with the shared da
     resetCredits: { availableCount: 3, nextExpiresAt: localAfterDays(1) },
   });
   assert.match(usage.innerHTML, /剩余重置次数[\s\S]*?codey-usage-detail-value">3 次</);
-  assert.match(usage.innerHTML, /<span>最近 明天 15:30 过期<\/span>/);
+  // 明天 15:30 距现在可能不足 18 小时，预警样式由专门的用例检查，这里只核对文字。
+  assert.match(usage.innerHTML, /<span(?: class="is-expiring")?>最近 明天 15:30 过期<\/span>/);
   // 详情里的窗口重置时间带“重置”后缀，摘要与过期时间不带。
   assert.match(usage.innerHTML, /<span class="codey-usage-detail-reset">明天 15:30 重置<\/span>/);
   assert.match(usage.innerHTML, /<span class="codey-usage-reset">明天 15:30<\/span>/);
