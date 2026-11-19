@@ -340,25 +340,7 @@ fn is_sensitive_key(key: &str) -> bool {
         .collect::<String>();
     matches!(
         normalized.as_str(),
-        "authorization"
-            | "proxyauthorization"
-            | "apikey"
-            | "xapikey"
-            | "key"
-            | "token"
-            | "accesstoken"
-            | "refreshtoken"
-            | "bottoken"
-            | "secret"
-            | "clientsecret"
-            | "password"
-            | "passwd"
-            | "cookie"
-            | "setcookie"
-            | "credential"
-            | "credentials"
-            | "webhook"
-            | "webhookurl"
+        "key" | "passwd" | "credentials" | "webhook"
     ) || normalized.contains("authorization")
         || normalized.ends_with("apikey")
         || normalized.ends_with("token")
@@ -370,12 +352,17 @@ fn is_sensitive_key(key: &str) -> bool {
 }
 
 fn sanitize_log_text(value: &mut String, max_bytes: usize) {
-    *value = redact_embedded_urls(&redact_labeled_secrets(value));
+    if let Some(redacted) = redact_labeled_secrets(value) {
+        *value = redacted;
+    }
+    if let Some(redacted) = redact_embedded_urls(value) {
+        *value = redacted;
+    }
     truncate_utf8(value, max_bytes);
 }
 
-fn redact_labeled_secrets(input: &str) -> String {
-    let mut value = input.to_string();
+fn redact_labeled_secrets(input: &str) -> Option<String> {
+    let mut owned: Option<String> = None;
     for label in [
         "authorization:",
         "proxy-authorization:",
@@ -384,18 +371,26 @@ fn redact_labeled_secrets(input: &str) -> String {
         "cookie:",
         "set-cookie:",
     ] {
-        value = redact_after_label(&value, label, true);
+        let current = owned.as_deref().unwrap_or(input);
+        if let Some(redacted) = redact_after_label(current, label, true) {
+            owned = Some(redacted);
+        }
     }
     for label in ["bearer ", "basic "] {
-        value = redact_after_label(&value, label, false);
+        let current = owned.as_deref().unwrap_or(input);
+        if let Some(redacted) = redact_after_label(current, label, false) {
+            owned = Some(redacted);
+        }
     }
-    value
+    owned
 }
 
-fn redact_after_label(input: &str, label: &str, until_line_end: bool) -> String {
+fn redact_after_label(input: &str, label: &str, until_line_end: bool) -> Option<String> {
+    let first = find_ascii_case_insensitive(input, label)?;
     let mut output = String::with_capacity(input.len());
     let mut cursor = 0;
-    while let Some(relative) = find_ascii_case_insensitive(&input[cursor..], label) {
+    let mut next_match = Some(first);
+    while let Some(relative) = next_match {
         let start = cursor + relative;
         let value_start = start + label.len();
         output.push_str(&input[cursor..value_start]);
@@ -421,9 +416,10 @@ fn redact_after_label(input: &str, label: &str, until_line_end: bool) -> String 
         if cursor == value_start && value_start == input.len() {
             break;
         }
+        next_match = find_ascii_case_insensitive(&input[cursor..], label);
     }
     output.push_str(&input[cursor..]);
-    output
+    Some(output)
 }
 
 fn find_ascii_case_insensitive(input: &str, needle: &str) -> Option<usize> {
@@ -434,16 +430,14 @@ fn find_ascii_case_insensitive(input: &str, needle: &str) -> Option<usize> {
         .position(|candidate| candidate.eq_ignore_ascii_case(needle))
 }
 
-fn redact_embedded_urls(input: &str) -> String {
+fn redact_embedded_urls(input: &str) -> Option<String> {
+    let http = find_ascii_case_insensitive(input, "http://");
+    let https = find_ascii_case_insensitive(input, "https://");
+    let mut next_match = [http, https].into_iter().flatten().min();
+    next_match?;
     let mut output = String::with_capacity(input.len());
     let mut cursor = 0;
-    loop {
-        let http = find_ascii_case_insensitive(&input[cursor..], "http://");
-        let https = find_ascii_case_insensitive(&input[cursor..], "https://");
-        let Some(relative) = [http, https].into_iter().flatten().min() else {
-            output.push_str(&input[cursor..]);
-            break;
-        };
+    while let Some(relative) = next_match {
         let start = cursor + relative;
         output.push_str(&input[cursor..start]);
         let mut end = input.len();
@@ -467,8 +461,12 @@ fn redact_embedded_urls(input: &str) -> String {
         output.push_str(sanitize_url(candidate).as_deref().unwrap_or(candidate));
         output.push_str(&input[candidate_end..end]);
         cursor = end;
+        let http = find_ascii_case_insensitive(&input[cursor..], "http://");
+        let https = find_ascii_case_insensitive(&input[cursor..], "https://");
+        next_match = [http, https].into_iter().flatten().min();
     }
-    output
+    output.push_str(&input[cursor..]);
+    Some(output)
 }
 
 fn sanitize_url(value: &str) -> Option<String> {
@@ -990,6 +988,62 @@ fn file_is_from_different_day(path: &Path, today: NaiveDate) -> std::io::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn redacts_every_legacy_sensitive_key() {
+        for key in [
+            "Authorization",
+            "Proxy-Authorization",
+            "api_key",
+            "X-API-Key",
+            "key",
+            "token",
+            "access_token",
+            "refresh_token",
+            "bot_token",
+            "secret",
+            "client_secret",
+            "password",
+            "passwd",
+            "Cookie",
+            "Set-Cookie",
+            "credential",
+            "credentials",
+            "webhook",
+            "webhook_url",
+            "request.authorization.value",
+            "provider-api-key",
+            "provider-token",
+            "provider-secret",
+            "provider-password",
+            "session-cookie",
+            "provider-credential",
+            "channel-webhook-url",
+        ] {
+            let mut context = serde_json::json!({(key): "sensitive"});
+            sanitize_context(&mut context);
+            assert_eq!(context[key], REDACTED_VALUE, "{key}");
+        }
+        for key in [
+            "key",
+            "token",
+            "access_token",
+            "refresh_token",
+            "api_key",
+            "secret",
+            "password",
+            "passwd",
+            "auth",
+            "authorization",
+            "signature",
+            "sig",
+            "credential",
+            "code",
+        ] {
+            let sanitized = sanitize_url(&format!("https://example.com/?{key}=sensitive")).unwrap();
+            assert!(sanitized.ends_with("=REDACTED"), "{key}");
+        }
+    }
 
     #[test]
     fn recursive_log_sanitization_removes_credentials_and_url_secrets() {

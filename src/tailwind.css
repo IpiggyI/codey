@@ -46,7 +46,6 @@
 @import "@heroui/styles/components/input-group.css" layer(components);
 
 /* 布局 */
-@import "@heroui/styles/components/card.css" layer(components);
 @import "@heroui/styles/components/header.css" layer(components);
 
 /* 弹层 */
@@ -61,11 +60,13 @@
 @import "@heroui/styles/utilities";
 @import "@heroui/styles/variants";
 
+/* 主题由宿主同步后显式设置，避免系统深色覆盖 Codex 手动选择的浅色。 */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
 /* Tailwind 只需扫描实际导入的 HeroUI 组件源码。 */
 @source "../node_modules/@heroui/react/dist/utils";
 @source "../node_modules/@heroui/react/dist/hooks";
 @source "../node_modules/@heroui/react/dist/components/button";
-@source "../node_modules/@heroui/react/dist/components/card";
 @source "../node_modules/@heroui/react/dist/components/checkbox";
 @source "../node_modules/@heroui/react/dist/components/chip";
 @source "../node_modules/@heroui/react/dist/components/close-button";
@@ -87,23 +88,70 @@
 @source "../node_modules/@heroui/react/dist/components/tooltip";
 
 /*
- * Codey 品牌色映射到 HeroUI 语义色。随后把 --radius 写回 Tailwind 默认值，
- * 避免 HeroUI 主题的 0.5rem 放大本分叉里依赖 var(--radius) 的 rounded 工具类。
+ * Codey 色板映射到 HeroUI 语义色变量；派生的 hover / soft 变体由 HeroUI 主题自动按 --accent 计算。
+ * --radius 取 12px：HeroUI 的 rounded-* 工具类按它的倍数派生（sm 6px、md 9px、lg 12px）。
  */
 @layer theme {
   :root,
   [data-theme="light"] {
-    --accent: #007aff;
+    --radius: 12px;
+    --accent: #1d8cf0;
     --accent-foreground: #ffffff;
-    --link: #007aff;
-    --danger: #ff3b30;
-    --success: #34c759;
-    --warning: #ff9500;
+    --link: #1d8cf0;
+    --danger: #f4212e;
+    --success: #00a36c;
+    --warning: #e08600;
     --background: #ffffff;
+    --foreground: #0f1419;
+    --surface: #ffffff;
+    --surface-secondary: #f7f9f9;
+    --surface-tertiary: #eff3f4;
+    --overlay: #ffffff;
+    --default: #eff3f4;
+    --default-foreground: #0f1419;
+    --muted: #536471;
+    --border: #e6eaed;
+    --divider: #eff3f4;
+    --field-background: #eff3f4;
+    --field-foreground: #0f1419;
+    --field-placeholder: #8b98a5;
+    --field-radius: 12px;
     --field-shadow: 0 0 0 0 transparent;
-    --field-border: rgba(0, 0, 0, 0.12);
-    --field-border-hover: rgba(0, 0, 0, 0.24);
-    --field-border-focus: #007aff;
-    --radius: 0.25rem;
+    --field-border: transparent;
+    --field-border-hover: #cfd9de;
+    --field-border-focus: #1d8cf0;
+    --focus: #1d8cf0;
+    --overlay-shadow: 0 0 15px rgba(101, 119, 134, 0.2), 0 0 3px 1px rgba(101, 119, 134, 0.15);
+  }
+
+  [data-theme="dark"] {
+    --radius: 12px;
+    --accent: #3b9eff;
+    --accent-foreground: #ffffff;
+    --link: #58adff;
+    --danger: #ff5c6c;
+    --success: #24c98b;
+    --warning: #f5b041;
+    --background: #171a20;
+    --foreground: #eceff4;
+    --surface: #1d2129;
+    --surface-secondary: #222731;
+    --surface-tertiary: #282e3a;
+    --overlay: #20252e;
+    --default: #262c37;
+    --default-foreground: #eceff4;
+    --muted: #9aa3b2;
+    --border: #2b313d;
+    --divider: #232833;
+    --field-background: #14171d;
+    --field-foreground: #eceff4;
+    --field-placeholder: #6e7787;
+    --field-radius: 12px;
+    --field-shadow: 0 0 0 0 transparent;
+    --field-border: #2e3543;
+    --field-border-hover: #3e4759;
+    --field-border-focus: #3b9eff;
+    --focus: #3b9eff;
+    --overlay-shadow: 0 18px 42px rgba(0, 0, 0, 0.46), 0 4px 12px rgba(0, 0, 0, 0.28), 0 0 0 1px rgba(255, 255, 255, 0.08);
   }
 }

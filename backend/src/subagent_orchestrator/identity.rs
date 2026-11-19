@@ -4,7 +4,7 @@
 //! fail-closed without duplicating identity heuristics.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, File};
+use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 
@@ -310,7 +310,7 @@ pub(super) fn task_id_from_subagent_transcript(
     let canonical_transcript =
         resolve_verified_subagent_transcript(state_root, session_id, agent_id, transcript_path)?;
 
-    let reader = BufReader::new(File::open(&canonical_transcript).ok()?);
+    let reader = BufReader::new(crate::rollout_file::reader_current(&canonical_transcript).ok()?);
     let mut limited = reader.take((MAX_TRANSCRIPT_METADATA_LINE_BYTES + 1) as u64);
     let mut first_line = Vec::new();
     let read = limited.read_until(b'\n', &mut first_line).ok()?;
@@ -400,10 +400,11 @@ pub(crate) fn resolve_verified_subagent_transcript(
         .map(str::trim)
         .filter(|path| !path.is_empty())
     {
-        let candidate = Path::new(raw_path);
-        if !candidate.is_absolute()
-            || candidate.extension().and_then(|value| value.to_str()) != Some("jsonl")
-        {
+        let resolved = crate::rollout_file::resolve(Path::new(raw_path))
+            .inspect_err(|e| eprintln!("解析子代理会话记录失败：{e}"))
+            .ok()?;
+        let candidate = resolved.as_path();
+        if !candidate.is_absolute() || !crate::rollout_file::has_extension(candidate) {
             return None;
         }
         let metadata = fs::symlink_metadata(candidate).ok()?;
@@ -415,7 +416,7 @@ pub(crate) fn resolve_verified_subagent_transcript(
             return None;
         }
         let file_name = canonical.file_name().and_then(|value| value.to_str())?;
-        if file_name.ends_with(&expected_suffix) {
+        if crate::rollout_file::plain_name(file_name).ends_with(&expected_suffix) {
             return Some(canonical);
         }
         if !session_id.trim().is_empty() && is_parent_session_rollout_name(file_name, session_id) {
@@ -429,7 +430,7 @@ pub(crate) fn resolve_verified_subagent_transcript(
 }
 
 fn is_parent_session_rollout_name(file_name: &str, session_id: &str) -> bool {
-    let Some(stem) = file_name
+    let Some(stem) = crate::rollout_file::plain_name(file_name)
         .strip_prefix("rollout-")
         .and_then(|name| name.strip_suffix(".jsonl"))
     else {
@@ -456,7 +457,7 @@ fn find_unique_agent_rollout_in_dir(
         let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
             continue;
         };
-        if !name.ends_with(expected_suffix) {
+        if !crate::rollout_file::plain_name(name).ends_with(expected_suffix) {
             continue;
         }
         let Ok(canonical) = fs::canonicalize(&path) else {
@@ -525,7 +526,9 @@ fn find_agent_rollout_in_tree_inner(
             && path
                 .file_name()
                 .and_then(|value| value.to_str())
-                .is_some_and(|name| name.ends_with(expected_suffix))
+                .is_some_and(|name| {
+                    crate::rollout_file::plain_name(name).ends_with(expected_suffix)
+                })
             && let Ok(canonical) = fs::canonicalize(&path)
             && canonical.starts_with(sessions_root)
             && matched.replace(canonical).is_some()
@@ -571,7 +574,7 @@ fn collect_recent_session_rollout_files(
                 target,
             );
         } else if metadata.is_file()
-            && path.extension().and_then(|value| value.to_str()) == Some("jsonl")
+            && crate::rollout_file::has_extension(&path)
             && let Ok(canonical) = fs::canonicalize(&path)
             && canonical.starts_with(sessions_root)
         {
@@ -581,7 +584,11 @@ fn collect_recent_session_rollout_files(
 }
 
 fn session_meta_agent_id(path: &Path) -> Option<String> {
-    let reader = BufReader::new(File::open(path).ok()?);
+    let reader = BufReader::new(
+        crate::rollout_file::reader_current(path)
+            .inspect_err(|error| eprintln!("读取子代理会话记录失败：{error}"))
+            .ok()?,
+    );
     let mut limited = reader.take((MAX_TRANSCRIPT_METADATA_LINE_BYTES + 1) as u64);
     let mut first_line = Vec::new();
     let read = limited.read_until(b'\n', &mut first_line).ok()?;

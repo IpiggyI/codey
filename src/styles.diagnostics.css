@@ -4,7 +4,6 @@
 
 .trace-card {
   min-height: 0;
-  border-radius: 12px;
 }
 
 .trace-warning {
@@ -12,11 +11,11 @@
   align-items: center;
   gap: 7px;
   margin-top: 12px;
-  border: 1px solid rgba(255, 149, 0, 0.2);
+  border: 1px solid color-mix(in srgb, var(--codey-amber) 20%, transparent);
   border-radius: 8px;
-  background: rgba(255, 149, 0, 0.06);
+  background: color-mix(in srgb, var(--codey-amber) 6%, transparent);
   padding: 8px 12px;
-  color: #9a5b0f;
+  color: var(--codey-amber);
   font-size: 11px;
 }
 
@@ -36,7 +35,7 @@
   justify-content: space-between;
   gap: 16px;
   padding-bottom: 14px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  border-bottom: 1px solid var(--codey-border);
   margin-bottom: 16px;
 }
 
@@ -50,25 +49,25 @@
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: #8e8e93;
+  background: var(--codey-subtle);
   flex-shrink: 0;
   transition: all 0.3s ease;
 }
 
 .trace-status-dot.active {
-  background: #34c759;
-  box-shadow: 0 0 0 3px rgba(52, 199, 89, 0.2);
+  background: var(--codey-green);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--codey-green) 20%, transparent);
 }
 
 .trace-snapshot-info strong {
   font-size: 13px;
   font-weight: 600;
-  color: #1d1d1f;
+  color: var(--codey-text);
 }
 
 .trace-snapshot-info span {
   font-size: 11px;
-  color: #6e6e73;
+  color: var(--codey-muted);
 }
 
 .trace-metrics-grid {
@@ -86,11 +85,10 @@
   align-items: flex-start;
   gap: 10px;
   overflow: hidden;
-  border: 1px solid rgba(0, 0, 0, 0.07);
-  border-radius: 12px;
-  background: #ffffff;
+  border: 1px solid transparent;
+  border-radius: 14px;
+  background: var(--codey-panel);
   padding: 14px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
   transition: border-color 0.2s cubic-bezier(0.16, 1, 0.3, 1),
               background-color 0.2s cubic-bezier(0.16, 1, 0.3, 1),
               box-shadow 0.2s cubic-bezier(0.16, 1, 0.3, 1),
@@ -120,10 +118,7 @@
 }
 
 .trace-metric-card:hover {
-  transform: translateY(-2px);
-  background: #ffffff;
-  border-color: rgba(0, 0, 0, 0.12);
-  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.06);
+  border-color: var(--codey-border-strong);
 }
 
 .trace-metric-card::after {
@@ -136,55 +131,50 @@
   height: 36px;
   flex: 0 0 auto;
   place-items: center;
-  border-radius: 10px;
-  background: rgba(0, 0, 0, 0.04);
-  color: #48484a;
+  border-radius: 50%;
+  background: var(--codey-surface-sunken);
+  color: var(--codey-text-soft);
   transition: all 0.2s ease;
 }
 
 .trace-metric-card-rows .trace-metric-icon {
-  background: rgba(0, 122, 255, 0.09);
-  color: #007aff;
+  background: color-mix(in srgb, var(--codey-blue) 9%, transparent);
+  color: var(--codey-blue);
 }
 .trace-metric-card-rows:hover {
-  border-color: rgba(0, 122, 255, 0.3);
-  box-shadow: 0 6px 16px rgba(0, 122, 255, 0.08);
+  border-color: color-mix(in srgb, var(--codey-blue) 30%, transparent);
 }
 
 .trace-metric-card-storage .trace-metric-icon {
-  background: rgba(88, 86, 214, 0.09);
-  color: #5856d6;
+  background: color-mix(in srgb, var(--codey-purple) 9%, transparent);
+  color: var(--codey-purple);
 }
 .trace-metric-card-storage:hover {
-  border-color: rgba(88, 86, 214, 0.3);
-  box-shadow: 0 6px 16px rgba(88, 86, 214, 0.08);
+  border-color: color-mix(in srgb, var(--codey-purple) 30%, transparent);
 }
 
 .trace-metric-card-content .trace-metric-icon {
-  background: rgba(48, 176, 199, 0.09);
-  color: #30b0c7;
+  background: var(--codey-green-soft);
+  color: var(--codey-green);
 }
 .trace-metric-card-content:hover {
-  border-color: rgba(48, 176, 199, 0.3);
-  box-shadow: 0 6px 16px rgba(48, 176, 199, 0.08);
+  border-color: var(--codey-green-border);
 }
 
 .trace-metric-card-crashpad-reports .trace-metric-icon {
-  background: rgba(255, 149, 0, 0.09);
-  color: #ff9500;
+  background: color-mix(in srgb, var(--codey-amber) 9%, transparent);
+  color: var(--codey-amber);
 }
 .trace-metric-card-crashpad-reports:hover {
-  border-color: rgba(255, 149, 0, 0.3);
-  box-shadow: 0 6px 16px rgba(255, 149, 0, 0.08);
+  border-color: color-mix(in srgb, var(--codey-amber) 30%, transparent);
 }
 
 .trace-metric-card-crashpad-storage .trace-metric-icon {
-  background: rgba(255, 45, 85, 0.09);
-  color: #ff2d55;
+  background: var(--codey-red-soft);
+  color: var(--codey-red);
 }
 .trace-metric-card-crashpad-storage:hover {
-  border-color: rgba(255, 45, 85, 0.3);
-  box-shadow: 0 6px 16px rgba(255, 45, 85, 0.08);
+  border-color: var(--codey-red-border);
 }
 
 .trace-metric-content {
@@ -196,7 +186,7 @@
 
 .trace-metric-content span {
   display: block;
-  color: #6e6e73;
+  color: var(--codey-muted);
   font-size: 11px;
   font-weight: 500;
   letter-spacing: 0.01em;
@@ -205,7 +195,7 @@
 
 .trace-metric-content strong {
   display: block;
-  color: #1d1d1f;
+  color: var(--codey-text);
   font-size: 20px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
@@ -215,7 +205,7 @@
 
 .trace-metric-content small {
   display: block;
-  color: #8e8e93;
+  color: var(--codey-subtle);
   font-size: 11px;
   line-height: 1.35;
   white-space: normal;
@@ -226,7 +216,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  min-height: 128px;
+  padding: 18px 20px;
+  border-radius: 18px;
+  background: var(--codey-panel);
 }
 
 .trace-empty {
@@ -248,28 +240,48 @@
   width: 48px;
   height: 48px;
   place-items: center;
-  border-radius: 12px;
-  background: rgba(0, 122, 255, 0.06);
-  border: 1px solid rgba(0, 122, 255, 0.12);
+  border-radius: 50%;
+  background: var(--codey-surface-sunken);
+  border: 0;
 }
 
 .trace-empty-icon {
-  color: var(--mac-blue);
+  color: var(--codey-text);
   display: grid;
   place-items: center;
 }
 
 .trace-empty-copy h3 {
   margin: 0 0 4px;
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 600;
-  color: #1d1d1f;
+  color: var(--codey-text);
   letter-spacing: -0.01em;
 }
 
 .trace-empty-copy p {
   margin: 0;
-  font-size: 12px;
-  color: #6e6e73;
+  font-size: 13px;
+  color: var(--codey-muted);
   line-height: 1.4;
+}
+
+/* 基础功能页内的诊断存储保护沿用同页的描边圆角容器：指标卡以 1px 间隙分隔。 */
+.overview-config .trace-metrics-grid {
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--codey-border);
+  border-radius: 16px;
+  background: var(--codey-border);
+}
+
+.overview-config .trace-metric-card {
+  border: 0;
+  border-radius: 0;
+  background: var(--codey-card);
+}
+
+.overview-config .trace-empty-container {
+  border: 1px solid var(--codey-border);
+  border-radius: 16px;
 }

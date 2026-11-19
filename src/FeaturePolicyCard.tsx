@@ -13,7 +13,7 @@ import type {
   FastContextToolsStatus,
   SubagentRoleId,
 } from "./App.types";
-import { Card, Table } from "@heroui/react";
+import { Table } from "@heroui/react";
 import {
   Button,
   Badge,
@@ -28,9 +28,9 @@ import {
   resolveCurrentProviderModelOption,
   type SubagentModelOption,
 } from "./subagentModels";
-import { surfaceCardPaddingClass } from "./uiClasses";
 import { SETTINGS_OVERLAY_Z_INDEX } from "./overlay.constants";
 import { codexLaunchProxyHasCredentials, validateCodexLaunchProxy } from "./urlValidation";
+import { SettingsPageHeader } from "./SettingsPageHeader";
 
 const GPU_LAUNCH_MODES = [
   { value: "off", label: "关闭" },
@@ -95,26 +95,23 @@ export function SubagentPolicyCardComponent({
 
   return (
     <section className="secondary-section subagent-section" aria-labelledby="subagent-title">
-      <div className="section-title compact">
-        <div className="section-heading">
-          <span className="section-icon" aria-hidden="true">
-            <IconUsersGroup size={15} />
-          </span>
-          <div>
-            <h2 id="subagent-title">Codey 子代理角色与调度增强</h2>
-            <p>基于 Codex 原生子代理的多角色调度与模型配置。</p>
-          </div>
-        </div>
-        <Switch
-          checked={config.subagentOptimization}
-          disabled={isBusy}
-          onCheckedChange={(checked) =>
-            onSubagentOptimizationChange(checked)
-          }
-          aria-label="启用 Codey 子代理角色与调度增强"
-        />
-      </div>
-      <Card className={`secondary-card subagent-card ${surfaceCardPaddingClass}`}>
+      <SettingsPageHeader
+        id="subagent-title"
+        title="Codey 子代理角色与调度增强"
+        icon={<IconUsersGroup size={15} />}
+        description="基于 Codex 原生子代理的多角色调度与模型配置。"
+        actions={
+          <Switch
+            checked={config.subagentOptimization}
+            disabled={isBusy}
+            onCheckedChange={(checked) =>
+              onSubagentOptimizationChange(checked)
+            }
+            aria-label="启用 Codey 子代理角色与调度增强"
+          />
+        }
+      />
+      <div className={`secondary-card subagent-card`}>
         <div className="subagent-policy-body">
           {config.subagentOptimization ? (
             <>
@@ -262,7 +259,7 @@ export function SubagentPolicyCardComponent({
                   </Table.ScrollContainer>
                 </Table>
               </div>
-              <div className="subagent-policy-callout">
+              <div className={`subagent-policy-callout${subagentModelOptions.length === 0 ? " is-warning" : ""}`}>
                 <IconInfoCircle size={14} className="subagent-callout-icon" aria-hidden="true" />
                 <div className="subagent-callout-text">
                   {subagentModelOptions.length === 0
@@ -280,6 +277,15 @@ export function SubagentPolicyCardComponent({
                 <strong>子代理角色与调度增强已关闭</strong>
                 <p>开启后仅在宽范围、可并行或需要专门证据时选择性派生子代理，并提供三类专用角色与汇合门禁。</p>
               </div>
+              <Button
+                variant="default"
+                size="sm"
+                className="mt-1"
+                disabled={isBusy}
+                onPress={() => onSubagentOptimizationChange(true)}
+              >
+                开启子代理优化
+              </Button>
             </div>
           )}
           <SubagentRuntimeOverviewSection
@@ -288,7 +294,7 @@ export function SubagentPolicyCardComponent({
             reasoningEffortLabels={REASONING_EFFORT_LABELS}
           />
         </div>
-      </Card>
+      </div>
     </section>
   );
 }
@@ -307,7 +313,7 @@ type FeaturePolicyCardProps = {
 };
 
 const LAUNCH_PROXY_CODE_CLASS =
-  "rounded bg-[rgb(var(--codey-ink-rgb,0,0,0))]/10 px-1 py-0.5 font-mono text-[11px]";
+  "rounded bg-[rgba(var(--codey-ink-rgb),0.1)] px-1 py-0.5 font-mono text-[11px]";
 
 const LAUNCH_PROXY_TOOLTIP_CONTENT = (
   <div className="space-y-1.5 text-xs text-left leading-relaxed">
@@ -414,54 +420,66 @@ function FeaturePolicyCardComponent({
             </div>
           </div>
         </div>
-        <Card className={`secondary-card launch-proxy-card ${surfaceCardPaddingClass}`}>
-          <Input
-            id="codex-launch-proxy-input"
-            aria-label="Codex 启动代理"
-            aria-invalid={Boolean(launchProxyError)}
-            aria-describedby={
-              launchProxyError
-                ? "codex-launch-proxy-error"
-                : launchProxyCredentialed
-                  ? "codex-launch-proxy-credentials"
-                  : undefined
-            }
-            value={launchProxy}
-            disabled={configEditingDisabled}
-            placeholder="留空时 Codey 不修改代理设置，例如 http://127.0.0.1:7890"
-            spellCheck={false}
-            rightSection={
-              launchProxy ? (
-                <button
-                  type="button"
-                  className="flex h-5 w-5 cursor-pointer items-center justify-center rounded-full text-[var(--codey-muted,#8e8e93)] hover:bg-[rgb(var(--codey-ink-rgb,0,0,0))]/5 hover:text-[var(--codey-text,#1d1d1f)] transition-colors disabled:cursor-not-allowed disabled:opacity-50"
-                  disabled={configEditingDisabled}
-                  onClick={() => onConfigChange({ ...config, codexLaunchProxy: "" })}
-                  aria-label="清空代理设置"
-                  title="清空代理设置"
+        <div className={`feature-card launch-proxy-card${launchProxy.trim() ? " active" : ""}`}>
+          <div className="feature-card-body launch-proxy-row">
+            <div className="launch-proxy-label">
+              <label htmlFor="codex-launch-proxy-input">代理地址</label>
+              <span
+                className={`launch-proxy-state${launchProxyError ? " is-error" : launchProxy.trim() ? " is-active" : ""}`}
+              >
+                {launchProxyError ? "格式错误" : launchProxy.trim() ? "已设置代理" : "未设置"}
+              </span>
+            </div>
+            <div className="launch-proxy-field">
+              <Input
+                id="codex-launch-proxy-input"
+                aria-label="Codex 启动代理"
+                aria-invalid={Boolean(launchProxyError)}
+                aria-describedby={
+                  launchProxyError
+                    ? "codex-launch-proxy-error"
+                    : launchProxyCredentialed
+                      ? "codex-launch-proxy-credentials"
+                      : undefined
+                }
+                value={launchProxy}
+                disabled={configEditingDisabled}
+                placeholder="留空时 Codey 不修改代理设置，例如 http://127.0.0.1:7890"
+                spellCheck={false}
+                rightSection={
+                  launchProxy ? (
+                    <button
+                      type="button"
+                      className="flex h-5 w-5 cursor-pointer items-center justify-center rounded-full text-[var(--codey-muted)] hover:bg-[var(--codey-hover)] hover:text-[var(--codey-text)] transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={configEditingDisabled}
+                      onClick={() => onConfigChange({ ...config, codexLaunchProxy: "" })}
+                      aria-label="清空代理设置"
+                      title="清空代理设置"
+                    >
+                      <IconX size={12} aria-hidden="true" />
+                    </button>
+                  ) : undefined
+                }
+                onChange={(event) =>
+                  onConfigChange({ ...config, codexLaunchProxy: event.target.value })
+                }
+              />
+              {launchProxyError ? (
+                <small
+                  id="codex-launch-proxy-error"
+                  className="launch-proxy-note is-error"
+                  role="alert"
                 >
-                  <IconX size={12} aria-hidden="true" />
-                </button>
-              ) : undefined
-            }
-            onChange={(event) =>
-              onConfigChange({ ...config, codexLaunchProxy: event.target.value })
-            }
-          />
-          {launchProxyError ? (
-            <small
-              id="codex-launch-proxy-error"
-              className="launch-proxy-note is-error"
-              role="alert"
-            >
-              {launchProxyError}
-            </small>
-          ) : launchProxyCredentialed ? (
-            <small id="codex-launch-proxy-credentials" className="launch-proxy-note">
-              带用户名密码的代理由本机回环中继认证；中继运行期间，本机其他进程也能免凭据使用这个代理。
-            </small>
-          ) : null}
-        </Card>
+                  {launchProxyError}
+                </small>
+              ) : launchProxyCredentialed ? (
+                <small id="codex-launch-proxy-credentials" className="launch-proxy-note">
+                  带用户名密码的代理由本机回环中继认证；中继运行期间，本机其他进程也能免凭据使用这个代理。
+                </small>
+              ) : null}
+            </div>
+          </div>
+        </div>
       </section>
 
       <section className="secondary-section" aria-labelledby="runtime-title">
@@ -476,7 +494,7 @@ function FeaturePolicyCardComponent({
             </div>
           </div>
         </div>
-        <Card className={`secondary-card runtime-card ${surfaceCardPaddingClass}`}>
+        <div className={`secondary-card runtime-card`}>
           <div className="feature-grid">
             {/* GPU 渲染模式：占满整行全宽，仅 Windows 客户端展示 */}
             {isWindowsClient && (
@@ -708,7 +726,7 @@ function FeaturePolicyCardComponent({
               </div>
             </div>
           </div>
-        </Card>
+        </div>
       </section>
     </>
   );

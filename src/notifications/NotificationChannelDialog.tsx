@@ -177,11 +177,11 @@ function NotificationChannelDialogComponent({
             <div className="mt-[18px] grid gap-[7px]">
               <span
                 id="notification-channel-select-label"
-                className="text-[11px] font-semibold text-[#6e6e73]"
+                className="text-[12.5px] font-semibold text-[var(--codey-muted)]"
               >
                 发送渠道
               </span>
-              <div className="relative w-[min(100%,260px)]">
+              <div className="relative w-full">
                 <Select
                   className="w-full"
                   value={draft.kind}

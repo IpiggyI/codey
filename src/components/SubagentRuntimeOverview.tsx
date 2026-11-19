@@ -67,8 +67,8 @@ const ITEM_GROUP_CLASS = "group/rt-item";
 const ITEM_CHEVRON_CLASS =
   "mt-0.5 shrink-0 text-muted transition-transform group-open/rt-item:rotate-90";
 const CODE_BLOCK_CLASS =
-  "m-0 max-h-96 overflow-auto whitespace-pre rounded-md bg-black/[0.03] p-2 font-mono text-[11px] leading-relaxed";
-const CODE_CLASS = "rounded bg-black/[0.05] px-1 py-0.5 font-mono text-[11px]";
+  "m-0 max-h-96 overflow-auto whitespace-pre rounded-md bg-[rgba(var(--codey-ink-rgb),0.03)] p-2 font-mono text-[11px] leading-relaxed";
+const CODE_CLASS = "rounded bg-[rgba(var(--codey-ink-rgb),0.05)] px-1 py-0.5 font-mono text-[11px]";
 const PATH_CLASS = "break-all font-mono text-[11px]";
 const CARD_CLASS = "space-y-1.5 rounded-md border border-default px-2.5 py-2";
 
@@ -293,7 +293,7 @@ function renderBasis(overview: SubagentRuntimeOverview, context: OverviewContext
     roles.some(({ id }) => roleUnsaved(context, id));
   const low = context.effortLabels.low ?? "low";
   return (
-    <div className="space-y-1 rounded-md bg-black/[0.03] px-2.5 py-2 leading-relaxed">
+    <div className="space-y-1 rounded-md bg-[rgba(var(--codey-ink-rgb),0.03)] px-2.5 py-2 leading-relaxed">
       <div className="flex flex-wrap items-center gap-1.5">
         <Badge variant={overview.platformSupported ? "success" : "warning"}>
           {overview.platformSupported ? "当前平台支持" : "当前平台不支持"}

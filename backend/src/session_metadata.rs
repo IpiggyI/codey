@@ -166,8 +166,9 @@ impl SessionMetadataCache {
             return None;
         }
         if let Some(path) = self.rollout_paths.get(session_id) {
-            if path.exists() {
-                return Some(path.clone());
+            let candidate = crate::rollout_file::resolve(path).unwrap_or_else(|_| path.clone());
+            if candidate.is_file() {
+                return Some(candidate);
             }
             self.rollout_paths.remove(session_id);
         }
@@ -191,7 +192,9 @@ impl SessionMetadataCache {
                     } else {
                         home.join(rollout_path)
                     };
-                    if rollout_path.exists() {
+                    let rollout_path =
+                        crate::rollout_file::resolve(&rollout_path).unwrap_or(rollout_path);
+                    if rollout_path.is_file() {
                         resolved = Some(rollout_path);
                         break;
                     }

@@ -143,7 +143,7 @@ function ModelPickerDialogComponent({
           </DialogDescription>
         </DialogHeader>
         {modelSyncWarning && (
-          <div className="mt-3.5 flex items-start gap-2 rounded-[9px] border border-amber-700/20 bg-[#fff8eb] px-3 py-2.5 text-[11px] leading-5 text-[#8a4b08]" role="alert">
+          <div className="mt-3.5 flex items-start gap-2 rounded-[9px] border border-[var(--codey-amber-border)] bg-[var(--codey-amber-soft)] px-3 py-2.5 text-[11px] leading-5 text-[var(--codey-amber)]" role="alert">
             <AlertTriangle className="mt-px shrink-0" size={17} aria-hidden="true" />
             <span className="min-w-0 break-words">{modelSyncWarning}</span>
           </div>
@@ -177,12 +177,12 @@ function ModelPickerDialogComponent({
           </Button>
         </div>
         {modelInputError && (
-          <p className="mt-1.5 text-[11px] leading-[1.45] text-[#d70015]" role="alert">{modelInputError}</p>
+          <p className="mt-1.5 text-[11px] leading-[1.45] text-[var(--codey-red,#d70015)]" role="alert">{modelInputError}</p>
         )}
-        <div className="mt-3 flex items-center justify-between gap-4 rounded-[9px] border border-black/8 bg-[#f7f7f8] px-3 py-2.5">
+        <div className="mt-3 flex items-center justify-between gap-4 rounded-[9px] border border-[var(--codey-border)] bg-[var(--codey-panel)] px-3 py-2.5">
           <div className="grid min-w-0 gap-0.5">
-            <strong className="text-xs font-semibold text-[#1d1d1f]">Auto Review</strong>
-            <small className="text-[10px] leading-[1.45] text-[#6e6e73]">
+            <strong className="text-xs font-semibold text-[var(--codey-text,#1d1d1f)]">Auto Review</strong>
+            <small className="text-[10px] leading-[1.45] text-[var(--codey-muted,#6e6e73)]">
               请确认是否支持<code>codex-auto-review</code>模型再进行修改
             </small>
           </div>
@@ -194,18 +194,18 @@ function ModelPickerDialogComponent({
             aria-label="当前 provider 支持 auto-review"
           />
         </div>
-        <div className="my-3 max-h-[360px] overflow-y-auto rounded-[10px] border border-black/8 bg-[#fbfbfc] py-1 pl-1 pr-0.5 [scrollbar-color:rgba(99,99,104,0.46)_transparent] [scrollbar-gutter:stable] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-button]:hidden [&::-webkit-scrollbar-thumb]:min-h-11 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:border-2 [&::-webkit-scrollbar-thumb]:border-transparent [&::-webkit-scrollbar-thumb]:bg-black/40 [&::-webkit-scrollbar-thumb]:bg-clip-padding">
+        <div className="my-3 max-h-[360px] overflow-y-auto rounded-[10px] border border-[var(--codey-border)] bg-[var(--codey-surface)] py-1 pl-1 pr-0.5 [scrollbar-color:rgba(var(--codey-ink-rgb),0.3)_transparent] [scrollbar-gutter:stable] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-button]:hidden [&::-webkit-scrollbar-thumb]:min-h-11 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:border-2 [&::-webkit-scrollbar-thumb]:border-transparent [&::-webkit-scrollbar-thumb]:bg-[rgba(var(--codey-ink-rgb),0.4)] [&::-webkit-scrollbar-thumb]:bg-clip-padding">
           {modelState.officialModels.length > 0 && (
             <>
-              <div className="m-0.5 flex items-center justify-between gap-3 rounded-[7px] bg-[#f1f5fb] px-2.5 py-2">
+              <div className="m-0.5 flex items-center justify-between gap-3 rounded-[7px] bg-[var(--codey-blue-soft)] px-2.5 py-2">
                 <div className="grid gap-0.5">
-                  <strong className="text-xs font-semibold text-[#1d1d1f]">官方模型</strong>
-                  <small className="text-[10px] leading-[1.35] text-[#6e6e73]">来自本次 Codex 官方账号登录</small>
+                  <strong className="text-xs font-semibold text-[var(--codey-text,#1d1d1f)]">官方模型</strong>
+                  <small className="text-[10px] leading-[1.35] text-[var(--codey-muted,#6e6e73)]">来自本次 Codex 官方账号登录</small>
                 </div>
                 <Badge variant="info">{modelState.officialModels.length} 个</Badge>
               </div>
               {visibleOfficialModels.map((model) => (
-                <div className="flex flex-wrap items-center gap-2.5 rounded-md bg-blue-500/[0.025] px-3 py-2 hover:bg-blue-500/[0.07]" key={model.slug}>
+                <div className="flex flex-wrap items-center gap-2.5 rounded-md px-3 py-2 hover:bg-[var(--codey-hover)]" key={model.slug}>
                   <Checkbox
                     checked={draftModelSet.has(modelKey(model.slug))}
                     disabled={isBusy}
@@ -214,8 +214,8 @@ function ModelPickerDialogComponent({
                     aria-label={`当前 provider 支持 ${model.slug}`}
                   />
                   <div className="grid min-w-0 flex-1 gap-px">
-                    <strong className="break-words text-xs font-semibold text-[#1d1d1f]">{model.displayName}</strong>
-                    <small className="break-words text-[11px] text-[#86868b]">{model.slug}</small>
+                    <strong className="break-words text-xs font-semibold text-[var(--codey-text,#1d1d1f)]">{model.displayName}</strong>
+                    <small className="break-words text-[11px] text-[var(--codey-subtle,#86868b)]">{model.slug}</small>
                   </div>
                   <Checkbox
                     checked={draft1MModelSet.has(modelKey(model.slug))}
@@ -251,10 +251,10 @@ function ModelPickerDialogComponent({
               )}
             </>
           )}
-          <div className="mx-0.5 mb-0.5 mt-1.5 flex items-center justify-between gap-3 rounded-[7px] border-t border-black/6 bg-[#f5f5f7] px-2.5 py-2">
+          <div className="mx-0.5 mb-0.5 mt-1.5 flex items-center justify-between gap-3 rounded-[7px] border-t border-[var(--codey-border-subtle)] bg-[var(--codey-panel)] px-2.5 py-2">
             <div className="grid gap-0.5">
-              <strong className="text-xs font-semibold text-[#1d1d1f]">模型</strong>
-              <small className="text-[10px] leading-[1.35] text-[#6e6e73]">全部通过当前 provider 调用，可同步发现或手动输入</small>
+              <strong className="text-xs font-semibold text-[var(--codey-text,#1d1d1f)]">模型</strong>
+              <small className="text-[10px] leading-[1.35] text-[var(--codey-muted,#6e6e73)]">全部通过当前 provider 调用，可同步发现或手动输入</small>
             </div>
             <Badge variant="secondary">
               {filteredThirdPartyModels.length === thirdPartyModelOptions.length
@@ -289,7 +289,7 @@ function ModelPickerDialogComponent({
               selectedThirdPartyModelKeys.has(modelKey(model));
             const manual = manualThirdPartyModelKeys.has(modelKey(model));
             return (
-              <ModelOrderItem className="flex-wrap rounded-md px-3 py-2 hover:bg-blue-500/6" key={model}
+              <ModelOrderItem className="flex-wrap rounded-md px-3 py-2 hover:bg-[var(--codey-hover)]" key={model}
                 model={model} models={thirdPartyModelOptions} disabled={isBusy} onMove={onMoveModel}>
                 <Checkbox
                   checked={draftModelSet.has(modelKey(model))}
@@ -297,7 +297,7 @@ function ModelPickerDialogComponent({
                   onCheckedChange={(checked) => onToggleDraftModel(model, checked === true)}
                   aria-label={`当前 provider 支持 ${model}`}
                 />
-                <span className="min-w-0 flex-1 break-words text-xs font-semibold text-[#1d1d1f]">{model}</span>
+                <span className="min-w-0 flex-1 break-words text-xs font-semibold text-[var(--codey-text,#1d1d1f)]">{model}</span>
                 <Checkbox
                   checked={draft1MModelSet.has(modelKey(model))}
                   disabled={isBusy}
@@ -310,7 +310,7 @@ function ModelPickerDialogComponent({
                   <Button
                     variant="ghost"
                     size="xs"
-                    className="shrink-0 text-[#d70015]"
+                    className="shrink-0 text-[var(--codey-red,#d70015)]"
                     disabled={isBusy}
                     onPress={() => onDeleteThirdPartyModel(model)}
                     aria-label={`删除其他模型 ${model}`}

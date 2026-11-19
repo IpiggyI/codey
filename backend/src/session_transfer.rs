@@ -143,7 +143,9 @@ pub fn start_export_transfer(home: &Path, session_id: &str) -> Result<SessionExp
     let usage = transfer_directory_usage(&directory)?;
     ensure_transfer_capacity(usage, 1, 0)?;
     let source = session_export_source(home, session_id)?;
-    rollout_transfer_size(&source.rollout_path)?;
+    if !crate::rollout_file::compressed(&source.rollout_path) {
+        rollout_transfer_size(&source.rollout_path)?;
+    }
 
     let transfer_id = Uuid::new_v4().to_string();
     let path = transfer_path(home, TransferKind::Export, &transfer_id)?;
@@ -446,12 +448,9 @@ fn import_session_bundle<R: BufRead>(
         fs::create_dir_all(parent)
             .with_context(|| format!("创建导入会话目录失败：{}", parent.display()))?;
     }
+    let mut rollout_file = crate::rollout_file::create_plain(&rollout_path)
+        .with_context(|| format!("创建导入会话文件失败：{}", rollout_path.display()))?;
     let write_result = (|| -> Result<()> {
-        let mut rollout_file = fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&rollout_path)
-            .with_context(|| format!("创建导入会话文件失败：{}", rollout_path.display()))?;
         {
             let mut writer = std::io::BufWriter::with_capacity(64 * 1024, &mut rollout_file);
             let mut rollout = BufReader::with_capacity(64 * 1024, rollout);
@@ -475,8 +474,9 @@ fn import_session_bundle<R: BufRead>(
             .sync_all()
             .with_context(|| format!("保存导入会话文件失败：{}", rollout_path.display()))
     })();
+    drop(rollout_file);
     if let Err(error) = write_result {
-        let _ = fs::remove_file(&rollout_path);
+        let _ = crate::rollout_file::remove_current(&rollout_path);
         return Err(error);
     }
 
@@ -490,7 +490,7 @@ fn import_session_bundle<R: BufRead>(
         &provider_id,
     );
     if let Err(error) = insert_result {
-        let _ = fs::remove_file(&rollout_path);
+        let _ = crate::rollout_file::remove_current(&rollout_path);
         return Err(error);
     }
 
@@ -748,9 +748,10 @@ fn write_session_bundle(
     serde_json::to_writer(&mut *writer, thread)?;
     writer.write_all(b",\"rollout\":\"")?;
 
-    let file = File::open(rollout_path)
+    let file = crate::rollout_file::reader_current(rollout_path)
         .with_context(|| format!("读取会话数据失败：{}", rollout_path.display()))?;
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(file.take(SESSION_TRANSFER_MAX_BYTES + 1));
+    let mut total = 0_u64;
     let mut line = String::new();
     let mut found_session_meta = false;
     let mut records = 0usize;
@@ -763,6 +764,8 @@ fn write_session_bundle(
         {
             break;
         }
+        total += line.len() as u64;
+        anyhow::ensure!(total <= SESSION_TRANSFER_MAX_BYTES, "会话数据超过导出上限");
         if !line.trim().is_empty() {
             let value: Value =
                 serde_json::from_str(&line).context("会话 rollout 包含无效的 JSONL 记录")?;
@@ -1285,7 +1288,7 @@ fn checked_rollout_path(home: &Path, rollout_path: &Path) -> Result<PathBuf> {
     let canonical_home = home
         .canonicalize()
         .with_context(|| format!("找不到 Codex 数据目录：{}", home.display()))?;
-    let canonical_rollout = rollout_path
+    let canonical_rollout = crate::rollout_file::resolve(rollout_path)?
         .canonicalize()
         .with_context(|| format!("找不到会话数据文件：{}", rollout_path.display()))?;
     if !canonical_rollout.starts_with(&canonical_home) {
@@ -1914,5 +1917,31 @@ mod tests {
             String::from_utf8(output).unwrap(),
             serde_json::to_string(value).unwrap()
         );
+    }
+    #[test]
+    fn session_export_compressed_rollout_preserves_content() {
+        let dir = tempdir().unwrap();
+        let home = dir.path();
+        let id = "s1";
+        let db = create_thread_db(home, id, home, "测试");
+        let plain = home.join("sessions/rollout-s1.jsonl");
+        let packed = plain.with_extension("jsonl.zst");
+        let original = fs::read_to_string(&plain).unwrap();
+        fs::write(&packed, zstd::encode_all(original.as_bytes(), 1).unwrap()).unwrap();
+        let error = start_export_transfer(home, id).unwrap_err().to_string();
+        crate::rollout_file::assert_conflicting_paths(&error, &plain, &packed);
+        fs::remove_file(&plain).unwrap();
+        for recorded in [&plain, &packed] {
+            Connection::open(&db)
+                .unwrap()
+                .execute(
+                    "UPDATE threads SET rollout_path=?1",
+                    [recorded.to_str().unwrap()],
+                )
+                .unwrap();
+            let (_, bundle) = export_via_chunks(home, id);
+            let value: Value = serde_json::from_slice(&bundle).unwrap();
+            assert_eq!(value["rollout"], original);
+        }
     }
 }

@@ -37,18 +37,10 @@ pub(crate) struct OfficialAuth {
     pub(crate) account_label: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct OfficialAuthFingerprint {
-    len: u64,
-    modified: SystemTime,
-}
-
-fn official_auth_fingerprint(path: &Path) -> Option<OfficialAuthFingerprint> {
-    let metadata = fs::metadata(path).ok()?;
-    Some(OfficialAuthFingerprint {
-        len: metadata.len(),
-        modified: metadata.modified().ok()?,
-    })
+async fn usage_auth_bytes(home: &Path) -> Result<Vec<u8>> {
+    tokio::fs::read(home.join("auth.json"))
+        .await
+        .context("未找到 Codex 官方登录信息")
 }
 
 #[cfg(test)]
@@ -157,7 +149,7 @@ pub struct AccountUsageCache {
     consecutive_failures: u32,
     retry: Option<(Instant, String)>,
     auth_fingerprint_initialized: bool,
-    auth_fingerprint: Option<OfficialAuthFingerprint>,
+    auth_fingerprint: Option<String>,
     auth_generation: u64,
 }
 
@@ -171,7 +163,13 @@ impl AccountUsageCache {
         codex_home: &Path,
         force_refresh: bool,
     ) -> Result<AccountUsageSnapshot> {
-        self.observe_auth_fingerprint(official_auth_fingerprint(&codex_home.join("auth.json")));
+        let bytes = usage_auth_bytes(codex_home).await;
+        self.observe_auth_fingerprint(
+            bytes
+                .as_ref()
+                .ok()
+                .map(|bytes| crate::fs_util::sha256_hex(bytes)),
+        );
         let generation = self.auth_generation;
         if force_refresh {
             self.expires_at = None;
@@ -183,12 +181,20 @@ impl AccountUsageCache {
         // reqwest snapshots the current system proxy when a client is built. Rebuild the
         // dedicated usage client for each network refresh so proxy changes do not require
         // restarting Codey. Cached results still avoid unnecessary requests and rebuilds.
-        let result = match account_usage_http_client() {
-            Ok(client) => fetch_official_account_usage(&client, codex_home).await,
+        let result = match bytes.and_then(|bytes| parse_official_auth(&bytes)) {
+            Ok(auth) => match account_usage_http_client() {
+                Ok(client) => fetch_usage_for_auth(&client, auth).await,
+                Err(error) => Err(error),
+            },
             Err(error) => Err(error),
         };
 
-        self.observe_auth_fingerprint(official_auth_fingerprint(&codex_home.join("auth.json")));
+        self.observe_auth_fingerprint(
+            usage_auth_bytes(codex_home)
+                .await
+                .ok()
+                .map(|bytes| crate::fs_util::sha256_hex(&bytes)),
+        );
         if generation != self.auth_generation {
             bail!("官方登录状态已变化，请重新读取额度");
         }
@@ -234,7 +240,7 @@ impl AccountUsageCache {
         ));
     }
 
-    fn observe_auth_fingerprint(&mut self, fingerprint: Option<OfficialAuthFingerprint>) {
+    fn observe_auth_fingerprint(&mut self, fingerprint: Option<String>) {
         if !self.auth_fingerprint_initialized {
             self.auth_generation += 1;
             self.auth_fingerprint_initialized = true;
@@ -323,17 +329,6 @@ fn account_usage_failure_backoff(consecutive_failures: u32) -> Duration {
 }
 
 // shortcut: 账号额度始终按本机 auth.json 的 ChatGPT 登录读取 ChatGPT backend 用量; ceiling: 当前 provider 为账号池型中转时数字不代表实际消耗; replace when: 能从当前 provider 取得该登录账号自己的用量
-pub async fn fetch_official_account_usage(
-    client: &Client,
-    codex_home: &Path,
-) -> Result<AccountUsageSnapshot> {
-    let auth_path = codex_home.join("auth.json");
-    let auth = tokio::task::spawn_blocking(move || read_official_auth(&auth_path))
-        .await
-        .context("读取 Codex 官方登录信息任务异常退出")??;
-    fetch_usage_for_auth(client, auth).await
-}
-
 pub(crate) async fn fetch_usage_for_auth(
     client: &Client,
     auth: OfficialAuth,
@@ -501,7 +496,11 @@ pub(crate) fn account_usage_preflight(
 
 pub(crate) fn read_official_auth(path: &Path) -> Result<OfficialAuth> {
     let bytes = fs::read(path).with_context(|| "未找到 Codex 官方登录信息")?;
-    let value: Value = serde_json::from_slice(&bytes).with_context(|| "Codex 登录信息格式无效")?;
+    parse_official_auth(&bytes)
+}
+
+fn parse_official_auth(bytes: &[u8]) -> Result<OfficialAuth> {
+    let value: Value = serde_json::from_slice(bytes).with_context(|| "Codex 登录信息格式无效")?;
     official_auth_from_value(&value)
 }
 
@@ -1444,14 +1443,8 @@ mod tests {
     fn usage_cache_clears_backoff_when_auth_changes() {
         let started_at = Instant::now();
         let mut cache = AccountUsageCache::default();
-        let first = OfficialAuthFingerprint {
-            len: 10,
-            modified: UNIX_EPOCH + Duration::from_secs(1),
-        };
-        let second = OfficialAuthFingerprint {
-            len: 11,
-            modified: UNIX_EPOCH + Duration::from_secs(2),
-        };
+        let first = crate::fs_util::sha256_hex(b"first");
+        let second = crate::fs_util::sha256_hex(b"other");
         cache.observe_auth_fingerprint(Some(first.clone()));
         cache.record_failure("expired token".to_string(), started_at);
         assert!(
@@ -1470,6 +1463,30 @@ mod tests {
                 .cached_result(started_at + Duration::from_secs(1))
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn account_usage_same_size_switch_discards_cached_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        fs::write(&path, b"first").unwrap();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        let mut cache = AccountUsageCache::default();
+        assert_eq!(
+            query_snapshot(&mut cache, dir.path(), false).await["status"],
+            "error"
+        );
+        cache.record_success(sample_snapshot(), Instant::now());
+        fs::write(&path, b"other").unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        let value = query_snapshot(&mut cache, dir.path(), false).await;
+        assert_eq!(value["status"], "error");
+        assert!(cache.snapshot.is_none());
     }
 
     #[test]

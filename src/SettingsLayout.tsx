@@ -1,4 +1,4 @@
-import { useId, useState, type ReactNode } from "react";
+import { useId, useState, type KeyboardEvent, type ReactNode } from "react";
 import {
   IconBook2,
   IconCpu,
@@ -7,6 +7,7 @@ import {
   IconSparkles,
   IconUsersGroup,
 } from "@tabler/icons-react";
+import { SettingsPageHeaderTarget } from "./SettingsPageHeader";
 
 // 新增页面时追加条目并在 App 的 sections 中提供对应内容；分组按首次出现的顺序展示。
 const SETTINGS_PAGES = [
@@ -19,17 +20,51 @@ const SETTINGS_PAGES = [
 ] as const;
 
 const SETTINGS_GROUPS = [...new Set(SETTINGS_PAGES.map((page) => page.group))];
+const SETTINGS_GROUP_ENTRIES = SETTINGS_GROUPS.map(
+  (group) => [group, SETTINGS_PAGES.filter((page) => page.group === group)] as const,
+);
+const MENU_PAGES = SETTINGS_GROUP_ENTRIES.flatMap(([, pages]) => pages);
+const MENU_NAVIGATION_KEYS = new Set([
+  "ArrowDown",
+  "ArrowUp",
+  "ArrowRight",
+  "ArrowLeft",
+  "Home",
+  "End",
+]);
 
 export type SettingsPageId = (typeof SETTINGS_PAGES)[number]["id"];
 type SettingsSection = ReactNode | ((active: boolean) => ReactNode);
 
 type SettingsLayoutProps = {
   active?: boolean;
+  brand?: ReactNode;
   hidden?: boolean;
   sections: Record<SettingsPageId, SettingsSection>;
+  sidebarFooter?: ReactNode;
 };
 
-export function SettingsLayout({ active: layoutActive = true, sections, hidden = false }: SettingsLayoutProps) {
+function SettingsPageContent({ children, labelledBy }: {
+  children: ReactNode;
+  labelledBy: string;
+}) {
+  const [headerTarget, setHeaderTarget] = useState<HTMLDivElement | null>(null);
+
+  return (
+    <SettingsPageHeaderTarget.Provider value={headerTarget}>
+      <div className="settings-page-header-host" ref={setHeaderTarget} />
+      <div
+        className="settings-page-scroll page-scroll"
+        aria-labelledby={labelledBy}
+        tabIndex={0}
+      >
+        <div className="page">{children}</div>
+      </div>
+    </SettingsPageHeaderTarget.Provider>
+  );
+}
+
+export function SettingsLayout({ active: layoutActive = true, brand, sections, sidebarFooter, hidden = false }: SettingsLayoutProps) {
   const [activePage, setActivePage] = useState<SettingsPageId>("overview");
   const [visitedPages, setVisitedPages] = useState<ReadonlySet<SettingsPageId>>(
     () => new Set(["overview"]),
@@ -41,14 +76,40 @@ export function SettingsLayout({ active: layoutActive = true, sections, hidden =
     setActivePage(page);
   }
 
+  function handleMenuKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    if (!MENU_NAVIGATION_KEYS.has(event.key)) return;
+    const items = Array.from(
+      event.currentTarget.querySelectorAll<HTMLButtonElement>("button.settings-nav-item"),
+    );
+    const currentIndex = items.indexOf(event.target as HTMLButtonElement);
+    if (currentIndex === -1 || items.length === 0) return;
+    event.preventDefault();
+    let nextIndex = currentIndex;
+    if (event.key === "Home") {
+      nextIndex = 0;
+    } else if (event.key === "End") {
+      nextIndex = items.length - 1;
+    } else {
+      const step = event.key === "ArrowDown" || event.key === "ArrowRight" ? 1 : -1;
+      nextIndex = (currentIndex + step + items.length) % items.length;
+    }
+    const nextButton = items[nextIndex];
+    const nextPage = MENU_PAGES[nextIndex];
+    if (nextButton && nextPage) {
+      selectPage(nextPage.id);
+      nextButton.focus();
+    }
+  }
+
   return (
     <div className="settings-layout" hidden={hidden}>
       <nav className="settings-sidebar" aria-label="配置功能菜单">
-        <div className="settings-sidebar-menu">
-          {SETTINGS_GROUPS.map((group) => (
+        {brand && <div className="settings-sidebar-header">{brand}</div>}
+        <div className="settings-sidebar-menu" onKeyDown={handleMenuKeyDown}>
+          {SETTINGS_GROUP_ENTRIES.map(([group, pages]) => (
             <div key={group} className="settings-nav-group">
               <div className="settings-nav-group-title">{group}</div>
-              {SETTINGS_PAGES.filter((page) => page.group === group).map((page) => {
+              {pages.map((page) => {
                 const Icon = page.icon;
                 return (
                   <button
@@ -60,7 +121,7 @@ export function SettingsLayout({ active: layoutActive = true, sections, hidden =
                     aria-controls={`${id}-page-${page.id}`}
                     onClick={() => selectPage(page.id)}
                   >
-                    <Icon size={16} stroke={1.75} aria-hidden="true" />
+                    <Icon size={18} stroke={1.85} aria-hidden="true" />
                     <span>{page.title}</span>
                   </button>
                 );
@@ -68,6 +129,7 @@ export function SettingsLayout({ active: layoutActive = true, sections, hidden =
             </div>
           ))}
         </div>
+        {sidebarFooter && <div className="settings-sidebar-footer">{sidebarFooter}</div>}
       </nav>
 
       <div className="settings-content" id="codey-settings-content" tabIndex={-1}>
@@ -84,15 +146,9 @@ export function SettingsLayout({ active: layoutActive = true, sections, hidden =
               hidden={!active}
             >
               {visitedPages.has(page.id) && (
-                <div
-                  className="settings-page-scroll page-scroll"
-                  aria-labelledby={`${id}-menu-${page.id}`}
-                  tabIndex={0}
-                >
-                  <div className="page">
-                    {typeof content === "function" ? content(active) : content}
-                  </div>
-                </div>
+                <SettingsPageContent labelledBy={`${id}-menu-${page.id}`}>
+                  {typeof content === "function" ? content(active) : content}
+                </SettingsPageContent>
               )}
             </section>
           );

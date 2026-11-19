@@ -382,7 +382,6 @@ dependencies = [
  "chrono",
  "codey-codex-extensions",
  "codey-runtime-core",
- "codey-runtime-data",
  "directories",
  "dispatch2",
  "fastctx",
@@ -455,18 +454,6 @@ dependencies = [
  "uuid",
  "windows 0.58.0",
  "zip",
-]
-
-[[package]]
-name = "codey-runtime-data"
-version = "1.4.3"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "codey-runtime-core",
- "rusqlite",
- "serde_json",
- "tempfile",
 ]
 
 [[package]]

@@ -113,7 +113,7 @@ test("two saves in a row poll until the later save finishes and then stop", asyn
   h.current.acceptConfigApply({ revision: 1, state: "pending" });
   h.current.acceptConfigApply({ revision: 2, state: "pending" });
   h.render();
-  assert.equal(configApplyBannerVisible(h.current.status.configApply, h.current.configApplyError), true);
+  assert.equal(configApplyBannerVisible(h.current.status.configApply, h.current.configApplyError), false);
   const replies = [
     { revision: 1, state: "applied" },
     { revision: 2, state: "pending" },

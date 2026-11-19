@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::BufRead;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -50,7 +50,7 @@ const RUNTIME_SUBAGENT_POLICY_PENDING_FILE: &str = "runtime-subagent-policy.pend
 const RUNTIME_SUBAGENT_POLICY_SCHEMA_VERSION: u32 = 2;
 const RUNTIME_SUBAGENT_ATTESTATION_SCHEMA_VERSION: u32 = 1;
 const RUNTIME_SUBAGENT_ATTESTATION_PREFIX: &str = "runtime-attestation-";
-const MAX_RUNTIME_ATTESTATION_TRANSCRIPT_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_RUNTIME_ATTESTATION_TRANSCRIPT_BYTES: usize = 2 * 1024 * 1024;
 const LEGACY_RUNTIME_ID: &str = "legacy-runtime";
 const PENDING_INIT_GRACE_MILLIS: u64 = 10 * 60 * 1000;
 const STATE_ERROR_GRACE_MILLIS: u64 = 10 * 60 * 1000;
@@ -768,29 +768,25 @@ fn observed_runtime_subagent_selection(
         return Ok(None);
     };
 
-    let mut file = fs::File::open(&canonical_transcript).with_context(|| {
+    let window = crate::rollout_file::read_window(
+        &canonical_transcript,
+        0,
+        MAX_RUNTIME_ATTESTATION_TRANSCRIPT_BYTES,
+    )
+    .with_context(|| {
         format!(
             "打开子代理 rollout 以验证运行配置失败：{}",
             canonical_transcript.display()
         )
     })?;
-    let length = file.metadata()?.len();
-    let start = length.saturating_sub(MAX_RUNTIME_ATTESTATION_TRANSCRIPT_BYTES);
-    file.seek(SeekFrom::Start(start))?;
-    let mut bytes = Vec::with_capacity((length - start).min(usize::MAX as u64) as usize);
-    file.take(MAX_RUNTIME_ATTESTATION_TRANSCRIPT_BYTES)
-        .read_to_end(&mut bytes)?;
-    let records = if start == 0 {
-        bytes.as_slice()
-    } else if let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') {
-        &bytes[newline + 1..]
-    } else {
-        &[]
-    };
+    let records = window.tail_records();
 
     let mut observed: Option<ObservedRuntimeSubagentSelection> = None;
     for line in records.split(|byte| *byte == b'\n') {
-        if line.is_empty() {
+        if line.is_empty()
+            || (memchr::memmem::find(line, b"turn_context").is_none()
+                && memchr::memmem::find(line, b"\\u").is_none())
+        {
             continue;
         }
         let Ok(record) = serde_json::from_slice::<Value>(line) else {
@@ -872,6 +868,8 @@ fn trusted_root_turn_matches(
     let Some(home) = state_root.parent() else {
         return Ok(false);
     };
+    let resolved = crate::rollout_file::resolve(transcript)?;
+    let transcript = resolved.as_path();
     let (Ok(sessions), Ok(path), Ok(metadata)) = (
         fs::canonicalize(home.join("sessions")),
         fs::canonicalize(transcript),
@@ -886,13 +884,17 @@ fn trusted_root_turn_matches(
         || !path
             .file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(".jsonl"))
+            .is_some_and(crate::rollout_file::is_rollout)
     {
         return Ok(false);
     }
-    let mut file = fs::File::open(path)?;
+    let window = crate::rollout_file::read_window(
+        &path,
+        64 * 1024,
+        MAX_RUNTIME_ATTESTATION_TRANSCRIPT_BYTES,
+    )?;
     let mut header = String::new();
-    BufReader::new((&mut file).take(64 * 1024)).read_line(&mut header)?;
+    window.head.as_slice().read_line(&mut header)?;
     let Ok(meta) = serde_json::from_str::<Value>(&header) else {
         return Ok(false);
     };
@@ -902,17 +904,20 @@ fn trusted_root_turn_matches(
     {
         return Ok(false);
     }
-    let length = file.metadata()?.len();
-    let start = length.saturating_sub(MAX_RUNTIME_ATTESTATION_TRANSCRIPT_BYTES);
-    file.seek(SeekFrom::Start(start))?;
-    let mut records = BufReader::new(file.take(MAX_RUNTIME_ATTESTATION_TRANSCRIPT_BYTES));
-    if start > 0 {
-        records.skip_until(b'\n')?;
-    }
+    let mut records = window.tail_records();
     let mut previous_aborted = false;
     let mut current_started = false;
-    for line in records.lines() {
-        let Ok(record) = serde_json::from_str::<Value>(&line?) else {
+    let mut line = String::new();
+    while records.read_line(&mut line)? > 0 {
+        let relevant = memchr::memmem::find(line.as_bytes(), b"event_msg").is_some()
+            || memchr::memmem::find(line.as_bytes(), b"\\u").is_some();
+        if !relevant {
+            line.clear();
+            continue;
+        }
+        let parsed = serde_json::from_str::<Value>(&line);
+        line.clear();
+        let Ok(record) = parsed else {
             continue;
         };
         if record["type"] != "event_msg" {
@@ -2346,10 +2351,11 @@ fn child_transcript_path<'a>(input: &'a HookInput, agent_id: &str) -> Option<&'a
     let suffix = format!("-{agent_id}.jsonl");
     let agent_transcript = nonempty(input.agent_transcript_path.as_deref());
     let transcript = nonempty(input.transcript_path.as_deref());
-    if agent_transcript.is_some_and(|path| path.ends_with(&suffix)) {
+    if agent_transcript.is_some_and(|path| crate::rollout_file::plain_name(path).ends_with(&suffix))
+    {
         return agent_transcript;
     }
-    if transcript.is_some_and(|path| path.ends_with(&suffix)) {
+    if transcript.is_some_and(|path| crate::rollout_file::plain_name(path).ends_with(&suffix)) {
         return transcript;
     }
     agent_transcript.or(transcript)
@@ -2366,4 +2372,54 @@ fn quote_posix(path: &Path) -> String {
 
 fn powershell_executable_invocation(path: &Path) -> String {
     format!("& '{}'", path.to_string_lossy().replace('\'', "''"))
+}
+
+#[cfg(test)]
+mod transcript_window_tests {
+    use super::*;
+
+    #[test]
+    fn large_rollout_attests_the_same_header_and_tail_in_both_formats() {
+        let header = json!({"type":"session_meta","payload":{"source":"cli","id":"session"}});
+        let context = |model| json!({"type":"turn_context","payload":{"turn_id":"current","model":model,"effort":"high"}});
+        let aborted = json!({"type":"event_msg","payload":{"type":"turn_aborted","turn_id":"old"}});
+        let started =
+            json!({"type":"event_msg","payload":{"type":"task_started","turn_id":"current"}});
+        let padding = "x".repeat(3 * 1024 * 1024);
+        let contents = format!(
+            "{header}\n{}\n\"{padding}\"\n{}\n{aborted}\n{started}\n",
+            context("old-model"),
+            context("current-model")
+        );
+        for compressed in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let sessions = dir.path().join("sessions");
+            fs::create_dir(&sessions).unwrap();
+            let root = dir.path().join(STATE_DIRECTORY);
+            let plain = sessions.join("rollout-test-agent.jsonl");
+            if compressed {
+                fs::write(
+                    plain.with_extension("jsonl.zst"),
+                    zstd::encode_all(contents.as_bytes(), 1).unwrap(),
+                )
+                .unwrap();
+            } else {
+                fs::write(&plain, &contents).unwrap();
+            }
+            let observed = observed_runtime_subagent_selection(
+                &root,
+                "session",
+                "agent",
+                plain.to_str(),
+                Some("current"),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(observed.model, "current-model");
+            assert_eq!(observed.reasoning_effort, "high");
+            bind_root_turn(&root, "runtime", "session", "old", 1).unwrap();
+            let input=serde_json::from_value(json!({"hook_event_name":"PreToolUse","session_id":"session","turn_id":"current","transcript_path":plain})).unwrap();
+            assert!(trusted_root_turn_matches(&input, &root, "runtime", 2).unwrap());
+        }
+    }
 }

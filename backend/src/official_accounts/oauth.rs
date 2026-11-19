@@ -11,7 +11,7 @@ use tokio::net::TcpListener;
 
 const OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OAUTH_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
-const OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+pub(crate) const OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 const OAUTH_CALLBACK_PORT: u16 = 1455;
 const OAUTH_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 const OAUTH_SCOPE: &str = "openid profile email offline_access";
@@ -34,12 +34,104 @@ impl TokenExchange for reqwest::Client {
             .await
             .map_err(|_| anyhow!("官方登录令牌请求失败"))?;
         let status = response.status();
-        ensure!(status.is_success(), "官方登录令牌接口返回 {status}");
         let body = crate::http_response::read_bounded_body(response, 256 * 1024, "官方登录响应")
             .await
             .map_err(|_| anyhow!("读取官方登录响应失败"))?;
+        if !status.is_success() {
+            let error = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+            if grant["grant_type"] == "refresh_token" && rejected_refresh(status.as_u16(), &error) {
+                return Err(RefreshRejected.into());
+            }
+            bail!("官方登录令牌接口返回 {status}");
+        }
         serde_json::from_slice(&body).map_err(|_| anyhow!("官方登录响应格式无效"))
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct RefreshRejected;
+
+impl std::fmt::Display for RefreshRejected {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("官方登录令牌被拒绝，请重新添加账号")
+    }
+}
+
+impl std::error::Error for RefreshRejected {}
+
+fn rejected_refresh(status: u16, body: &Value) -> bool {
+    let code = body["error"]
+        .as_str()
+        .or_else(|| body["error"]["code"].as_str());
+    matches!(status, 400 | 401)
+        && matches!(
+            code,
+            Some(
+                "invalid_grant"
+                    | "invalid_token"
+                    | "refresh_token_reused"
+                    | "refresh_token_expired"
+                    | "refresh_token_invalidated"
+            )
+        )
+}
+
+pub(crate) fn needs_refresh(account: &Account) -> bool {
+    let tokens = &account.auth["tokens"];
+    let expiry = tokens["access_token"]
+        .as_str()
+        .and_then(crate::account_usage::jwt_claims)
+        .and_then(|claims| claims["exp"].as_u64())
+        .or_else(|| tokens["expires_at"].as_u64())
+        .or_else(|| account.auth["expires_at"].as_u64());
+    tokens["refresh_token"]
+        .as_str()
+        .is_some_and(|token| !token.is_empty())
+        && expiry.is_some_and(|time| time <= super::unix_timestamp().saturating_add(300))
+}
+
+pub(crate) async fn refresh(client: &dyn TokenExchange, account: &mut Account) -> Result<()> {
+    let reply = client.exchange(json!({"grant_type":"refresh_token","client_id":OAUTH_CLIENT_ID,"refresh_token":account.auth["tokens"]["refresh_token"]})).await?;
+    let access = reply["access_token"]
+        .as_str()
+        .filter(|token| !token.trim().is_empty())
+        .context("刷新响应缺少访问令牌")?;
+    for identity in [
+        reply["account_id"].as_str().map(str::to_owned),
+        crate::account_usage::account_id_from_jwt(access),
+        reply["id_token"]
+            .as_str()
+            .and_then(crate::account_usage::account_id_from_jwt),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        ensure!(
+            account.auth["tokens"]["account_id"] == identity.as_str(),
+            "刷新响应的账号标识不匹配"
+        );
+    }
+    let tokens = account.auth["tokens"]
+        .as_object_mut()
+        .context("官方账号缺少令牌")?;
+    tokens.insert("access_token".into(), json!(access));
+    for field in ["refresh_token", "id_token"] {
+        if let Some(value) = reply[field].as_str().filter(|value| !value.is_empty()) {
+            tokens.insert(field.into(), json!(value));
+        }
+    }
+    tokens.remove("expires_at");
+    if let Some(expiry) = reply["expires_at"].as_u64().or_else(|| {
+        reply["expires_in"]
+            .as_u64()
+            .map(|seconds| super::unix_timestamp().saturating_add(seconds))
+    }) {
+        tokens.insert("expires_at".into(), json!(expiry));
+    }
+    account.auth.as_object_mut().unwrap().remove("expires_at");
+    account.auth["last_refresh"] = json!(chrono::Utc::now().to_rfc3339());
+    account.invalid = false;
+    Ok(())
 }
 
 impl Drop for LoginSession {
@@ -495,6 +587,9 @@ async fn import_with(client: &dyn TokenExchange, input: &str) -> Result<Account>
                     auth["auth_mode"] = json!("chatgpt");
                 }
                 auth["tokens"]["access_token"] = json!(access);
+                if let Some(expiry) = tokens["expires_at"].as_u64() {
+                    auth["tokens"]["expires_at"] = json!(expiry);
+                }
                 for (name, aliases) in [
                     ("refresh_token", ["refresh_token", "refreshToken"]),
                     ("id_token", ["id_token", "idToken"]),
@@ -545,6 +640,19 @@ async fn import_with(client: &dyn TokenExchange, input: &str) -> Result<Account>
 mod tests {
     use super::*;
     struct FakeExchange;
+    #[test]
+    fn official_account_only_credential_rejections_invalidate() {
+        for status in [400, 401, 429, 500, 503] {
+            assert_eq!(
+                rejected_refresh(status, &json!({"error":"invalid_grant"})),
+                matches!(status, 400 | 401)
+            );
+            assert!(!rejected_refresh(
+                status,
+                &json!({"error":"invalid_request"})
+            ));
+        }
+    }
     #[async_trait::async_trait]
     impl TokenExchange for FakeExchange {
         async fn exchange(&self, grant: Value) -> Result<Value> {

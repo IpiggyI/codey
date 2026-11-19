@@ -16,6 +16,35 @@ test("列表只有目标服务显示检查中，其他操作仍由全局锁保�
   assert.match(textContent(cards[0]), /检查中/);
   assert.doesNotMatch(textContent(cards[1]), /检查中/);
   assert.equal(elementProps(button(cards[1], "测试连接")).disabled, true);
+  let opened = null;
+  const interactive = graph.exports.ExtensionList({
+    kind: "mcp",
+    entries,
+    busy: false,
+    onAction(action, entry) {
+      opened = { action, id: entry.id };
+    },
+  });
+  const titleBtn = matching(
+    interactive,
+    (node) => elementType(node) === "button" && textContent(node) === "first",
+  )[0];
+  elementProps(titleBtn).onClick();
+  assert.deepEqual(opened, { action: "edit", id: "first" });
+
+  let cleared = false;
+  const emptyFiltered = graph.exports.ExtensionList({
+    kind: "skill",
+    entries: [],
+    busy: false,
+    filtered: true,
+    onAction() {},
+    onClearFilters() {
+      cleared = true;
+    },
+  });
+  elementProps(button(emptyFiltered, "清除筛选条件")).onClick();
+  assert.equal(cleared, true);
 });
 
 const removeButton = (tree, name) => matching(tree, (node) => elementProps(node)["aria-label"] === `卸载 ${name}`);
@@ -42,38 +71,32 @@ test("内置 Skill 只有查看入口，没有卸载入口", () => {
   assert.equal(removeButton(tree, "builtin-skill").length, 0);
 });
 
-test("每一行共用同一条左边缘：内置行也预留选择列，原因行与其他详情行同缩进", () => {
+
+test("有选择列时每一行都预留同宽的选择列，只有可切换的行放复选框", () => {
   const graph = createModuleGraph(new URL("../src/features/codex-extensions/ExtensionList.tsx", import.meta.url), { stubs });
   const base = { sourcePath: "/skills", manifestPath: "/skills/SKILL.md", description: "", enabled: true, readOnly: false, scope: "user" };
   const entries = [
-    { ...base, id: "external", name: "external", ownership: "external" },
+    { ...base, id: "external", name: "external", ownership: "managed" },
     { ...base, id: "builtin", name: "imagegen", ownership: "builtin", scope: "system", readOnly: true, reason: "Codex 系统资源不可修改" },
     { ...base, id: "fast-context", name: "fast-context", ownership: "external", canToggle: false, reason: "目录内容无法安全删除：文件超过大小限制" },
   ];
   const tree = graph.exports.ExtensionList({ kind: "skill", entries, busy: false, onAction() {}, onSelect() {} });
-  const [external, builtin, blocked] = matching(tree, (node) => elementType(node) === "article");
-  const classOf = (node) => String(elementProps(node).className ?? "");
-  // 图标前的选择列：每一行都有同样宽度的一列，只有可切换的行里才放复选框。
-  const selectColumn = (article) => matching(article, (node) => classOf(node).includes("mt-2 w-4 shrink-0"));
-  for (const article of [external, builtin, blocked]) assert.equal(selectColumn(article).length, 1);
-  assert.equal(matching(selectColumn(external)[0], (node) => elementType(node) === ui.Checkbox).length, 1);
-  assert.equal(matching(selectColumn(builtin)[0], (node) => elementType(node) === ui.Checkbox).length, 0);
-  assert.equal(matching(selectColumn(blocked)[0], (node) => elementType(node) === ui.Checkbox).length, 0);
-  // 详情行（路径、状态行、原因、操作栏）在每一行里都用同一个缩进。
-  const indents = (article) => new Set(matching(article, (node) => /sm:ml-/.test(classOf(node))).map((node) => classOf(node).match(/sm:ml-\S+/)[0]));
-  assert.deepEqual([...indents(external)], ["sm:ml-[76px]"]);
-  assert.deepEqual([...indents(builtin)], ["sm:ml-[76px]"]);
-  assert.deepEqual([...indents(blocked)], ["sm:ml-[76px]"]);
-  const reason = matching(blocked, (node) => elementType(node) === "p" && textContent(node).includes("目录内容无法安全删除"))[0];
-  assert.match(classOf(reason), /sm:ml-\[76px\]/);
+  const [toggleable, builtin, blocked] = matching(tree, (node) => elementType(node) === "article");
+  const checkboxes = (article) => matching(article, (node) => elementType(node) === ui.Checkbox);
+  const spacers = (article) => matching(article, (node) => String(elementProps(node).className ?? "").includes("w-4 shrink-0"));
+  assert.equal(checkboxes(toggleable).length, 1);
+  for (const article of [builtin, blocked]) {
+    assert.equal(checkboxes(article).length, 0);
+    assert.equal(spacers(article).length, 1);
+  }
 });
 
-test("没有选择列的列表仍用较小的缩进", () => {
+test("没有可选择的行时不渲染选择列", () => {
   const graph = createModuleGraph(new URL("../src/features/codex-extensions/ExtensionList.tsx", import.meta.url), { stubs });
   const entry = { id: "a", name: "a", sourcePath: "/a", enabled: true, readOnly: false, reason: "说明" };
   const tree = graph.exports.ExtensionList({ kind: "mcp", entries: [entry], busy: false, onAction() {} });
+  assert.equal(matching(tree, (node) => elementType(node) === ui.Checkbox).length, 0);
   assert.equal(matching(tree, (node) => String(elementProps(node).className ?? "").includes("w-4 shrink-0")).length, 0);
-  assert.ok(matching(tree, (node) => String(elementProps(node).className ?? "").includes("sm:ml-12")).length > 0);
 });
 
 test("安装预览文件列表有界，来源可在预览期间编辑且最终操作含明确确认", () => {
@@ -145,4 +168,70 @@ test("预览期间更改路径丢弃迟到结果，预览后更改路径撤销�
   ready.onChange({ ...ready.draft, content: "/tmp/third" });
   assert.equal(h.draftEditor().draft.installPreview, undefined);
   assert.equal(h.mutations.length, 0);
+});
+
+test("批量选择跨页达到 100 项上限时，已部分选中的页可取消本页、未选中的页禁用选择本页", () => {
+  const skills = Array.from({ length: 140 }, (_, i) => ({
+    id: `skill-${String(i).padStart(3, "0")}`,
+    name: `skill-${String(i).padStart(3, "0")}`,
+    sourcePath: `/tmp/skill-${i}`,
+    enabled: true,
+    readOnly: false,
+    ownership: "managed",
+    scope: "user",
+  }));
+  const controller = {
+    inventory: { revision: "r1", mcps: [], skills, warnings: [] },
+    scope: { kind: "user" },
+    busy: false,
+    loading: false,
+    checks: {},
+    clearError() {},
+  };
+  const toolbar = autoStubModule("toolbar");
+  const list = autoStubModule("list");
+  const graph = createModuleGraph(new URL("../src/features/codex-extensions/CodexExtensionsPage.tsx", import.meta.url), {
+    autoStub: true,
+    stubs: {
+      ...stubs,
+      "./useExtensionsController": { useExtensionsController: () => controller },
+      "./ExtensionToolbar": toolbar,
+      "./ExtensionList": list,
+    },
+  });
+  graph.react.useRef = (initial) => graph.react.useState(() => ({ current: initial }))[0];
+  const render = () => {
+    graph.restart();
+    return graph.exports.CodexExtensionsPage({ kind: "skill", request() {} });
+  };
+  const pageButton = (tree) => {
+    const trailing = elementProps(matching(tree, (node) => elementType(node) === toolbar.ExtensionFilters)[0]).trailing;
+    return matching(trailing, (node) => elementType(node) === ui.Button)[0];
+  };
+  const listProps = (tree) => elementProps(matching(tree, (node) => elementType(node) === list.ExtensionList)[0]);
+
+  // 第 1 页只勾选 10 项，随后第 2~5 页整页选中（共 90 项），第 6 页点击“选择本页”会截断到 100 项（本页仅选中前 10 项）。
+  for (let i = 0; i < 10; i++) {
+    listProps(render()).onSelect(`skill-${String(i).padStart(3, "0")}`);
+  }
+  elementProps(button(render(), "下一页")).onClick();
+  for (let p = 2; p <= 6; p++) {
+    const btn = pageButton(render());
+    assert.equal(textContent(btn), "选择本页");
+    assert.equal(elementProps(btn).disabled, false);
+    elementProps(btn).onClick();
+    if (p < 6) elementProps(button(render(), "下一页")).onClick();
+  }
+
+  // 第 6 页虽未全选，但总选择数已满 100 项且本页已有选中项，应切换为可操作的“取消本页”。
+  const partialCapBtn = pageButton(render());
+  assert.equal(textContent(partialCapBtn), "取消本页");
+  assert.equal(elementProps(partialCapBtn).disabled, false);
+
+  // 翻到第 7 页（本页 0 项选中且总数已满 100 项），“选择本页”应被禁用。
+  elementProps(button(render(), "下一页")).onClick();
+  const cappedEmptyBtn = pageButton(render());
+  assert.equal(textContent(cappedEmptyBtn), "选择本页");
+  assert.equal(elementProps(cappedEmptyBtn).disabled, true);
+  assert.equal(elementProps(cappedEmptyBtn).title, "最多同时选择 100 项");
 });

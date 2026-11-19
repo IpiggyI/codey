@@ -17,11 +17,10 @@ import type {
 import { invoke } from "./api";
 import { errorText, withTimeout } from "./appUtils";
 import { ManualModelCombobox } from "./components/ManualModelCombobox";
-import { Card } from "@heroui/react";
 import { Button, Input, PasswordInput, Select, Switch } from "./components/ui";
 import { SETTINGS_OVERLAY_Z_INDEX } from "./overlay.constants";
-import { surfaceCardPaddingClass } from "./uiClasses";
 import { validateOutboundApiUrl } from "./urlValidation";
+import { SettingsPageHeader } from "./SettingsPageHeader";
 
 const TEST_TIMEOUT_MS = 65_000;
 const FETCH_MODELS_TIMEOUT_MS = 20_000;
@@ -165,13 +164,6 @@ function PromptOptimizationCardComponent({
   };
 
   const handleApiKeyChange = (value: string) => {
-    if (value === "") {
-      updateOptimization({
-        apiKey: "",
-        clearApiKey: false,
-      });
-      return;
-    }
     updateOptimization({
       apiKey: value,
       clearApiKey: false,
@@ -320,9 +312,9 @@ function PromptOptimizationCardComponent({
             />
           </div>
           <Button
-            className="h-[38px]! min-w-[76px] shrink-0 max-[680px]:w-full!"
-            variant="light"
-            size="xs"
+            className="h-9! min-w-[84px] shrink-0 max-[680px]:w-full!"
+            variant="outline"
+            size="sm"
             disabled={
               isBusy ||
               fetchingModels ||
@@ -353,26 +345,23 @@ function PromptOptimizationCardComponent({
       className="secondary-section prompt-optimization-section"
       aria-labelledby="prompt-optimization-title"
     >
-      <div className="section-title compact">
-        <div className="section-heading">
-          <span className="section-icon" aria-hidden="true">
-            <IconSparkles size={15} />
-          </span>
-          <div>
-            <h2 id="prompt-optimization-title">提示词优化</h2>
-            <p>把 Codex 输入框里的内容重写得更清楚、更好执行。可沿用当前 provider、复用官方账号登录，或手工填写连接信息。</p>
-          </div>
-        </div>
-        <Switch
-          checked={optimization.enabled}
-          disabled={isBusy}
-          aria-label="启用提示词优化"
-          onCheckedChange={(checked) =>
-            updateOptimization({ enabled: checked })
-          }
-        />
-      </div>
-      <Card className={"secondary-card prompt-optimization-card " + surfaceCardPaddingClass}>
+      <SettingsPageHeader
+        id="prompt-optimization-title"
+        title="提示词优化"
+        icon={<IconSparkles size={15} />}
+        description="把 Codex 输入框里的内容重写得更清楚、更好执行。可沿用当前 provider、复用官方账号登录，或手工填写连接信息。"
+        actions={
+          <Switch
+            checked={optimization.enabled}
+            disabled={isBusy}
+            aria-label="启用提示词优化"
+            onCheckedChange={(checked) =>
+              updateOptimization({ enabled: checked })
+            }
+          />
+        }
+      />
+      <div className={"secondary-card prompt-optimization-card"}>
         {optimization.enabled ? (
           <div className="prompt-optimization-content">
             <div className="prompt-optimization-toolbar">
@@ -420,8 +409,8 @@ function PromptOptimizationCardComponent({
 
               <div className="prompt-optimization-toolbar-actions">
                 <Button
-                  variant="light"
-                  size="xs"
+                  variant="outline"
+                  size="sm"
                   className="prompt-test-btn"
                   disabled={isBusy || testing || fetchingModels || !testDraftValid}
                   onPress={() => void runTest()}
@@ -600,9 +589,18 @@ function PromptOptimizationCardComponent({
               <strong>提示词优化已关闭</strong>
               <p>开启后，在 Codex 输入框旁可通过快捷按钮一键将自然语言重写为高质量提示词。</p>
             </div>
+            <Button
+              variant="default"
+              size="sm"
+              className="mt-1"
+              disabled={isBusy}
+              onPress={() => updateOptimization({ enabled: true })}
+            >
+              开启提示词优化
+            </Button>
           </div>
         )}
-      </Card>
+      </div>
     </section>
   );
 }

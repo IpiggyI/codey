@@ -332,6 +332,16 @@
     || key.startsWith("__reactProps")
   ));
 
+  const ignoredReactFiberTraversalKeys = new Set([
+    "child",
+    "sibling",
+    "stateNode",
+    "_owner",
+    "alternate",
+    "_store",
+    "ref",
+  ]);
+
   const messageIdFromReactState = (element, stableTurnOnly = false) => {
     const visited = new WeakSet();
     const stack = reactStateKeys(element).map((key) => ({
@@ -356,6 +366,7 @@
       visited.add(value);
       scanned += 1;
       for (const key of Object.keys(value).slice(0, 80)) {
+        if (ignoredReactFiberTraversalKeys.has(key)) continue;
         let child;
         try {
           child = value[key];
@@ -460,17 +471,22 @@
     }
     for (const key of reactStateKeys(element)) {
       const reactState = element[key];
-      const directEntries = [
-        reactState?.pendingProps?.children?.props?.entry,
-        reactState?.memoizedProps?.children?.props?.entry,
-        reactState?.children?.props?.entry,
-        reactState?.pendingProps?.entry,
-        reactState?.memoizedProps?.entry,
-        reactState?.entry,
-      ];
-      for (const entry of directEntries) {
-        const metadata = metadataFromReactTurnEntry(entry, expectedMessageId);
-        if (metadata) return metadata;
+      for (const target of [reactState, reactState?.return, reactState?.return?.return]) {
+        if (!target || typeof target !== "object") continue;
+        const directEntries = [
+          target.pendingProps?.children?.props?.entry,
+          target.memoizedProps?.children?.props?.entry,
+          target.children?.props?.entry,
+          target.pendingProps?.entry,
+          target.memoizedProps?.entry,
+          target.entry,
+          target.pendingProps,
+          target.memoizedProps,
+        ];
+        for (const entry of directEntries) {
+          const metadata = metadataFromReactTurnEntry(entry, expectedMessageId);
+          if (metadata) return metadata;
+        }
       }
     }
     const visited = new WeakSet();
@@ -499,6 +515,7 @@
         candidates.push({ ...metadata, score });
       }
       for (const key of Object.keys(value).slice(0, 80)) {
+        if (ignoredReactFiberTraversalKeys.has(key)) continue;
         let child;
         try {
           child = value[key];
@@ -4515,6 +4532,7 @@
     installThreadUpdatedTimes(root);
     recoverHiddenRunningThreads(root);
     installMessageSelection(root);
+    syncSidebarClassObserver(root);
     if (syncTitles) syncSidebarTitles(root);
   };
 
@@ -4579,6 +4597,8 @@
   const pendingScanRoots = new Set();
   let pendingScanRootsByNode = new WeakMap();
   const pendingScanRootsByIdentity = new Map();
+  let pendingMessageSelectionScan = false;
+  const pendingScanCount = () => pendingScanRoots.size + (pendingMessageSelectionScan ? 1 : 0);
   const deferredMutationBatches = [];
   const deferredMutationSourceQueue = [];
   const deferredMutationInputQueue = [];
@@ -4616,7 +4636,7 @@
       mutations: Number(existing.mutations) || 0,
       nodes: Number(existing.nodes) || 0,
       processedNodes: Number(existing.processedNodes) || 0,
-      pending: deferredMutationTaskCount + deferredMutationInputRecordCount + pendingScanRoots.size,
+      pending: deferredMutationTaskCount + deferredMutationInputRecordCount + pendingScanCount(),
       pendingNodes: deferredMutationNodeCount + deferredMutationInputNodeCount,
       skipped: Number(existing.skipped) || 0,
       timing: {
@@ -4636,7 +4656,7 @@
       scanMs: (stats.timing.scanMs || 0) + (Number(timing.scanMs) || 0),
     };
     if (changes.timing) stats.__codeyTiming = { ...stats.timing };
-    stats.pending = deferredMutationTaskCount + deferredMutationInputRecordCount + pendingScanRoots.size;
+    stats.pending = deferredMutationTaskCount + deferredMutationInputRecordCount + pendingScanCount();
     stats.pendingNodes = deferredMutationNodeCount + deferredMutationInputNodeCount;
     (window.__codeyObserverStats ||= {})["codey-inject.sessionToolMutations"] = stats;
     return stats;
@@ -4773,11 +4793,21 @@
     // addPendingScanRoot() maintains a nested-free queue, so the flush must
     // not repeat the same containment checks over every pending root.
     const roots = [...pendingScanRoots].filter((root) => root.isConnected !== false);
+    const shouldScanMessageSelection = pendingMessageSelectionScan;
     pendingScanRoots.clear();
     pendingScanRootsByIdentity.clear();
+    pendingMessageSelectionScan = false;
     updateSessionMutationPending();
     const startedAt = nowMs();
     let scannedRoots = 0;
+    if (
+      shouldScanMessageSelection
+      && !roots.includes(document.body)
+      && !roots.includes(document.documentElement)
+    ) {
+      installMessageSelection(document);
+      scannedRoots += 1;
+    }
     for (let index = 0; index < roots.length; index += 1) {
       const root = roots[index];
       if (scannedRoots > 0) {
@@ -4798,14 +4828,14 @@
       scannedRoots: (Number(stats.scannedRoots) || 0) + scannedRoots,
       timing: { scanMs: nowMs() - startedAt },
     });
-    if (pendingScanRoots.size) scheduleIncrementalScan(null);
+    if (pendingScanCount()) scheduleIncrementalScan(null);
   };
   const scheduleIncrementalScan = (root) => {
     if (disposed) return;
     if (root === null) {
       // A flush already left its overflow roots in the queue. Do not let the
       // root-only scheduling entry point consume the budget a second time.
-      if (!pendingScanRoots.size) return;
+      if (!pendingScanCount()) return;
     } else {
       addPendingScanRoot(root);
     }
@@ -4956,7 +4986,7 @@
           mutations: Number(current.mutations) || 0,
           nodes: Number(current.nodes) || 0,
           processedNodes: Number(current.processedNodes) || 0,
-          pending: deferredMutationTaskCount + pendingScanRoots.size,
+          pending: deferredMutationTaskCount + pendingScanCount(),
           pendingNodes: deferredMutationNodeCount,
           skipped: Number(current.skipped) || 0,
           timing: {
@@ -5461,12 +5491,7 @@
   };
   const handleSessionToolMutationsImpl = (mutations) => {
     if (disposed) return 0;
-    if (!completionReconcileSessionId && !completionReconcileCheckTimer) {
-      completionReconcileCheckTimer = window.setTimeout(() => {
-        completionReconcileCheckTimer = 0;
-        void reconcileStaleCompletedTask();
-      }, completionReconcileMutationDelayMs);
-    }
+    let sawNonTurnMutation = false;
     let processedNodes = 0;
     const removalTargets = new Set();
     const relevanceCache = new WeakMap();
@@ -5495,6 +5520,7 @@
           continue;
         }
         if (target && !isCodeyOwned(target)) {
+          sawNonTurnMutation = true;
           const { threadRow } = contextForTarget(target);
           const relevantThreadClassChange = threadRow
             && mutation.attributeName === "class"
@@ -5514,14 +5540,16 @@
             mutation.attributeName !== "class"
             && !pureUiAttributeChange
           )) {
-            const topologyRoot = (
-              threadRow
-              || nearestScanRoot(target)
-              || (sessionIdentityAttributes.includes(mutation.attributeName)
-                ? document.body
-                : null)
-            );
+            const topologyRoot = threadRow || nearestScanRoot(target);
             if (addPendingScanRoot(topologyRoot)) {
+              processedNodes += 1;
+            } else if (
+              !topologyRoot
+              && sessionIdentityAttributes.includes(mutation.attributeName)
+              && !pendingMessageSelectionScan
+            ) {
+              pendingMessageSelectionScan = true;
+              updateSessionMutationPending();
               processedNodes += 1;
             }
           }
@@ -5533,6 +5561,7 @@
       // discovery. Rejecting the whole record before inspecting every added or
       // removed node keeps streaming churn off the optional tool path.
       if (targetContext.conversationTurn) continue;
+      sawNonTurnMutation = true;
       // Depends only on mutation.target, so it is identical for every node in
       // this record; streaming appends many text nodes per record.
       let interactiveRoot;
@@ -5583,8 +5612,18 @@
       });
       if (addPendingScanRoot(topologyRoot)) processedNodes += 1;
     });
-    if (pendingScanRoots.size) {
+    if (pendingScanCount()) {
       scheduleIncrementalScan(null);
+    }
+    if (
+      sawNonTurnMutation
+      && !completionReconcileSessionId
+      && !completionReconcileCheckTimer
+    ) {
+      completionReconcileCheckTimer = window.setTimeout(() => {
+        completionReconcileCheckTimer = 0;
+        void reconcileStaleCompletedTask();
+      }, completionReconcileMutationDelayMs);
     }
     return processedNodes;
   };
@@ -5627,14 +5666,56 @@
     subtree: true,
   };
   const mutationDispatcher = window.__codeyMutationDispatcher;
+  // 通过共享分发器接入时，将 class 与 oldValue 收敛到侧栏容器，避免流式输出全局唤醒。
+  const globalSessionToolMutationOptions = {
+    attributes: true,
+    attributeFilter: sessionToolMutationOptions.attributeFilter.filter((attribute) => attribute !== "class"),
+    childList: true,
+    subtree: true,
+  };
+  const sidebarClassMutationOptions = {
+    attributes: true,
+    attributeOldValue: true,
+    attributeFilter: ["class"],
+    subtree: true,
+  };
+  const sidebarClassContainerSelector = [
+    sidebarProjectListSelector,
+    "[data-app-action-sidebar-section]",
+    sidebarThreadRowSelector,
+  ].join(", ");
+  let usingMutationDispatcher = false;
+  let sidebarClassObserver = null;
+  let observedSidebarRoots = new WeakSet();
+  const resolveSidebarClassTarget = (node) => {
+    if (!(node instanceof HTMLElement)) return null;
+    const shell = node.closest?.("aside, nav");
+    if (shell && !shell.closest?.("[data-turn-key]") && !shell.querySelector?.("[data-turn-key]")) {
+      return shell;
+    }
+    return node.closest?.(`${sidebarProjectListSelector}, [data-app-action-sidebar-section]`) || node;
+  };
+  function syncSidebarClassObserver(root = document) {
+    if (!usingMutationDispatcher || disposed || typeof MutationObserver !== "function") return;
+    const matches = queryWithin(root, sidebarClassContainerSelector);
+    for (const node of matches) {
+      const target = resolveSidebarClassTarget(node);
+      if (!target || observedSidebarRoots.has(target)) continue;
+      observedSidebarRoots.add(target);
+      sidebarClassObserver ||= new MutationObserver(handleSessionToolMutations);
+      sidebarClassObserver.observe(target, sidebarClassMutationOptions);
+    }
+  }
   let sessionToolObserver = null;
   if (typeof mutationDispatcher?.subscribe === "function") {
     const unsubscribe = mutationDispatcher.subscribe(
       handleSessionToolMutations,
-      sessionToolMutationOptions,
+      globalSessionToolMutationOptions,
     );
     if (mutationDispatcher.snapshot?.().observerInstalled) {
       sessionToolObserver = { disconnect: unsubscribe };
+      usingMutationDispatcher = true;
+      syncSidebarClassObserver(document);
     } else {
       unsubscribe?.();
     }
@@ -5689,6 +5770,10 @@
     if (disposed) return;
     disposed = true;
     sessionToolObserver?.disconnect?.();
+    sidebarClassObserver?.disconnect?.();
+    sidebarClassObserver = null;
+    observedSidebarRoots = new WeakSet();
+    usingMutationDispatcher = false;
     lifecycleListeners.splice(0).forEach((remove) => remove());
     lifecycleIntervals.splice(0).forEach((id) => window.clearInterval?.(id));
     window.clearTimeout(scanTimer);
@@ -5706,6 +5791,7 @@
     threadRunningRecheckTimers.clear();
     pendingScanRoots.clear();
     pendingScanRootsByIdentity.clear();
+    pendingMessageSelectionScan = false;
     pendingScanRootsByNode = new WeakMap();
     deferredMutationBatches.length = 0;
     deferredMutationSourceQueue.length = 0;

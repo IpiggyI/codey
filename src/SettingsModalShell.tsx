@@ -16,7 +16,7 @@ type SettingsModalShellProps = {
 export function CodeyBrandMark() {
   return (
     <svg
-      className="block size-[38px] rounded-[10px] text-[#007aff] shadow-[0_1px_2px_rgba(0,122,255,0.12),0_4px_12px_rgba(0,122,255,0.14)] max-[760px]:size-8"
+      className="block size-9 rounded-[10px] text-[var(--codey-blue)] shadow-[0_0_0_1px_var(--codey-border)] max-[760px]:size-8"
       viewBox="0 0 350 350"
       aria-hidden="true"
       focusable="false"
@@ -89,7 +89,7 @@ export function SettingsModalShell({
     >
       <Modal.Container placement="center" className="p-3 max-[760px]:p-1.5">
         <Modal.Dialog
-          className="settings-modal-shell relative flex h-[min(860px,calc(100dvh-24px))] w-[min(1040px,calc(100vw-24px))] max-w-[calc(100vw-24px)] flex-col overflow-hidden rounded-[14px] p-0 text-sm [-webkit-app-region:no-drag] max-[760px]:h-[calc(100dvh-12px)] max-[760px]:max-h-[calc(100dvh-12px)] max-[760px]:max-w-[calc(100vw-12px)]"
+          className="settings-modal-shell relative flex h-[min(880px,calc(100dvh-24px))] w-[min(1220px,calc(100vw-24px))] max-w-[calc(100vw-24px)] flex-col overflow-hidden rounded-[18px] p-0 text-sm [-webkit-app-region:no-drag] max-[760px]:h-[calc(100dvh-12px)] max-[760px]:max-h-[calc(100dvh-12px)] max-[760px]:max-w-[calc(100vw-12px)]"
           aria-label="Codey 配置"
           data-codey-settings-shell="true"
         >

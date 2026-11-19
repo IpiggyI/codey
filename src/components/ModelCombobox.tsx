@@ -207,15 +207,15 @@ export function ModelCombobox({
             className="overflow-y-auto"
             style={{ maxHeight: MODEL_LIST_HEIGHT }}
             renderEmptyState={() => (
-              <div className="px-3 py-6 text-xs text-[#8e8e93]">{emptyText}</div>
+              <div className="px-3 py-6 text-xs text-[var(--codey-subtle)]">{emptyText}</div>
             )}
           >
             {(group) => (
               <ListBox.Section id={group.id}>
-                <Header className="flex min-w-0 items-center justify-between gap-2 px-3 py-1 text-[10px] font-semibold text-[#8e8e93]">
+                <Header className="flex min-w-0 items-center justify-between gap-2 px-3 py-1 text-[10px] font-semibold text-[var(--codey-subtle)]">
                   <span className="truncate">{group.label}</span>
                   {group.providerId ? (
-                    <span className="shrink-0 font-mono font-normal text-[#aeaeb2]">
+                    <span className="shrink-0 font-mono font-normal text-[var(--codey-subtle)]">
                       {group.providerId}
                     </span>
                   ) : null}
@@ -231,16 +231,16 @@ export function ModelCombobox({
                       >
                         <span className="flex min-w-0 items-center gap-2">
                           <span className="grid min-w-0 flex-1 gap-0.5">
-                            <span className="truncate font-semibold text-[#3a3a3c]">
+                            <span className="truncate font-semibold text-[var(--codey-text-soft)]">
                               {option.label}
                             </span>
                             {option.routeName ? (
-                              <span className="truncate text-[10px] text-[#8e8e93]">
+                              <span className="truncate text-[10px] text-[var(--codey-subtle)]">
                                 {option.routeName} · {option.modelId}
                               </span>
                             ) : null}
                           </span>
-                          <span className="grid w-4 shrink-0 place-items-center text-blue-600">
+                          <span className="grid w-4 shrink-0 place-items-center text-[var(--codey-blue)]">
                             {selected ? <IconCheck size={14} aria-hidden="true" /> : null}
                           </span>
                         </span>

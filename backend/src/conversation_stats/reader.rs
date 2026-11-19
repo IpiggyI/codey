@@ -1,18 +1,33 @@
 use std::collections::VecDeque;
+#[cfg(test)]
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 
 use super::{ConversationStatsSnapshot, state::State};
+use crate::rollout_file::{self, FileVersion};
 
 const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_SESSIONS: usize = 8;
 const HEAD_BYTES: u64 = 4 * 1024;
 const TAIL_BYTES: u64 = 64 * 1024;
+
+fn line_may_affect_stats(line: &[u8]) -> bool {
+    [
+        b"session_meta".as_slice(),
+        b"compacted",
+        b"event_msg",
+        b"token_usage_record",
+        b"response_item",
+        b"turn_context",
+        b"\\u",
+    ]
+    .iter()
+    .any(|name| memchr::memmem::find(line, name).is_some())
+}
 
 #[derive(Default)]
 pub(super) struct Cache {
@@ -21,19 +36,21 @@ pub(super) struct Cache {
 
 impl Cache {
     pub fn read(&mut self, path: &Path, session_id: &str) -> Result<ConversationStatsSnapshot> {
-        let index = self
-            .entries
-            .iter()
-            .position(|(cached, id, _)| cached == path && id == session_id);
-        let mut entry = index
+        let context = || format!("读取对话用量失败：{}", path.display());
+        let path = rollout_file::resolve(path).with_context(context)?;
+        let alternate = rollout_file::alternate_path(&path);
+        let index = self.entries.iter().position(|(cached, id, _)| {
+            id == session_id && (*cached == path || Some(cached) == alternate.as_ref())
+        });
+        let mut reader = index
             .and_then(|index| self.entries.remove(index))
-            .unwrap_or_else(|| (path.to_owned(), session_id.to_owned(), Reader::default()));
-        entry
-            .2
-            .read(path, session_id)
-            .with_context(|| format!("读取对话用量失败：{}", path.display()))?;
-        let snapshot = entry.2.state.snapshot();
-        self.entries.push_back(entry);
+            .filter(|(cached, _, _)| *cached == path)
+            .map(|(_, _, reader)| reader)
+            .unwrap_or_default();
+        reader.read(&path, session_id).with_context(context)?;
+        let snapshot = reader.state.snapshot();
+        self.entries
+            .push_back((path, session_id.to_owned(), reader));
         if self.entries.len() > MAX_SESSIONS {
             self.entries.pop_front();
         }
@@ -45,16 +62,26 @@ impl Cache {
 struct Reader {
     offset: u64,
     checkpoint: Option<[u8; 32]>,
-    version: Option<(u64, Option<SystemTime>)>,
+    version: Option<FileVersion>,
     state: State,
 }
 
 impl Reader {
     fn read(&mut self, path: &Path, session_id: &str) -> Result<()> {
-        let mut file = File::open(path)?;
-        let metadata = file.metadata()?;
-        let len = metadata.len();
-        let modified = metadata.modified().ok();
+        if rollout_file::compressed(path) {
+            let version = rollout_file::file_version(&std::fs::metadata(path)?);
+            if self.version == Some(version) {
+                return Ok(());
+            }
+            let bytes = rollout_file::bounded(path, rollout_file::MAX_DECODED)?;
+            let len = bytes.len() as u64;
+            *self = Self::default();
+            self.read_append(&mut std::io::Cursor::new(bytes), len, session_id)?;
+            self.version = Some(version);
+            return Ok(());
+        }
+        let mut file = rollout_file::open_plain(path)?;
+        let (len, modified) = rollout_file::file_version(&file.metadata()?);
         if len < self.offset
             || self
                 .version
@@ -76,9 +103,14 @@ impl Reader {
         Ok(())
     }
 
-    fn read_append(&mut self, file: &mut File, len: u64, session_id: &str) -> Result<()> {
+    fn read_append(
+        &mut self,
+        file: &mut impl crate::rollout_file::ReadSeek,
+        len: u64,
+        session_id: &str,
+    ) -> Result<()> {
         file.seek(SeekFrom::Start(self.offset))?;
-        let mut reader = BufReader::new(file.take(len - self.offset));
+        let mut reader = BufReader::with_capacity(64 * 1024, file.take(len - self.offset));
         let mut line = Vec::new();
         loop {
             line.clear();
@@ -104,14 +136,21 @@ impl Reader {
                 }
             }
             self.offset += consumed;
-            if oversized {
-                self.state.mark_partial();
-            } else if let Ok(record) = serde_json::from_slice(&line) {
-                self.state.observe(&record, session_id);
-            } else {
+            if oversized || self.observe_line(&line, session_id).is_err() {
                 self.state.mark_partial();
             }
         }
+    }
+
+    fn observe_line(&mut self, line: &[u8], session_id: &str) -> Result<()> {
+        if line_may_affect_stats(line) {
+            let record = serde_json::from_slice(line)?;
+            self.state.observe(&record, session_id);
+        } else {
+            // 无关记录只校验 JSON，避免为其分配字段和值。
+            serde_json::from_str::<&serde_json::value::RawValue>(std::str::from_utf8(line)?)?;
+        }
+        Ok(())
     }
 }
 
@@ -134,6 +173,40 @@ fn boundary_digest(file: &mut (impl Read + Seek), offset: u64) -> Result<[u8; 32
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn prefilter_keeps_stats_records_and_marks_malformed_unrelated_lines_partial() {
+        use std::io::Write;
+
+        for kind in [
+            "session_meta",
+            "compacted",
+            "event_msg",
+            "token_usage_record",
+            "response_item",
+            "turn_context",
+        ] {
+            assert!(line_may_affect_stats(
+                format!(r#"{{"type":"{kind}"}}"#).as_bytes()
+            ));
+        }
+        assert!(line_may_affect_stats(br#"{"type":"\u0063ompacted"}"#));
+        assert!(!line_may_affect_stats(br#"{"type":"other"}"#));
+
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        writeln!(
+            file,
+            r#"{{"timestamp":"2026-10-28T00:00:00Z","type":"event_msg","payload":{{"type":"task_started","turn_id":"first"}}}}"#
+        )
+        .unwrap();
+        writeln!(file, r#"{{"type":"other"}}"#).unwrap();
+        let mut reader = Reader::default();
+        reader.read(file.path(), "own").unwrap();
+        assert_eq!(reader.state.snapshot().turn_count, Some(1));
+        writeln!(file, r#"{{"type":"other","#).unwrap();
+        reader.read(file.path(), "own").unwrap();
+        assert_eq!(reader.state.snapshot().turn_count, None);
+    }
 
     fn assert_reader_snapshot(reader: &Reader, file: &File, total: u64, turns: u64, id: &str) {
         let snapshot = reader.state.snapshot();

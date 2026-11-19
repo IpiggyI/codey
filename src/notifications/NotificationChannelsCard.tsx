@@ -7,9 +7,7 @@ import {
 } from "@tabler/icons-react";
 
 import type { Config } from "../App.types";
-import { Card } from "@heroui/react";
 import { Badge, Button } from "../components/ui";
-import { surfaceCardPaddingClass } from "../uiClasses";
 import { getNotificationChannelDefinition } from "./channelRegistry";
 import { NotificationChannelDialog } from "./NotificationChannelDialog";
 import {
@@ -108,11 +106,11 @@ function NotificationChannelsCardComponent({
           </div>
         </div>
         {config.webhook.channels.length === 0 ? (
-          <Card className={`secondary-card notification-empty ${surfaceCardPaddingClass}`}>
+          <div className={`secondary-card notification-empty`}>
             <IconBell size={20} aria-hidden="true" />
             <strong>还没有通知渠道</strong>
             <small>点击“添加渠道”选择推送方式并完成配置。</small>
-          </Card>
+          </div>
         ) : (
           <ul className="notification-channel-list" aria-label="已配置通知渠道">
             {config.webhook.channels.map((channel) => {
@@ -127,8 +125,8 @@ function NotificationChannelsCardComponent({
               const ChannelIcon = definition.Icon;
               return (
                 <li key={channel.id}>
-                  <Card
-                    className={`secondary-card notification-card ${surfaceCardPaddingClass} ${cardState}`}
+                  <div
+                    className={`secondary-card notification-card ${cardState}`}
                   >
                     <div className="notification-card-header">
                       <div className="notification-title">
@@ -164,7 +162,7 @@ function NotificationChannelsCardComponent({
                         </Button>
                       </div>
                     </div>
-                  </Card>
+                  </div>
                 </li>
               );
             })}

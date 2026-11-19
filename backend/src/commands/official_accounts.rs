@@ -228,6 +228,8 @@ pub(super) async fn switch_account(
     id: &str,
     home: &Path,
 ) -> Result<Value, String> {
+    let lock = state.official_account_usage.lock().await.refresh_lock(id);
+    let _switch = lock.lock().await;
     let _config_guard = state.config_write_lock.lock().await;
     let _account_guard = state.official_account_lock.lock().await;
     let mut config = state.config.read().await.clone();
@@ -256,7 +258,8 @@ pub(super) async fn switch_account(
 
 async fn query_usage(state: &Arc<AppState>, args: &Value, home: &Path) -> Result<Value, String> {
     let client = state.http_client().await?;
-    query_usage_with(state, args, home, |auth| async move {
+    let exchange = client.current(oauth::OAUTH_TOKEN_URL).await;
+    query_usage_with(state, args, home, &exchange, |auth| async move {
         account_usage::fetch_usage_for_auth(
             &client
                 .current("https://chatgpt.com/backend-api/wham/usage")
@@ -272,6 +275,7 @@ async fn query_usage_with<F, Fut>(
     state: &Arc<AppState>,
     args: &Value,
     home: &Path,
+    exchange: &dyn oauth::TokenExchange,
     fetch: F,
 ) -> Result<Value, String>
 where
@@ -280,20 +284,56 @@ where
 {
     let force = optional_argument::<bool>(args, "forceRefresh")?.unwrap_or(false);
     let store = state.official_accounts();
+    let id = usage_account_id(args, home)?;
+    let lock = state.official_account_usage.lock().await.refresh_lock(&id);
+    let mut previous = lock.lock().await;
     let request = {
-        let _guard = state.official_account_lock.lock().await;
+        let guard = state.official_account_lock.lock().await;
         store.sync_from_codex(home).map_err(|e| e.to_string())?;
-        let id = usage_account_id(args, home)?;
-        let account = store
+        let mut account = store
             .get(&id)
             .map_err(|e| e.to_string())?
             .ok_or("找不到官方账号")?;
-        let mut usage = state.official_account_usage.lock().await;
-        if !force && let Some(cached) = usage.cached(&account) {
+        if !force && let Some(cached) = state.official_account_usage.lock().await.cached(&account) {
             return Ok(cached);
         }
-        usage.begin(&account).map_err(|e| e.to_string())?
+        if crate::official_accounts::auth_account_id(home)
+            .map_err(|e| e.to_string())?
+            .as_deref()
+            != Some(&id)
+        {
+            if account.invalid {
+                return Err("官方账号已失效，请重新添加账号".into());
+            }
+            if oauth::needs_refresh(&account) {
+                if let Some((_, result)) = previous
+                    .as_ref()
+                    .filter(|(generation, _)| generation == &account.generation)
+                {
+                    result.clone()?;
+                } else {
+                    drop(guard);
+                    let generation = account.generation.clone();
+                    let result = refresh_stored(state, home, account, exchange)
+                        .await
+                        .map_err(|error| error.to_string());
+                    *previous = Some(match &result {
+                        Ok(updated) => (updated.generation.clone(), Ok(())),
+                        Err(error) => (generation, Err(error.clone())),
+                    });
+                    account = result?;
+                }
+            }
+        }
+        state
+            .official_account_usage
+            .lock()
+            .await
+            .begin(&account)
+            .map_err(|e| e.to_string())?
     };
+    drop(previous);
+    drop(lock);
     let snapshot = fetch(request.auth.clone())
         .await
         .map_err(|e| e.to_string())?;
@@ -305,6 +345,34 @@ where
         .await
         .complete(&store, &request, snapshot)
         .map_err(|e| e.to_string())
+}
+
+async fn refresh_stored(
+    state: &AppState,
+    home: &Path,
+    mut account: crate::official_accounts::Account,
+    exchange: &dyn oauth::TokenExchange,
+) -> anyhow::Result<crate::official_accounts::Account> {
+    let result = oauth::refresh(exchange, &mut account).await;
+    let _guard = state.official_account_lock.lock().await;
+    let store = state.official_accounts();
+    let stored = store
+        .get(&account.id)?
+        .context("官方账号已删除，忽略刷新结果")?;
+    anyhow::ensure!(
+        stored.generation == account.generation
+            && crate::official_accounts::auth_account_id(home)?.as_deref() != Some(&account.id),
+        "官方账号凭据已变化，忽略刷新结果"
+    );
+    account.plan_type = stored.plan_type;
+    if let Err(error) = result {
+        if error.is::<oauth::RefreshRejected>() {
+            account.invalid = true;
+            store.save_credentials(account)?;
+        }
+        return Err(error);
+    }
+    store.save_credentials(account)
 }
 
 fn usage_account_id(args: &Value, home: &Path) -> Result<String, String> {
@@ -342,6 +410,103 @@ mod tests {
     use crate::official_accounts::Account;
 
     struct CallbackExchange(std::sync::atomic::AtomicUsize);
+
+    struct RefreshExchange {
+        calls: std::sync::atomic::AtomicUsize,
+        response: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl oauth::TokenExchange for RefreshExchange {
+        async fn exchange(&self, grant: Value) -> anyhow::Result<Value> {
+            assert_eq!(grant["grant_type"], "refresh_token");
+            assert_eq!(grant["refresh_token"], "old-refresh");
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::task::yield_now().await;
+            match self.response {
+                "invalid_grant" => Err(oauth::RefreshRejected.into()),
+                "offline" => anyhow::bail!("网络不可用"),
+                _ => Ok(
+                    json!({"access_token":"new-access", "refresh_token":"new-refresh", "expires_in":3600}),
+                ),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn official_accounts_refresh_before_usage_and_share_exchange() {
+        use base64::Engine;
+        let (_dir, home, state, current) = fixture();
+        let store = state.official_accounts();
+        let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(json!({"exp":crate::official_accounts::unix_timestamp()+60}).to_string());
+        let account = store.upsert(Account::from_auth(json!({"auth_mode":"chatgpt", "tokens":{"account_id":"other","access_token":format!("a.{claims}.c"),"refresh_token":"old-refresh"}})).unwrap()).unwrap();
+        let args = json!({"accountId":account.id});
+        let exchange = RefreshExchange {
+            calls: Default::default(),
+            response: "ok",
+        };
+        let fetch = |auth: account_usage::OfficialAuth| {
+            let saved = store.get(&account.id).unwrap().unwrap();
+            assert_eq!(auth.access_token, "new-access");
+            assert_eq!(saved.auth["tokens"]["refresh_token"], "new-refresh");
+            async { anyhow::bail!("模拟额度响应") }
+        };
+        let (first, second) = tokio::join!(
+            query_usage_with(&state, &args, &home, &exchange, fetch),
+            query_usage_with(&state, &args, &home, &exchange, fetch)
+        );
+        assert_eq!(first.unwrap_err(), "模拟额度响应");
+        assert_eq!(second.unwrap_err(), "模拟额度响应");
+        let mut auth = store.get(&current).unwrap().unwrap().auth;
+        auth["expires_at"] = json!(1);
+        let bytes = serde_json::to_vec(&auth).unwrap();
+        std::fs::write(home.join("auth.json"), &bytes).unwrap();
+        let result = query_usage_with(
+            &state,
+            &json!({"accountId":current}),
+            &home,
+            &exchange,
+            |auth| async move {
+                assert_eq!(auth.access_token, "secret-access");
+                anyhow::bail!("当前账号额度响应")
+            },
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), "当前账号额度响应");
+        assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), bytes);
+        assert_eq!(exchange.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn official_accounts_refresh_failure_and_replacement() {
+        let (_dir, home, state, _) = fixture();
+        let store = state.official_accounts();
+        for response in ["offline", "invalid_grant"] {
+            let account = store.upsert(Account::from_auth(json!({"auth_mode":"chatgpt", "tokens":{"account_id":response,"access_token":"old","refresh_token":"old-refresh","expires_at":1}})).unwrap()).unwrap();
+            let exchange = RefreshExchange {
+                calls: Default::default(),
+                response,
+            };
+            let result = query_usage_with(
+                &state,
+                &json!({"accountId":account.id}),
+                &home,
+                &exchange,
+                |_| async { panic!("刷新失败后不应查询额度") },
+            )
+            .await;
+            assert!(result.is_err());
+            assert_eq!(exchange.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            let saved = store.get(&account.id).unwrap().unwrap();
+            assert_eq!(saved.auth, account.auth);
+            assert_eq!(saved.summary(None)["invalid"], response == "invalid_grant");
+            let mut next = saved;
+            next.auth["tokens"]["access_token"] = json!("replacement");
+            store.upsert(next).unwrap();
+            assert!(!store.get(&account.id).unwrap().unwrap().invalid);
+        }
+    }
 
     #[async_trait::async_trait]
     impl oauth::TokenExchange for CallbackExchange {
@@ -710,23 +875,29 @@ mod tests {
             )
             .unwrap();
         let args = json!({"accountId":second.id,"forceRefresh":true});
-        let response = query_usage_with(&state, &args, &home, |auth| async move {
-            assert_eq!(auth.access_token, "second-secret");
-            assert_eq!(auth.account_id.as_deref(), Some("second-account"));
-            Ok(account_usage::AccountUsageSnapshot {
-                plan_type: Some("plus".into()),
-                primary: None,
-                secondary: None,
-                credits: None,
-                reset_credits: Some(account_usage::AccountResetCredits {
-                    available_count: 2,
-                    next_expires_at: Some(1_800_000_000),
-                }),
-                additional_limits: vec![],
-                account_label: None,
-                fetched_at: 10,
-            })
-        })
+        let response = query_usage_with(
+            &state,
+            &args,
+            &home,
+            &CallbackExchange(Default::default()),
+            |auth| async move {
+                assert_eq!(auth.access_token, "second-secret");
+                assert_eq!(auth.account_id.as_deref(), Some("second-account"));
+                Ok(account_usage::AccountUsageSnapshot {
+                    plan_type: Some("plus".into()),
+                    primary: None,
+                    secondary: None,
+                    credits: None,
+                    reset_credits: Some(account_usage::AccountResetCredits {
+                        available_count: 2,
+                        next_expires_at: Some(1_800_000_000),
+                    }),
+                    additional_limits: vec![],
+                    account_label: None,
+                    fetched_at: 10,
+                })
+            },
+        )
         .await
         .unwrap();
         assert_eq!(response["status"], "ok");

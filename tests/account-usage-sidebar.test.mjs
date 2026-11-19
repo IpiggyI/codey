@@ -431,31 +431,41 @@ const weeklyOnly = (usedPercent, resetsAt = localAfterDays(1)) => ({
   secondary: null,
 });
 
-test("a lone weekly window draws a border progress ring and a calendar-date reset", async () => {
+test("a lone weekly window draws a horizontal meter and a calendar-date reset", async () => {
   const resetsAt = localAfterDays(1);
   const usage = await renderedUsage(weeklyOnly(15, resetsAt));
   assert.equal(usage.dataset.windowCount, "1");
   const summary = summaryOf(usage);
   assert.match(summary, new RegExp(`<span class="codey-usage-reset">${monthDayLabel(resetsAt)} 重置</span>`));
   assert.doesNotMatch(summary, /今天|明天/);
-  assert.match(summary, /class="codey-usage-border-progress" aria-hidden="true" focusable="false"/);
-  assert.match(summary, /pathLength="100" stroke-dasharray="85 100"/);
-  assert.doesNotMatch(summary, /codey-usage-meter/);
+  assert.doesNotMatch(summary, /codey-usage-border-progress/);
+  assert.match(summary, /style="--codey-usage-remaining:0\.85"/);
+  assert.match(summary, /class="codey-usage-meter" aria-hidden="true"><span><\/span><\/span>/);
 });
 
-test("the border progress follows the remaining percentage and the tone thresholds", async () => {
+test("the stylesheet lays the lone weekly meter beside a large percentage in the Chakra Petch face", () => {
+  assert.match(source, /@font-face \{ font-family: "Codey Chakra Petch"; [^}]*src: url\("data:font\/woff2;base64,/);
+  assert.match(source, /\[data-window-count="1"\] \.codey-usage-segment\[data-window="weekly"\] \.codey-usage-value \{[^}]*font-size: 31px;/);
+  assert.match(source, /\[data-window-count="1"\] \.codey-usage-segment\[data-window="weekly"\] \.codey-usage-meter \{ grid-area: 2 \/ 1 \/ 3 \/ 2;/);
+  assert.match(source, /\.codey-usage-detail-gauge \.codey-usage-meter \{ flex: 0 1 74%;/);
+  assert.match(source, /\.codey-usage-detail-percent \{[^}]*font-size: 19px;/);
+  assert.match(source, /\.codey-usage-plan-tag\[data-pro-tier="500"\]/);
+});
+
+test("the meter follows the remaining percentage and the tone thresholds", async () => {
   for (const [remaining, tone] of [[100, "healthy"], [71, "healthy"], [70, "normal"], [57, "normal"], [40, "warning"], [20, "critical"], [0, "critical"]]) {
     const summary = summaryOf(await renderedUsage(weeklyOnly(100 - remaining)));
     assert.ok(summary.includes(`data-window="weekly" data-tone="${tone}"`), `${remaining}% tone`);
-    assert.ok(summary.includes(`stroke-dasharray="${remaining} 100"`), `${remaining}% dash`);
-    assert.equal(summary.includes('opacity="0"'), remaining === 0, `${remaining}% hides the rounded end cap`);
+    assert.ok(summary.includes(`style="--codey-usage-remaining:${remaining / 100}"`), `${remaining}% fill`);
+    assert.ok(summary.includes('class="codey-usage-meter" aria-hidden="true"><span></span></span>'), `${remaining}% meter`);
+    assert.doesNotMatch(summary, /codey-usage-border-progress/, `${remaining}% has no ring`);
   }
 });
 
-test("the border progress is limited to a lone weekly window", async () => {
+test("the summary meter is limited to a lone weekly window", async () => {
   const both = await renderedUsage(resetCreditsBase());
   assert.equal(both.dataset.windowCount, "2");
-  assert.doesNotMatch(both.innerHTML, /codey-usage-border-progress/);
+  assert.doesNotMatch(summaryOf(both), /codey-usage-meter/);
   assert.match(summaryOf(both), /class="codey-usage-reset">明天 15:30</);
 
   const fiveHourOnly = await renderedUsage({
@@ -464,7 +474,7 @@ test("the border progress is limited to a lone weekly window", async () => {
     secondary: null,
   });
   assert.equal(fiveHourOnly.dataset.windowCount, "1");
-  assert.doesNotMatch(fiveHourOnly.innerHTML, /codey-usage-border-progress/);
+  assert.doesNotMatch(summaryOf(fiveHourOnly), /codey-usage-meter/);
   assert.match(fiveHourOnly.innerHTML, /data-window="five-hour"/);
 });
 
@@ -474,7 +484,8 @@ test("reset credits render their count and the nearest expiry with the shared da
     resetCredits: { availableCount: 3, nextExpiresAt: localAfterDays(1) },
   });
   assert.match(usage.innerHTML, /剩余重置次数[\s\S]*?codey-usage-detail-value">3 次</);
-  assert.match(usage.innerHTML, /<span>最近 明天 15:30 过期<\/span>/);
+  // 明天 15:30 距现在可能不足 18 小时，预警样式由专门的用例检查，这里只核对文字。
+  assert.match(usage.innerHTML, /<span(?: class="is-expiring")?>最近 明天 15:30 过期<\/span>/);
   // 详情里的窗口重置时间带“重置”后缀，摘要与过期时间不带。
   assert.match(usage.innerHTML, /<span class="codey-usage-detail-reset">明天 15:30 重置<\/span>/);
   assert.match(usage.innerHTML, /<span class="codey-usage-reset">明天 15:30<\/span>/);

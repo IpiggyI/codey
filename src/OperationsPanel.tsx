@@ -2,6 +2,8 @@ import { memo, useMemo, useState } from "react";
 import {
   IconActivity as Activity,
   IconAlertTriangle,
+  IconChevronDown,
+  IconChevronUp,
   IconCode as Code,
   IconCloudCheck,
   IconCpu,
@@ -21,9 +23,9 @@ import type {
   PluginMarketplaceStatus,
   RuntimeStatus,
 } from "./App.types";
-import { Card, Disclosure } from "@heroui/react";
+import { Disclosure } from "@heroui/react";
 import { Badge, Button } from "./components/ui";
-import { flushCardClass } from "./uiClasses";
+import { SettingsPageHeader } from "./SettingsPageHeader";
 import {
   buildEnabledOptimizationFeatures,
   describeInjectionIssues,
@@ -383,59 +385,14 @@ function OperationsPanelComponent({
   return (
     <section
       className={`operations-hub${restartPending ? " pending" : status.running ? " running" : ""}`}
-      aria-labelledby="operations-title"
+      aria-labelledby="overview-title"
     >
-      <Card className={`operations-panel ${flushCardClass}`}>
-        <div className="operations-header">
-          <div className="operations-heading">
-            <span className="operations-heading-icon">
-              <Activity size={18} aria-hidden="true" />
-            </span>
-            <div className="operations-heading-copy">
-              <div className="operations-title-row">
-                <h2 id="operations-title">Codex 运行状态</h2>
-              </div>
-            </div>
-          </div>
-
-          <div className="operations-actions">
-            <div
-              className="operations-status-chips"
-              role="list"
-              aria-label="核心服务状态"
-            >
-              {statusCards.map((item) => {
-                const StatusIcon = item.icon;
-                const isExpanded = activeCardTitle === item.title;
-                return (
-                  <span
-                    key={item.title}
-                    className="operations-status-chip-wrap"
-                    role="listitem"
-                  >
-                    <button
-                      type="button"
-                      className={`operations-status-chip tone-${item.tone}${isExpanded ? " active" : ""}`}
-                      onClick={() => toggleCard(item.title)}
-                      aria-expanded={isExpanded}
-                      aria-label={`${item.title}（${item.label}），点击${isExpanded ? "收起" : "展开"}`}
-                    >
-                      <span
-                        className="operations-status-chip-icon"
-                        aria-hidden="true"
-                      >
-                        <StatusIcon size={14} />
-                      </span>
-                      <span className="operations-status-chip-copy">
-                        <strong>{item.title}</strong>
-                        <small>{item.label}</small>
-                      </span>
-                    </button>
-                  </span>
-                );
-              })}
-            </div>
-
+      <SettingsPageHeader
+        id="overview-title"
+        title="基础功能"
+        description="查看 Codex 运行状态，管理客户端功能与通知。"
+        actions={
+          <>
             <Badge
               variant={
                 restartPending
@@ -467,7 +424,48 @@ function OperationsPanelComponent({
                 {restartStatusUnknown ? "重新查询状态" : status.running ? "重启 Codex" : "未运行"}
               </Button>
             )}
-          </div>
+          </>
+        }
+      />
+      <div className="operations-panel">
+        <div
+          className="operations-status-cards"
+          role="list"
+          aria-label="核心服务状态"
+        >
+          {statusCards.map((item) => {
+            const StatusIcon = item.icon;
+            const isExpanded = activeCardTitle === item.title;
+            return (
+              <button
+                key={item.title}
+                type="button"
+                role="listitem"
+                className={`status-strip-item tone-${item.tone}${isExpanded ? " is-expanded" : ""}`}
+                onClick={() => toggleCard(item.title)}
+                aria-expanded={isExpanded}
+                aria-label={`${item.title}（${item.label}），点击${isExpanded ? "收起" : "展开"}`}
+              >
+                <span className="status-strip-head">
+                  <StatusIcon size={15} className="status-strip-icon" aria-hidden="true" />
+                  <strong>{item.title}</strong>
+                  <span className="status-strip-state">
+                    <span className="status-strip-dot" aria-hidden="true" />
+                    {item.label}
+                  </span>
+                </span>
+                <span className="status-strip-description">{item.description}</span>
+                <span className="status-strip-toggle">
+                  {isExpanded ? "收起诊断" : "查看诊断"}
+                  {isExpanded ? (
+                    <IconChevronUp size={12} aria-hidden="true" />
+                  ) : (
+                    <IconChevronDown size={12} aria-hidden="true" />
+                  )}
+                </span>
+              </button>
+            );
+          })}
         </div>
 
         {/* 详情面板只做展开收起动画，没有独立触发器：标题卡片本身就是开关。 */}
@@ -705,7 +703,7 @@ function OperationsPanelComponent({
           </Disclosure.Content>
         </Disclosure>
 
-      </Card>
+      </div>
     </section>
   );
 }

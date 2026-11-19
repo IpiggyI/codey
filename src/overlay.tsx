@@ -10,6 +10,7 @@ import diagnosticStyles from "./styles.diagnostics.css?inline";
 import responsiveStyles from "./styles.responsive.css?inline";
 import { codeyApiPath } from "./api";
 import { SETTINGS_OVERLAY_Z_INDEX_CSS } from "./overlay.constants";
+import { installOverlayTheme } from "./overlayTheme";
 import { SETTINGS_OPENED_EVENT } from "./useRuntimeStatus";
 import { shadowStyleSheet } from "./shadowStyles";
 import tailwindStyles from "./tailwind.css?inline";
@@ -77,28 +78,29 @@ if (!window.__codeySettingsOverlay) {
   enableShadowDOM();
   const rootElement = document.createElement("div");
   rootElement.id = "codey-overlay-root";
-  rootElement.dataset.theme = "light";
   rootElement.style.inset = "0";
   rootElement.style.pointerEvents = "none";
   rootElement.style.position = "fixed";
   rootElement.style.width = "100%";
   const modalContainer = document.createElement("div");
   modalContainer.id = "codey-overlay-modal-container";
-  modalContainer.dataset.theme = "light";
   modalContainer.style.inset = "0";
   modalContainer.style.position = "fixed";
   modalContainer.style.width = "100%";
   shadow.append(rootElement, modalContainer);
-  getOverlayMountTarget().appendChild(host);
+  const theme = installOverlayTheme([rootElement, modalContainer]);
 
   let hideTimer: number | undefined;
   let visible = false;
 
+  // 关闭或预加载期间让宿主脱离文档，避免 ShadowRoot 的大样式表常驻主文档的全局样式失效集。
   const hide = () => {
     window.clearTimeout(hideTimer);
     hideTimer = undefined;
+    if (visible) return;
     host.style.display = "none";
     host.setAttribute("aria-hidden", "true");
+    host.remove();
   };
   const reactRoot = ReactDOM.createRoot(rootElement);
   const render = (visible: boolean) => {
@@ -127,6 +129,7 @@ if (!window.__codeySettingsOverlay) {
     window.clearTimeout(hideTimer);
     hideTimer = undefined;
     getOverlayMountTarget().appendChild(host);
+    theme.sync();
     host.style.display = "block";
     host.setAttribute("aria-hidden", "false");
     render(true);

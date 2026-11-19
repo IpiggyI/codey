@@ -89,10 +89,10 @@ function ChannelSectionComponent({
         <small>{summaryText(channelList, loadError)}</small>
       </div>
       {notice ? (
-        <p role="status" className="mb-2 text-xs text-[#9a6700]">{notice}</p>
+        <p role="status" className="mb-2 text-xs text-[var(--codey-amber)]">{notice}</p>
       ) : null}
       {error ? (
-        <div role="alert" className="mb-2 flex items-center gap-2 text-xs text-[#c4271c]">
+        <div role="alert" className="mb-2 flex items-center gap-2 text-xs text-[var(--codey-red)]">
           <span className="min-w-0 flex-1">{error}</span>
           {versionConflict || !actionError ? (
             <Button variant="outline" size="xs" disabled={disabled} onPress={onRefresh}>
@@ -103,7 +103,7 @@ function ChannelSectionComponent({
       ) : null}
       {channelList ? (
         <>
-          <ul className="m-0 grid list-none gap-2 p-0">
+          <ul className="provider-row-list m-0 grid list-none gap-0 p-0">
             {channelList.channels.map((entry) => {
               const editor = editing?.channelId === entry.id ? editing : null;
               const switchDisabled = disabled || !canSelectChannel(entry);
@@ -112,9 +112,9 @@ function ChannelSectionComponent({
               const focusSwitch = request === "switch" && !switchDisabled;
               const focusEdit = request === "edit" || (request === "switch" && !focusSwitch);
               return (
-                <li key={entry.id} className="grid gap-2 rounded-lg border border-black/5 bg-white px-3 py-2">
+                <li key={entry.id} className="provider-row grid gap-2">
                   <div className="flex flex-wrap items-center gap-2">
-                    <strong className="text-[13px]">{entry.displayName}</strong>
+                    <strong className="text-[14px] text-[var(--codey-text)]">{entry.displayName}</strong>
                     <Badge variant={entry.kind === "official" ? "info" : "brand"}>
                       {entry.kind === "official" ? "官方账号" : "provider"}
                     </Badge>
@@ -122,10 +122,10 @@ function ChannelSectionComponent({
                     <Badge variant={entry.available ? "secondary" : "warning"}>
                       {entry.available ? "可用" : "不可用"}
                     </Badge>
-                    <span className="ml-auto text-xs text-[#6e6e73]">{defaultModelText(entry)}</span>
+                    <span className="ml-auto text-xs text-[var(--codey-muted)]">{defaultModelText(entry)}</span>
                   </div>
                   {entry.unavailableReason ? (
-                    <small className="text-xs text-[#9a6700]">{entry.unavailableReason}</small>
+                    <small className="text-xs text-[var(--codey-amber)]">{entry.unavailableReason}</small>
                   ) : null}
                   {editor ? (
                     <div

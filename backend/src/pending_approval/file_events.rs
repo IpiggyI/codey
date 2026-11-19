@@ -244,7 +244,7 @@ fn classify_path(relative: &Path) -> PathKind {
             .extension()
             .and_then(|extension| extension.to_str())
         {
-            Some("jsonl") => PathKind::Rollout,
+            _ if crate::rollout_file::has_extension(relative) => PathKind::Rollout,
             None => PathKind::Directory,
             _ => PathKind::Unrelated,
         };

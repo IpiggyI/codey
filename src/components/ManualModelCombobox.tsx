@@ -101,7 +101,7 @@ export function ManualModelCombobox({
     >
       <ComboBox.InputGroup>
         <InputGroup.Prefix className="px-2">
-          <IconRobot size={15} aria-hidden="true" className="text-[#7d7d83]" />
+          <IconRobot size={15} aria-hidden="true" className="text-[var(--codey-subtle)]" />
         </InputGroup.Prefix>
         <Input
           id={id}
@@ -121,7 +121,7 @@ export function ManualModelCombobox({
           <InputGroup.Suffix className="px-1">
             <button
               aria-label="清空模型"
-              className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[#8e8e93] transition-colors hover:bg-black/5 hover:text-[#1d1d1f]"
+              className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--codey-subtle)] transition-colors hover:bg-[var(--codey-hover)] hover:text-[var(--codey-text)]"
               onClick={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
@@ -145,7 +145,7 @@ export function ManualModelCombobox({
             aria-label={ariaLabel}
             className="max-h-[260px] overflow-y-auto"
             renderEmptyState={() => (
-              <div className="py-4 text-center text-xs text-[#8e8e93]">
+              <div className="py-4 text-center text-xs text-[var(--codey-subtle)]">
                 暂无模型列表，可输入自定义模型或点击「获取列表」
               </div>
             )}
@@ -158,15 +158,15 @@ export function ManualModelCombobox({
                 className="mx-0.5 rounded-[7px] px-2.5 py-1.5 text-xs"
               >
                 {option.note ? (
-                  <span className="min-w-0 flex-1 truncate text-[#8e8e93]">{option.label}</span>
+                  <span className="min-w-0 flex-1 truncate text-[var(--codey-subtle)]">{option.label}</span>
                 ) : option.custom ? (
                   <div className="flex min-w-0 items-center gap-1.5 truncate">
-                    <IconCirclePlus aria-hidden="true" className="shrink-0 text-blue-500" size={14} />
-                    <span className="shrink-0 text-[#6e6e73]">使用自定义模型</span>
-                    <span className="truncate font-semibold text-[#1d1d1f]">{option.label}</span>
+                    <IconCirclePlus aria-hidden="true" className="shrink-0 text-[var(--codey-blue)]" size={14} />
+                    <span className="shrink-0 text-[var(--codey-muted)]">使用自定义模型</span>
+                    <span className="truncate font-semibold text-[var(--codey-text)]">{option.label}</span>
                   </div>
                 ) : (
-                  <span className="min-w-0 flex-1 truncate font-medium text-[#1d1d1f]">{option.label}</span>
+                  <span className="min-w-0 flex-1 truncate font-medium text-[var(--codey-text)]">{option.label}</span>
                 )}
               </ListBox.Item>
             )}
@@ -179,7 +179,7 @@ export function ManualModelCombobox({
   const field = showPopup ? combobox : (
     <div className="w-full min-w-0">
       {combobox}
-      <p id={hintId} className="m-0 mt-1 text-xs text-[#8e8e93]">
+      <p id={hintId} className="m-0 mt-1 text-xs text-[var(--codey-subtle)]">
         {emptyHint}
       </p>
     </div>
