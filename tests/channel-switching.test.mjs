@@ -1160,3 +1160,18 @@ test("控制台接线：重启走既有确认流程，渠道随页面加载读�
   assert.match(app, /channelController\.noteStatusNotice\(next\.channelNotice \?\? null\)/);
   assert.match(app, /noticeAfterChannelChange\(refreshProviderAfterChannelChange,/);
 });
+
+test("统一模型目录的默认模型：选中的渠道是当前 provider 时以渠道默认模型为准，否则用全局默认模型", async () => {
+  const { globalDefaultForProvider } = await loadTypeScriptModule(new URL("../src/modelRoutes.ts", import.meta.url));
+  const models = ["gpt-6.2-sol", "gpt-6.1-sol"];
+  const channelId = "official:abc";
+  const config = {
+    defaultModel: "gpt-6.1-sol",
+    selectedChannelId: channelId,
+    defaultModelsByChannel: { [channelId]: "gpt-6.2-sol" },
+  };
+  assert.equal(globalDefaultForProvider(config, models, { channelId }), "gpt-6.2-sol");
+  assert.equal(globalDefaultForProvider(config, models, { channelId: "provider:other" }), "gpt-6.1-sol");
+  assert.equal(globalDefaultForProvider({ ...config, selectedChannelId: null }, models, { channelId }), "gpt-6.1-sol");
+  assert.equal(globalDefaultForProvider({ ...config, defaultModelsByChannel: {} }, models, { channelId }), "gpt-6.1-sol");
+});

@@ -874,9 +874,11 @@ export function App({
         setNotice(configApplyNotice(result.configApply));
         return;
       }
+      const channelId = result.config.selectedChannelId;
+      const scope = channelId && currentProviderSnapshot.channelId === channelId ? "当前渠道" : "全局";
       setNotice({
         tone: result.restartRequired ? "info" : "success",
-        text: `已将全局默认模型设为「${currentProviderSnapshot.id} / ${model}」`,
+        text: `已将${scope}默认模型设为「${currentProviderSnapshot.id} / ${model}」`,
       });
     });
   }

@@ -197,7 +197,7 @@ function ModelSectionComponent({
       {
         providerId: currentProviderSnapshot.id,
         models,
-        defaultModel: globalDefaultForProvider(config, models),
+        defaultModel: globalDefaultForProvider(config, models, currentProviderSnapshot),
         official,
       },
     ];
