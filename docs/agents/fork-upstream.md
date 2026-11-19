@@ -24,7 +24,7 @@
 
 | 侧 | 标签 | 提交 | 日期 |
 |---|---|---|---|
-| 本分叉 | `v1.4.3` | `release: v1.4.3` 提交 | 2026-11-11 |
+| 本分叉 | `v1.4.4` | `release: v1.4.4` 提交 | 2026-11-19 |
 | 上游 | [`v1.6.3`](https://github.com/SuperGness/codey/releases/tag/v1.6.3) | [`9316ed47`](https://github.com/SuperGness/codey/commit/9316ed47) | 2026-11-18 对照的固定目标，见 [2026-11-18-plan.md](../upstream-sync/2026-11-18-plan.md) |
 | 早期内容锚点 | 上游 `v0.10.7` | `bd03e13` | 上次整段同步 |
 | vendor | 上游 `v1.6.3` | `9316ed47` | 2026-11-18 整目录替换，保留三处本地改动：`assets/model-catalog-metadata.json` 补入 `gpt-6.1-sol`、`gpt-6-sol`、`gpt-6-luna` 三个模型的元数据，`bridge.rs` 的页面独有请求编号，`cdp.rs` 里 `browser_websocket_url` 的本地测试；上游 `3e6902a5` 删除了 `codey-runtime-data`，vendor 只剩 `codey-runtime-core`，会话删除代码移入 `backend/src/session_delete/` |
