@@ -3415,6 +3415,36 @@ test("hosted completion reconcile leaves live, pending, follower, changing, and 
   }
 });
 
+// Codex 26.1117 host facades drop getStreamRole and report the history attachment instead.
+function attachmentFacade(handlers, attached) {
+  const { getStreamRole: _removed, ...rest } = handlers;
+  return { ...rest, hasLocalHistorySubscription: () => attached.value };
+}
+
+test("Codex 26.1117 hosted reconcile requires the window to hold the thread history", async () => {
+  for (const value of [true, false]) {
+    const { handlers } = hostedReconcileHandlers();
+    const runtime = loadHostedManagerInjection(attachmentFacade(handlers, { value }));
+    assert.equal(await runHostedReconcile(runtime), value);
+    const names = runtime.calls.map(([name]) => name);
+    assert.ok(names.includes("hasLocalHistorySubscription"));
+    assert.equal(names.includes("unsubscribeInactiveConversation"), value);
+  }
+});
+
+test("Codex 26.1117 hosted deletion checks the history attachment instead of the stream role", async () => {
+  const { handlers } = hostedDeletionHandlers();
+  const attached = { value: true };
+  const runtime = loadHostedManagerInjection(attachmentFacade(handlers, attached));
+  const controller = await runtime.window.__codeyLoadCodexSessionController({ feature: "deleteMessages" });
+  await controller.prepareMessageDeletion("thread-1");
+  assert.deepEqual(runtime.calls.map(([name, arg]) => [name, arg]), [
+    ["getThreadExecutionState", "thread-1"], ["hasLocalHistorySubscription", "thread-1"],
+  ]);
+  attached.value = false;
+  await assert.rejects(controller.prepareMessageDeletion("thread-1"), /拥有当前会话的窗口/);
+});
+
 function hostedDeletionHandlers(overrides = {}) {
   const state = { execution: { inProgress: false, activeTurnId: null }, role: { role: "owner" } };
   const handlers = {

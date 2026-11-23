@@ -274,7 +274,7 @@
   // 列表，在把资源送进页面求值前预筛。新增改写必须登记它依赖的字面量。
   // 逐项前置字面量：任一组完整出现即适用；legacy 只豁免新版数字构建的缺失。
   const rendererPatchItems = /*codey-renderer-patch-items*/[
-    {"label": "app server manager registry", "alternatives": [["inactiveThreadUnsubscriber.clearConversationStreamOwnership", "getStreamRole(", "updateConversationState("]]},
+    {"label": "app server manager registry", "alternatives": [["inactiveThreadUnsubscriber.clearConversationStreamOwnership", "getStreamRole(", "updateConversationState("], ["inactiveThreadUnsubscriber.clearConversationStreamOwnership", "hasLocalHistorySubscription(", "updateConversationState("]]},
     {"label": "model route bridge preflight", "alternatives": [["codex-message-from-view", "sendMessageFromView", "Failed to send message from view"]]},
     {"label": "app server request route preflight", "alternatives": [["AppServerRequestClient is missing a message dispatcher", "mcp_request_enqueued"]]},
     {"label": "app server request identity tracking", "alternatives": [["AppServerRequestClient is missing a message dispatcher", "mcp_request_enqueued"]]},
@@ -286,7 +286,7 @@
     {"label": "hosted app server manager marker", "alternatives": [["Desktop host did not provide its AppServerManager service"]]},
     {"label": "default Chinese locale", "alternatives": [["72216192", "enable_i18n", "locale_source", ".localeOverride"]]},
     {"label": "thread owner discovery coalescing", "alternatives": [["maybe_resume_owner_discovery_failed", "followExistingOwner", ".clientCoordination.findThreadOwner"]], "legacy": "旧版页面内所有者发现入口；26.1029 数字资源中已无这些前置字面量。"},
-    {"label": "completed thread reconciliation", "alternatives": [["getHasInProgressLocalConversation(", "inactiveThreadUnsubscriber.clearConversationStreamOwnership", "getConversationStreamRevision("]]},
+    {"label": "completed thread reconciliation", "alternatives": [["getHasInProgressLocalConversation(", "inactiveThreadUnsubscriber.clearConversationStreamOwnership", "getConversationStreamRevision("], ["getHasInProgressLocalConversation(", "inactiveThreadUnsubscriber.clearConversationStreamOwnership", "hasLocalHistorySubscription(", "getThreadExecutionState("]]},
     {"label": "model allowlist", "alternatives": [["\"amazonBedrock\"!==", "availableAccessPrograms?.cyber", "useHiddenModels:"], ["useHiddenModels:", "availableModels:", "includeUltraReasoningEffort", "amazonBedrock"]]},
     {"label": "model visibility", "alternatives": [["\"amazonBedrock\"!==", "availableAccessPrograms?.cyber", "useHiddenModels:"], ["useHiddenModels:", "includeUltraReasoningEffort", "amazonBedrock"]]},
     {"label": "third-party Ultra reasoning", "alternatives": [["includeUltraReasoningEffort:", "isCustomModelProvider:", "modelCatalogPath:", "1186680773"], ["includeUltraReasoningEffort:", "isCustomModelProvider:", "teamCatalog:", "1186680773"]]},
@@ -369,7 +369,7 @@
     let nativeCustomProviderModelAccess = false;
     if (!source.includes("/*codey-app-server-manager-registry*/")
       && source.includes("inactiveThreadUnsubscriber.clearConversationStreamOwnership")
-      && source.includes("getStreamRole(")
+      && (source.includes("getStreamRole(") || source.includes("hasLocalHistorySubscription("))
       && source.includes("updateConversationState(")) {
       // 在原生管理器被读取时登记真实实例，避免依赖模块导出名和 React 结构。
       // 登记失败不得影响原生读取，也不允许已销毁实例覆盖新管理器。
@@ -416,9 +416,9 @@
         // 入队时的可选改写只供模型目录跟踪使用，不能改变用户的请求目的地。
         patched = replaceUniqueRendererGate(
           patched,
-          /(enqueueRequest\(([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*)=[$A-Z_a-z][$\w]*=>\{this\.dispatchMessage\?\.\([`"]mcp-request[`"],\{request:[$A-Z_a-z][$\w]*,hostId:this\.hostId,[\s\S]{0,1500}?widget:\4\?\.widget\}\)\},[$A-Z_a-z][$\w]*=null\)\{)let /g,
+          /(enqueueRequest\(([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*)=[$A-Z_a-z][$\w]*=>\{this\.dispatchMessage\?\.\([`"]mcp-request[`"],\{request:[$A-Z_a-z][$\w]*,hostId:this\.hostId,[\s\S]{0,1500}?widget:\4\?\.widget\}\)\},[$A-Z_a-z][$\w]*=null(?:,[$A-Z_a-z][$\w]*)?\)\{)/g,
           (_match, prefix, methodName, paramsName) =>
-            `${prefix}let __codeyRoute=globalThis.__codeyModelWhitelistPatch?.rewriteOutgoingMessage?.({type:\`mcp-request\`,request:{method:${methodName},params:${paramsName}}});if(__codeyRoute?.request){${methodName}=__codeyRoute.request.method??${methodName},${paramsName}=__codeyRoute.request.params??${paramsName}}let `,
+            `${prefix}let __codeyRoute=globalThis.__codeyModelWhitelistPatch?.rewriteOutgoingMessage?.({type:\`mcp-request\`,request:{method:${methodName},params:${paramsName}}});if(__codeyRoute?.request){${methodName}=__codeyRoute.request.method??${methodName},${paramsName}=__codeyRoute.request.params??${paramsName}}`,
           "app server request route preflight",
         );
       }
@@ -729,7 +729,8 @@
       !source.includes("codeyReconcileCompletedConversation")
       && source.includes("getHasInProgressLocalConversation(")
       && source.includes("inactiveThreadUnsubscriber.clearConversationStreamOwnership")
-      && source.includes("getConversationStreamRevision(")
+      && (source.includes("getConversationStreamRevision(")
+        || (source.includes("hasLocalHistorySubscription(") && source.includes("getThreadExecutionState(")))
     ) {
       // 渲染器可能漏掉完成通知，仍保留进行中的轮次和消息流角色。
       // 两次核对服务端状态，排除并发修订、未确认的提交和跟随窗口，再沿重连路径恢复分页历史。
@@ -737,8 +738,18 @@
       patched = replaceUniqueRendererGate(
         patched,
         /getHasInProgressLocalConversation\(\{exceptConversationId:([$A-Z_a-z][$\w]*)\}=\{\}\)\{for\(let ([$A-Z_a-z][$\w]*) of this\.threadStore\.getRecentConversationIds\(\)\)\{if\(\2===\1\)continue;let ([$A-Z_a-z][$\w]*)=this\.conversations\.get\(\2\);if\((?:\3!=null|null!=\3)&&([$A-Z_a-z][$\w]*)\(\3\)\)return!0\}return!1\}/g,
-        (match, _exceptName, _idName, _conversationName, inProgressName) =>
-          `async codeyReconcileCompletedConversation(__codeyParams){let __codeyId=__codeyParams?.conversationId,__codeyRunning=()=>{let __codeyConversation=__codeyId==null?null:this.getConversation(__codeyId);return __codeyConversation!=null&&__codeyConversation.unconfirmedTurnSubmissions?.some(e=>e.terminal!==!0)!==!0&&${inProgressName}(__codeyConversation)&&this.getStreamRole(__codeyId)?.role!==\`follower\`};if(!__codeyRunning())return!1;let __codeyRevision=this.getConversationStreamRevision(__codeyId),__codeyReadStatus=async()=>{let __codeyResponse=await this.sendRequest(\`thread/read\`,{threadId:__codeyId,includeTurns:!1}),__codeyStatus=__codeyResponse?.thread?.status;return typeof __codeyStatus===\`string\`?__codeyStatus:__codeyStatus?.type},__codeyStatus=await __codeyReadStatus();if(__codeyStatus!==\`idle\`&&__codeyStatus!==\`systemError\`&&__codeyStatus!==\`error\`)return!1;await new Promise(__codeyResolve=>setTimeout(__codeyResolve,250));if(await __codeyReadStatus()!==__codeyStatus||this.getConversationStreamRevision(__codeyId)!==__codeyRevision||!__codeyRunning())return!1;let __codeyCwd=this.getConversation(__codeyId)?.cwd;this.inactiveThreadUnsubscriber.clearConversationStreamOwnership(__codeyId);this.updateConversationState(__codeyId,__codeyState=>{__codeyState.resumeState=\`needs_resume\`},!1);await this.resumeConversation({...__codeyParams,workspaceRoots:__codeyParams.workspaceRoots?.length?__codeyParams.workspaceRoots:__codeyCwd?[__codeyCwd]:[\`/\`]});let __codeyConversation=this.getConversation(__codeyId);return __codeyConversation!=null&&!${inProgressName}(__codeyConversation)}${match}`,
+        (match, _exceptName, _idName, _conversationName, inProgressName) => {
+          // Codex 26.1117 删除了跟随者角色和流修订号：本窗口挂着历史流才算拥有者，
+          // 修订号改为进行中轮次的编号，没有编号时不核对。
+          const roleStream = source.includes("getConversationStreamRevision(");
+          const owned = roleStream
+            ? "this.getStreamRole(__codeyId)?.role!==`follower`"
+            : "this.hasLocalHistorySubscription(__codeyId)===!0";
+          const revision = roleStream
+            ? "this.getConversationStreamRevision(__codeyId)"
+            : "(this.getThreadExecutionState(__codeyId)?.activeTurnId??null)";
+          return `async codeyReconcileCompletedConversation(__codeyParams){let __codeyId=__codeyParams?.conversationId,__codeyRunning=()=>{let __codeyConversation=__codeyId==null?null:this.getConversation(__codeyId);return __codeyConversation!=null&&__codeyConversation.unconfirmedTurnSubmissions?.some(e=>e.terminal!==!0)!==!0&&${inProgressName}(__codeyConversation)&&${owned}};if(!__codeyRunning())return!1;let __codeyRevision=${revision};${roleStream ? "" : "if(__codeyRevision==null)return!1;"}let __codeyReadStatus=async()=>{let __codeyResponse=await this.sendRequest(\`thread/read\`,{threadId:__codeyId,includeTurns:!1}),__codeyStatus=__codeyResponse?.thread?.status;return typeof __codeyStatus===\`string\`?__codeyStatus:__codeyStatus?.type},__codeyStatus=await __codeyReadStatus();if(__codeyStatus!==\`idle\`&&__codeyStatus!==\`systemError\`&&__codeyStatus!==\`error\`)return!1;await new Promise(__codeyResolve=>setTimeout(__codeyResolve,250));if(await __codeyReadStatus()!==__codeyStatus||${revision}!==__codeyRevision||!__codeyRunning())return!1;let __codeyCwd=this.getConversation(__codeyId)?.cwd;this.inactiveThreadUnsubscriber.clearConversationStreamOwnership(__codeyId);this.updateConversationState(__codeyId,__codeyState=>{__codeyState.resumeState=\`needs_resume\`},!1);await this.resumeConversation({...__codeyParams,workspaceRoots:__codeyParams.workspaceRoots?.length?__codeyParams.workspaceRoots:__codeyCwd?[__codeyCwd]:[\`/\`]});let __codeyConversation=this.getConversation(__codeyId);return __codeyConversation!=null&&!${inProgressName}(__codeyConversation)}${match}`;
+        },
         "completed thread reconciliation",
       );
     }
@@ -846,15 +857,17 @@
       // 原生请求解析器不校验显式档位；复用同一模块的模型查询和原生档位解析。
       patched = replaceUniqueRendererGate(
         patched,
-        /async function(?: ([$A-Z_a-z][$\w]*))?\(([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*)\)\{try\{(?<body>[^}]{0,500}[\s\S]{0,1000}?return\(0,(?<tiers>[$A-Z_a-z][$\w]*)\.E_\)\(await (?:(?<models>[$A-Z_a-z][$\w]*)|(?<inlineModels>async function\([$A-Z_a-z][$\w]*,[$A-Z_a-z][$\w]*,[$A-Z_a-z][$\w]*\)\{try\{[\s\S]{0,600}?"Failed to read service tier model"[\s\S]{0,120}?,null\}\}))\(\2,\3,\4\?\?(?<config>[$A-Z_a-z][$\w]*)\.model\),\k<config>\.service_tier,[$A-Z_a-z][$\w]*\))\}catch\(([$A-Z_a-z][$\w]*)\)\{return ([\s\S]{0,180}?"Failed to read service tier for request"[\s\S]{0,100}?),null\}\}/g,
+        /async function(?: ([$A-Z_a-z][$\w]*))?\(([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*),([$A-Z_a-z][$\w]*)(?:,(?<provider>[$A-Z_a-z][$\w]*))?\)\{try\{(?<body>[^}]{0,500}[\s\S]{0,1000}?return\(0,(?<tiers>[$A-Z_a-z][$\w]*)\.E_\)\(await (?:(?<models>[$A-Z_a-z][$\w]*)|(?<inlineModels>async function\([$A-Z_a-z][$\w]*,[$A-Z_a-z][$\w]*,[$A-Z_a-z][$\w]*(?:,[$A-Z_a-z][$\w]*)?\)\{try\{[\s\S]{0,600}?"Failed to read service tier model"[\s\S]{0,120}?,null\}\}))\(\2,\3,\4\?\?(?<config>[$A-Z_a-z][$\w]*)\.model(?:,\k<provider>)?\),\k<config>\.service_tier,[$A-Z_a-z][$\w]*\))\}catch\(([$A-Z_a-z][$\w]*)\)\{return ([\s\S]{0,180}?"Failed to read service tier for request"[\s\S]{0,100}?),null\}\}/g,
         (match, name, scope, host, model, tier, ...rest) => {
-          const { body, tiers, models, inlineModels, config } = rest.at(-1);
+          const { body, tiers, models, inlineModels, config, provider } = rest.at(-1);
           // Codex 26.1103 把模型查询内联成立即调用的函数；提到同一 try 块开头以便复用。
           const lookup = models ?? "__codeyModels";
+          // Codex 26.1117 按模型提供方查询模型列表，解析器和模型查询各多一个参数。
+          const providerArg = provider ? `,${provider}` : "";
           const checked = (inlineModels ? body.replace(inlineModels, lookup) : body)
             .replaceAll(`return(0,${tiers}.E_)(`, "return await __codeyRequestTier(")
-            .replace(`__codeyRequestTier(null,${config}.service_tier,`, `__codeyRequestTier(await ${lookup}(${scope},${host},${model}??${config}.model),${config}.service_tier,`);
-          const validate = `${inlineModels ? `const __codeyModels=${inlineModels};` : ""}const __codeyRequestTier=async(m,t,a)=>{let v=(0,${tiers}.E_)(m,t,a);return v==null?null:(0,${tiers}.DS)(m??await ${lookup}(${scope},${host},${model}),v)};`;
+            .replace(`__codeyRequestTier(null,${config}.service_tier,`, `__codeyRequestTier(await ${lookup}(${scope},${host},${model}??${config}.model${providerArg}),${config}.service_tier,`);
+          const validate = `${inlineModels ? `const __codeyModels=${inlineModels};` : ""}const __codeyRequestTier=async(m,t,a)=>{let v=(0,${tiers}.E_)(m,t,a);return v==null?null:(0,${tiers}.DS)(m??await ${lookup}(${scope},${host},${model}${providerArg}),v)};`;
           return match.replace(body, validate + checked);
         },
         "service tier request model validation",

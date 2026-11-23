@@ -603,6 +603,102 @@ test("Codex 26.1103 inline request reader clears a stale Fast tier after changin
   assert.deepEqual(logs, []);
 });
 
+test("Codex 26.1117 provider-scoped request reader validates tiers against that provider's models", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const { runInNewContext } = await import("node:vm");
+  const { patch, logs } = await installPatch();
+  const request = await readFile(new URL("./fixtures/codex-service-tier-26.1117.js", import.meta.url), "utf8");
+  const shared = await readFile(new URL("./fixtures/codex-service-tier-shared.js", import.meta.url), "utf8");
+  const native = runInNewContext(`${shared};({DS:p,Pd:d,E_:m,W6:i,uw:s})`);
+  const catalogs = {
+    "provider-a": [{ model: "shared-model", serviceTiers: [{ id: "priority", name: "Fast" }] }],
+    "provider-b": [{ model: "shared-model", serviceTiers: [] }],
+  };
+  const listed = [];
+  const scope = { get: () => ({ type: "fromConfig" }), query: { setData() {} } };
+  const patched = patch(request);
+  assert.equal(typeof patched, "string");
+  assert.equal(patch(patched), null);
+  const read = runInNewContext(patched, {
+    d: { ...native, qh: (selection) => selection.serviceTier }, r: native,
+    o: { V: () => ({ sendRequest: async (method, params) => { listed.push(params.modelProvider); return { data: catalogs[params.modelProvider] ?? [] }; } }) },
+    i: { QN: "selection" }, a: { s: async () => "chatgpt" },
+    s: { Wr: async () => ({ requirements: { featureRequirements: { fast_mode: true } } }), b9: "requirements" },
+    l: { ig: async () => ({ config: { model: "shared-model", service_tier: "priority" } }), Y$: (value) => value },
+    c: { v: { error: (message) => { throw Error(message); } } },
+  });
+  assert.equal(await read(scope, "local", "shared-model", "priority", "provider-a"), "priority");
+  assert.equal(await read(scope, "local", "shared-model", "priority", "provider-b"), null);
+  assert.equal(await read(scope, "local", undefined, undefined, "provider-b"), null, "the configured tier is checked too");
+  assert.deepEqual(listed, ["provider-a", "provider-b", "provider-b"], "every lookup keeps the caller's provider");
+  assert.deepEqual(logs, []);
+});
+
+test("Codex 26.1117 request client keeps the abort check after the route preflight", async () => {
+  const { logs, patch } = await installPatch();
+  const source = [
+    'class C{async sendRequest(e,t,n){if(null==this.dispatchMessage)throw Error("AppServerRequestClient is missing a message dispatcher");return this.enqueueRequest(e,t,n)}',
+    'enqueueRequest(e,t,n,r=t=>{this.dispatchMessage?.("mcp-request",{request:t,hostId:this.hostId,retainResponse:void 0,source:n?.source,timeoutMs:n?.timeoutMs,widget:n?.widget})},i=null,a){if(a?.aborted)return Promise.reject(Error("App-server request cancelled"));let s=1;log("mcp_request_enqueued");let{request:o,promise:l}=this.createRequest(e,t,n,i);r(o);return l}',
+    'createRequest(e,t){return{request:{method:e,params:t},promise:Promise.resolve([e,t])}}',
+    'onResult(e,t){let r=this.requestPromises.get(e);r.resolve(t),this.emitRequestLifecycleEvent({type:"completed",hostId:this.hostId,method:r.method,id:e})}}',
+  ].join("");
+  const patched = patch(source);
+  assert.ok(patched.includes("let __codeyRoute=globalThis.__codeyModelWhitelistPatch?.rewriteOutgoingMessage"));
+  assert.equal(patch(patched), null);
+  const Client = Function("log", `${patched};return C`)(() => {});
+  const client = new Client();
+  client.dispatchMessage = () => {};
+  globalThis.__codeyModelWhitelistPatch = {
+    rewriteOutgoingMessage: (message) => ({ ...message, request: { ...message.request, params: { routed: true } } }),
+  };
+  assert.deepEqual(await client.enqueueRequest("model/list", {}, {}), ["model/list", { routed: true }]);
+  await assert.rejects(client.enqueueRequest("model/list", {}, {}, undefined, null, { aborted: true }), /cancelled/);
+  assert.deepEqual(logs, []);
+});
+
+test("Codex 26.1117 manager registry and reconciliation use history attachment and the active turn", async () => {
+  const { logs, patch } = await installPatch();
+  const manager = [
+    "class M{getHostId(){return\"local\"}getConversation(e){return this.threadStore.getConversation(e)}hasLocalHistorySubscription(e){return this.streamState.hasLocalHistorySubscription(e)}",
+    "updateConversationState(e,t){t(this.threadStore.getConversation(e))}getThreadExecutionState(e,t){let n=this.getConversation(e);return null==n?null:{inProgress:el(n),activeTurnId:n.activeTurnId??null}}",
+    "async sendRequest(e,t){return this.reads.shift()}async resumeConversation(e){this.resumed.push(e);this.threadStore.getConversation(e.conversationId).running=!1}",
+    "clear(){this.inactiveThreadUnsubscriber.clearConversationStreamOwnership(1)}",
+    "getHasInProgressLocalConversation({exceptConversationId:e}={}){for(let t of this.threadStore.getRecentConversationIds()){if(t===e)continue;let n=this.conversations.get(t);if(null!=n&&el(n))return!0}return!1}}",
+  ].join("");
+  const patched = patch(manager);
+  assert.match(patched, /codey-app-server-manager-registry/);
+  assert.match(patched, /async codeyReconcileCompletedConversation\(/);
+  assert.equal(patch(patched), null);
+  const Manager = Function("el", `${patched};return M`)((conversation) => conversation.running === true);
+  const create = ({ attached = true, activeTurnId = "turn-1" } = {}) => {
+    const conversation = { running: true, activeTurnId, cwd: "/work" };
+    const instance = new Manager();
+    Object.assign(instance, {
+      threadStore: { getConversation: () => conversation },
+      streamState: { hasLocalHistorySubscription: () => attached },
+      inactiveThreadUnsubscriber: { clearConversationStreamOwnership: () => { instance.cleared = true; } },
+      reads: [{ thread: { status: { type: "idle" } } }, { thread: { status: { type: "idle" } } }],
+      resumed: [],
+    });
+    return { instance, conversation };
+  };
+  delete globalThis.__codeyAppServerManagers;
+  const owned = create();
+  owned.instance.getConversation("thread-1");
+  assert.equal(globalThis.__codeyAppServerManagers.get("local"), owned.instance);
+  assert.equal(await owned.instance.codeyReconcileCompletedConversation({ conversationId: "thread-1" }), true);
+  assert.equal(owned.instance.cleared, true);
+  assert.equal(owned.conversation.resumeState, "needs_resume");
+  assert.deepEqual(owned.instance.resumed.map((params) => params.workspaceRoots), [["/work"]]);
+  for (const options of [{ attached: false }, { activeTurnId: null }]) {
+    const skipped = create(options);
+    assert.equal(await skipped.instance.codeyReconcileCompletedConversation({ conversationId: "thread-1" }), false);
+    assert.equal(skipped.instance.cleared, undefined, JSON.stringify(options));
+  }
+  delete globalThis.__codeyAppServerManagers;
+  assert.deepEqual(logs, []);
+});
+
 test("real shared permissions grant null access and preserve explicit account denial", async () => {
   const { readFile } = await import("node:fs/promises");
   const { runInNewContext } = await import("node:vm");
