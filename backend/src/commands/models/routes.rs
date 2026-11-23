@@ -102,6 +102,8 @@ pub(crate) fn config_with_provider_model_sync(
 ) -> CodeyConfig {
     let supports_auto_review = models_support_auto_review(&provider_models);
     let provider_models = regular_route_models(provider_models);
+    let previous_upstream = config.upstream_models_by_provider.get(provider_id).cloned();
+    let fetched_models = provider_models.clone();
     let selected_models = config
         .selected_models_by_provider
         .get(provider_id)
@@ -130,6 +132,20 @@ pub(crate) fn config_with_provider_model_sync(
             .insert(provider_id.to_string(), manual_models);
     }
     next = next.normalize();
+    let codex_app_path = next.codex_app_path.clone();
+    crate::model_order::select_new_provider_models(
+        &mut next,
+        provider_id,
+        previous_upstream.as_deref(),
+        &fetched_models,
+        || {
+            model_catalog::official_model_order(
+                codex_home,
+                &crate::codex_config::codey_model_catalog_dir(),
+                &codex_app_path,
+            )
+        },
+    );
     if next.current_model_list_key() == Some(provider_id)
         || next.current_provider_id() == Some(provider_id)
     {

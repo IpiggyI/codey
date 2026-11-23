@@ -140,6 +140,8 @@ impl ModelSelectionState {
     }
 }
 
+#[path = "model_catalog/installed_catalog.rs"]
+mod installed_catalog;
 #[path = "model_catalog/runtime_source.rs"]
 mod runtime_source;
 pub(crate) use runtime_source::validate_catalog_source;
@@ -1261,7 +1263,12 @@ fn read_official_entries_for_app(
         eprintln!("拒绝模型目录：{error:#}");
         paths.pop();
     }
-    let entries = read_official_entries_uncached(&paths, user_catalog.is_some());
+    let installed = source
+        .as_ref()
+        .ok()
+        .and_then(|source| installed_catalog::installed_catalog(source, catalog_dir));
+    let entries =
+        read_official_entries_uncached(&paths, user_catalog.is_some(), installed.as_deref());
     let entries = std::sync::Arc::new(match rejection {
         Some(error) => entries.with_context(|| format!("拒绝模型目录：{error:#}"))?,
         None => entries?,
@@ -1288,9 +1295,11 @@ pub(crate) fn official_model_order(
 fn read_official_entries_uncached(
     paths: &[PathBuf],
     complete_candidate_from_fallbacks: bool,
+    installed: Option<&installed_catalog::InstalledCatalog>,
 ) -> Result<OfficialCatalogEntries> {
     let mut catalogs = Vec::new();
     let mut native_models = None;
+    let mut native_client_version = None;
     let mut bundled_fast_model_slugs = HashSet::new();
     let mut bundled_official_order = Vec::new();
     let mut last_error = None;
@@ -1313,13 +1322,30 @@ fn read_official_entries_uncached(
         let models = official_models_from_value(&value);
         if index == 0 {
             native_models = Some(models);
+            native_client_version = value
+                .get("client_version")
+                .and_then(Value::as_str)
+                .map(str::to_string);
         } else if !models.is_empty() {
             catalogs.push(models);
         }
     }
+    // 本机 Codex 的内置目录比随附目录新，排在前面补全模板与 Fast 声明。
+    if let Some(installed) = installed {
+        bundled_official_order = crate::model_order::official_order(&installed.models);
+        bundled_fast_model_slugs.extend(installed.models.iter().filter_map(|model| {
+            declares_fast_speed_support(model)
+                .then(|| model.get("slug").and_then(Value::as_str))
+                .flatten()
+                .map(model_id::key)
+        }));
+        catalogs.push(installed.models.clone());
+    }
     if let Some(value) = codey_runtime_core::model_suffix::bundled_model_catalog() {
         let models = official_models_from_value(&value);
-        bundled_official_order = crate::model_order::official_order(&models);
+        if bundled_official_order.is_empty() {
+            bundled_official_order = crate::model_order::official_order(&models);
+        }
         if !models.is_empty() {
             bundled_fast_model_slugs.extend(models.iter().filter_map(|model| {
                 declares_fast_speed_support(model)
@@ -1332,7 +1358,18 @@ fn read_official_entries_uncached(
     }
 
     if let Some(native_models) = native_models {
-        let official_order = crate::model_order::official_order(&native_models);
+        let native_order = crate::model_order::official_order(&native_models);
+        // 用户目录自带顺序；只有 Codex 的服务端缓存需要与本机内置目录比较新旧。
+        let official_order = match installed {
+            Some(installed) if !complete_candidate_from_fallbacks => {
+                installed_catalog::merge_official_order(
+                    &native_order,
+                    native_client_version.as_deref(),
+                    installed,
+                )
+            }
+            _ => native_order,
+        };
         let templates = native_models
             .into_iter()
             .map(|mut model| {
@@ -2874,7 +2911,7 @@ mod tests {
     fn catalog_audit_missing_native_catalog_uses_available_bundled_templates() {
         let home = tempfile::tempdir().unwrap();
         let entries =
-            read_official_entries_uncached(&[home.path().join("models_cache.json")], false)
+            read_official_entries_uncached(&[home.path().join("models_cache.json")], false, None)
                 .unwrap();
 
         assert_eq!(

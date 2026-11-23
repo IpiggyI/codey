@@ -1777,3 +1777,129 @@ fn official_websocket_transport_is_automatic_and_login_scoped() {
         &unavailable
     ));
 }
+
+fn write_models_cache(home: &std::path::Path, order: &[&str]) {
+    let models = order
+        .iter()
+        .enumerate()
+        .map(|(index, slug)| json!({"slug": slug, "visibility": "list", "priority": index + 1}))
+        .collect::<Vec<_>>();
+    std::fs::write(
+        home.join("models_cache.json"),
+        serde_json::to_vec(&json!({ "models": models })).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn launch_sync_selects_newly_listed_models_at_their_official_position() {
+    use crate::model_order::ModelOrderMode;
+    let home = tempfile::tempdir().unwrap();
+    write_models_cache(
+        home.path(),
+        &[
+            "gpt-6.2-sol",
+            "gpt-6.2-astra",
+            "gpt-6.1-terra",
+            "gpt-6.1-sol",
+        ],
+    );
+    let snapshot = crate::model_ownership::CurrentProviderSnapshot::from_parts(
+        "relay",
+        "https://relay.example/v1",
+        "responses",
+        false,
+    );
+    let key = snapshot.ownership_key.clone();
+    let mut config = CodeyConfig::default();
+    config.attach_current_provider_snapshot(snapshot);
+    config.upstream_models_by_provider.insert(
+        key.clone(),
+        vec![
+            "gpt-6.1-sol".into(),
+            "gpt-6.1-terra".into(),
+            "relay-unchecked".into(),
+        ],
+    );
+    config.selected_models_by_provider.insert(
+        key.clone(),
+        vec!["gpt-6.1-sol".into(), "gpt-6.1-terra".into()],
+    );
+    config
+        .model_order_mode_by_provider
+        .insert(key.clone(), ModelOrderMode::Manual);
+
+    let synced = config_with_current_provider_model_sync(
+        &config,
+        [
+            "gpt-6.1-sol",
+            "gpt-6.1-terra",
+            "relay-unchecked",
+            "gpt-6.2-astra",
+            "gpt-6.2-sol",
+        ]
+        .map(String::from)
+        .to_vec(),
+        true,
+        home.path(),
+    );
+
+    // 手动顺序（6.1-sol 在 6.1-terra 前）保留；未勾选过的 relay-unchecked 不被加回。
+    assert_eq!(
+        synced.selected_models_by_provider[&key],
+        [
+            "gpt-6.2-sol",
+            "gpt-6.2-astra",
+            "gpt-6.1-sol",
+            "gpt-6.1-terra"
+        ]
+    );
+}
+
+#[test]
+fn manual_sync_selects_newly_listed_models_but_not_on_a_failed_fetch() {
+    let home = tempfile::tempdir().unwrap();
+    write_models_cache(home.path(), &["gpt-6.2-sol", "gpt-6.1-sol"]);
+    let mut config = CodeyConfig::default();
+    config
+        .upstream_models_by_provider
+        .insert("route-a".into(), vec!["gpt-6.1-sol".into()]);
+    config
+        .selected_models_by_provider
+        .insert("route-a".into(), vec!["gpt-6.1-sol".into()]);
+
+    let synced = config_with_provider_model_sync(
+        &config,
+        "route-a",
+        vec!["gpt-6.1-sol".into(), "gpt-6.2-sol".into()],
+        home.path(),
+    );
+    assert_eq!(
+        synced.selected_models_by_provider["route-a"],
+        ["gpt-6.2-sol", "gpt-6.1-sol"]
+    );
+
+    let mut current = config.clone();
+    let snapshot = crate::model_ownership::CurrentProviderSnapshot::from_parts(
+        "relay",
+        "https://relay.example/v1",
+        "responses",
+        false,
+    );
+    let key = snapshot.ownership_key.clone();
+    current.attach_current_provider_snapshot(snapshot);
+    current
+        .upstream_models_by_provider
+        .insert(key.clone(), vec!["gpt-6.1-sol".into()]);
+    current
+        .selected_models_by_provider
+        .insert(key.clone(), vec!["gpt-6.1-sol".into()]);
+    // 启动拉取失败时沿用保存的清单（synced = false），不能把它当作新发现的模型。
+    let fallback = config_with_current_provider_model_sync(
+        &current,
+        vec!["gpt-6.1-sol".into(), "gpt-6.2-sol".into()],
+        false,
+        home.path(),
+    );
+    assert_eq!(fallback.selected_models_by_provider[&key], ["gpt-6.1-sol"]);
+}
