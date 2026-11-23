@@ -299,6 +299,9 @@
     {"label": "interaction CPU sampling", "alternatives": [["activeInteractions=new Map", "beginCpuSampling"]]},
     {"label": "interaction heartbeat", "alternatives": [["activeInteractions=new Map", "beginCpuSampling"]]},
     {"label": "syntax highlight worker pool", "alternatives": [["totalASTLRUCacheSize:", "poolSize:", "workerFactory:"]]},
+    {"label": "thread scroll restoration distance", "alternatives": [["threadScroll.restore", "threadScroll.initialRead", "previousViewportHeightPx:"]]},
+    {"label": "thread resize viewport height", "alternatives": [["threadScroll.restore", "threadScroll.initialRead", "previousViewportHeightPx:"]]},
+    {"label": "thread resize pinned top", "alternatives": [["threadScroll.restore", "threadScroll.initialRead", "previousViewportHeightPx:"]]},
     {"label": "orbit character preload iframe", "alternatives": [["orbit-character-preloaded", "allow-same-origin"]]},
     {"label": "startup secondary route prefetch", "alternatives": [["\"general-settings\",\"appearance\",\"keyboard-shortcuts\""]]},
     {"label": "sentry loaf observer", "alternatives": [["PerformanceObserver.supportedEntryTypes.includes(\"long-animation-frame\")", "auto.ui.browser.metrics"]]},
@@ -334,6 +337,7 @@
     "Failed to read service tier for request",
     "maybe_resume_owner_discovery_failed",
     "totalASTLRUCacheSize:",
+    "threadScroll.restore",
     "orbit-character-preloaded",
     "\"general-settings\",\"appearance\",\"keyboard-shortcuts\"",
     "PerformanceObserver.supportedEntryTypes.includes(\"long-animation-frame\")",
@@ -547,6 +551,47 @@
         "personal checkout prewarm element",
       );
     }
+    if (source.includes("threadScroll.restore") && source.includes("threadScroll.initialRead")
+      && source.includes("previousViewportHeightPx:")) {
+      if (!source.includes("/*codey-scroll-restore-distance*/")) {
+        // 顶部和阅读锚点各有自己的恢复距离，先选分支可以省去即将被覆盖的尺寸读取。
+        // 26.1117 起恢复调用前多一句读取 scrollTop，旧版直接把距离交给保存函数。
+        const distance = new RegExp([
+          String.raw`,(?<distance>[$\w]+)=(?<saved>null==[$\w]+\?[$\w]+:Math\.max\(0,(?<rail>[$\w]+)\.scrollHeight-\k<rail>\.clientHeight-[$\w]+\));`,
+          String.raw`(?<top>"top"===[$\w]+)\?\k<distance>=(?<maximum>Math\.max\(0,\k<rail>\.scrollHeight-\k<rail>\.clientHeight\)):`,
+          String.raw`(?<anchored>[$\w]+&&null!=(?<anchor>[$\w]+\.current))&&\(\k<distance>=(?<anchoredValue>\k<anchor>\+\([$\w]+\(\)\?\.getHeightPx\(\)\?\?0\))\)[,;]`,
+          String.raw`(?=(?:[$\w]+\(\k<distance>\),|let [$\w]+=\k<rail>\.scrollTop;)\(0,[$\w]+\.[$\w]+\)\("threadScroll\.restore")`,
+        ].join(""), "g");
+        patched = replaceUniqueRendererGate(
+          patched,
+          distance,
+          (...args) => {
+            const { distance, top, maximum, anchored, anchoredValue, saved } = args.at(-1);
+            return `,${distance}=/*codey-scroll-restore-distance*/${top}?${maximum}:${anchored}?${anchoredValue}:${saved};`;
+          },
+          "thread scroll restoration distance",
+        );
+      }
+      if (!source.includes("__codeyViewportHeight")) {
+        patched = replaceUniqueRendererGate(
+          patched,
+          /let ([$\w]+)=([$\w]+)!==([$\w]+)\.clientHeight;if\(\2=\3\.clientHeight,\1&&0===\2\)/g,
+          (_match, changed, previous, viewport) =>
+            `let __codeyViewportHeight=${viewport}.clientHeight,${changed}=${previous}!==__codeyViewportHeight;${previous}=__codeyViewportHeight;if(${changed}&&0===${previous})`,
+          "thread resize viewport height",
+        );
+      }
+      if (!source.includes("/*codey-scroll-pinned-top*/")) {
+        // 顶部固定时直接按可滚动范围定位，不先读取只在其他分支使用的距底距离。
+        patched = replaceUniqueRendererGate(
+          patched,
+          /(let [$\w]+=\(0,[$\w]+\.[$\w]+\)\(([$\w]+)\);)(if\("top"===([$\w]+)&&[$\w]+\.current\[\4\]\)return void [$\w]+\(Math\.max\(0,\2\.scrollHeight-\2\.clientHeight\),"instant"\);)(?=if\("bottom"===\4&&)/g,
+          (_match, distanceRead, _viewport, pinnedTop) =>
+            `/*codey-scroll-pinned-top*/${pinnedTop}${distanceRead}`,
+          "thread resize pinned top",
+        );
+      }
+    }
     if (
       !source.includes("/*codey-pierre-pool-size*/")
       && source.includes("totalASTLRUCacheSize:")
@@ -634,7 +679,7 @@
         patched,
         /(Error\([`"]Reached the post-login Statsig bootstrap deadline[`"]\)\)\)\},)(?:[1-9]\d{4,}|[1-9]\d*e[4-9])(\);[\s\S]{0,600}?Error\([`"]Timed out while fetching post-login Statsig bootstrap[`"]\)\)\},)(?:[1-9]\d{3,}|[1-9]\d*e[4-9])(\)\})/g,
         (_match, deadlinePrefix, attemptPrefix, suffix) =>
-          `${deadlinePrefix}/*codey-statsig-bootstrap-deadline*/5e3${attemptPrefix}/*codey-statsig-bootstrap-attempt*/4500${suffix}`,
+          `${deadlinePrefix}/*codey-statsig-bootstrap-deadline*/12e3${attemptPrefix}/*codey-statsig-bootstrap-attempt*/8e3${suffix}`,
         "statsig post-login bootstrap timeout",
       );
     }
@@ -661,7 +706,7 @@
         patched,
         /(\buseStatsigInternalClientFactoryAsync=function\([$A-Z_a-z][$\w]*,[$A-Z_a-z][$\w]*\)\{let ([$A-Z_a-z][$\w]*)=\(0,[$A-Z_a-z][$\w]*\.useMemo\)\([\s\S]{0,240}?\[[$A-Z_a-z][$\w]*,([$A-Z_a-z][$\w]*)\]=\(0,[$A-Z_a-z][$\w]*\.useState\)\([`"]Ready[`"]!==\2\.loadingStatus\);return\(0,[$A-Z_a-z][$\w]*\.useMemo\)\(\(\)=>\{)[`"]Ready[`"]!==\2\.loadingStatus&&\2\.initializeAsync\(\)\.catch\(([$A-Z_a-z][$\w]*\.Log\.error)\)\.finally\(\(\)=>\3\(!1\)\)(\},\[\]\),\{client:\2,isLoading:[$A-Z_a-z][$\w]*\}\})/g,
         (_match, prefix, clientName, setLoadingName, logErrorExpr, suffix) =>
-          `${prefix}"Ready"!==${clientName}.loadingStatus&&(()=>{/*codey-statsig-async-init-cap*/let __codeyDone=!1,__codeyFinish=()=>{__codeyDone||(__codeyDone=!0,clearTimeout(__codeyTimer),"Loading"===${clientName}.loadingStatus&&typeof ${clientName}._finalizeUpdate==="function"&&${clientName}._finalizeUpdate(null),${setLoadingName}(!1))},__codeyTimer=setTimeout(__codeyFinish,1500);${clientName}.initializeAsync().catch(${logErrorExpr}).finally(__codeyFinish)})()${suffix}`,
+          `${prefix}"Ready"!==${clientName}.loadingStatus&&(()=>{/*codey-statsig-async-init-cap*/let __codeyDone=!1,__codeyFinish=()=>{__codeyDone||(__codeyDone=!0,clearTimeout(__codeyTimer),"Loading"===${clientName}.loadingStatus&&typeof ${clientName}._finalizeUpdate==="function"&&${clientName}._finalizeUpdate(null),${setLoadingName}(!1))},__codeyTimer=setTimeout(__codeyFinish,3000);${clientName}.initializeAsync().catch(${logErrorExpr}).finally(__codeyFinish)})()${suffix}`,
         "statsig async client init cap",
       );
     }
