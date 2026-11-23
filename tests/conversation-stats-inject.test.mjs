@@ -280,7 +280,6 @@ const createEnvironment = (options = {}) => {
     },
     rerun: () => vm.runInContext(source, context),
     dispose: () => context.window.__codeyConversationStats.dispose(),
-    markPreviousVersion: () => { context.window.__codeyConversationStats.version = 0; },
     resizeObservers,
     animationFrames,
     runAnimationFrames: () => {
@@ -1176,7 +1175,7 @@ test("Escape closes the card and restores focus only when focus was inside the s
   }
 });
 
-test("cards fade in rising 4 px over 150 ms, and reduced motion turns the animation off", async () => {
+test("cards fade in rising 4 px over 150 ms, and system or Codex reduced motion turns the animation off", async () => {
   const env = createEnvironment();
   try {
     await flushTimers(30);
@@ -1186,6 +1185,9 @@ test("cards fade in rising 4 px over 150 ms, and reduced motion turns the animat
     assert.match(css, /@keyframes codey-cs-enter \{ from \{ opacity: 0; transform: translateY\(4px\); \}/);
     const reduced = css.match(/@media \(prefers-reduced-motion: reduce\) \{(.*)\}\s*$/m)?.[1] ?? "";
     assert.match(reduced, /\.codey-cs-details \{ animation: none; \}/);
+    // Codex 自己的「减少动态效果」设置写在根元素上，与系统设置同样关闭动画。
+    const codexSetting = css.match(/:root\[data-reduced-motion="true"\] \{(.*)\}\s*$/m)?.[1] ?? "";
+    assert.match(codexSetting, /\.codey-cs-details \{ animation: none; \}/);
     // 深色主题沿用 Codex 的文字与背景变量。
     assert.match(css, /--cs-text: var\(--text-primary, CanvasText\)/);
     assert.match(css, /--cs-surface: color-mix\(in srgb, var\(--bg-primary, Canvas\)/);
@@ -2226,15 +2228,18 @@ test("dispose removes portal, listeners and pending response without resurrectin
   assert.equal(env.statsCalls().length, 1);
 });
 
-test("version replacement disposes previous ownership before installing one new portal", async () => {
+test("upgrading from version 4 replaces the style and installs one new portal", async () => {
   const env = createEnvironment();
   try {
     await flushTimers(30);
     const originalBar = env.bar();
-    env.markPreviousVersion();
+    const styleId = "codey-conversation-stats-styles";
+    env.document.getElementById(styleId).textContent = "";
+    env.window.__codeyConversationStats.version = 4;
     env.rerun();
     await flushTimers(30);
     assert.notEqual(env.bar(), originalBar);
+    assert.match(env.document.getElementById(styleId).textContent, /:root\[data-reduced-motion="true"\]/);
     assert.equal(env.document.querySelectorAll("#codey-conversation-stats-overlay").length, 1);
     assert.equal(env.document.listeners.get("pointerdown").length, 1);
     click(summary(env));

@@ -4,7 +4,7 @@
 // stats.lastModelRequest 中与通知对上的请求时间为锚点。会话 id 取自可见 composer。
 (() => {
   const PROBE_KEY = "__codeyConversationStats";
-  const VERSION = 4;
+  const VERSION = 5;
   const previous = window[PROBE_KEY];
   if (previous?.installed && (previous.version === VERSION || !previous.dispose)) return;
   previous?.dispose?.();
@@ -239,6 +239,7 @@
     if (document.getElementById(styleId)) return;
     const style = document.createElement("style");
     style.id = styleId;
+    const reducedMotion = `${styleScope} .codey-cs-details { animation: none; }`;
     style.textContent = `
       [${conversationAttribute}] ~ :last-child { margin-bottom: 34px !important; }
       ${styleScope} { --cs-text: var(--text-primary, CanvasText); --cs-muted: color-mix(in srgb, var(--cs-text) 60%, transparent); --cs-line: color-mix(in srgb, var(--cs-text) 11%, transparent); --cs-surface: color-mix(in srgb, var(--bg-primary, Canvas) 97%, var(--cs-text)); -webkit-app-region: no-drag !important; pointer-events: auto !important; position: relative; box-sizing: border-box; width: 100%; min-width: 0; padding: 5px 4px 0; color: var(--cs-text); font: 12px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", sans-serif; font-variant-numeric: tabular-nums; }
@@ -266,7 +267,8 @@
       ${styleScope} dt { color: var(--cs-muted); }
       ${styleScope} dd { margin: 0; text-align: right; color: color-mix(in srgb, var(--cs-text) 72%, transparent); overflow-wrap: anywhere; }
       @media (max-width: 480px) { ${styleScope} .codey-cs-details { padding: 14px; } }
-      @media (prefers-reduced-motion: reduce) { ${styleScope} .codey-cs-details { animation: none; } }
+      :root[data-reduced-motion="true"] { ${reducedMotion} }
+      @media (prefers-reduced-motion: reduce) { ${reducedMotion} }
     `;
     document.documentElement.appendChild(style);
   };

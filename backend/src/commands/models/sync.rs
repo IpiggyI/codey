@@ -214,6 +214,15 @@ pub(crate) fn config_with_current_provider_model_sync(
     };
     let supports_auto_review = models_support_auto_review(&provider_models);
     let provider_models = regular_route_models(provider_models);
+    let previous_upstream = config
+        .upstream_models_by_provider
+        .get(&provider_id)
+        .cloned();
+    let fetched_models = if synced {
+        provider_models.clone()
+    } else {
+        Vec::new()
+    };
     let manual_models = if synced {
         selected_models_not_in_upstream(config.selected_models(), &provider_models)
     } else {
@@ -244,6 +253,13 @@ pub(crate) fn config_with_current_provider_model_sync(
         codex_home,
         &crate::codex_config::codey_model_catalog_dir(),
         &next.codex_app_path,
+    );
+    crate::model_order::select_new_provider_models(
+        &mut next,
+        &provider_id,
+        previous_upstream.as_deref(),
+        &fetched_models,
+        || order.clone(),
     );
     crate::model_order::apply_provider_order(&mut next, &provider_id, &order);
     subagent_policy::reconcile_for_current_provider(&mut next, codex_home, false);

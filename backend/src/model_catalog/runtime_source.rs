@@ -7,6 +7,12 @@ pub(super) struct RuntimeCatalogSource {
     modified: std::time::SystemTime,
 }
 
+impl RuntimeCatalogSource {
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
 pub(super) fn catalog_source_for_app(app: &str) -> Result<RuntimeCatalogSource> {
     let root = if app.trim().is_empty() {
         discover_app()?.context("未发现可用的 Codex 安装，无法验证模型目录来源")?
@@ -325,6 +331,70 @@ wire_api = "responses"
         assert!(prepare_cached_catalog_for_native_web_search(&catalog_dir, &[], &[]).unwrap());
         validate_catalog_source(&catalog_dir, app.to_str().unwrap()).unwrap();
         assert_eq!(fs::read(&user_path).unwrap(), original);
+    }
+
+    #[test]
+    fn official_order_follows_the_installed_codex_when_the_server_cache_is_from_an_older_version() {
+        let installed = br#"{"models":[
+            {"slug":"gpt-6.2-sol","visibility":"list","priority":1,"base_instructions":"prompt"},
+            {"slug":"gpt-6.2-astra","visibility":"list","priority":2},
+            {"slug":"gpt-6.1-terra","visibility":"list","priority":3},
+            {"slug":"gpt-6.1-sol","visibility":"list","priority":4}
+        ]}"#
+        .to_vec();
+        super::super::installed_catalog::tests::set_installed_catalog_output(Some((
+            installed,
+            Some(b"codex-cli 0.171.0-alpha.13".to_vec()),
+        )));
+        for (cache_version, expected) in [
+            (
+                "0.170.0",
+                vec![
+                    "gpt-6.2-sol",
+                    "gpt-6.2-astra",
+                    "gpt-6.1-terra",
+                    "gpt-6.1-sol",
+                    "gpt-5.5",
+                ],
+            ),
+            (
+                "0.171.0",
+                vec![
+                    "gpt-6.1-sol",
+                    "gpt-6.1-terra",
+                    "gpt-5.5",
+                    "gpt-6.2-sol",
+                    "gpt-6.2-astra",
+                ],
+            ),
+        ] {
+            // 每轮一个新安装：内置目录按运行程序缓存。
+            let root = tempfile::tempdir().unwrap();
+            let app = installation(&root.path().join("app"));
+            fs::write(
+                root.path().join("models_cache.json"),
+                serde_json::to_vec(&json!({"client_version": cache_version, "models":[
+                    {"slug":"gpt-6.1-sol", "visibility":"list", "priority": 1},
+                    {"slug":"gpt-6.1-terra", "visibility":"list", "priority": 2},
+                    {"slug":"gpt-5.5", "visibility":"list", "priority": 3}
+                ]}))
+                .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                official_model_order(root.path(), root.path(), app.to_str().unwrap()),
+                expected,
+                "{cache_version}"
+            );
+        }
+        // 没有服务端缓存时，顺序同样来自本机 Codex，而不是 Codey 随附的目录。
+        let root = tempfile::tempdir().unwrap();
+        let app = installation(&root.path().join("app"));
+        assert_eq!(
+            official_model_order(root.path(), root.path(), app.to_str().unwrap())[..2],
+            ["gpt-6.2-sol", "gpt-6.2-astra"]
+        );
+        super::super::installed_catalog::tests::set_installed_catalog_output(None);
     }
 
     #[test]

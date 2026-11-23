@@ -2524,7 +2524,7 @@
       if (messageDeletionMethods.isRunning(conversation)) {
         throw new Error("当前任务仍在运行，请等待任务结束后再删除");
       }
-      if (this.getStreamRole(conversationId)?.role === "follower") {
+      if (localStreamDetached(this, conversationId)) {
         throw new Error("请在拥有当前会话的窗口中删除消息");
       }
       return conversation;
@@ -2677,11 +2677,19 @@
       this.inactiveThreadUnsubscriber.clearConversationStreamOwnership(conversationId);
     },
   };
+  // Codex 26.1117 删除了跟随者角色：本窗口没有挂上会话的历史流时，原生编辑同样拒绝。
+  const localStreamDetached = (manager, conversationId) => (declaredMethod(manager, "getStreamRole")
+    ? manager.getStreamRole(conversationId)?.role === "follower"
+    : manager.hasLocalHistorySubscription(conversationId) !== true);
+
   const isLocalMessageDeletionManager = (manager) => {
     try {
       if (!manager || manager.disposed === true
-        || !["getHostId", "getConversation", "getStreamRole", "sendRequest", "updateConversationState"]
-          .every((name) => declaredMethod(manager, name))) return false;
+        || !["getHostId", "getConversation", "sendRequest", "updateConversationState"]
+          .every((name) => declaredMethod(manager, name))
+        || !(declaredMethod(manager, "getStreamRole") || declaredMethod(manager, "hasLocalHistorySubscription"))) {
+        return false;
+      }
       const unsubscriber = Object.getOwnPropertyDescriptor(manager, "inactiveThreadUnsubscriber")?.value;
       return Boolean(declaredMethod(unsubscriber, "clearConversationStreamOwnership"))
         && declaredMethod(manager, "getHostId").call(manager) === "local";
@@ -2730,15 +2738,27 @@
   // 与资源补丁里的 codeyReconcileCompletedConversation 同一判定：原生 app-server
   // 两次确认已结束、其间没有新提交，才退订并按重连恢复的方式重新载入。宿主不暴露
   // 流修订号，改为比对进行中的轮次；尚未确认的提交没有轮次 ID，不会被当作卡住。
+  // 宿主门面在 Codex 26.1117 去掉了 getStreamRole，改由 hasLocalHistorySubscription 表示本窗口
+  // 是否挂着该会话的历史流。存根上任意属性都可调用：旧版门面没有新方法时调用会失败或返回
+  // 非布尔值，这时回退到流角色；回退仍失败则把错误交给调用方。
+  const hostedStreamDetached = async (manager, conversationId) => {
+    try {
+      const attached = await callHostedAppServer(() => manager.hasLocalHistorySubscription(conversationId));
+      if (typeof attached === "boolean") return !attached;
+    } catch {}
+    const role = await callHostedAppServer(() => manager.getStreamRole(conversationId));
+    return role?.role === "follower";
+  };
+
   const reconcileHostedConversation = async (manager, params) => {
     const conversationId = params?.conversationId;
     if (conversationId == null) return false;
     const runningTurnId = async () => {
-      const [state, role] = await Promise.all([
+      const [state, detached] = await Promise.all([
         callHostedAppServer(() => manager.getThreadExecutionState(conversationId)),
-        callHostedAppServer(() => manager.getStreamRole(conversationId)),
+        hostedStreamDetached(manager, conversationId),
       ]);
-      return state?.inProgress === true && state.activeTurnId != null && role?.role !== "follower"
+      return state?.inProgress === true && state.activeTurnId != null && !detached
         ? state.activeTurnId : null;
     };
     const readStatus = async () => {
@@ -2771,13 +2791,13 @@
   // 启动维护重放墓碑。退订不会卸载 app-server 里已加载的会话，这里只做宿主侧检查，
   // 不退订也不丢弃缓存，以免重启前按旧历史重新载入。
   const prepareHostedMessageDeletion = async (manager, conversationId) => {
-    const [state, role] = await Promise.all([
+    const [state, detached] = await Promise.all([
       callHostedAppServer(() => manager.getThreadExecutionState(conversationId)),
-      callHostedAppServer(() => manager.getStreamRole(conversationId)),
+      hostedStreamDetached(manager, conversationId),
     ]);
     if (state == null) throw new Error("当前会话尚未加载，请打开该对话后再删除");
     if (state.inProgress === true) throw new Error("当前任务仍在运行，请等待任务结束后再删除");
-    if (role?.role === "follower") throw new Error("请在拥有当前会话的窗口中删除消息");
+    if (detached) throw new Error("请在拥有当前会话的窗口中删除消息");
   };
 
   const hostedSessionController = (manager) => {

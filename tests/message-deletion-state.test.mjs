@@ -334,6 +334,25 @@ test("preparing deletion rejects active tasks followers and unsupported history 
   }
 });
 
+test("Codex 26.1117 managers without stream roles delete only from the window holding the history", async () => {
+  for (const attached of [true, false]) {
+    const runtime = fixture();
+    delete runtime.manager.getStreamRole;
+    runtime.manager.hasLocalHistorySubscription = (sessionId) => {
+      assert.equal(sessionId, runtime.conversation.id);
+      return attached;
+    };
+    const before = structuredClone(runtime.conversation);
+    if (attached) {
+      await runtime.manager.prepare(runtime.conversation.id);
+    } else {
+      await assert.rejects(runtime.manager.prepare(runtime.conversation.id), /拥有当前会话的窗口/);
+      assert.deepEqual(runtime.conversation, before);
+    }
+    assert.deepEqual(runtime.requests, []);
+  }
+});
+
 test("suffix deletion rechecks tasks ownership and history before sending a request", async () => {
   for (const configure of [
     ({ conversation }) => { conversation.threadRuntimeStatus = { type: "active" }; },
